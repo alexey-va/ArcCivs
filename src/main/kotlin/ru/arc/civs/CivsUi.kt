@@ -309,7 +309,7 @@ class CivsUi internal constructor(
         ), buildList {
             city.workers.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, worker ->
                 add(valueButton(player, "worker_$index", "common.destination", text.literal(worker.name), PEOPLE,
-                    text.status(player, host.workerStatus(worker.id))) { showWorker(player, worker.id) })
+                    workerStatus(player, worker)) { showWorker(player, worker.id) })
             }
             if (city.workers.size < limit) add(button(player, "recruit", "workers.recruit", COMMIT) { showRecruit(player) })
             pages(player, current, city.workers.size) { showWorkers(player, it) }
@@ -324,7 +324,7 @@ class CivsUi internal constructor(
             body(text.literal(worker.name)), table(listOf(
                 tr(player, "label.workplace") to (building?.let { buildingName(player, it.type, it.level) } ?: tr(player, "workers.unassigned")),
                 tr(player, "label.profession") to tr(player, "profession.${building?.let { CivsRules.profession(it.type) } ?: "unassigned"}"),
-                tr(player, "label.state") to text.status(player, host.workerStatus(workerId)),
+                tr(player, "label.state") to workerStatus(player, worker),
                 tr(player, "label.deliveries") to text.literal(worker.completedCycles),
             )), error?.let(::body),
         ), buildList {
@@ -467,6 +467,16 @@ class CivsUi internal constructor(
             else -> "city.next-grow"
         }
         return tr(player, key)
+    }
+
+    private fun workerStatus(player: Player, worker: CivWorker): Component {
+        val status = host.workerStatus(worker.id).removePrefix("workers.status.")
+        // Durable assignments can change before the next Citizens pulse updates its cached status.
+        return text.status(player, when {
+            worker.assignment == null -> "unassigned"
+            status == "unassigned" || status == "no-assignment" -> "waiting"
+            else -> status
+        })
     }
 
     private fun upgradeBenefit(player: Player, building: CivBuilding): Component = when (building.type) {

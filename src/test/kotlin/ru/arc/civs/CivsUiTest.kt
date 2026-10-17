@@ -107,11 +107,12 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("an assigned workplace refreshes from persisted state and a repeated click is ignored") {
+    test("assignment and removal use persisted state while Citizens still reports the previous job") {
         withUi { h ->
             h.city = settlement(h.player)
             val worker = h.city!!.workers.last()
             val forester = h.city!!.buildings.last()
+            every { h.host.workerStatus(worker.id) } returns "workers.status.unassigned"
             every { h.host.assign(any(), any(), any()) } answers {
                 h.city = CivsRules.assign(h.city!!, h.player.uniqueId, secondArg(), thirdArg(), 0)
                 CompletableFuture.completedFuture(Unit)
@@ -124,8 +125,38 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
+            h.body() shouldContain "Waiting for work"
+            h.body().contains("No workplace assigned") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
+
+            every { h.host.workerStatus(worker.id) } returns "workers.status.working"
+            h.click("unassign")
+            h.paper.performTicks(2)
+            h.body() shouldContain "No workplace assigned"
+            h.body().contains("Working") shouldBe false
+            verify(exactly = 1) { h.host.assign(h.player, worker.id, null) }
             verify(exactly = 0) { h.runtime.close(h.player) }
+        }
+    }
+
+    test("worker list uses the same assignment truth while current assigned runtime states remain visible") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            val worker = h.city!!.workers.last()
+            h.city = CivsRules.assign(h.city!!, h.player.uniqueId, worker.id, h.city!!.buildings.last().id, 0)
+            for ((status, label) in listOf(
+                "no-assignment" to "Waiting for work",
+                "sleeping" to "Settlement is sleeping",
+                "route-unreachable" to "No accessible route",
+                "working" to "Working",
+            )) {
+                every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
+                h.ui.open(h.player)
+                h.click("workers")
+                plainText(h.screen.buttons.first { it.id.value == "worker_3" }.tooltip) shouldBe label
+                h.click("worker_3")
+                h.body() shouldContain label
+            }
         }
     }
 
