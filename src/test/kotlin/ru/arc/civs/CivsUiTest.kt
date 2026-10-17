@@ -226,7 +226,7 @@ class CivsUiTest : FunSpec({
             h.handles.size shouldBe 128
             h.handles.forEach { handle ->
                 verify(exactly = 1) { handle.isVisibleByDefault = false }
-                verify(exactly = 1) { handle.showTo(any()) }
+                verify(exactly = 1) { handle.showTo(any<Player>()) }
             }
             h.paper.performTicks(4)
             h.handles.size shouldBe 2 * (240 + 28)
