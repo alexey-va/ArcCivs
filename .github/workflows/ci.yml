@@ -31,7 +31,9 @@ jobs:
         run: ./gradlew --no-daemon --build-cache test shadowJar
       - name: Verify production artifact
         id: artifact
-        run: python3 scripts/verify-jar.py --github-output "$GITHUB_OUTPUT"
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_*.py'
+          python3 scripts/verify-jar.py --github-output "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ArcCivs-${{ github.sha }}

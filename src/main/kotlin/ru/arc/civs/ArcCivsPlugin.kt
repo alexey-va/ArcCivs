@@ -13,10 +13,16 @@ import ru.arc.paper.runtime.PaperPluginRuntime
 import java.util.concurrent.Executor
 import java.util.logging.Level
 
-class ArcCivsPlugin : JavaPlugin() {
+open class ArcCivsPlugin : JavaPlugin() {
     private var runtime: PaperPluginRuntime? = null
 
     override fun onEnable() {
+        val unavailable = pluginMeta.pluginDependencies.filterNot(server.pluginManager::isPluginEnabled)
+        if (unavailable.isNotEmpty()) {
+            logger.severe("ArcCivs startup refused: mandatory dependencies are not enabled: ${unavailable.joinToString()}")
+            server.pluginManager.disablePlugin(this)
+            return
+        }
         saveDefaultConfig()
         PaperArcRuntime.installScheduling(this)
         ArcLogging.install(PaperLoggingPlatform("ArcCivs", "ArcCivs"), LoggingConfigSource { EmptyConfig })
