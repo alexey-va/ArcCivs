@@ -6,7 +6,7 @@ recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management; unrelated players cannot build, break or loot city structures.
 
-Core 2.7.30 is mandatory: lifecycle/scheduling, atomic persistence, localized
+Core 2.7.31 is mandatory: lifecycle/scheduling, atomic persistence, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. NPCs use Citizens ordinary bounded point-to-point navigation;
 there is no Core packet-NPC API. No duplicated pools, schematic cache or display
