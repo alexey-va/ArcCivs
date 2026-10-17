@@ -5,7 +5,7 @@ plugins {
 group = "ru.ruscrafting"
 version = "0.1.8"
 description = "Persistent player settlements and working citizens for RusCrafting"
-val arcCorePluginVersion = "0.1.14"
+val arcCorePluginVersion = "0.1.15"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
 kotlin { jvmToolchain(25) }
 dependencies {
