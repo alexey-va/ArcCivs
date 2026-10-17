@@ -23,6 +23,7 @@ import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.plugin.Plugin
+import ru.arc.observability.StructuredDebugLine
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -30,6 +31,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.logging.Level
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /** A bounded, transient Citizens scene. The owning Core runtime calls [pulse] every 20 ticks. */
 class CivsCitizens(
@@ -208,27 +210,33 @@ class CivsCitizens(
                 if (actor.route == null) startRoute(actor, world, target, now)
                 val route = actor.route
                 if (route != null) {
-                    when {
-                        !route.chunks.loaded(world) -> pause(actor, "chunk-unloaded", now)
-                        route.success == false -> pause(actor, "route-unreachable", now)
-                        route.success == true -> {
-                            actor.route = null
-                            if (arrived(actor.npc.entity.location, route.target)) cycle.arrive(now)
-                            else pause(actor, "route-unreachable", now)
+                    if (!route.chunks.loaded(world)) {
+                        pauseNavigation(actor, "chunk-unloaded", "route-chunk-unloaded", route.target, now)
+                    } else {
+                        if (route.completion == null && route.path == null) observePath(actor, route)
+                        val outcome = citizenNavigationOutcome(route.completion,
+                            route.completion?.cancelReason == null && route.completion != null &&
+                                arrived(actor.npc.entity.location, route.target),
+                            now - route.startedAt, route.timeoutMillis, actor.npc.navigator.isNavigating)
+                        when (outcome) {
+                            CitizenNavigationOutcome.PENDING -> Unit
+                            CitizenNavigationOutcome.ARRIVED -> {
+                                actor.route = null
+                                cycle.arrive(now)
+                            }
+                            else -> pauseNavigation(actor, "route-unreachable", outcome.name.lowercase(), route.target, now)
                         }
-                        now - route.startedAt > route.timeoutMillis || !actor.npc.navigator.isNavigating ->
-                            pause(actor, "route-unreachable", now)
                     }
                 }
             }
             CitizenPhase.WORKING -> {
                 if (!arrived(actor.npc.entity.location, requireNotNull(actor.plan.workplace).location(world)))
-                    pause(actor, "route-unreachable", now)
+                    pauseNavigation(actor, "route-unreachable", "left-workplace", requireNotNull(actor.plan.workplace).location(world), now)
                 else cycle.work(now)
             }
             CitizenPhase.READY -> {
                 if (!arrived(actor.npc.entity.location, actor.plan.storage.location(world))) {
-                    pause(actor, "route-unreachable", now)
+                    pauseNavigation(actor, "route-unreachable", "left-storage", actor.plan.storage.location(world), now)
                 } else if (!hasCapacity(city, actor.plan)) {
                     cycle.pause("storage-full", now, true)
                 } else cycle.beginDelivery(now)?.let { ticket -> submitDelivery(actor, ticket, now) }
@@ -243,24 +251,67 @@ class CivsCitizens(
         val to = target.location(world)
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point())) {
-            pause(actor, "route-unreachable", now)
+            pauseNavigation(actor, "route-unreachable", "outside-route-range", to, now)
             return
         }
         val chunks = CitizenChunks.between(from.blockX, from.blockZ, target.x, target.z)
         val chunksLoaded = chunks.loaded(world)
         if (!chunksLoaded || !standable(world, target)) {
-            pause(actor, if (!chunksLoaded) "chunk-unloaded" else "route-unreachable", now)
+            pauseNavigation(actor, if (!chunksLoaded) "chunk-unloaded" else "route-unreachable",
+                if (!chunksLoaded) "route-chunk-unloaded" else "target-not-standable", to, now)
             return
         }
         // Citizens itself retains the already-loaded destination while navigating. ArcCivs never loads a chunk.
         val navigator = actor.npc.navigator
         navigator.defaultParameters.range((distance + 8).coerceAtLeast(16.0).toFloat())
-        val route = Route(to, chunks, now, (10_000 + distance * 1_500).toLong().coerceAtMost(90_000))
+        val route = Route(from.point(), to, chunks, now, (10_000 + distance * 1_500).toLong().coerceAtMost(90_000))
         actor.route = route
         navigator.setTarget(to)
+        route.strategy = navigator.pathStrategy?.javaClass?.simpleName
         navigator.localParameters.addSingleUseCallback { reason ->
-            if (actor.route === route) route.success = reason == null
+            if (actor.route === route) {
+                observePath(actor, route)
+                route.callbackPosition = actor.npc.entity.location.point()
+                route.callbackNavigating = navigator.isNavigating
+                route.completion = CitizenNavigationCompletion(reason?.name)
+            }
         }
+    }
+
+    private fun observePath(actor: Actor, route: Route) {
+        // Native navigation can clear its path before invoking the completion callback.
+        // Retain only a bounded endpoint snapshot, never the path or world blocks.
+        runCatching {
+            actor.npc.navigator.pathStrategy?.path?.asSequence()?.map { CitizenPoint(it.x, it.y, it.z) }
+                ?.asIterable()?.let(::citizenPathSnapshot)
+        }.getOrNull()?.let { route.path = it }
+    }
+
+    private fun pauseNavigation(actor: Actor, status: String, detail: String, target: Location, now: Long) {
+        val route = actor.route
+        if (route != null && route.completion == null) observePath(actor, route)
+        val entity = actor.npc.entity as Villager
+        val actual = entity.location.point()
+        val velocity = entity.velocity
+        val navigator = actor.npc.navigator
+        val parameters = navigator.localParameters
+        // The cycle permits three attempts, so failures produce at most three lines per actor/cycle.
+        plugin.logger.warning(NAVIGATION_DIAGNOSTIC.line(
+            "city" to actor.cityId, "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
+            "attempt" to actor.cycle.failedAttempts + 1, "phase" to actor.cycle.phase, "reason" to detail,
+            "callback" to (route?.completion?.let { it.cancelReason ?: "null" } ?: "not-received"),
+            "from" to route?.from?.coordinates(), "target" to target.point().coordinates(), "actual" to actual.coordinates(),
+            "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
+            "timeout_ms" to route?.timeoutMillis, "navigating" to navigator.isNavigating,
+            "callback_navigating" to route?.callbackNavigating, "callback_actual" to route?.callbackPosition?.coordinates(),
+            "velocity" to CitizenPoint(velocity.x, velocity.y, velocity.z).coordinates(),
+            "has_ai" to entity.hasAI(), "collidable" to entity.isCollidable,
+            "path_nodes" to route?.path?.nodes, "path_end" to route?.path?.end?.coordinates(),
+            "path_truncated" to route?.path?.truncated, "range" to parameters.range(),
+            "distance_margin" to parameters.distanceMargin(), "path_distance_margin" to parameters.pathDistanceMargin(),
+            "strategy" to route?.strategy,
+        ))
+        pause(actor, status, now)
     }
 
     private fun submitDelivery(actor: Actor, ticket: UUID, now: Long) {
@@ -461,11 +512,19 @@ class CivsCitizens(
         var route: Route? = null
         var reportedFailure = false
     }
-    private class Route(val target: Location, val chunks: CitizenChunks, val startedAt: Long, val timeoutMillis: Long) {
-        var success: Boolean? = null
+    private class Route(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long, val timeoutMillis: Long) {
+        var completion: CitizenNavigationCompletion? = null
+        var callbackPosition: CitizenPoint? = null
+        var callbackNavigating: Boolean? = null
+        var path: CitizenPathSnapshot? = null
+        var strategy: String? = null
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?)
+
+    private companion object {
+        val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
+    }
 }
 
 internal data class CitizenPoint(val x: Double, val y: Double, val z: Double) {
@@ -473,6 +532,31 @@ internal data class CitizenPoint(val x: Double, val y: Double, val z: Double) {
         (y - other.y) * (y - other.y) + (z - other.z) * (z - other.z)
 }
 internal data class CitizenViewer(val worldId: UUID, val point: CitizenPoint)
+
+/** Null completion means no callback; a received null reason means native completion, not verified arrival. */
+internal data class CitizenNavigationCompletion(val cancelReason: String?)
+internal enum class CitizenNavigationOutcome { PENDING, ARRIVED, CANCELLED, COMPLETED_OUTSIDE_ARRIVAL, TIMED_OUT, STOPPED }
+internal fun citizenNavigationOutcome(completion: CitizenNavigationCompletion?, arrived: Boolean,
+    elapsedMillis: Long, timeoutMillis: Long, navigating: Boolean): CitizenNavigationOutcome = when {
+    completion?.cancelReason != null -> CitizenNavigationOutcome.CANCELLED
+    completion != null -> if (arrived) CitizenNavigationOutcome.ARRIVED else CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
+    elapsedMillis > timeoutMillis -> CitizenNavigationOutcome.TIMED_OUT
+    !navigating -> CitizenNavigationOutcome.STOPPED
+    else -> CitizenNavigationOutcome.PENDING
+}
+
+internal data class CitizenPathSnapshot(val nodes: Int, val end: CitizenPoint, val truncated: Boolean)
+internal fun citizenPathSnapshot(path: Iterable<CitizenPoint>): CitizenPathSnapshot? {
+    val iterator = path.iterator()
+    var nodes = 0
+    var end: CitizenPoint? = null
+    while (nodes < 256 && iterator.hasNext()) {
+        end = iterator.next()
+        nodes++
+    }
+    return end?.let { CitizenPathSnapshot(nodes, it, iterator.hasNext()) }
+}
+
 internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>, range: Int): Boolean =
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
@@ -532,6 +616,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
     private var resumePhase = CitizenPhase.TO_STORAGE
     private var deliveryRetryAt: Long? = null
     private val retries = CitizenRetry()
+    val failedAttempts: Int get() = retries.attempts
 
     fun start() { if (phase == CitizenPhase.IDLE) phase = CitizenPhase.TO_STORAGE }
     fun arrive(now: Long) {
@@ -624,6 +709,7 @@ private data class CitizenChunks(val minX: Int, val maxX: Int, val minZ: Int, va
 private fun CivPosition.location(world: World) = Location(world, x + 0.5, y.toDouble(), z + 0.5)
 private fun CivPosition.point() = CitizenPoint(x + 0.5, y.toDouble(), z + 0.5)
 private fun Location.point() = CitizenPoint(x, y, z)
+private fun CitizenPoint.coordinates() = "$x,$y,$z"
 private fun CivPosition.inChunk(x: Int, z: Int) = this.x shr 4 == x && this.z shr 4 == z
 private fun citizenName(name: String, id: UUID): String = name.filter { it.isLetterOrDigit() || it == ' ' || it == '-' || it == '_' }
     .trim().take(24).ifEmpty { id.toString().take(8) }

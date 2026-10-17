@@ -35,6 +35,42 @@ class CivsCitizensTest : FunSpec({
         citizenRouteWithinReach(origin, CitizenPoint(0.0, 153.001, 0.0)) shouldBe false
     }
 
+    test("a native null completion remains distinct from no callback and requires verified arrival") {
+        val completed = CitizenNavigationCompletion(null)
+        citizenNavigationOutcome(completed, false, 1_000, 10_000, false) shouldBe
+            CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
+        citizenNavigationOutcome(completed, true, 1_000, 10_000, false) shouldBe CitizenNavigationOutcome.ARRIVED
+        citizenNavigationOutcome(null, true, 1_000, 10_000, false) shouldBe CitizenNavigationOutcome.STOPPED
+        citizenNavigationOutcome(null, true, 1_000, 10_000, true) shouldBe CitizenNavigationOutcome.PENDING
+    }
+
+    test("Citizens cancellation retains its reason and cannot count as an arrival") {
+        val cancelled = CitizenNavigationCompletion("STUCK")
+        cancelled.cancelReason shouldBe "STUCK"
+        citizenNavigationOutcome(cancelled, true, 90_001, 90_000, false) shouldBe CitizenNavigationOutcome.CANCELLED
+        citizenNavigationOutcome(null, false, 90_001, 90_000, false) shouldBe CitizenNavigationOutcome.TIMED_OUT
+        citizenNavigationOutcome(null, false, 90_000, 90_000, true) shouldBe CitizenNavigationOutcome.PENDING
+    }
+
+    test("path diagnostics preserve the endpoint but inspect at most 256 nodes") {
+        citizenPathSnapshot(emptyList()) shouldBe null
+        val start = CitizenPoint(-9.0, 1.0, -12.0)
+        val end = CitizenPoint(15.0, 1.0, -12.0)
+        citizenPathSnapshot(listOf(start, end)) shouldBe CitizenPathSnapshot(2, end, false)
+        var reads = 0
+        val unbounded = Iterable {
+            object : Iterator<CitizenPoint> {
+                override fun hasNext() = true
+                override fun next(): CitizenPoint {
+                    check(reads < 256) { "Diagnostic exceeded its path budget" }
+                    return CitizenPoint(reads++.toDouble(), 1.0, -12.0)
+                }
+            }
+        }
+        citizenPathSnapshot(unbounded) shouldBe CitizenPathSnapshot(256, CitizenPoint(255.0, 1.0, -12.0), true)
+        reads shouldBe 256
+    }
+
     test("storage reassignment resets an actor only beyond the bounded new leg") {
         val previous = CivPosition(0, 64, 0)
         val actual = CitizenPoint(0.5, 64.0, 0.5)
