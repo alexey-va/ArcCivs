@@ -21,6 +21,71 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsServiceTest : FunSpec({
+    test("replacement keeps the prior placement and rejects confirmation until async work resolves") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            val firstBlueprint = h.previewBlueprint()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                CompletableFuture.completedFuture(firstBlueprint)
+            val first = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            h.tick(); first.join()
+            val original = h.service.preview(h.player)!!
+            val pending = CompletableFuture<CivBlueprint>()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+            val rotated = h.service.rotatePreview(h.player, -90)
+            h.service.preview(h.player) shouldBe original.copy(busy = true)
+            h.service.confirmPreview(h.player).isCompletedExceptionally shouldBe true
+            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+            pending.completeExceptionally(CivsRejection("source-load-failed"))
+            h.tick()
+            rotated.isCompletedExceptionally shouldBe true
+            h.service.preview(h.player) shouldBe original
+            verify(exactly = 1) { h.renderer.show(any(), any(), any()) }
+            verify(exactly = 0) { h.renderer.clear(any()) }
+        }
+    }
+
+    test("move and both rotations preserve the normalized entrance relation and replace the context") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                CompletableFuture.completedFuture(h.previewBlueprint(arg(5), arg<Int?>(7) ?: 0))
+            }
+            val first = h.service.prepareFounding(h.player, "Oak Town", "nordic"); h.tick(); first.join()
+            val before = h.service.preview(h.player)!!
+            val left = h.service.rotatePreview(h.player, -90); h.tick(); left.join()
+            h.service.preview(h.player)!!.rotation shouldBe 270
+            val nudged = h.service.nudgePreview(h.player, CivsPreviewMove.RIGHT); h.tick(); nudged.join()
+            val after = h.service.preview(h.player)!!
+            after.entrance shouldBe CivPosition(before.entrance.x - 1, before.entrance.y, before.entrance.z)
+            after.anchor shouldBe after.entrance.copy(y = after.entrance.y - 1)
+            (after.id != before.id) shouldBe true
+            val right = h.service.rotatePreview(h.player, 90); h.tick(); right.join()
+            h.service.preview(h.player)!!.rotation shouldBe 0
+        }
+    }
+
+    test("cancelled async placement preparation cannot publish a late preview") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            val pending = CompletableFuture<CivBlueprint>()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+            val preparing = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            h.service.cancelPreview(h.player)
+            h.service.prepareFounding(h.player, "Another Town", "nordic").isCompletedExceptionally shouldBe true
+            verify(exactly = 1) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
+            pending.complete(h.previewBlueprint()); h.tick()
+            preparing.isCompletedExceptionally shouldBe true
+            h.service.preview(h.player) shouldBe null
+            verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                CompletableFuture.completedFuture(h.previewBlueprint())
+            val next = h.service.prepareFounding(h.player, "Another Town", "nordic"); h.tick()
+            next.join() shouldBe Unit
+            h.service.preview(h.player)!!.cityName shouldBe "Another Town"
+        }
+    }
+
     test("one Core heartbeat activates navigation every tick only while the service is ready") {
         serviceScenario { h ->
             var activations = 0
@@ -358,6 +423,14 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun previewBlueprint(entrance: CivPosition = CivPosition(0, 64, 0), rotation: Int = 0): CivBlueprint {
+        val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
+        val anchor = entrance.copy(y = entrance.y - 1)
+        val hall = city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, anchor = anchor,
+            entrance = entrance, rotation = rotation,
+            bounds = CivBox(CivPosition(anchor.x - 2, anchor.y, anchor.z - 5), CivPosition(anchor.x + 2, anchor.y + 5, anchor.z - 1)))
+        return CivBlueprint(hall, world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
+    }
     fun commit() { saves.last().let { it.second.complete(it.first) }; tick() }
     fun placement(): ServicePlacement {
         val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,

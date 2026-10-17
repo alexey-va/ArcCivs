@@ -19,6 +19,7 @@ class CivsText private constructor(
     private val messages: Map<String, Map<String, String>>,
     defaultLocale: () -> String,
     private val useClientLocale: () -> Boolean,
+    private val forcedLocale: () -> String?,
 ) {
     private val renderer = LocalizedMiniMessage(
         messages.mapValues { (_, values) -> object : LocaleCatalog {
@@ -35,7 +36,8 @@ class CivsText private constructor(
     }
 
     fun render(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
-        render(key, if (player != null && useClientLocale()) player.locale().toLanguageTag() else null, *values)
+        render(key, forcedLocale()?.takeIf(String::isNotBlank)
+            ?: if (player != null && useClientLocale()) player.locale().toLanguageTag() else null, *values)
 
     fun render(key: String, locale: String? = null, vararg values: Pair<String, Any?>): Component {
         require(key in messages.getValue("ru")) { "Unknown ArcCivs locale key: $key" }
@@ -81,12 +83,14 @@ class CivsText private constructor(
             val merged = bundled.mapValues { (locale, values) -> values + overrides[locale].orEmpty() }
             return CivsText(merged,
                 { plugin.config.getString("locale", "ru") ?: "ru" },
-                { plugin.config.getBoolean("use-client-locale", true) },
+                { plugin.config.getBoolean("use-client-locale", false) },
+                // Missing keys in existing installations also adopt the server language.
+                { plugin.config.getString("force-language", "ru") },
             )
         }
 
         internal fun fromYaml(source: String, defaultLocale: String = "ru"): CivsText =
-            CivsText(parse(source), { defaultLocale }, { true })
+            CivsText(parse(source), { defaultLocale }, { true }, { null })
 
         private fun parse(source: String): Map<String, Map<String, String>> {
             val yaml = YamlConfiguration().apply { loadFromString(source) }

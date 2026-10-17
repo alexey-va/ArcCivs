@@ -37,7 +37,7 @@ class CivsCommand(
             args.isEmpty() -> ui.open(player)
             args.contentEquals(arrayOf("preview")) -> host.movePreview(player).whenCompleteSync(tasks) { _, failure ->
                 if (!player.isOnline) return@whenCompleteSync
-                if (failure != null) player.sendMessage(text.failure(player, failure)) else ui.open(player)
+                if (failure != null) player.sendMessage(text.failure(player, failure)) else ui.resumePlacement(player)
             }
             args.contentEquals(arrayOf("reload")) && player.hasPermission("arccivs.admin") ->
                 host.reload(player).whenCompleteSync(tasks) { _, failure ->

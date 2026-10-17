@@ -6,7 +6,7 @@ recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management; unrelated players cannot build, break or loot city structures.
 
-Core 2.7.31 is mandatory: lifecycle/scheduling, atomic persistence, localized
+Core 2.7.33 is mandatory: lifecycle/scheduling, atomic persistence, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. NPCs use Citizens ordinary bounded point-to-point navigation;
 there is no Core packet-NPC API. No duplicated pools, schematic cache or display
@@ -45,6 +45,24 @@ confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery
 is permission gated. Suggestions reflect the exact argument only.
+
+Prepared placement leaves the dialog and uses Core `PaperActionPanels` through
+`CivsPlacementControls`. The main page offers confirm, anchor movement, both
+quarter-turn rotations, optional details and cancellation. Movement has a separate
+page of six one-block nudges, Done and Cancel; a ground right-click relocates the
+whole preview. The green twelve-edge support block is also a direct movement
+entry. It is the normalized support pivot below the walkable entrance and outside
+the building footprint; the authored origin stays fixed. Cyan marks the entrance; a light-blue frame
+shows the ground destination. Upgrades keep their existing position and rotation.
+Move controls sit slightly higher and farther away to leave a clear terrain-pick
+corridor below them; the normal placement page uses the shared Core defaults.
+
+`CivsService` keeps the last valid preview until an asynchronous replacement is
+ready, blocks confirmation during that load and fences obsolete completions.
+Every accepted replacement receives a fresh context identity. Final authority,
+world validation, captured schematic bytes and durable reservation remain in the
+service/world owners. Dialogs suppress the panel only while actually open; they
+do not own movement or confirmation. No physical blocks change for previews.
 
 ## Delivery
 

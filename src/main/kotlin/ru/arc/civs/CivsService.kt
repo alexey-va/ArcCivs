@@ -38,8 +38,8 @@ class CivsService(
     citizenRuntime: CivsCitizens? = null,
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
-        val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
-        val upgrading: Boolean, val expires: Long,
+        val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
+        val upgrading: Boolean, val expires: Long, val movementOrigin: CivPosition,
     )
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>) {
         var repairing = false
@@ -115,7 +115,8 @@ class CivsService(
         val b = it.blueprint.building
         CivsPreviewView(b.type, b.level, it.style, it.cityName, b.anchor, b.rotation,
             b.bounds.max.x - b.bounds.min.x + 1, b.bounds.max.y - b.bounds.min.y + 1,
-            b.bounds.max.z - b.bounds.min.z + 1, CivsRules.cost(b.type, b.level), it.blueprint.snapshot.nonBarrierCount)
+            b.bounds.max.z - b.bounds.min.z + 1, CivsRules.cost(b.type, b.level), it.blueprint.snapshot.nonBarrierCount,
+            it.id, it.blueprint.worldId, b.entrance, b.bounds, !it.upgrading, player.uniqueId in previewLoads)
     }
 
     override fun prepareFounding(player: Player, name: String, style: String): CompletableFuture<Unit> = action {
@@ -147,11 +148,13 @@ class CivsService(
             building.entrance, true, building.rotation)
     }
 
-    override fun rotatePreview(player: Player): CompletableFuture<Unit> = action {
+    override fun rotatePreview(player: Player, degrees: Int): CompletableFuture<Unit> = action {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
+        require(degrees == -90 || degrees == 90)
         val b = old.blueprint.building
-        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, b.entrance, false, (b.rotation + 90) % 360)
+        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, b.entrance, false,
+            Math.floorMod(b.rotation + degrees, 360), old.movementOrigin)
     }
 
     override fun movePreview(player: Player): CompletableFuture<Unit> = action {
@@ -163,9 +166,22 @@ class CivsService(
         prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, entrance, false, b.rotation)
     }
 
+    override fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit> = action {
+        val old = currentPreview(player)
+        rejectIf(old.upgrading, "upgrade-position-fixed")
+        val b = old.blueprint.building
+        val entrance = civsMovedEntrance(b.entrance, direction, facing(player))
+        rejectIf(listOf(entrance.x.toLong() - old.movementOrigin.x, entrance.y.toLong() - old.movementOrigin.y,
+            entrance.z.toLong() - old.movementOrigin.z).any { kotlin.math.abs(it) > 64 }, "placement-offset-limit")
+        near(player, old.blueprint.worldId, entrance)
+        rejectIf(entrance.y <= player.world.minHeight || entrance.y + 1 >= player.world.maxHeight, "outside-world")
+        if (old.cityId == null) checkSettlementSpace(player.world.uid, entrance)
+        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, entrance, false, b.rotation, old.movementOrigin)
+    }
+
     private fun prepare(
         player: Player, cityId: UUID?, name: String, style: String, type: BuildingType, level: Int,
-        buildingId: UUID, entrance: CivPosition, upgrading: Boolean, rotation: Int? = null,
+        buildingId: UUID, entrance: CivPosition, upgrading: Boolean, rotation: Int? = null, movementOrigin: CivPosition = entrance,
     ): CompletableFuture<Unit> {
         requireReady(player)
         rejectIf(style !in styles(), "invalid-style")
@@ -176,8 +192,7 @@ class CivsService(
         val request = UUID.randomUUID()
         requests[player.uniqueId] = request
         previewLoads += player.uniqueId
-        previews.remove(player.uniqueId)
-        renderer.clear(player.uniqueId)
+        // Keep the last usable position visible until the replacement is ready.
         val result = tracked<Unit>()
         blueprints.prepare(style, type, level, buildingId, worldId, entrance, facing(player), rotation)
             .whenCompleteSync(tasks) { blueprint, failure ->
@@ -193,8 +208,9 @@ class CivsService(
                     if (city != null) rejectIf(!city.canManage(player.uniqueId) ||
                         !city.contains(prepared.building.bounds.min.x, prepared.building.bounds.min.z) ||
                         !city.contains(prepared.building.bounds.max.x, prepared.building.bounds.max.z), "outside-city")
-                    previews[player.uniqueId] = Preview(cityId, name, style, prepared, upgrading, now() + settings.previewSeconds * 1_000L)
                     renderer.show(player, prepared.building, prepared.surface)
+                    previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
+                        now() + settings.previewSeconds * 1_000L, movementOrigin)
                     result.complete(Unit)
                 }.onFailure { result.completeExceptionally(it) }
             }
@@ -495,7 +511,9 @@ class CivsService(
 
     private fun currentPreview(player: Player): Preview {
         requireReady(player)
-        return previews[player.uniqueId]?.takeIf { it.expires > now() } ?: throw CivsRejection("preview-expired")
+        rejectIf(player.uniqueId in previewLoads, "city-busy")
+        return previews[player.uniqueId]?.takeIf { it.expires > now() && it.blueprint.worldId == player.world.uid }
+            ?: throw CivsRejection("preview-expired")
     }
     private fun managed(player: Player): Settlement {
         requireReady(player)

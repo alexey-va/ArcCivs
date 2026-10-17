@@ -1,5 +1,6 @@
 locale: ru
-use-client-locale: true
+force-language: ru
+use-client-locale: false
 schematics-root: /home/freedeeml/McFine/arc_schematics
 allowed-worlds: [vanilla]
 settlement-radius: 96

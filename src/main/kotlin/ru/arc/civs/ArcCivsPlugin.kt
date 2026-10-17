@@ -38,6 +38,7 @@ open class ArcCivsPlugin : JavaPlugin() {
             val service = lifecycle.own(CivsService(this, lifecycle.tasks, settings, store, blueprints, executor))
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks))
             service.ui = ui
+            lifecycle.own(CivsPlacementControls(this, service, ui, lifecycle.tasks, CivsText.load(this)))
             val command = CivsCommand(service, ui, CivsText.load(this), lifecycle.tasks)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)

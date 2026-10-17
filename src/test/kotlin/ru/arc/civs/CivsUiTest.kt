@@ -33,7 +33,7 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
-    test("real Core history restores an editable founder name and fresh callbacks after preview Back") {
+    test("real Core dialog flow yields to world placement and details can return without reopening a modal") {
         withUi(realHistory = true) { h ->
             every { h.host.prepareFounding(any(), any(), any()) } answers {
                 h.preview = preview().copy(cityName = secondArg())
@@ -44,21 +44,19 @@ class CivsUiTest : FunSpec({
             h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 1) { h.player.closeDialog() }
+            h.ui.open(h.player)
             h.screen.id shouldBe "civs.preview"
-            h.click("history")
-            h.screen.id shouldBe "civs.name"
-            h.screen.inputs.single().initial shouldBe "Oak Town"
-            h.click("prepare", mapOf("city_name" to "River Town"))
-            h.paper.performTicks(2)
-            h.screen.id shouldBe "civs.preview"
-            h.preview!!.cityName shouldBe "River Town"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
+            h.click("placement")
+            h.ui.showingDialog(h.player) shouldBe false
             verify(exactly = 1) { h.host.prepareFounding(h.player, "Oak Town", "medieval-oak") }
-            verify(exactly = 1) { h.host.prepareFounding(h.player, "River Town", "medieval-oak") }
-            verify(exactly = 0) { h.player.closeDialog() }
+            verify(exactly = 2) { h.player.closeDialog() }
         }
     }
 
-    test("founding submits the literal name once and completes through preview into the city") {
+    test("founding submits the literal name once then leaves confirmation to the world controls") {
         withUi { h ->
             val preparing = CompletableFuture<Unit>()
             every { h.host.prepareFounding(any(), any(), any()) } returns preparing
@@ -72,11 +70,10 @@ class CivsUiTest : FunSpec({
             h.preview = preview()
             preparing.complete(Unit)
             h.paper.performTicks(2)
-            h.screen.id shouldBe "civs.preview"
-            h.click("confirm")
-            h.paper.performTicks(2)
-            h.screen.id shouldBe "civs.overview"
-            verify(exactly = 0) { h.runtime.close(h.player) }
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 1) { h.runtime.close(h.player) }
+            verify(exactly = 0) { h.host.confirmPreview(any()) }
+            verify(exactly = 0) { h.host.cancelPreview(any()) }
         }
     }
 
@@ -88,6 +85,7 @@ class CivsUiTest : FunSpec({
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             val count = h.screens.size
             h.dismiss()
+            verify(exactly = 1) { h.host.cancelPreview(h.player) }
             h.preview = preview()
             first.complete(Unit)
             h.paper.performTicks(2)
@@ -179,40 +177,30 @@ class CivsUiTest : FunSpec({
             h.screen.buttons.map { it.id.value } shouldNotContain "add"
             h.preview = preview().copy(level = 2)
             h.ui.open(h.player)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("confirm", "cancel")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
         }
     }
 
-    test("moving a preview explicitly closes the screen while retaining the host preview") {
+    test("returning from preview details closes the screen while retaining the host preview") {
         withUi { h ->
             h.preview = preview()
-            h.ui.open(h.player); h.click("move")
+            h.ui.open(h.player); h.click("placement")
             verify(exactly = 1) { h.runtime.close(h.player) }
             verify(exactly = 0) { h.host.cancelPreview(any()) }
             h.preview shouldBe preview()
         }
     }
 
-    test("an expired or failed replacement preview keeps the reason visible with a working return action") {
+    test("a stale details screen cannot mutate an expired placement") {
         withUi { h ->
-            every { h.host.rotatePreview(any()) } answers {
-                h.preview = null
-                CompletableFuture.failedFuture(CivsRejection("source-load-failed"))
-            }
-            every { h.host.confirmPreview(any()) } answers {
-                h.preview = null
-                CompletableFuture.failedFuture(CivsRejection("preview-expired"))
-            }
-            for ((action, message) in listOf("rotate" to "could not be loaded", "confirm" to "preview ended")) {
-                h.preview = preview()
-                h.ui.open(h.player)
-                h.click(action)
-                h.paper.performTicks(2)
-                h.body() shouldContain message
-                h.screen.buttons.map { it.id.value } shouldBe listOf("return")
-                h.click("return")
-                h.screen.id shouldBe "civs.welcome"
-            }
+            h.preview = preview()
+            h.ui.open(h.player)
+            h.preview = null
+            h.click("placement")
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 0) { h.host.confirmPreview(any()) }
+            verify(exactly = 0) { h.host.rotatePreview(any(), any()) }
+            verify(exactly = 0) { h.host.movePreview(any()) }
         }
     }
 
@@ -240,14 +228,14 @@ class CivsUiTest : FunSpec({
                 verify(exactly = 1) { handle.isVisibleByDefault = false }
                 verify(exactly = 1) { handle.showTo(any()) }
             }
-            h.paper.performTicks(3)
-            h.handles.size shouldBe 2 * (240 + 16)
+            h.paper.performTicks(4)
+            h.handles.size shouldBe 2 * (240 + 28)
             h.locations.count { it.x == 239.0 && it.y == 64.0 && it.z == 0.0 } shouldBe 2
             h.renderer.clear(h.player.uniqueId)
             h.renderer.clear(second.uniqueId)
             h.handles.forEach { verify(exactly = 1) { it.remove() } }
             h.paper.performTicks(2)
-            h.handles.size shouldBe 512
+            h.handles.size shouldBe 536
         }
     }
 
@@ -260,7 +248,7 @@ class CivsUiTest : FunSpec({
             h.renderer.show(h.player, building, previewBlocks(1))
             first.forEach { verify(exactly = 1) { it.remove() } }
             h.paper.performTicks(1)
-            h.handles.size shouldBe 128 + 17
+            h.handles.size shouldBe 128 + 29
             h.renderer.onWorldChange(PlayerChangedWorldEvent(h.player, h.player.world))
             h.handles.forEach { verify(exactly = 1) { it.remove() } }
 
@@ -283,12 +271,13 @@ class CivsUiTest : FunSpec({
             shouldThrow<CivsRejection> {
                 h.renderer.show(h.player, building, previewBlocks(6_001))
             }.reason shouldBe "preview-too-large"
-            h.handles.size shouldBe 17
+            h.handles.size shouldBe 29
             h.handles.forEach { verify(exactly = 0) { it.remove() } }
             val cues = civsPreviewCues(building)
             cues.count { it.material == Material.ORANGE_CONCRETE } shouldBe 12
-            cues.count { it.material == Material.LIME_CONCRETE } shouldBe 4
-            cues.filter { it.material == Material.LIME_CONCRETE }.forEach {
+            cues.count { it.material == Material.LIME_CONCRETE } shouldBe 12
+            cues.count { it.material == Material.CYAN_CONCRETE } shouldBe 4
+            cues.filter { it.material == Material.CYAN_CONCRETE }.forEach {
                 it.y shouldBe building.entrance.y + 0.025
             }
         }
@@ -378,7 +367,8 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
 }
 
 private fun preview() = CivsPreviewView(BuildingType.TOWN_HALL, 1, "medieval-oak", "Oak Town",
-    CivPosition(0, 64, 0), 0, 12, 10, 12, Stock(), 400)
+    CivPosition(0, 64, 0), 0, 12, 10, 12, Stock(), 400, UUID(0, 1), UUID(0, 2),
+    CivPosition(0, 65, 0), CivBox(CivPosition(-6, 64, -12), CivPosition(5, 73, -1)), true, false)
 
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,

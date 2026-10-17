@@ -8,10 +8,13 @@ import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import io.mockk.every
 import io.mockk.mockk
 import org.bukkit.entity.Player
+import org.bukkit.configuration.file.YamlConfiguration
+import org.bukkit.plugin.Plugin
 import ru.arc.paper.api.ArcSchematicException
 import ru.arc.paper.api.ArcSchematicFailure
 import java.util.Locale
 import java.util.concurrent.CompletionException
+import java.io.ByteArrayInputStream
 
 class CivsTextTest : FunSpec({
     test("bundled locales have parity and unknown client locales fall back to Russian") {
@@ -20,6 +23,29 @@ class CivsTextTest : FunSpec({
         plainText(text.render("common.title", "en-US")) shouldBe "Settlements"
         plainText(text.render("common.title", "ru_RU")) shouldBe "Города"
         plainText(text.render("common.title", "ja-JP")) shouldBe "Города"
+    }
+
+    test("server force language overrides English clients and legacy client-language settings") {
+        val config = YamlConfiguration().apply {
+            set("locale", "ru")
+            set("use-client-locale", true)
+        }
+        val folder = java.nio.file.Files.createTempDirectory("civs-text").toFile()
+        try {
+            val plugin = mockk<Plugin> {
+                every { getResource("locales.yml") } answers { ByteArrayInputStream(civsLocaleSource().toByteArray()) }
+                every { dataFolder } returns folder
+                every { getConfig() } returns config
+            }
+            val player = mockk<Player> { every { locale() } returns Locale.ENGLISH }
+            val text = CivsText.load(plugin)
+            plainText(text.render(player, "common.title")) shouldBe "Города"
+            plainText(text.render("common.title", "en")) shouldBe "Settlements"
+            config.set("force-language", "ru")
+            plainText(text.render(player, "common.title")) shouldBe "Города"
+        } finally {
+            folder.deleteRecursively()
+        }
     }
 
     test("city names and external values cannot inject MiniMessage formatting") {

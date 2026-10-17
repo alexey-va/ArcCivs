@@ -33,7 +33,10 @@ class CivsUi internal constructor(
     constructor(plugin: Plugin, host: CivsUiHost, tasks: LifecycleTaskScope) :
         this(plugin, host, tasks, PaperDialogRuntime(plugin), CivsText.load(plugin))
 
-    private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token) { var consumed = false }
+    private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token) {
+        var consumed = false
+        var cancelPending: (() -> Unit)? = null
+    }
     private val visits = mutableMapOf<UUID, Visit>()
     private val roots = mutableMapOf<UUID, String>()
     private var closed = false
@@ -56,6 +59,16 @@ class CivsUi internal constructor(
             else -> "civs.welcome"
         }
         showEntry(player)
+    }
+
+    fun showingDialog(player: Player): Boolean = player.uniqueId in visits
+
+    /** Forms and details yield to the world instead of reopening a placement modal. */
+    fun resumePlacement(player: Player) {
+        runtime.close(player)
+        visits.remove(player.uniqueId)
+        roots.remove(player.uniqueId)
+        if (host.preview(player) != null) player.sendMessage(tr(player, "panel.opened"))
     }
 
     fun openWorker(player: Player, cityId: UUID, workerId: UUID) {
@@ -112,7 +125,8 @@ class CivsUi internal constructor(
                 draft = name
                 if (name.isBlank()) showName(player, style, name, text.reason(player, "invalid-name"))
                 else perform(player, "civs.preview", "preview.title", { host.prepareFounding(player, name, style) },
-                    success = { showPreview(player) }, failure = { showName(player, style, name, it) })
+                    success = { resumePlacement(player) }, failure = { showName(player, style, name, it) },
+                    cancelPending = { host.cancelPreview(player) })
             }),
             inputs = listOf(PaperDialogTextInput(NAME, tr(player, "founding.name-label"), initial = initial.take(32), width = 320, maxLength = 32)),
             reopen = { showName(player, style, draft) },
@@ -136,20 +150,8 @@ class CivsUi internal constructor(
                 tr(player, "label.rotation") to tr(player, "preview.rotation", "value" to preview.rotation),
             )),
             costTable(player, preview.cost), body(player, "preview.protected"), error?.let(::body),
-        ), buildList {
-            add(button(player, "confirm", "preview.confirm", COMMIT) {
-                perform(player, "civs.preview", "preview.title", { host.confirmPreview(player) },
-                    success = { open(player) }, failure = { showPreview(player, it) })
-            })
-            if (preview.level == 1) add(button(player, "rotate", "preview.rotate", PERSONAL) {
-                perform(player, "civs.preview", "preview.title", { host.rotatePreview(player) },
-                    success = { showPreview(player) }, failure = { showPreview(player, it) })
-            })
-            if (preview.level == 1) add(button(player, "move", "preview.move", NAVIGATION, close = true) {
-                player.sendMessage(tr(player, "preview.move-hint"))
-            })
-            add(button(player, "cancel", "preview.cancel") { host.cancelPreview(player); showEntry(player) })
-        }, reopen = { showPreview(player) })
+        ), listOf(button(player, "placement", "panel.return", NAVIGATION) { resumePlacement(player) }),
+            reopen = { showPreview(player) })
     }
 
     private fun showOverview(player: Player, feedback: Component? = null) {
@@ -230,7 +232,8 @@ class CivsUi internal constructor(
             }, error?.let(::body),
         ), if (eligible) listOf(button(player, "prepare", "buildings.prepare", COMMIT) {
             perform(player, "civs.preview", "preview.title", { host.prepareBuilding(player, type) },
-                success = { showPreview(player) }, failure = { showOffer(player, type, it) })
+                success = { resumePlacement(player) }, failure = { showOffer(player, type, it) },
+                cancelPending = { host.cancelPreview(player) })
         }) else emptyList(), reopen = { showOffer(player, type) })
     }
 
@@ -293,7 +296,8 @@ class CivsUi internal constructor(
             }, error?.let(::body),
         ), if (eligible) listOf(button(player, "prepare", "upgrades.prepare", COMMIT) {
             perform(player, "civs.preview", "preview.title", { host.prepareUpgrade(player, buildingId) },
-                success = { showPreview(player) }, failure = { showUpgrade(player, buildingId, it) })
+                success = { resumePlacement(player) }, failure = { showUpgrade(player, buildingId, it) },
+                cancelPending = { host.cancelPreview(player) })
         }) else emptyList(), reopen = { showUpgrade(player, buildingId) })
     }
 
@@ -505,11 +509,13 @@ class CivsUi internal constructor(
     }
 
     private fun perform(player: Player, id: String, title: String, action: () -> CompletableFuture<Unit>,
-        success: () -> Unit, failure: (Component) -> Unit) {
+        success: () -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null) {
         val visit = present(player, id, title, listOf(body(player, "common.working")), emptyList()) ?: return
+        visit.cancelPending = cancelPending
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { _, error ->
             if (!current(player, visit)) return@whenCompleteSync
+            visit.cancelPending = null
             if (error == null) success() else failure(text.failure(player, error))
         }
     }
@@ -534,7 +540,12 @@ class CivsUi internal constructor(
         runtime.open(player, PaperDialogScreen(id = id, title = tr(player, title).color(LAND), body = bodies,
             inputs = inputs, buttons = guarded, columns = if (guarded.size == 1) 1 else 2,
             exitButton = button(player, "history", footerKey).copy(width = 200),
-        ), reopen, { if (visits[player.uniqueId] === visit) visits.remove(player.uniqueId) }, closeOnEscape)
+        ), reopen, {
+            if (visits[player.uniqueId] === visit) {
+                visits.remove(player.uniqueId)
+                visit.cancelPending?.invoke()
+            }
+        }, closeOnEscape)
         return visit
     }
 

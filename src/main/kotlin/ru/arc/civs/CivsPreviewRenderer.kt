@@ -161,7 +161,7 @@ internal data class CivsPreviewCuboid(
     val material: Material,
 )
 
-/** Twelve fine amber edges and a green floor marker at the exact walkable entrance. */
+/** Amber building bounds, an unmistakable green anchor block and a cyan walkable entrance. */
 internal fun civsPreviewCues(building: CivBuilding): List<CivsPreviewCuboid> = buildList {
     val thickness = 0.035f
     val half = thickness / 2.0
@@ -179,10 +179,27 @@ internal fun civsPreviewCues(building: CivBuilding): List<CivsPreviewCuboid> = b
     for (x in listOf(x0, x1)) for (z in listOf(z0, z1)) add(CivsPreviewCuboid(x, y0, z, thickness, sy, thickness, Material.ORANGE_CONCRETE))
     for (x in listOf(x0, x1)) for (y in listOf(y0, y1)) add(CivsPreviewCuboid(x, y, z0, thickness, thickness, sz, Material.ORANGE_CONCRETE))
     val entry = building.entrance
-    val ex = entry.x - 0.04
+    // Keep the walkable entrance inside the support frame; coincident rings hide the green handle.
+    val ex = entry.x + 0.16
     val ey = entry.y + 0.025
-    val ez = entry.z - 0.04
-    val edge = 0.07f
-    for (z in listOf(ez, ez + 1.01)) add(CivsPreviewCuboid(ex, ey, z, 1.08f, 0.035f, edge, Material.LIME_CONCRETE))
-    for (x in listOf(ex, ex + 1.01)) add(CivsPreviewCuboid(x, ey, ez, edge, 0.035f, 1.08f, Material.LIME_CONCRETE))
+    val ez = entry.z + 0.16
+    val edge = 0.045f
+    for (z in listOf(ez, ez + 0.635)) add(CivsPreviewCuboid(ex, ey, z, 0.68f, 0.035f, edge, Material.CYAN_CONCRETE))
+    for (x in listOf(ex, ex + 0.635)) add(CivsPreviewCuboid(x, ey, ez, edge, 0.035f, 0.68f, Material.CYAN_CONCRETE))
+    addAll(civsAnchorCues(building.anchor, Material.LIME_CONCRETE))
+}
+
+/** Same twelve-edge, 0.08-block frame as Builder's movable origin marker. */
+internal fun civsAnchorCues(point: CivPosition, material: Material): List<CivsPreviewCuboid> = buildList(12) {
+    val thickness = 0.08f
+    val half = thickness / 2.0
+    val x = point.x.toDouble()
+    val y = point.y.toDouble()
+    val z = point.z.toDouble()
+    for (yy in listOf(y, y + 1)) for (zz in listOf(z, z + 1))
+        add(CivsPreviewCuboid(x, yy - half, zz - half, 1f, thickness, thickness, material))
+    for (xx in listOf(x, x + 1)) for (zz in listOf(z, z + 1))
+        add(CivsPreviewCuboid(xx - half, y, zz - half, thickness, 1f, thickness, material))
+    for (xx in listOf(x, x + 1)) for (yy in listOf(y, y + 1))
+        add(CivsPreviewCuboid(xx - half, yy - half, z, thickness, thickness, 1f, material))
 }
