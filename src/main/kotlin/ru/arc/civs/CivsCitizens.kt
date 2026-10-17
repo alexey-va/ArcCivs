@@ -1,7 +1,12 @@
 package ru.arc.civs
 
+import com.destroystokyo.paper.entity.Pathfinder
 import net.citizensnpcs.api.CitizensAPI
+import net.citizensnpcs.api.ai.AbstractPathStrategy
+import net.citizensnpcs.api.ai.NavigatorParameters
 import net.citizensnpcs.api.ai.PathfinderType
+import net.citizensnpcs.api.ai.TargetType
+import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.event.NPCRightClickEvent
 import net.citizensnpcs.api.npc.MemoryNPCDataStore
 import net.citizensnpcs.api.npc.NPC
@@ -23,6 +28,7 @@ import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.plugin.Plugin
+import org.bukkit.util.Vector
 import ru.arc.observability.StructuredDebugLine
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -266,7 +272,9 @@ class CivsCitizens(
         navigator.defaultParameters.range((distance + 8).coerceAtLeast(16.0).toFloat())
         val route = Route(from.point(), to, chunks, now, (10_000 + distance * 1_500).toLong().coerceAtMost(90_000))
         actor.route = route
-        navigator.setTarget(to)
+        navigator.setTarget { parameters ->
+            CitizenExactNavigation((actor.npc.entity as Villager).pathfinder, to, parameters)
+        }
         route.strategy = navigator.pathStrategy?.javaClass?.simpleName
         navigator.localParameters.addSingleUseCallback { reason ->
             if (actor.route === route) {
@@ -524,6 +532,52 @@ class CivsCitizens(
 
     private companion object {
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
+    }
+}
+
+/**
+ * Keep native movement under Citizens lifecycle, but use Paper's exact-block path request.
+ * Citizens' Minecraft location strategy uses a one-block reach range, which can finish
+ * 1.45 blocks before an entrance. Paper findPath uses reach range zero on Paper 1.21.11.
+ */
+internal class CitizenExactNavigation(
+    private val pathfinder: Pathfinder,
+    target: Location,
+    private val parameters: NavigatorParameters,
+) : AbstractPathStrategy(TargetType.LOCATION) {
+    private val target = target.clone()
+    private var started = false
+    private var stopped = false
+    private var path: Pathfinder.PathResult? = null
+
+    override fun getTargetAsLocation(): Location = target.clone()
+    override fun getCurrentDestination(): Location = target.clone()
+    override fun getPath(): Iterable<Vector>? = path?.points?.map { it.toVector() }
+
+    override fun update(): Boolean {
+        if (stopped) return true
+        if (!started) {
+            // Citizens applies the route-local native range before this first update.
+            started = true
+            val candidate = pathfinder.findPath(target)
+            path = candidate
+            val end = candidate?.finalPoint
+            if (candidate == null || !candidate.canReachFinalPoint() || end == null ||
+                end.world != target.world || end.blockX != target.blockX ||
+                end.blockY != target.blockY || end.blockZ != target.blockZ ||
+                !pathfinder.moveTo(candidate, parameters.speedModifier().toDouble())) {
+                setCancelReason(CancelReason.STUCK)
+                return true
+            }
+        }
+        return !pathfinder.hasPath()
+    }
+
+    override fun stop() {
+        if (stopped) return
+        stopped = true
+        path = null
+        pathfinder.stopPathfinding()
     }
 }
 

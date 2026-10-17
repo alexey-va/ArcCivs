@@ -1,8 +1,15 @@
 package ru.arc.civs
 
+import com.destroystokyo.paper.entity.Pathfinder
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import net.citizensnpcs.api.ai.NavigatorParameters
+import net.citizensnpcs.api.ai.event.CancelReason
+import org.bukkit.Location
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
@@ -50,6 +57,80 @@ class CivsCitizensTest : FunSpec({
         citizenNavigationOutcome(cancelled, true, 90_001, 90_000, false) shouldBe CitizenNavigationOutcome.CANCELLED
         citizenNavigationOutcome(null, false, 90_001, 90_000, false) shouldBe CitizenNavigationOutcome.TIMED_OUT
         citizenNavigationOutcome(null, false, 90_000, 90_000, true) shouldBe CitizenNavigationOutcome.PENDING
+    }
+
+    test("exact native routing plans once at first update and keeps Citizens in control until native completion") {
+        val target = Location(null, 15.5, 1.0, -11.5)
+        val pathfinder = mockk<Pathfinder>()
+        val path = mockk<Pathfinder.PathResult>()
+        every { pathfinder.findPath(any<Location>()) } returns path
+        every { path.finalPoint } returns Location(null, 15.0, 1.0, -12.0)
+        every { path.canReachFinalPoint() } returns true
+        every { pathfinder.moveTo(path, 1.0) } returns true
+        every { pathfinder.hasPath() } returns true
+        every { pathfinder.stopPathfinding() } returns Unit
+        val route = CitizenExactNavigation(pathfinder, target, NavigatorParameters().speedModifier(1f))
+
+        verify(exactly = 0) { pathfinder.findPath(any<Location>()) }
+        route.update() shouldBe false
+        route.update() shouldBe false
+        verify(exactly = 1) { pathfinder.findPath(target) }
+        verify(exactly = 1) { pathfinder.moveTo(path, 1.0) }
+        every { pathfinder.hasPath() } returns false
+        route.update() shouldBe true
+        route.cancelReason shouldBe null
+        route.stop()
+        route.stop()
+        route.update() shouldBe true
+        verify(exactly = 1) { pathfinder.stopPathfinding() }
+        verify(exactly = 1) { pathfinder.findPath(any<Location>()) }
+    }
+
+    test("native partial paths and unreachable target cells never start movement") {
+        val target = Location(null, 15.5, 1.0, -11.5)
+        for ((end, reachable) in listOf(
+            Location(null, 14.0, 1.0, -12.0) to true,
+            Location(null, 15.0, 2.0, -12.0) to true,
+            Location(null, 15.0, 1.0, -12.0) to false,
+            null to true,
+        )) {
+            val pathfinder = mockk<Pathfinder>()
+            val path = mockk<Pathfinder.PathResult>()
+            every { pathfinder.findPath(any<Location>()) } returns path
+            every { path.finalPoint } returns end
+            every { path.canReachFinalPoint() } returns reachable
+            val route = CitizenExactNavigation(pathfinder, target, NavigatorParameters())
+            route.update() shouldBe true
+            route.cancelReason shouldBe CancelReason.STUCK
+            verify(exactly = 0) { pathfinder.moveTo(any<Pathfinder.PathResult>(), any()) }
+        }
+    }
+
+    test("native planning and movement rejection fail the route and cancellation cannot restart it") {
+        val target = Location(null, 15.5, 1.0, -11.5)
+        val pathfinder = mockk<Pathfinder>()
+        every { pathfinder.findPath(any<Location>()) } returns null
+        every { pathfinder.stopPathfinding() } returns Unit
+        val missing = CitizenExactNavigation(pathfinder, target, NavigatorParameters())
+        missing.update() shouldBe true
+        missing.cancelReason shouldBe CancelReason.STUCK
+        missing.stop()
+        missing.update() shouldBe true
+        verify(exactly = 1) { pathfinder.findPath(any<Location>()) }
+
+        val path = mockk<Pathfinder.PathResult>()
+        every { pathfinder.findPath(any<Location>()) } returns path
+        every { path.finalPoint } returns Location(null, 15.0, 1.0, -12.0)
+        every { path.canReachFinalPoint() } returns true
+        every { pathfinder.moveTo(path, 1.0) } returns false
+        val rejected = CitizenExactNavigation(pathfinder, target, NavigatorParameters().speedModifier(1f))
+        rejected.update() shouldBe true
+        rejected.cancelReason shouldBe CancelReason.STUCK
+        verify(exactly = 0) { pathfinder.hasPath() }
+        val cancelled = CitizenExactNavigation(pathfinder, target, NavigatorParameters())
+        cancelled.stop()
+        cancelled.update() shouldBe true
+        verify(exactly = 2) { pathfinder.findPath(any<Location>()) }
     }
 
     test("path diagnostics preserve the endpoint but inspect at most 256 nodes") {
