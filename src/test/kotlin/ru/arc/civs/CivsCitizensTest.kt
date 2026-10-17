@@ -11,15 +11,18 @@ import net.citizensnpcs.api.ai.NavigatorParameters
 import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.npc.NPC
 import net.citizensnpcs.api.npc.NPCRegistry
+import org.bukkit.Chunk
 import org.bukkit.Location
+import org.bukkit.World
 import org.bukkit.entity.Entity
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
-    test("external activation only ticks our spawned moving NPC with a viewer and loaded route") {
+    test("external activation only ticks our spawned moving NPC with a viewer and an entity ticking route") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("vanilla")
+            world.loadChunk(-1, -1)
             val registry = mockk<NPCRegistry>()
             val npc = mockk<NPC>()
             val entity = mockk<Entity>()
@@ -60,7 +63,54 @@ class CivsCitizensTest : FunSpec({
             every { npc.owningRegistry } returns mockk<NPCRegistry>()
             tick() shouldBe false
             activations shouldBe 2
+            every { npc.owningRegistry } returns registry
+            world.unloadChunk(-1, -1)
+            tick() shouldBe false
+            activations shouldBe 2
+            world.loadChunk(-1, -1)
+            tick() shouldBe true
+            activations shouldBe 3
         }
+    }
+
+    test("chunk readiness distinguishes loaded terrain from entity ticking without loading chunks") {
+        val world = mockk<World>()
+        val chunk = mockk<Chunk>()
+        every { world.isChunkLoaded(-2, 3) } returns false
+        citizenChunkReady(world, -2, 3) shouldBe false
+        verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>(), any<Boolean>()) }
+
+        every { world.isChunkLoaded(-2, 3) } returns true
+        every { world.getChunkAt(-2, 3, false) } returns chunk
+        for (level in Chunk.LoadLevel.entries) {
+            every { chunk.loadLevel } returns level
+            citizenChunkReady(world, -2, 3) shouldBe (level == Chunk.LoadLevel.ENTITY_TICKING)
+        }
+        verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>()) }
+        verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>(), true) }
+    }
+
+    test("a route sleeps while any checked chunk is non ticking and recovers when simulation returns") {
+        val world = mockk<World>()
+        val active = mockk<Chunk>()
+        val boundary = mockk<Chunk>()
+        val chunks = CitizenChunks.between(15, -12, 47, -12)
+        chunks shouldBe CitizenChunks(-1, 3, -2, 0)
+        every { world.isChunkLoaded(any(), any()) } returns true
+        every { world.getChunkAt(any<Int>(), any<Int>(), false) } returns active
+        every { active.loadLevel } returns Chunk.LoadLevel.ENTITY_TICKING
+        every { world.getChunkAt(2, -1, false) } returns boundary
+        every { boundary.loadLevel } returns Chunk.LoadLevel.TICKING
+        repeat(5) { chunks.ready(world) shouldBe false }
+        every { boundary.loadLevel } returns Chunk.LoadLevel.ENTITY_TICKING
+        chunks.ready(world) shouldBe true
+        verify(exactly = 0) { world.getChunkAt(-1, -2, false) }
+        verify(exactly = 0) { world.getChunkAt(3, -1, false) }
+        every { world.isChunkLoaded(-1, -2) } returns false
+        chunks.ready(world) shouldBe false
+        every { world.isChunkLoaded(-1, -2) } returns true
+        chunks.ready(world) shouldBe true
+        verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>(), true) }
     }
 
     test("view activation is bounded in three dimensions and never crosses worlds") {

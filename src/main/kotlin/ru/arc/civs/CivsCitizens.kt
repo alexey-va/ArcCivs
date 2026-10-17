@@ -14,6 +14,7 @@ import net.citizensnpcs.api.npc.NPCRegistry
 import net.citizensnpcs.trait.VillagerProfession
 import net.citizensnpcs.util.NMS
 import org.bukkit.Bukkit
+import org.bukkit.Chunk
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.World
@@ -90,7 +91,8 @@ class CivsCitizens(
                 actor.npc.entity.world.uid != city.worldId -> "unavailable"
                 !citizenHasViewer(city.worldId, actor.npc.entity.location.point(), viewers, viewerRange) -> "sleeping"
                 plan == null -> "storage-unavailable"
-                !loaded(world, plan.storage) || plan.workplace?.let { !loaded(world, it) } == true -> "chunk-unloaded"
+                !citizenChunkReady(world, actor.npc.entity.location.blockX shr 4, actor.npc.entity.location.blockZ shr 4) ||
+                    !plan.chunksReady(world) || actor.route?.chunks?.ready(world) == false -> "chunk-unloaded"
                 else -> null
             }
             if (reason != null) {
@@ -127,7 +129,7 @@ class CivsCitizens(
                 plan == null -> "storage-unavailable"
                 world == null -> "world-unloaded"
                 !citizenHasViewer(city.worldId, plan.storage.point(), viewers, viewerRange) -> "sleeping"
-                !loaded(world, plan.storage) || plan.workplace?.let { !loaded(world, it) } == true -> "chunk-unloaded"
+                !plan.chunksReady(world) -> "chunk-unloaded"
                 actors.size >= maxActive -> "capacity"
                 else -> null
             }
@@ -202,7 +204,7 @@ class CivsCitizens(
         for (actor in actors.values) {
             val route = actor.route ?: continue
             if (route.completion != null) continue
-            activateCitizenRoute(actor.npc, registry, actor.worldId, viewers, viewerRange, route.chunks::loaded)
+            activateCitizenRoute(actor.npc, registry, actor.worldId, viewers, viewerRange, route.chunks::ready)
         }
     }
 
@@ -230,8 +232,9 @@ class CivsCitizens(
                 if (actor.route == null) startRoute(actor, world, target, now)
                 val route = actor.route
                 if (route != null) {
-                    if (!route.chunks.loaded(world)) {
-                        pauseNavigation(actor, "chunk-unloaded", "route-chunk-unloaded", route.target, now)
+                    if (!route.chunks.ready(world)) {
+                        remove(actor, "chunk-unloaded")
+                        return
                     } else {
                         if (route.completion == null && route.path == null) observePath(actor, route)
                         val outcome = citizenNavigationOutcome(route.completion,
@@ -263,7 +266,7 @@ class CivsCitizens(
             }
             else -> Unit
         }
-        statuses[actor.workerId] = cycle.status()
+        if (actors[actor.workerId] === actor) statuses[actor.workerId] = cycle.status()
     }
 
     private fun startRoute(actor: Actor, world: World, target: CivPosition, now: Long) {
@@ -275,10 +278,12 @@ class CivsCitizens(
             return
         }
         val chunks = CitizenChunks.between(from.blockX, from.blockZ, target.x, target.z)
-        val chunksLoaded = chunks.loaded(world)
-        if (!chunksLoaded || !standable(world, target)) {
-            pauseNavigation(actor, if (!chunksLoaded) "chunk-unloaded" else "route-unreachable",
-                if (!chunksLoaded) "route-chunk-unloaded" else "target-not-standable", to, now)
+        if (!chunks.ready(world)) {
+            remove(actor, "chunk-unloaded")
+            return
+        }
+        if (!standable(world, target)) {
+            pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now)
             return
         }
         // Citizens itself retains the already-loaded destination while navigating. ArcCivs never loads a chunk.
@@ -438,7 +443,8 @@ class CivsCitizens(
     }
 
     private fun standable(world: World, point: CivPosition): Boolean {
-        if (!loaded(world, point) || point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return false
+        if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+            point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return false
         val feet = world.getBlockAt(point.x, point.y, point.z)
         val head = world.getBlockAt(point.x, point.y + 1, point.z)
         val floor = world.getBlockAt(point.x, point.y - 1, point.z)
@@ -459,8 +465,6 @@ class CivsCitizens(
         return from.world!!.rayTraceBlocks(from.clone().add(0.0, 0.8, 0.0), offset.normalize(), distance,
             FluidCollisionMode.ALWAYS, true) == null
     }
-
-    private fun loaded(world: World, point: CivPosition): Boolean = world.isChunkLoaded(point.x shr 4, point.z shr 4)
 
     private fun viewers(excluding: UUID? = null): List<CitizenViewer> = plugin.server.onlinePlayers.asSequence()
         .filter { it.isOnline && it.uniqueId != excluding && !it.hasMetadata("NPC") }
@@ -631,11 +635,13 @@ internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerc
 
 /** NPC.update also runs during inactive villager ticks, too late to activate that tick's movement. */
 internal fun activateCitizenRoute(npc: NPC, registry: NPCRegistry, worldId: UUID, viewers: List<CitizenViewer>,
-    viewerRange: Int, chunksLoaded: (World) -> Boolean, activate: (Entity) -> Unit = NMS::activate): Boolean {
+    viewerRange: Int, chunksReady: (World) -> Boolean, activate: (Entity) -> Unit = NMS::activate): Boolean {
     if (npc.owningRegistry !== registry || !npc.isSpawned || !npc.navigator.isNavigating) return false
     val entity = npc.entity
     if (!entity.isValid || entity.world.uid != worldId ||
-        !citizenHasViewer(worldId, entity.location.point(), viewers, viewerRange) || !chunksLoaded(entity.world)) return false
+        !citizenHasViewer(worldId, entity.location.point(), viewers, viewerRange) ||
+        !citizenChunkReady(entity.world, entity.location.blockX shr 4, entity.location.blockZ shr 4) ||
+        !chunksReady(entity.world)) return false
     activate(entity)
     return true
 }
@@ -775,9 +781,21 @@ internal class CitizenRetry {
     }
 }
 
-private data class CitizenChunks(val minX: Int, val maxX: Int, val minZ: Int, val maxZ: Int) {
+/** Server-thread only. The false overload and load-level getter never load or retain a chunk on Paper. */
+internal fun citizenChunkReady(world: World, x: Int, z: Int): Boolean =
+    world.isChunkLoaded(x, z) && world.getChunkAt(x, z, false).loadLevel == Chunk.LoadLevel.ENTITY_TICKING
+
+private fun CitizenPlan.chunksReady(world: World): Boolean = workplace?.let {
+    CitizenChunks.between(storage.x, storage.z, it.x, it.z).ready(world)
+} ?: citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
+
+internal data class CitizenChunks(val minX: Int, val maxX: Int, val minZ: Int, val maxZ: Int) {
     fun contains(x: Int, z: Int) = x in minX..maxX && z in minZ..maxZ
-    fun loaded(world: World): Boolean = (minX..maxX).all { x -> (minZ..maxZ).all { z -> world.isChunkLoaded(x, z) } }
+    // The one-chunk search margin only needs loaded terrain; movement needs entity ticking.
+    fun ready(world: World): Boolean = (minX..maxX).all { x -> (minZ..maxZ).all { z ->
+        if (x == minX || x == maxX || z == minZ || z == maxZ) world.isChunkLoaded(x, z)
+        else citizenChunkReady(world, x, z)
+    } }
     companion object {
         fun between(x1: Int, z1: Int, x2: Int, z2: Int) = CitizenChunks(
             (minOf(x1, x2) shr 4) - 1, (maxOf(x1, x2) shr 4) + 1,
