@@ -9,14 +9,15 @@ import net.citizensnpcs.api.ai.TargetType
 import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.event.NPCRightClickEvent
 import net.citizensnpcs.api.npc.MemoryNPCDataStore
-import net.citizensnpcs.api.npc.MetadataStore
 import net.citizensnpcs.api.npc.NPC
 import net.citizensnpcs.api.npc.NPCRegistry
 import net.citizensnpcs.trait.VillagerProfession
+import net.citizensnpcs.util.NMS
 import org.bukkit.Bukkit
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.World
+import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Player
 import org.bukkit.entity.Villager
@@ -191,6 +192,18 @@ class CivsCitizens(
     fun activeCount(): Int {
         checkMainThread()
         return actors.size
+    }
+
+    /** Called by one Core timer before Paper chooses active/inactive entity ticks. */
+    fun activateNavigating() {
+        checkMainThread()
+        if (closed.get() || actors.isEmpty()) return
+        val viewers = viewers()
+        for (actor in actors.values) {
+            val route = actor.route ?: continue
+            if (route.completion != null) continue
+            activateCitizenRoute(actor.npc, registry, actor.worldId, viewers, viewerRange, route.chunks::loaded)
+        }
     }
 
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
@@ -387,7 +400,8 @@ class CivsCitizens(
         npc.isProtected = true
         npc.setUseMinecraftAI(false)
         npc.setAlwaysUseNameHologram(false)
-        configureCitizenActivity(npc.data(), viewerRange)
+        npc.data().set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
+        npc.data().set(NPC.Metadata.SHOULD_SAVE, false)
         npc.data().set(NPC.Metadata.VILLAGER_BLOCK_TRADES, true)
         npc.data().set(NPC.Metadata.PICKUP_ITEMS, false)
         npc.data().set(NPC.Metadata.DROPS_ITEMS, false)
@@ -615,12 +629,15 @@ internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
 
-/** Keep native movement ticking inside this NPC's viewer radius, without loading or retaining chunks. */
-internal fun configureCitizenActivity(metadata: MetadataStore, viewerRange: Int) {
-    require(viewerRange in 1..96)
-    metadata.set(NPC.Metadata.ACTIVATION_RANGE, viewerRange)
-    metadata.set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
-    metadata.set(NPC.Metadata.SHOULD_SAVE, false)
+/** NPC.update also runs during inactive villager ticks, too late to activate that tick's movement. */
+internal fun activateCitizenRoute(npc: NPC, registry: NPCRegistry, worldId: UUID, viewers: List<CitizenViewer>,
+    viewerRange: Int, chunksLoaded: (World) -> Boolean, activate: (Entity) -> Unit = NMS::activate): Boolean {
+    if (npc.owningRegistry !== registry || !npc.isSpawned || !npc.navigator.isNavigating) return false
+    val entity = npc.entity
+    if (!entity.isValid || entity.world.uid != worldId ||
+        !citizenHasViewer(worldId, entity.location.point(), viewers, viewerRange) || !chunksLoaded(entity.world)) return false
+    activate(entity)
+    return true
 }
 
 // Entrances retain the domain bound; a real actor can stop up to 0.65 blocks from an entrance.

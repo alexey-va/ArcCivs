@@ -21,6 +21,43 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsServiceTest : FunSpec({
+    test("one Core heartbeat activates navigation every tick only while the service is ready") {
+        serviceScenario { h ->
+            var activations = 0
+            every { h.citizens.activateNavigating() } answers { activations++; Unit }
+            h.paper.performTicks(3)
+            activations shouldBe 0
+            h.start()
+            val started = activations
+            h.paper.performTicks(5)
+            activations shouldBe started + 5
+            h.service.close()
+            h.paper.performTicks(5)
+            activations shouldBe started + 5
+        }
+    }
+
+    test("reload and lifecycle cancellation cannot keep an old navigation heartbeat alive") {
+        serviceScenario { h ->
+            h.start()
+            var activations = 0
+            every { h.citizens.activateNavigating() } answers { activations++; Unit }
+            val pending = CompletableFuture<List<Settlement>>()
+            every { h.store.load() } returns pending
+            val reload = h.service.reload(h.player)
+            h.paper.performTicks(5)
+            activations shouldBe 0
+            pending.complete(listOf(h.city))
+            h.tick()
+            reload.join()
+            val resumed = activations
+            (resumed > 0) shouldBe true
+            h.tasks.close()
+            h.paper.performTicks(5)
+            activations shouldBe resumed
+        }
+    }
+
     test("shared protection follows loaded geometry and unregisters at shutdown") {
         serviceScenario { h ->
             val services = h.plugin.server.servicesManager

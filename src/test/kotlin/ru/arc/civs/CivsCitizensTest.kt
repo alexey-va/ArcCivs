@@ -10,31 +10,56 @@ import io.mockk.verify
 import net.citizensnpcs.api.ai.NavigatorParameters
 import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.npc.NPC
-import net.citizensnpcs.api.npc.SimpleMetadataStore
+import net.citizensnpcs.api.npc.NPCRegistry
 import org.bukkit.Location
+import org.bukkit.entity.Entity
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
-    test("native activation follows each NPC viewer range without saving it or retaining chunks") {
-        val unrelatedNpc = SimpleMetadataStore()
-        for (range in listOf(1, 32, 64, 96)) {
-            val metadata = SimpleMetadataStore()
-            metadata.set(NPC.Metadata.NAMEPLATE_VISIBLE, true)
-            configureCitizenActivity(metadata, range)
+    test("external activation only ticks our spawned moving NPC with a viewer and loaded route") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = paper.addSimpleWorld("vanilla")
+            val registry = mockk<NPCRegistry>()
+            val npc = mockk<NPC>()
+            val entity = mockk<Entity>()
+            every { npc.owningRegistry } returns registry
+            every { npc.isSpawned } returns true
+            every { npc.navigator.isNavigating } returns true
+            every { npc.entity } returns entity
+            every { entity.isValid } returns true
+            every { entity.world } returns world
+            every { entity.location } returns Location(world, -8.9, 1.0, -11.5)
+            var viewers = listOf(CitizenViewer(world.uid, CitizenPoint(-60.5, 1.0, -7.5)))
+            var loaded = true
+            var activations = 0
+            fun tick() = activateCitizenRoute(npc, registry, world.uid, viewers, 96, { loaded }) {
+                it shouldBe entity
+                activations++
+            }
 
-            metadata.get<Int>(NPC.Metadata.ACTIVATION_RANGE) shouldBe range
-            metadata.get<Boolean>(NPC.Metadata.KEEP_CHUNK_LOADED) shouldBe false
-            metadata.get<Boolean>(NPC.Metadata.SHOULD_SAVE) shouldBe false
-            metadata.get<Boolean>(NPC.Metadata.NAMEPLATE_VISIBLE) shouldBe true
-        }
-        unrelatedNpc.has(NPC.Metadata.ACTIVATION_RANGE) shouldBe false
-    }
-
-    test("unbounded or always-active Citizens ranges are rejected before changing NPC metadata") {
-        for (range in listOf(-1, 0, 97, Int.MAX_VALUE)) {
-            val metadata = SimpleMetadataStore()
-            shouldThrow<IllegalArgumentException> { configureCitizenActivity(metadata, range) }
-            metadata.size() shouldBe 0
+            repeat(2) { tick() shouldBe true }
+            activations shouldBe 2
+            loaded = false
+            tick() shouldBe false
+            loaded = true
+            viewers = listOf(CitizenViewer(world.uid, CitizenPoint(90.0, 1.0, -11.5)))
+            tick() shouldBe false
+            viewers = listOf(CitizenViewer(UUID.randomUUID(), CitizenPoint(-8.9, 1.0, -11.5)))
+            tick() shouldBe false
+            viewers = listOf(CitizenViewer(world.uid, CitizenPoint(-60.5, 1.0, -7.5)))
+            every { npc.navigator.isNavigating } returns false
+            tick() shouldBe false
+            every { npc.navigator.isNavigating } returns true
+            every { npc.isSpawned } returns false
+            tick() shouldBe false
+            every { npc.isSpawned } returns true
+            every { entity.isValid } returns false
+            tick() shouldBe false
+            every { entity.isValid } returns true
+            every { npc.owningRegistry } returns mockk<NPCRegistry>()
+            tick() shouldBe false
+            activations shouldBe 2
         }
     }
 

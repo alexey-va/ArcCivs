@@ -98,6 +98,7 @@ class CivsService(
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
+        tasks.runTimer(1, 1) { if (ready()) citizens.activateNavigating() }
         tasks.runTimer(20, 20) { pulse() }
     }
 

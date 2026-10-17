@@ -63,7 +63,7 @@
 
 1. Соберите JAR: `./gradlew test shadowJar` и проверьте его вместе с точным
    ArcCore JAR: `python3 scripts/verify-jar.py`. Установите зависимости и
-   `build/libs/ArcCivs-0.1.1.jar` в `plugins` по принятой процедуре сервера.
+   `build/libs/ArcCivs-0.1.2.jar` в `plugins` по принятой процедуре сервера.
 2. Подготовьте закрытый каталог из **54** выровненных схем: три стиля,
    шесть типов, три уровня. Он расположен под `schematics-root` и использует
    префикс `civs/minecolonies/<style>/`. Входы и ориентация уровней одного здания

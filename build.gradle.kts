@@ -1,18 +1,14 @@
-import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
-
 plugins {
     kotlin("jvm") version "2.3.0"
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.1"
+version = "0.1.2"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.8"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
 kotlin { jvmToolchain(25) }
-val citizensMetadataTestRuntime by configurations.creating
 dependencies {
-    add(citizensMetadataTestRuntime.name, "net.kyori:adventure-api:4.26.1")
     implementation(kotlin("stdlib"))
     implementation("ru.ruscrafting.arc:arc-core:2.7.32")
     implementation("ru.ruscrafting.arc:arc-core-logging:2.7.32")
@@ -34,14 +30,6 @@ dependencies {
     testImplementation("net.citizensnpcs:citizens-main:2.0.42-SNAPSHOT") { isTransitive = false }
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
-// Citizens' metadata enum references Adventure types relocated by its runtime Libby loader.
-val citizensMetadataFixture by tasks.registering(ShadowJar::class) {
-    configurations = listOf(citizensMetadataTestRuntime)
-    archiveFileName.set("citizens-adventure.jar")
-    destinationDirectory.set(layout.buildDirectory.dir("test-fixtures"))
-    relocate("net.kyori", "clib.net.kyori")
-}
-dependencies { testRuntimeOnly(files(citizensMetadataFixture.flatMap { it.archiveFile })) }
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
