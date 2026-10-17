@@ -9,6 +9,7 @@ import net.citizensnpcs.api.ai.TargetType
 import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.event.NPCRightClickEvent
 import net.citizensnpcs.api.npc.MemoryNPCDataStore
+import net.citizensnpcs.api.npc.MetadataStore
 import net.citizensnpcs.api.npc.NPC
 import net.citizensnpcs.api.npc.NPCRegistry
 import net.citizensnpcs.trait.VillagerProfession
@@ -386,8 +387,7 @@ class CivsCitizens(
         npc.isProtected = true
         npc.setUseMinecraftAI(false)
         npc.setAlwaysUseNameHologram(false)
-        npc.data().set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
-        npc.data().set(NPC.Metadata.SHOULD_SAVE, false)
+        configureCitizenActivity(npc.data(), viewerRange)
         npc.data().set(NPC.Metadata.VILLAGER_BLOCK_TRADES, true)
         npc.data().set(NPC.Metadata.PICKUP_ITEMS, false)
         npc.data().set(NPC.Metadata.DROPS_ITEMS, false)
@@ -614,6 +614,14 @@ internal fun citizenPathSnapshot(path: Iterable<CitizenPoint>): CitizenPathSnaps
 internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>, range: Int): Boolean =
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
+
+/** Keep native movement ticking inside this NPC's viewer radius, without loading or retaining chunks. */
+internal fun configureCitizenActivity(metadata: MetadataStore, viewerRange: Int) {
+    require(viewerRange in 1..96)
+    metadata.set(NPC.Metadata.ACTIVATION_RANGE, viewerRange)
+    metadata.set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
+    metadata.set(NPC.Metadata.SHOULD_SAVE, false)
+}
 
 // Entrances retain the domain bound; a real actor can stop up to 0.65 blocks from an entrance.
 internal const val CITIZEN_ROUTE_ARRIVAL_TOLERANCE = 1.0

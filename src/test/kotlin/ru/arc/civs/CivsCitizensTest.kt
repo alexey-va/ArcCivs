@@ -9,10 +9,35 @@ import io.mockk.mockk
 import io.mockk.verify
 import net.citizensnpcs.api.ai.NavigatorParameters
 import net.citizensnpcs.api.ai.event.CancelReason
+import net.citizensnpcs.api.npc.NPC
+import net.citizensnpcs.api.npc.SimpleMetadataStore
 import org.bukkit.Location
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
+    test("native activation follows each NPC viewer range without saving it or retaining chunks") {
+        val unrelatedNpc = SimpleMetadataStore()
+        for (range in listOf(1, 32, 64, 96)) {
+            val metadata = SimpleMetadataStore()
+            metadata.set(NPC.Metadata.NAMEPLATE_VISIBLE, true)
+            configureCitizenActivity(metadata, range)
+
+            metadata.get<Int>(NPC.Metadata.ACTIVATION_RANGE) shouldBe range
+            metadata.get<Boolean>(NPC.Metadata.KEEP_CHUNK_LOADED) shouldBe false
+            metadata.get<Boolean>(NPC.Metadata.SHOULD_SAVE) shouldBe false
+            metadata.get<Boolean>(NPC.Metadata.NAMEPLATE_VISIBLE) shouldBe true
+        }
+        unrelatedNpc.has(NPC.Metadata.ACTIVATION_RANGE) shouldBe false
+    }
+
+    test("unbounded or always-active Citizens ranges are rejected before changing NPC metadata") {
+        for (range in listOf(-1, 0, 97, Int.MAX_VALUE)) {
+            val metadata = SimpleMetadataStore()
+            shouldThrow<IllegalArgumentException> { configureCitizenActivity(metadata, range) }
+            metadata.size() shouldBe 0
+        }
+    }
+
     test("view activation is bounded in three dimensions and never crosses worlds") {
         val world = UUID.randomUUID()
         val origin = CitizenPoint(0.0, 64.0, 0.0)
