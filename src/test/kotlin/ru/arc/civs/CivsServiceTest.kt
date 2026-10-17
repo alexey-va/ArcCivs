@@ -363,6 +363,19 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("closing a service observes actual citizen retirement and duplicate close keeps that barrier") {
+        serviceScenario { h ->
+            val terminal = CompletableFuture<Void>()
+            every { h.citizens.closeAsync() } returns terminal
+            h.service.close()
+            h.service.close()
+            verify(exactly = 1) { h.citizens.closeAsync() }
+            h.service.drained().isDone shouldBe false
+            terminal.complete(null)
+            h.service.drained().join()
+        }
+    }
+
     test("closing an active placement releases its guard and a late completion cannot start repair") {
         serviceScenario { h ->
             val placement = h.placement()
@@ -400,6 +413,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     val service: CivsService
 
     init {
+        every { citizens.closeAsync() } returns CompletableFuture.completedFuture(null)
+        every { renderer.drained() } returns CompletableFuture.completedFuture(null)
         every { player.uniqueId } returns owner
         every { player.world } returns world
         every { player.location } returns Location(world, 0.0, 65.0, 0.0)

@@ -42,37 +42,54 @@ class CivsProtection(
     private val available: () -> Boolean = { true },
     private val protectedWorlds: Set<String> = emptySet(),
 ) : Listener {
-    private data class Footprint(val worldId: UUID, val bounds: CivBox)
-    private var geometry = emptyList<Footprint>()
-    private var chunks = emptyMap<UUID, Map<Long, List<CivBox>>>()
+    internal data class Footprint(val worldId: UUID, val bounds: CivBox)
+    internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>)
+    internal class IndexNode(val bounds: CivBox, val boxes: List<CivBox>, val left: IndexNode? = null, val right: IndexNode? = null) {
+        fun contains(x: Int, y: Int, z: Int): Boolean = bounds.contains(x, y, z) &&
+            (boxes.any { it.contains(x, y, z) } || left?.contains(x, y, z) == true || right?.contains(x, y, z) == true)
+    }
+    private var snapshot = prepare(emptyList())
 
     init { refresh() }
 
-    /** Call immediately after publishing a city snapshot. Stock/worker-only changes do not rebuild the index. */
+    /** Compatibility for small fixture/offline callers; runtime preparation uses [prepare] on its worker. */
     fun refresh(): Boolean {
-        check(Bukkit.isPrimaryThread()) { "Civs protection refresh requires the server thread" }
-        val current = cities().flatMap { city -> civsProtectedBuildings(city).map { Footprint(city.worldId, it.bounds) }.toList() }.distinct()
-        if (current == geometry) return false
-        val next = HashMap<UUID, MutableMap<Long, MutableList<CivBox>>>()
-        current.forEach { footprint ->
-            val world = next.getOrPut(footprint.worldId) { HashMap() }
-            val bounds = footprint.bounds
-            for (x in (bounds.min.x shr 4)..(bounds.max.x shr 4)) {
-                for (z in (bounds.min.z shr 4)..(bounds.max.z shr 4)) {
-                    world.getOrPut(chunkKey(x, z)) { ArrayList() }.add(bounds)
-                }
-            }
-        }
-        chunks = next.mapValues { (_, world) -> world.mapValues { (_, boxes) -> boxes.toList() } }
-        geometry = current
+        val prepared = prepare(cities())
+        if (prepared.geometry == snapshot.geometry) return false
+        return publish(prepared)
+    }
+
+    internal fun publish(prepared: Snapshot): Boolean {
+        check(Bukkit.isPrimaryThread()) { "Civs protection publication requires the server thread" }
+        snapshot = prepared
         return true
+    }
+
+    companion object {
+        /** Pure index construction over detached immutable city records. */
+        internal fun prepare(cities: Collection<Settlement>): Snapshot {
+            val current = cities.flatMap { city -> civsProtectedBuildings(city).map { Footprint(city.worldId, it.bounds) }.toList() }.distinct()
+            return Snapshot(current, current.groupBy { it.worldId }.mapValues { (_, footprints) ->
+                index(footprints.map { it.bounds })
+            })
+        }
+
+        /** Area-independent memory preserves old large footprints without enumerating their chunks. */
+        private fun index(boxes: List<CivBox>): IndexNode {
+            val bounds = CivBox(CivPosition(boxes.minOf { it.min.x }, boxes.minOf { it.min.y }, boxes.minOf { it.min.z }),
+                CivPosition(boxes.maxOf { it.max.x }, boxes.maxOf { it.max.y }, boxes.maxOf { it.max.z }))
+            if (boxes.size <= 8) return IndexNode(bounds, boxes)
+            val xWidth = bounds.max.x.toLong() - bounds.min.x
+            val zWidth = bounds.max.z.toLong() - bounds.min.z
+            val sorted = boxes.sortedBy { if (xWidth >= zWidth) it.min.x.toLong() + it.max.x else it.min.z.toLong() + it.max.z }
+            val middle = sorted.size / 2
+            return IndexNode(bounds, emptyList(), index(sorted.subList(0, middle)), index(sorted.subList(middle, sorted.size)))
+        }
     }
 
     fun isProtected(worldId: UUID, x: Int, y: Int, z: Int): Boolean =
         (!available() && Bukkit.getWorld(worldId)?.name in protectedWorlds) ||
-            chunks[worldId]?.get(chunkKey(x shr 4, z shr 4))?.any { it.contains(x, y, z) } == true
-
-    private fun chunkKey(x: Int, z: Int): Long = (x.toLong() shl 32) or (z.toLong() and 0xffff_ffffL)
+            snapshot.worlds[worldId]?.contains(x, y, z) == true
 
     private fun protected(block: Block): Boolean = isProtected(block.world.uid, block.x, block.y, block.z)
     private fun protected(location: Location?): Boolean = location?.world?.let {

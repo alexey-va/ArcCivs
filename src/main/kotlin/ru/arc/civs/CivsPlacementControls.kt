@@ -45,9 +45,12 @@ internal class CivsPlacementControls(
     private val ui: CivsUi,
     private val tasks: LifecycleTaskScope,
     private val text: CivsText,
-    private val displays: PaperPacketDisplays = PaperPacketDisplays(plugin, "civs-placement-controls"),
+    displays: PaperPacketDisplays? = null,
     panelRuntime: PaperActionPanels<CivsPlacementContext, CivsPlacementAction>? = null,
+    nativeWork: ru.arc.core.BudgetedTaskQueue? = null,
 ) : ActionPanelController<CivsPlacementContext, CivsPlacementAction>(), Listener, AutoCloseable {
+    private val displays = displays ?: nativeWork?.let { PaperPacketDisplays(plugin, "civs-placement-controls", it) }
+        ?: PaperPacketDisplays(plugin, "civs-placement-controls")
     private class Session(var previewId: UUID, val worldId: UUID) {
         var moving = false
         var pending: UUID? = null
@@ -57,8 +60,11 @@ internal class CivsPlacementControls(
     }
 
     private val sessions = mutableMapOf<UUID, Session>()
-    private val panels = panelRuntime ?: PaperActionPanels(plugin, displays, this)
+    private val panels = panelRuntime ?: PaperActionPanels(plugin, this.displays, this)
     private var closed = false
+    private var terminal: java.util.concurrent.CompletableFuture<Void>? = null
+    fun drained(): java.util.concurrent.CompletableFuture<Void> = terminal?.copy()
+        ?: java.util.concurrent.CompletableFuture.completedFuture(null)
 
     init {
         plugin.server.pluginManager.registerEvents(this, plugin)
@@ -253,7 +259,7 @@ internal class CivsPlacementControls(
         closed = true
         sessions.keys.toList().forEach(::clear)
         panels.close()
-        displays.close()
+        terminal = displays.closeAsync()
         HandlerList.unregisterAll(this)
     }
 

@@ -1,4 +1,4 @@
 schema = 1
 platform = "paper"
-core_version = "2.7.34"
+core_version = "2.7.38"
 capabilities = ["paper-action-panels","atomic-files", "health", "localized-text", "logging", "paper-block-protection", "paper-schematics", "paper-testing", "runtime", "scheduling"]

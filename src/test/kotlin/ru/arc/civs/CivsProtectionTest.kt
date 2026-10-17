@@ -28,6 +28,42 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("large persisted footprints use area independent indexes and keep every boundary protected") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("large-protection")
+            val huge = protectionBuilding(0, 1).copy(bounds = CivBox(CivPosition(-1_000_000, 64, -1_000_000),
+                CivPosition(1_000_000, 66, 1_000_000)))
+            val city = protectionCity(world.uid, UUID.randomUUID(), huge).copy(radius = 1_000_000,
+                workers = List(4) { CivWorker(UUID.randomUUID(), "Worker$it", null) })
+            CivsRules.validate(city).radius shouldBe 1_000_000
+            val prepared = java.util.concurrent.CompletableFuture.supplyAsync { CivsProtection.prepare(listOf(city)) }.join()
+            prepared.worlds.getValue(world.uid).boxes.size shouldBe 1
+            val listener = CivsProtection({ emptyList() })
+            listener.publish(prepared)
+            listener.isProtected(world.uid, -1_000_000, 64, 1_000_000) shouldBe true
+            listener.isProtected(world.uid, 1_000_000, 66, -1_000_000) shouldBe true
+            listener.isProtected(world.uid, 1_000_001, 64, 0) shouldBe false
+        }
+    }
+
+    test("worker prepared footprint stays unpublished until the main thread swaps its complete index") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("prepared-protection")
+            val old = protectionBuilding(0, 1)
+            val initial = protectionCity(world.uid, UUID.randomUUID(), old).copy(radius = 512,
+                workers = List(4) { CivWorker(UUID.randomUUID(), "Worker$it", null) })
+            CivsRules.validate(initial).radius shouldBe 512
+            val listener = CivsProtection({ listOf(initial) })
+            val changed = initial.copy(buildings = listOf(old.copy(bounds = CivBox(CivPosition(32, 64, 0), CivPosition(34, 66, 2)))))
+            val prepared = java.util.concurrent.CompletableFuture.supplyAsync { CivsProtection.prepare(listOf(changed)) }.join()
+            listener.isProtected(world.uid, 0, 64, 0) shouldBe true
+            listener.isProtected(world.uid, 32, 64, 0) shouldBe false
+            listener.publish(prepared) shouldBe true
+            listener.isProtected(world.uid, 0, 64, 0) shouldBe false
+            listener.isProtected(world.uid, 32, 64, 0) shouldBe true
+        }
+    }
+
     test("full current and planned boxes protect owners while the rest of their city stays editable") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("settlement")

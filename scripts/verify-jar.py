@@ -25,6 +25,7 @@ FORBIDDEN_CLASS_PREFIXES = (
     "ru/arc/paper/redis/SharedPaperRedisService",
     "ru/arc/paper/metrics/PaperArcMetricsProvider",
     "ru/arc/paper/packet/PaperVisualPacketRuntime",
+    "ru/arc/paper/runtime/PaperNativeCleanupServiceProvider",
 )
 
 # Inspect the actual feature and the Core preview transport it constructs. Other

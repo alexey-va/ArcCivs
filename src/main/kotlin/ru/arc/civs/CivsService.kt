@@ -36,6 +36,8 @@ class CivsService(
     worldAdapter: CivsWorld? = null,
     previewRenderer: CivsPreviewRenderer? = null,
     citizenRuntime: CivsCitizens? = null,
+    nativeWork: ru.arc.core.BudgetedTaskQueue? = null,
+    onCitizensCreated: (CivsCitizens) -> Unit = {},
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
         val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
@@ -44,7 +46,7 @@ class CivsService(
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>) {
         var repairing = false
     }
-    private val cities = linkedMapOf<UUID, Settlement>()
+    private var cities = linkedMapOf<UUID, Settlement>()
     private val busy = mutableSetOf<UUID>()
     private val unhealthy = mutableSetOf<UUID>()
     private val pendingFounders = mutableMapOf<UUID, Pair<UUID, CivPosition>>()
@@ -57,9 +59,11 @@ class CivsService(
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
     private var initialized = false
     private var closed = false
+    private var citizenDrain = CompletableFuture.completedFuture<Void>(null)
     private var loading = false
+    private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
-    private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks)
+    private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
     private val protection = CivsProtection(cities = { cities.values.toList() }, available = { ready() }, protectedWorlds = settings.worlds)
     private val sharedProtection = object : ArcBlockProtectionService {
         override fun isProtected(worldId: UUID, x: Int, y: Int, z: Int): Boolean =
@@ -88,10 +92,10 @@ class CivsService(
         }
     }
     lateinit var ui: CivsUi
-    private val citizens = citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() },
+    private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() },
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
-        }, settings.maximumNpcs, settings.viewerRange)
+        }, settings.maximumNpcs, settings.viewerRange)).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
 
     init {
@@ -270,10 +274,12 @@ class CivsService(
                                 log("commit construction $cityId", saveFailure)
                                 finishReservation(cityId, player.uniqueId, result, CivsRejection("storage-unavailable"))
                             } else {
-                                publish(requireNotNull(saved))
-                                cancelPreview(player.uniqueId)
-                                finishReservation(cityId, player.uniqueId, result, null)
-                                pulseConstruction()
+                                publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
+                                    if (publishFailure == null) cancelPreview(player.uniqueId)
+                                    else { unhealthy += cityId; initialized = false }
+                                    finishReservation(cityId, player.uniqueId, result, publishFailure)
+                                    if (publishFailure == null) pulseConstruction()
+                                }
                             }
                         }
                 }.onFailure { finishReservation(cityId, player.uniqueId, result, it) }
@@ -335,11 +341,15 @@ class CivsService(
         busy += cityId
         val result = tracked<Settlement>()
         store.save(next).whenCompleteSync(tasks) { saved, failure ->
-            busy -= cityId
             if (failure == null) {
-                publish(requireNotNull(saved))
-                result.complete(saved)
+                publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
+                    busy -= cityId
+                    if (publishFailure == null) result.complete(saved)
+                    else { unhealthy += cityId; result.completeExceptionally(publishFailure) }
+                    updateHealth()
+                }
             } else {
+                busy -= cityId
                 unhealthy += cityId
                 log("save settlement $cityId", failure)
                 result.completeExceptionally(CivsRejection("storage-unavailable"))
@@ -356,19 +366,21 @@ class CivsService(
         previews.keys.toList().forEach(::cancelPreview)
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
-        store.load().whenCompleteSync(tasks) { loaded, failure ->
+        store.load().thenApplyAsync({ records ->
+            val members = records.flatMap { it.members + it.owner }
+            require(members.distinct().size == members.size) { "A player belongs to more than one settlement" }
+            records.associateByTo(linkedMapOf(), Settlement::id) to CivsProtection.prepare(records)
+        }, executor).whenCompleteSync(tasks) { loaded, failure ->
             loading = false
             if (failure != null) {
                 initialized = false
                 log("load settlements", failure)
                 result.completeExceptionally(failure)
             } else runCatching {
-                val records = requireNotNull(loaded)
-                val members = records.flatMap { it.members + it.owner }
-                require(members.distinct().size == members.size) { "A player belongs to more than one settlement" }
-                cities.clear()
-                records.forEach { cities[it.id] = it }
-                protection.refresh()
+                val (records, prepared) = requireNotNull(loaded)
+                cities = records
+                protection.publish(prepared)
+                geometryGeneration++
                 unhealthy.clear()
                 initialized = true
                 result.complete(Unit)
@@ -379,11 +391,28 @@ class CivsService(
         return result
     }
 
-    private fun publish(city: Settlement) {
-        val previous = cities.put(city.id, city)
-        if (previous?.buildings != city.buildings || previous?.construction?.plannedBuilding != city.construction?.plannedBuilding) {
-            protection.refresh()
+    /** Publish geometry together with its prepared protection index; concurrent cities retry a stale candidate. */
+    private fun publish(city: Settlement): CompletableFuture<Unit> {
+        val previous = cities[city.id]
+        if (previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding) {
+            cities[city.id] = city
+            return CompletableFuture.completedFuture(Unit)
         }
+        val expected = geometryGeneration
+        val snapshot = cities.values.filter { it.id != city.id } + city
+        val result = tracked<Unit>()
+        CompletableFuture.supplyAsync({ CivsProtection.prepare(snapshot) }, executor).whenCompleteSync(tasks) { prepared, failure ->
+            if (failure != null) result.completeExceptionally(failure)
+            else if (geometryGeneration != expected) publish(city).whenComplete { _, retryFailure ->
+                if (retryFailure == null) result.complete(Unit) else result.completeExceptionally(retryFailure)
+            } else {
+                cities[city.id] = city
+                protection.publish(requireNotNull(prepared))
+                geometryGeneration++
+                result.complete(Unit)
+            }
+        }
+        return result
     }
 
     private fun pulse() {
@@ -572,7 +601,8 @@ class CivsService(
         placing.clear()
         operations.values.toList().forEach { it.cancel() }
         operations.clear()
-        citizens.close()
+        citizenDrain = runCatching { citizens.closeAsync() }
+            .getOrElse { CompletableFuture.failedFuture(it) }
         world.close()
         HandlerList.unregisterAll(protection)
         plugin.server.servicesManager.unregister(ArcBlockProtectionService::class.java, sharedProtection)
@@ -584,6 +614,8 @@ class CivsService(
         completions.clear()
         updateHealth()
     }
+
+    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), citizenDrain)
 
     companion object {
         internal fun areasOverlap(a: CivPosition, ar: Int, b: CivPosition, br: Int): Boolean =

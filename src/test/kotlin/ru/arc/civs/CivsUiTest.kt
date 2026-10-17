@@ -259,7 +259,41 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(3)
             h.handles.size shouldBe beforeClose
             h.handles.forEach { verify(exactly = 1) { it.remove() } }
-            verify(exactly = 1) { h.displays.close() }
+            verify(exactly = 1) { h.displays.closeAsync() }
+        }
+    }
+
+    test("normal preview cleanup yields through the aggregate native queue") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val h = PreviewHarness(paper, nativeBudget = 8)
+            try {
+                h.renderer.show(h.player, settlement(h.player).buildings.first(), previewBlocks(100))
+                paper.performTicks(1)
+                h.remainingHandles.size shouldBe 128
+                h.renderer.clear(h.player.uniqueId)
+                h.remainingHandles.size shouldBe 128
+                repeat(20) {
+                    val before = h.remainingHandles.size
+                    paper.performTicks(1)
+                    (before - h.remainingHandles.size <= 8) shouldBe true
+                }
+                h.remainingHandles.size shouldBe 0
+            } finally { h.renderer.close(); h.nativeWork?.close(); h.tasks.close() }
+        }
+    }
+
+    test("preview retirement observes the actual host packet cleanup acknowledgement") {
+        withPreview { h ->
+            val terminal = java.util.concurrent.CompletableFuture<Void>()
+            every { h.displays.closeAsync() } returns terminal
+            h.renderer.show(h.player, settlement(h.player).buildings.first(), previewBlocks(100))
+            h.paper.performTicks(1)
+            h.renderer.close()
+            h.renderer.drained().isDone shouldBe false
+            h.renderer.close()
+            verify(exactly = 1) { h.displays.closeAsync() }
+            terminal.complete(null)
+            h.renderer.drained().isDone shouldBe true
         }
     }
 
@@ -389,21 +423,32 @@ private fun withPreview(action: (PreviewHarness) -> Unit) = MockBukkitTestRuntim
     try { action(harness) } finally { harness.renderer.close(); harness.tasks.close() }
 }
 
-private class PreviewHarness(val paper: MockBukkitTestRuntime) {
+private class PreviewHarness(val paper: MockBukkitTestRuntime, nativeBudget: Int? = null) {
     val plugin = paper.createSimplePlugin("CivsPreviewTest")
     val player = paper.addPlayer("Mayor")
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+    val nativeWork = nativeBudget?.let { ru.arc.core.BudgetedTaskQueue(tasks, maximumSteps = it, nanoTime = { 0 }) }
     val displays = mockk<PaperPacketDisplays>(relaxed = true)
     val handles = mutableListOf<PacketBlockDisplay>()
+    val remainingHandles = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<PacketBlockDisplay, Boolean>())
     val locations = mutableListOf<Location>()
     val renderer: CivsPreviewRenderer
 
     init {
         every { displays.spawnBlock(any(), any()) } answers {
             locations += firstArg<Location>().clone()
-            mockk<PacketBlockDisplay>(relaxed = true).also(handles::add)
+            mockk<PacketBlockDisplay>(relaxed = true).also { handle ->
+                handles += handle
+                remainingHandles += handle
+                every { handle.remove() } answers { remainingHandles.remove(handle); Unit }
+            }
         }
-        renderer = CivsPreviewRenderer(plugin, tasks, displays)
+        // The real typed owner closes every remaining handle; the fake must preserve that contract.
+        every { displays.closeAsync() } answers {
+            remainingHandles.toList().forEach { it.remove() }
+            java.util.concurrent.CompletableFuture.completedFuture(null)
+        }
+        renderer = CivsPreviewRenderer(plugin, tasks, displays, nativeWork)
     }
 }
 

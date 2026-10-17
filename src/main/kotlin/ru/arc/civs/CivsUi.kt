@@ -30,8 +30,8 @@ class CivsUi internal constructor(
     private val runtime: PaperDialogRuntime,
     private val text: CivsText,
 ) : AutoCloseable, Listener {
-    constructor(plugin: Plugin, host: CivsUiHost, tasks: LifecycleTaskScope) :
-        this(plugin, host, tasks, PaperDialogRuntime(plugin), CivsText.load(plugin))
+    constructor(plugin: Plugin, host: CivsUiHost, tasks: LifecycleTaskScope, text: CivsText) :
+        this(plugin, host, tasks, PaperDialogRuntime(plugin), text)
 
     private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token) {
         var consumed = false

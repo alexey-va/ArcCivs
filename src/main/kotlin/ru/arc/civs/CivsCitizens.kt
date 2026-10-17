@@ -33,6 +33,8 @@ import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.plugin.Plugin
 import org.bukkit.util.Vector
 import ru.arc.observability.StructuredDebugLine
+import ru.arc.paper.api.ArcNativeCleanupService
+import java.util.IdentityHashMap
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -52,15 +54,22 @@ class CivsCitizens(
     private val viewerRange: Int = 96,
 ) : Listener, AutoCloseable {
     private val registry: NPCRegistry
-    private val actors = linkedMapOf<UUID, Actor>()
-    private val statuses = mutableMapOf<UUID, String>()
-    private val spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
-    private val completions = ConcurrentLinkedQueue<Completion>()
+    private val citizensProvider: Plugin
+    private val nativeCleanup: ArcNativeCleanupService
+    private var actors = linkedMapOf<UUID, Actor>()
+    private var statuses = mutableMapOf<UUID, String>()
+    private var spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
+    @Volatile private var completions = ConcurrentLinkedQueue<Completion>()
     private val closed = AtomicBoolean()
+    private var retirement: CompletableFuture<Void>? = null
 
     init {
         require(maxActive in 1..48 && viewerRange in 1..96)
         checkMainThread()
+        nativeCleanup = requireNotNull(plugin.server.servicesManager.load(ArcNativeCleanupService::class.java)) {
+            "ArcCore native cleanup service is unavailable"
+        }
+        citizensProvider = CitizensAPI.getPlugin()
         registry = CitizensAPI.createAnonymousNPCRegistry(MemoryNPCDataStore())
         plugin.server.pluginManager.registerEvents(this, plugin)
     }
@@ -517,18 +526,75 @@ class CivsCitizens(
         statuses[actor.workerId] = reason
     }
 
-    override fun close() {
+    /** Completes after the exact old NPC registry is empty; cancelling an observer cannot cancel cleanup. */
+    fun closeAsync(): CompletableFuture<Void> {
         checkMainThread()
-        if (!closed.compareAndSet(false, true)) return
+        retirement?.let { return it.copy() }
+        val result = CompletableFuture<Void>()
+        retirement = result
+        closed.set(true)
         HandlerList.unregisterAll(this)
-        actors.values.toList().forEach { remove(it, "closed") }
-        runCatching { registry.deregisterAll() }.onFailure {
-            plugin.logger.log(Level.WARNING, "ArcCivs Citizens registry cleanup failed", it)
+        val oldActors = actors
+        actors = linkedMapOf()
+        completions = ConcurrentLinkedQueue()
+        spawnRetries = mutableMapOf()
+        statuses = mutableMapOf()
+        var failure: Throwable? = null
+        fun attempt(operation: () -> Unit) {
+            try { operation() } catch (error: Throwable) {
+                if (failure == null) failure = error else if (failure !== error) failure!!.addSuppressed(error)
+            }
         }
-        completions.clear()
-        spawnRetries.clear()
-        statuses.clear()
+        fun requireProvider() = check(citizensProvider.isEnabled) {
+            "Citizens is unavailable during ArcCivs actor retirement"
+        }
+        val attempted = IdentityHashMap<NPC, Boolean>()
+        val steps = sequence {
+            for (actor in oldActors.values) {
+                actor.cycle.close()
+                requireProvider()
+                attempted[actor.npc] = true
+                attempt { cancelRoute(actor) }
+                attempt { actor.npc.destroy() }
+                yield(Unit)
+            }
+            // Citizens 2.0.42 exposes a live fastutil iterator. Capture one reference per step
+            // before destroying these leftovers, including rejected partial spawns.
+            requireProvider()
+            val orphans = ArrayList<NPC>()
+            val iterator = registry.iterator()
+            while (iterator.hasNext()) {
+                val npc = iterator.next()
+                if (!attempted.containsKey(npc)) orphans.add(npc)
+                yield(Unit)
+            }
+            for (npc in orphans) {
+                requireProvider()
+                attempt { npc.navigator.cancelNavigation() }
+                attempt { npc.destroy() }
+                yield(Unit)
+            }
+            requireProvider()
+            attempt {
+                check(!registry.iterator().hasNext()) { "ArcCivs Citizens registry still contains retired NPCs" }
+                // Empty by construction: do not hide a bulk native tail in deregisterAll().
+                registry.deregisterAll()
+            }
+            yield(Unit)
+        }.iterator()
+        try {
+            nativeCleanup.submit("ArcCivs:citizens") {
+                checkMainThread()
+                if (steps.hasNext()) { steps.next(); false }
+                else { failure?.let { throw it }; true }
+            }.whenComplete { _, error ->
+                if (error == null) result.complete(null) else result.completeExceptionally(error)
+            }
+        } catch (error: Throwable) { result.completeExceptionally(error) }
+        return result.copy()
     }
+
+    override fun close() { closeAsync() }
 
     private fun checkMainThread() = check(Bukkit.isPrimaryThread()) { "ArcCivs Citizens access must be on the server thread" }
 

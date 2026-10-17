@@ -75,18 +75,16 @@ class CivsText private constructor(
     companion object {
         val BODY: TextColor = TextColor.color(0xE8DFD2)
 
-        fun load(plugin: Plugin): CivsText {
+        fun load(plugin: Plugin, config: org.bukkit.configuration.file.FileConfiguration = plugin.config): CivsText {
             val bundled = requireNotNull(plugin.getResource("locales.yml")) { "ArcCivs locales.yml is missing" }
                 .bufferedReader(Charsets.UTF_8).use { parse(it.readText()) }
             val file = File(plugin.dataFolder, "locales.yml")
             val overrides = if (file.isFile) parse(file.readText(Charsets.UTF_8)) else emptyMap()
             val merged = bundled.mapValues { (locale, values) -> values + overrides[locale].orEmpty() }
-            return CivsText(merged,
-                { plugin.config.getString("locale", "ru") ?: "ru" },
-                { plugin.config.getBoolean("use-client-locale", false) },
-                // Missing keys in existing installations also adopt the server language.
-                { plugin.config.getString("force-language", "ru") },
-            )
+            val locale = config.getString("locale", "ru") ?: "ru"
+            val useClient = config.getBoolean("use-client-locale", false)
+            val forced = config.getString("force-language", "ru")
+            return CivsText(merged, { locale }, { useClient }, { forced })
         }
 
         internal fun fromYaml(source: String, defaultLocale: String = "ru"): CivsText =

@@ -15,6 +15,7 @@ import org.bukkit.util.Transformation
 import org.joml.Quaternionf
 import org.joml.Vector3f
 import ru.arc.core.LifecycleTaskScope
+import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.ScheduledTask
 import ru.arc.paper.api.ArcSchematicBlock
 import ru.arc.paper.display.PacketDisplay
@@ -28,9 +29,11 @@ class CivsPreviewRenderer internal constructor(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
     private val displays: PaperPacketDisplays,
+    private val nativeWork: BudgetedTaskQueue? = null,
 ) : AutoCloseable, Listener {
-    constructor(plugin: Plugin, tasks: LifecycleTaskScope) :
-        this(plugin, tasks, PaperPacketDisplays(plugin, "civs-preview"))
+    constructor(plugin: Plugin, tasks: LifecycleTaskScope, nativeWork: BudgetedTaskQueue? = null) :
+        this(plugin, tasks, nativeWork?.let { PaperPacketDisplays(plugin, "civs-preview", it) }
+            ?: PaperPacketDisplays(plugin, "civs-preview"), nativeWork)
 
     private class Scene(
         val player: Player,
@@ -49,6 +52,9 @@ class CivsPreviewRenderer internal constructor(
     private val pending = ArrayDeque<Scene>()
     private var batch: ScheduledTask? = null
     private var closed = false
+    private var terminal: java.util.concurrent.CompletableFuture<Void>? = null
+    fun drained(): java.util.concurrent.CompletableFuture<Void> = terminal?.copy()
+        ?: java.util.concurrent.CompletableFuture.completedFuture(null)
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
@@ -123,7 +129,14 @@ class CivsPreviewRenderer internal constructor(
     fun clear(playerId: UUID) {
         val scene = scenes.remove(playerId) ?: return
         pending.remove(scene)
-        scene.handles.forEach(PacketDisplay::remove)
+        val retired = scene.handles.toList().iterator()
+        if (nativeWork == null) retired.forEach(PacketDisplay::remove)
+        else nativeWork.submit({ !closed && plugin.isEnabled }) {
+            if (retired.hasNext()) retired.next().remove()
+            !retired.hasNext()
+        }.whenComplete { _, failure ->
+            if (failure != null && !closed) plugin.logger.log(Level.WARNING, "ArcCivs preview cleanup remains owned by its display runtime", failure)
+        }
         scene.handles.clear()
         scene.blockData.clear()
         if (pending.isEmpty()) {
@@ -143,10 +156,10 @@ class CivsPreviewRenderer internal constructor(
         closed = true
         batch?.cancel()
         batch = null
-        scenes.keys.toList().forEach(::clear)
+        scenes.clear() // The typed display owner closes every remaining handle once.
         pending.clear()
         HandlerList.unregisterAll(this)
-        displays.close()
+        terminal = displays.closeAsync()
     }
 
     private companion object {
