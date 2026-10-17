@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
@@ -129,6 +130,59 @@ class CivsCitizensTest : FunSpec({
         (old == retry) shouldBe false
         cycle.acceptsCompletion(old) shouldBe false
         cycle.acceptsCompletion(retry) shouldBe true
+    }
+
+    test("four workers retain completed trips through repeated busy commits and earn only once") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val foresters = (1..4).map { building(BuildingType.FORESTER, CivPosition(it * 5, 64, 0)) }
+        val workers = foresters.mapIndexed { index, building ->
+            CivWorker(UUID.randomUUID(), "Worker ${index + 1}", building.id, nextDeliveryAt = 1)
+        }
+        var city = CivsRules.validate(city(listOf(hall) + foresters, workers.first(), null).copy(workers = workers))
+        val cycles = workers.map { worker ->
+            CitizenCycle(requireNotNull(citizenPlan(city, worker)).token, 1_000).also {
+                reachWork(it)
+                it.work(1_000)
+                it.arrive(2_000)
+            }
+        }
+        var now = 2_000L
+        repeat(5) {
+            cycles.forEach { cycle ->
+                val ticket = requireNotNull(cycle.beginDelivery(now))
+                cycle.acceptsCompletion(ticket) shouldBe true
+                cycle.failDelivery("city-busy", now)
+                cycle.acceptsCompletion(ticket) shouldBe false
+                cycle.status() shouldBe "waiting"
+                cycle.retry(now + 4_999)
+                cycle.phase shouldBe CitizenPhase.PAUSED
+                cycle.beginDelivery(now + 4_999) shouldBe null
+                cycle.retry(now + 5_000)
+                cycle.phase shouldBe CitizenPhase.READY
+            }
+            now += 5_000
+        }
+        city.stock shouldBe Stock()
+        cycles.forEachIndexed { index, cycle ->
+            val worker = workers[index]
+            val ticket = requireNotNull(cycle.beginDelivery(now))
+            cycle.acceptsCompletion(ticket) shouldBe true
+            city = CivsRules.deliver(city, city.owner, worker.id, requireNotNull(worker.assignment),
+                worker.completedCycles, worker.nextDeliveryAt, now)
+            cycle.close()
+            cycle.acceptsCompletion(ticket) shouldBe false
+            cycle.failDelivery("city-busy", now)
+            cycle.retry(now + 5_000)
+            cycle.phase shouldBe CitizenPhase.CLOSED
+            cycle.beginDelivery(now + 5_000) shouldBe null
+            shouldThrow<CivsRejection> {
+                CivsRules.deliver(city, city.owner, worker.id, requireNotNull(worker.assignment),
+                    worker.completedCycles, worker.nextDeliveryAt, now)
+            }.reason shouldBe "stale-delivery"
+        }
+        city.stock shouldBe Stock(wood = 16)
+        city.workers.map { it.completedCycles } shouldBe listOf(1L, 1L, 1L, 1L)
+        city.revision shouldBe 4L
     }
 
     test("route and spawn failures get only two timed automatic retries") {

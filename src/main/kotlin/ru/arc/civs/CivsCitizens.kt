@@ -291,13 +291,12 @@ class CivsCitizens(
                 !actor.cycle.acceptsCompletion(completion.ticket)) continue
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
             if (error != null) {
-                val reason = if (error is CivsRejection && error.reason == "storage-full") "storage-full" else "delivery-failed"
-                actor.cycle.pause(reason, now, true)
+                actor.cycle.failDelivery((error as? CivsRejection)?.reason, now)
                 if (error !is CivsRejection) logFailure(actor, "delivery", error)
             } else {
                 val worker = completion.city?.workers?.find { it.id == actor.workerId }
                 if (worker == null || worker.completedCycles != completion.token.completedCycles + 1) {
-                    actor.cycle.pause("delivery-failed", now, true)
+                    actor.cycle.failDelivery(null, now)
                 } else {
                     // The provider publishes durable state. Reconciliation starts a new fenced cycle, never this callback.
                     actor.cycle.close()
@@ -519,6 +518,8 @@ private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
 
 internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, RETURNING, READY, DELIVERING, PAUSED, CLOSED }
 
+private const val CITIZEN_DELIVERY_RETRY_DELAY_MILLIS = 5_000L
+
 /** Only observed work time counts. Every cycle must visit storage, workplace and storage in that order. */
 internal class CitizenCycle(val token: CitizenToken, private val workMillis: Long) {
     var phase = CitizenPhase.IDLE
@@ -529,6 +530,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
     private var observedAt = 0L
     private var ticket: UUID? = null
     private var resumePhase = CitizenPhase.TO_STORAGE
+    private var deliveryRetryAt: Long? = null
     private val retries = CitizenRetry()
 
     fun start() { if (phase == CitizenPhase.IDLE) phase = CitizenPhase.TO_STORAGE }
@@ -553,21 +555,38 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         return UUID.randomUUID().also { ticket = it }
     }
     fun acceptsCompletion(candidate: UUID): Boolean = phase == CitizenPhase.DELIVERING && ticket == candidate
+    fun failDelivery(reason: String?, now: Long) {
+        if (phase != CitizenPhase.DELIVERING) return
+        if (reason != "city-busy") {
+            pause(if (reason == "storage-full") "storage-full" else "delivery-failed", now, true)
+            return
+        }
+        // Another worker's durable commit is still pending; the completed trip remains valid.
+        this.reason = "waiting"
+        resumePhase = CitizenPhase.READY
+        ticket = null
+        deliveryRetryAt = now + CITIZEN_DELIVERY_RETRY_DELAY_MILLIS
+        phase = CitizenPhase.PAUSED
+    }
     fun pause(reason: String, now: Long, retainWork: Boolean) {
         if (phase == CitizenPhase.CLOSED) return
         this.reason = reason
         resumePhase = if (retainWork) CitizenPhase.READY else CitizenPhase.TO_STORAGE
         ticket = null
+        deliveryRetryAt = null
         retries.fail(now)
         phase = CitizenPhase.PAUSED
     }
-    fun retry(now: Long) { if (phase == CitizenPhase.PAUSED && retries.ready(now)) resume() }
+    fun retry(now: Long) {
+        if (phase == CitizenPhase.PAUSED && (deliveryRetryAt?.let { now >= it } ?: retries.ready(now))) resume()
+    }
     fun resume() {
         if (phase != CitizenPhase.PAUSED) return
         phase = resumePhase
         reason = null
+        deliveryRetryAt = null
     }
-    fun close() { phase = CitizenPhase.CLOSED; ticket = null }
+    fun close() { phase = CitizenPhase.CLOSED; ticket = null; deliveryRetryAt = null }
     fun status(): String = when (phase) {
         CitizenPhase.TO_STORAGE, CitizenPhase.RETURNING -> "moving-to-storage"
         CitizenPhase.TO_WORK -> "moving-to-work"

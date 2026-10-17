@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import org.bukkit.Bukkit
 import org.bukkit.FluidCollisionMode
+import org.bukkit.Material
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.HandlerList
@@ -40,6 +41,9 @@ class CivsService(
         val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
         val upgrading: Boolean, val expires: Long,
     )
+    private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>) {
+        var repairing = false
+    }
     private val cities = linkedMapOf<UUID, Settlement>()
     private val busy = mutableSetOf<UUID>()
     private val unhealthy = mutableSetOf<UUID>()
@@ -49,6 +53,7 @@ class CivsService(
     private val previewLoads = mutableSetOf<UUID>()
     private val completions = mutableSetOf<CompletableFuture<*>>()
     private val placing = mutableSetOf<UUID>()
+    private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
     private var initialized = false
     private var closed = false
@@ -61,18 +66,25 @@ class CivsService(
             protection.isProtected(worldId, x, y, z)
 
         override fun permitsSchematicMutation(owner: String, worldId: UUID, x: Int, y: Int, z: Int): Boolean {
-            if (owner == "arccivs-construction" && ready() && placing.any { id ->
-                cities[id]?.takeIf { it.worldId == worldId }?.let { city ->
-                    // Connection repair also visits the immediate neighbors of the committed building.
-                    civsProtectedBuildings(city).any { building ->
-                        val box = building.bounds
-                        x.toLong() in (box.min.x.toLong() - 1)..(box.max.x.toLong() + 1) &&
-                            y.toLong() in (box.min.y.toLong() - 1)..(box.max.y.toLong() + 1) &&
-                            z.toLong() in (box.min.z.toLong() - 1)..(box.max.z.toLong() + 1)
-                    }
-                } == true
-            }) return true
-            return !isProtected(worldId, x, y, z)
+            if (!Bukkit.isPrimaryThread()) return false
+            if (owner != "arccivs-construction") return !isProtected(worldId, x, y, z)
+            if (!ready()) return false
+            val position = CivPosition(x, y, z)
+            val access = placementAccess.values.firstOrNull { access ->
+                val box = access.plan.building.bounds
+                access.plan.worldId == worldId && if (access.repairing) {
+                    x.toLong() in (box.min.x.toLong() - 1)..(box.max.x.toLong() + 1) &&
+                        y.toLong() in (box.min.y.toLong() - 1)..(box.max.y.toLong() + 1) &&
+                        z.toLong() in (box.min.z.toLong() - 1)..(box.max.z.toLong() + 1)
+                } else box.contains(x, y, z) && position in access.materials
+            } ?: return false
+            val city = cities[access.plan.cityId] ?: return false
+            if (city.id !in placing || city.id in unhealthy || city.worldId != worldId) return false
+            val targetWorld = plugin.server.getWorld(worldId) ?: return false
+            if (y !in targetWorld.minHeight until targetWorld.maxHeight || !targetWorld.isChunkLoaded(x shr 4, z shr 4)) return false
+            val block = targetWorld.getBlockAt(x, y, z)
+            // Preflight can precede this write by many ticks; Lands authority must still be current.
+            return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))
         }
     }
     lateinit var ui: CivsUi
@@ -385,28 +397,44 @@ class CivsService(
         store.loadPlan(order.id).thenCompose { plan ->
             requireNotNull(plan) { "Missing captured construction plan ${order.id}" }
             require(plan.cityId == city.id && plan.worldId == city.worldId && plan.building == order.plannedBuilding)
-            blueprints.recover(plan).thenApply { snapshot -> plan to snapshot }
+            blueprints.recover(plan).thenApplyAsync({ snapshot ->
+                require(plan.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS) { "Invalid construction plan size" }
+                val palette = mutableMapOf<String, Material>()
+                val materials = plan.blocks.associate { cell ->
+                    val name = cell.after.substringBefore('[')
+                    cell.position to palette.getOrPut(name) {
+                        Material.matchMaterial(name)?.takeIf { it.isBlock } ?: throw CivsRejection("invalid-plan")
+                    }
+                }
+                Triple(plan, snapshot, PlacementAccess(plan, materials))
+            }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
+            if (closed) return@whenCompleteSync
             if (failure != null) return@whenCompleteSync placementFailed(city.id, order.id, failure)
-            val (plan, snapshot) = requireNotNull(recovered)
+            val (plan, snapshot, access) = requireNotNull(recovered)
             world.revalidate(plan, city.owner).whenCompleteSync(tasks) { _, validationFailure ->
+                if (closed) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)
                 runCatching {
                     mutate(city.id) { CivsRules.beginPlacement(it, it.owner, order.id) }
                         .whenCompleteSync(tasks) { _, beginFailure ->
+                            if (closed) return@whenCompleteSync
                             if (beginFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, beginFailure)
-                            pasteCaptured(city.id, order.id, plan, snapshot)
+                            pasteCaptured(city.id, order.id, plan, snapshot, access)
                         }
                 }.onFailure { placementFailed(city.id, order.id, it) }
             }
         }
     }
 
-    private fun pasteCaptured(cityId: UUID, orderId: UUID, plan: CivPlacementPlan, snapshot: ArcSchematicSnapshot) {
+    private fun pasteCaptured(cityId: UUID, orderId: UUID, plan: CivPlacementPlan, snapshot: ArcSchematicSnapshot, access: PlacementAccess) {
         runCatching {
+            rejectIf(!ready() || cityId !in placing || cityId in unhealthy, "not-ready")
+            placementAccess[cityId] = access
             val operation = blueprints.paste(snapshot, plan.worldId, plan.building.anchor)
             operations[cityId] = operation
             operation.completion.whenCompleteSync(tasks) { mutation, failure ->
+                if (placementAccess[cityId] !== access) return@whenCompleteSync
                 operations.remove(cityId)
                 if (failure != null || mutation?.cancelled != false) {
                     placementFailed(cityId, orderId, failure ?: CivsRejection("placement-cancelled"))
@@ -423,29 +451,40 @@ class CivsService(
 
     private fun repairCommitted(cityId: UUID, plan: CivPlacementPlan, snapshot: ArcSchematicSnapshot) {
         // Shape repair is cosmetic and happens only after the durable build commit.
-        CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, plan.building.anchor) }, executor)
-            .whenCompleteSync(tasks) { cells, failure ->
-                if (failure != null) { placing -= cityId; log("prepare shape repair $cityId", failure); return@whenCompleteSync }
-                runCatching {
-                    val repair = blueprints.repair(plan.worldId, requireNotNull(cells))
-                    operations[cityId] = repair
-                    repair.completion.whenCompleteSync(tasks) { _, repairFailure ->
-                        operations.remove(cityId)
-                        placing -= cityId
-                        if (repairFailure != null) log("repair shapes $cityId", repairFailure)
-                        else store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
-                            .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure) }
-                        updateHealth()
-                    }
-                }.onFailure { placing -= cityId; log("repair shapes $cityId", it) }
-            }
+        val access = placementAccess[cityId] ?: return
+        access.repairing = true
+        runCatching {
+            CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, plan.building.anchor) }, executor)
+                .whenCompleteSync(tasks) { cells, failure ->
+                    if (placementAccess[cityId] !== access) return@whenCompleteSync
+                    if (failure != null) { releasePlacement(cityId); log("prepare shape repair $cityId", failure); return@whenCompleteSync }
+                    if (!ready()) { releasePlacement(cityId); return@whenCompleteSync }
+                    runCatching {
+                        val repair = blueprints.repair(plan.worldId, requireNotNull(cells))
+                        operations[cityId] = repair
+                        repair.completion.whenCompleteSync(tasks) { _, repairFailure ->
+                            if (placementAccess[cityId] !== access) return@whenCompleteSync
+                            releasePlacement(cityId)
+                            if (repairFailure != null) log("repair shapes $cityId", repairFailure)
+                            else store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
+                                .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure) }
+                            updateHealth()
+                        }
+                    }.onFailure { releasePlacement(cityId); log("repair shapes $cityId", it) }
+                }
+        }.onFailure { releasePlacement(cityId); log("prepare shape repair $cityId", it) }
+    }
+
+    private fun releasePlacement(cityId: UUID) {
+        operations.remove(cityId)
+        placementAccess.remove(cityId)
+        placing -= cityId
     }
 
     private fun placementFailed(cityId: UUID, orderId: UUID, failure: Throwable) {
-        operations.remove(cityId)
-        placing -= cityId
+        releasePlacement(cityId)
         log("place construction $orderId", failure)
-        if (cityId in unhealthy || cities[cityId]?.construction?.id != orderId) return
+        if (closed || cityId in unhealthy || cities[cityId]?.construction?.id != orderId) return
         val causes = generateSequence(failure) { it.cause }.toList()
         val reason = causes.filterIsInstance<CivsRejection>().firstOrNull()?.reason
             ?: if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.PROTECTED_AREA }) "protected-area" else "placement-failed"
@@ -510,7 +549,9 @@ class CivsService(
         closed = true
         initialized = false
         HandlerList.unregisterAll(this)
-        operations.values.forEach { it.cancel() }
+        placementAccess.clear()
+        placing.clear()
+        operations.values.toList().forEach { it.cancel() }
         operations.clear()
         citizens.close()
         world.close()

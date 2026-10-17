@@ -129,7 +129,8 @@ class CivsServiceTest : FunSpec({
                 hall.entrance, 96, "nordic", hall, (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }, orderId, 1_000)
                 .let { CivsRules.beginPlacement(it, it.owner, orderId) }
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(recovering))
-            val plan = CivPlacementPlan(orderId, recovering.id, h.world.uid, hall, emptyList(), "b".repeat(64))
+            val plan = CivPlacementPlan(orderId, recovering.id, h.world.uid, hall,
+                listOf(CivPlanBlock(hall.anchor, "minecraft:air", "minecraft:stone")), "b".repeat(64))
             val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
             every { snapshot.blocks() } returns emptyList()
             every { h.store.loadPlan(orderId) } returns CompletableFuture.completedFuture(plan)
@@ -156,6 +157,124 @@ class CivsServiceTest : FunSpec({
             h.service.city(h.player)!!.construction shouldBe null
             h.service.city(h.player)!!.buildings.single().phase shouldBe BuildingPhase.ACTIVE
             h.service.city(h.player)!!.stock shouldBe CivsRules.STARTING_STOCK
+        }
+    }
+
+    for (writesBeforeRevocation in 0..1) test("Lands revocation after preflight stops write ${writesBeforeRevocation + 1} and pauses the same paid construction") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            var allowed = true
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } answers { allowed }
+            h.start()
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            placement.validation.complete(Unit); h.tick()
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            if (writesBeforeRevocation == 0) allowed = false
+            h.commit()
+            if (writesBeforeRevocation == 1) {
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+                verify(exactly = 1) { h.worldAdapter.canModify(h.owner, h.world.getBlockAt(15, 64, 0), Material.OAK_PLANKS) }
+                h.world.getBlockAt(15, 64, 0).type = Material.OAK_PLANKS
+                allowed = false
+            }
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15 + writesBeforeRevocation, 64, 0) shouldBe false
+            placement.pasted.completeExceptionally(ArcSchematicException(ArcSchematicFailure.PROTECTED_AREA, "Lands denied the next write"))
+            h.tick()
+            h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PAUSED
+            h.commit()
+            val paused = h.service.city(h.player)!!
+            paused.construction!!.id shouldBe placement.city.construction!!.id
+            paused.construction.failure shouldBe "protected-area"
+            paused.stock shouldBe placement.city.stock
+            h.world.getBlockAt(15, 64, 0).type shouldBe if (writesBeforeRevocation == 1) Material.OAK_PLANKS else Material.AIR
+            h.world.getBlockAt(16, 64, 0).type shouldBe Material.AIR
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.health().activeLeases shouldBe 0
+        }
+    }
+
+    test("placement guards reject unloaded chunks and asynchronous calls without touching Lands or loading chunks") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } returns true
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            h.world.unloadChunk(1, 0)
+            h.world.isChunkLoaded(1, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 16, 64, 0) shouldBe false
+            h.world.isChunkLoaded(1, 0) shouldBe false
+            val worldId = h.world.uid
+            CompletableFuture.supplyAsync {
+                protection.permitsSchematicMutation("arccivs-construction", worldId, 15, 64, 0)
+            }.join() shouldBe false
+            verify(exactly = 0) { h.worldAdapter.canModify(any(), any(), any()) }
+            h.world.loadChunk(1, 0)
+            protection.permitsSchematicMutation("arccivs-construction", worldId, 16, 64, 0) shouldBe true
+            verify(exactly = 1) { h.worldAdapter.canModify(h.owner, h.world.getBlockAt(16, 64, 0), Material.STONE) }
+        }
+    }
+
+    test("repair retains only its planned footprint and checks live neighbor materials without an unprotected fallback") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            var allowed = true
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } answers { allowed }
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 0, 64, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 18, 64, 0) shouldBe false
+            placement.pasted.complete(ArcSchematicMutationResult(2, 0, false)); h.tick(); h.commit()
+            h.service.city(h.player)!!.construction shouldBe null
+            val neighbor = h.world.getBlockAt(18, 64, 0).also { it.type = Material.OAK_FENCE }
+            protection.isProtected(h.world.uid, 18, 64, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 18, 64, 0) shouldBe true
+            verify(exactly = 1) { h.worldAdapter.canModify(h.owner, neighbor, Material.OAK_FENCE) }
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 19, 64, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 0, 64, 0) shouldBe false
+            allowed = false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 18, 64, 0) shouldBe false
+            allowed = true
+            placement.repaired.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 18, 64, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.health().activeLeases shouldBe 0
+        }
+    }
+
+    test("cancelled placement releases its guard and retains the paid paused order") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } returns true
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            placement.pasted.complete(ArcSchematicMutationResult(1, 0, true)); h.tick(); h.commit()
+            val city = h.service.city(h.player)!!
+            city.construction!!.phase shouldBe ConstructionPhase.PAUSED
+            city.construction.failure shouldBe "placement-cancelled"
+            city.stock shouldBe placement.city.stock
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.health().activeLeases shouldBe 0
+        }
+    }
+
+    test("closing an active placement releases its guard and a late completion cannot start repair") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } returns true
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            h.service.close()
+            verify(exactly = 1) { placement.operation.cancel() }
+            placement.pasted.complete(ArcSchematicMutationResult(2, 0, false)); h.tick()
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.blueprints.repair(any(), any()) }
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.health().activeLeases shouldBe 0
         }
     }
 })
@@ -203,5 +322,44 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
     fun commit() { saves.last().let { it.second.complete(it.first) }; tick() }
+    fun placement(): ServicePlacement {
+        val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
+            anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),
+            entrance = CivPosition(15, 64, 3), phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), building.id, 1, 3, 0, ConstructionPhase.CONSTRUCTING,
+            CivsRules.cost(building.type, 1), plannedBuilding = building)
+        val reserved = CivsRules.reserveBuild(city, owner, building, order)
+        val ready = CivsRules.validate(reserved.copy(construction = order.copy(workDone = 3, phase = ConstructionPhase.READY_TO_PLACE)))
+        val plan = CivPlacementPlan(order.id, city.id, world.uid, building, listOf(
+            CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:oak_planks"),
+            CivPlanBlock(CivPosition(16, 64, 0), "minecraft:air", "minecraft:stone"),
+        ), "b".repeat(64))
+        val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
+        every { snapshot.blocks() } returns listOf(
+            ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:oak_planks", false, false),
+            ArcSchematicBlock(ArcSchematicPoint(1, 0, 0), "minecraft:stone", false, false),
+        )
+        val placement = ServicePlacement(ready)
+        every { store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+        every { store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+        every { store.deletePlan(order.id) } returns CompletableFuture.completedFuture(true)
+        every { store.deleteSchematic(order.id) } returns CompletableFuture.completedFuture(true)
+        every { blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+        every { worldAdapter.revalidate(plan, owner) } returns placement.validation
+        every { placement.operation.completion } returns placement.pasted
+        every { blueprints.paste(snapshot, world.uid, building.anchor) } returns placement.operation
+        val repair = mockk<ArcSchematicOperation>(relaxed = true)
+        every { repair.completion } returns placement.repaired
+        every { blueprints.repair(any(), any()) } returns repair
+        world.loadChunk(0, 0); world.loadChunk(1, 0)
+        return placement
+    }
     override fun close() { service.close(); tasks.close() }
+}
+
+private class ServicePlacement(val city: Settlement) {
+    val validation = CompletableFuture<Unit>()
+    val pasted = CompletableFuture<ArcSchematicMutationResult>()
+    val repaired = CompletableFuture<ArcSchematicMutationResult>()
+    val operation = mockk<ArcSchematicOperation>(relaxed = true)
 }
