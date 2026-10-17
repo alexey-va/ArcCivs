@@ -1,0 +1,21 @@
+name: ArcCivs
+version: '${version}'
+main: ru.arc.civs.ArcCivsPlugin
+api-version: '1.21.11'
+authors: [RusCrafting]
+description: Player settlements, construction and working citizens
+depend: [ArcCore, packetevents, WorldEdit, Citizens]
+softdepend: [Lands]
+commands:
+  civs:
+    aliases: [city]
+    description: Manage your settlement
+    usage: /civs [preview|status|reload]
+    permission: arccivs.use
+permissions:
+  arccivs.use:
+    description: Found and manage a settlement
+    default: true
+  arccivs.admin:
+    description: Inspect and recover settlements
+    default: op

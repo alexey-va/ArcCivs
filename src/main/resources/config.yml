@@ -1,0 +1,11 @@
+locale: ru
+use-client-locale: true
+schematics-root: /home/freedeeml/McFine/arc_schematics
+allowed-worlds: [vanilla]
+settlement-radius: 96
+maximum-settlements: 500
+maximum-building-volume: 50000
+maximum-previews: 4
+preview-seconds: 120
+maximum-active-npcs: 48
+npc-viewer-range: 96

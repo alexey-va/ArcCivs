@@ -1,0 +1,4 @@
+schema = 1
+platform = "paper"
+core_version = "2.7.31"
+capabilities = ["atomic-files", "health", "localized-text", "logging", "paper-block-protection", "paper-schematics", "paper-testing", "runtime", "scheduling"]

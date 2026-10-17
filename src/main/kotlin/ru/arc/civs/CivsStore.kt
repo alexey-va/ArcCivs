@@ -1,0 +1,322 @@
+package ru.arc.civs
+
+import com.google.gson.Gson
+import ru.arc.persistence.AtomicFileStore
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.Path
+import java.util.UUID
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
+
+/** Durable, bounded file state. Explicit load rescans external edits; filesystem work runs on the supplied executor. */
+class CivsStore(
+    root: Path,
+    private val executor: Executor,
+    private val maximumCities: Int = 500,
+) : AutoCloseable {
+    private val root = root.toAbsolutePath().normalize()
+    private val gson = Gson()
+    private val lifecycleLock = Any()
+    // ponytail: one bounded global lock serializes store paths; use keyed locks only if disk contention is measured.
+    private val ioLock = Any()
+    private var cityIndex: Map<UUID, CityIndex>? = null
+    private var closed = false
+
+    init {
+        require(maximumCities > 0) { "maximumCities must be positive" }
+    }
+
+    fun load(): CompletableFuture<List<Settlement>> = submit { reloadCityIndex(trustedRoot()) }
+
+    fun save(city: Settlement): CompletableFuture<Settlement> {
+        val snapshot = city.copy(
+            buildings = city.buildings.toList(),
+            workers = city.workers.toList(),
+            members = city.members.toSet(),
+        )
+        return submit {
+            CivsRules.validate(snapshot)
+            val trustedRoot = trustedRoot()
+            val index = ensureCityIndex(trustedRoot)
+            val sameCity = index[snapshot.id]
+            require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
+            val otherParticipants = HashSet<UUID>()
+            index.filterKeys { it != snapshot.id }.values.forEach { existing ->
+                otherParticipants.add(existing.owner)
+                otherParticipants.addAll(existing.members)
+            }
+            require((snapshot.members + snapshot.owner).none(otherParticipants::contains)) {
+                "Player already belongs to another settlement"
+            }
+            require(sameCity != null || index.size < maximumCities) { "Settlement capacity is full" }
+
+            if (sameCity == null) {
+                require(snapshot.revision == 0L) { "New settlement revision must start at zero" }
+            } else if (snapshot.revision == sameCity.revision) {
+                val persisted = try {
+                    requireNotNull(cityStore(trustedRoot, snapshot.id).loadOrNull()) {
+                        "Saved city disappeared during retry"
+                    }
+                } catch (error: Exception) {
+                    cityIndex = null
+                    throw error
+                }
+                require(persisted.city == snapshot) { "Same-revision city retry does not match saved state" }
+                return@submit snapshot
+            } else {
+                require(sameCity.revision < Long.MAX_VALUE && snapshot.revision == sameCity.revision + 1) {
+                    "Settlement revision is stale or skips a committed revision"
+                }
+            }
+
+            val saved = try {
+                requireNotNull(cityStore(trustedRoot, snapshot.id).write(CityDocument(SCHEMA_VERSION, snapshot)).city)
+            } catch (error: Exception) {
+                cityIndex = null
+                throw error
+            }
+            cityIndex = index + (saved.id to indexEntry(saved))
+            saved
+        }
+    }
+
+    fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
+        val snapshot = plan.copy(blocks = plan.blocks.toList())
+        return submit {
+            validatePlan(snapshot)
+            val trustedRoot = trustedRoot()
+            requireNotNull(planStore(trustedRoot, snapshot.id).write(PlanDocument(SCHEMA_VERSION, snapshot)).plan)
+        }
+    }
+
+    fun loadPlan(id: UUID): CompletableFuture<CivPlacementPlan?> = submit {
+        val trustedRoot = trustedRoot()
+        planStore(trustedRoot, id).loadOrNull()?.plan
+    }
+
+    fun deletePlan(id: UUID): CompletableFuture<Boolean> = submit {
+        val trustedRoot = trustedRoot()
+        val store = planStore(trustedRoot, id)
+        val existing = store.loadOrNull() ?: return@submit false
+        requireNotNull(existing.plan)
+        store.deleteIfExists()
+    }
+
+    /** A pure path accessor for Core's later asynchronous schematic open. */
+    fun schematicRoot(): Path = root.resolve("captured")
+
+    /** Persists one immutable order capture; retries may repeat identical bytes, never replace them. */
+    fun saveSchematic(id: UUID, bytes: ByteArray): CompletableFuture<Unit> {
+        val snapshot = if (bytes.size in 1..MAX_SCHEMATIC_BYTES) bytes.copyOf() else null
+        return submit {
+            val captured = requireNotNull(snapshot) { "Captured schematic must be nonempty and at most 16 MiB" }
+            val trustedRoot = trustedRoot()
+            val store = schematicStore(trustedRoot, id)
+            val existing = store.loadOrNull()
+            if (existing == null) {
+                store.write(captured)
+            } else {
+                require(existing.contentEquals(captured)) { "Order already has different captured schematic bytes" }
+            }
+            Unit
+        }
+    }
+
+    fun deleteSchematic(id: UUID): CompletableFuture<Boolean> = submit {
+        val trustedRoot = trustedRoot()
+        val store = schematicStore(trustedRoot, id)
+        if (store.loadOrNull() == null) return@submit false
+        store.deleteIfExists()
+    }
+
+    override fun close() {
+        synchronized(lifecycleLock) { closed = true }
+    }
+
+    private fun reloadCityIndex(trustedRoot: Path): List<Settlement> {
+        cityIndex = null
+        val cities = loadCities(trustedRoot)
+        cityIndex = cities.associate { it.id to indexEntry(it) }
+        return cities
+    }
+
+    private fun ensureCityIndex(trustedRoot: Path): Map<UUID, CityIndex> =
+        cityIndex ?: run {
+            reloadCityIndex(trustedRoot)
+            requireNotNull(cityIndex)
+        }
+
+    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision)
+
+    private fun loadCities(trustedRoot: Path): List<Settlement> {
+        val directory = trustedRoot.resolve("cities")
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        require(!Files.isSymbolicLink(directory)) { "City directory must not be a symbolic link" }
+        require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "City path is not a directory" }
+
+        val files = ArrayList<Path>()
+        Files.newDirectoryStream(directory).use { entries ->
+            for (entry in entries) {
+                if (!entry.fileName.toString().endsWith(".json")) continue
+                require(files.size < maximumCities) { "City directory exceeds the configured limit" }
+                files.add(entry)
+            }
+        }
+
+        val ids = HashSet<UUID>(files.size)
+        val participants = HashSet<UUID>()
+        return files.sortedBy { it.fileName.toString() }.map { file ->
+            val id = idFromJsonFilename(file)
+            val record = requireNotNull(cityStore(trustedRoot, id).loadOrNull()) {
+                "City record disappeared during load"
+            }
+            val city = requireNotNull(record.city)
+            require(city.id == id) { "City id does not match its filename" }
+            require(ids.add(city.id)) { "Duplicate city id" }
+            require(participants.add(city.owner) && city.members.all(participants::add)) {
+                "Player belongs to multiple settlements"
+            }
+            city
+        }
+    }
+
+    private fun idFromJsonFilename(file: Path): UUID {
+        val name = file.fileName.toString()
+        require(name.endsWith(".json")) { "Unexpected city file" }
+        val idText = name.removeSuffix(".json")
+        val id = runCatching { UUID.fromString(idText) }.getOrElse {
+            throw IllegalArgumentException("City filename is not a UUID", it)
+        }
+        require(id.toString() == idText) { "City filename must use canonical UUID form" }
+        return id
+    }
+
+    private fun cityStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
+        root = trustedRoot,
+        relativePath = Path.of("cities", "$id.json"),
+        maxBytes = MAX_CITY_BYTES,
+        encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
+        decode = { decodeJson(it, CityDocument::class.java) },
+        validate = { record ->
+            require(record.schemaVersion == SCHEMA_VERSION) { "Unsupported city schema version: ${record.schemaVersion}" }
+            val city = requireNotNull(record.city) { "City record is missing its city" }
+            require(city.id == id) { "City id does not match its filename" }
+            CivsRules.validate(city)
+        },
+    )
+
+    private fun planStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
+        root = trustedRoot,
+        relativePath = Path.of("plans", "$id.json"),
+        maxBytes = MAX_PLAN_BYTES,
+        encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
+        decode = { decodeJson(it, PlanDocument::class.java) },
+        validate = { record ->
+            require(record.schemaVersion == SCHEMA_VERSION) { "Unsupported plan schema version: ${record.schemaVersion}" }
+            val plan = requireNotNull(record.plan) { "Plan record is missing its plan" }
+            require(plan.id == id) { "Plan id does not match its filename" }
+            validatePlan(plan)
+        },
+    )
+
+    private fun schematicStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
+        root = trustedRoot,
+        relativePath = Path.of("captured", "$id.schem"),
+        maxBytes = MAX_SCHEMATIC_BYTES.toLong(),
+        encode = { it },
+        decode = { it },
+        validate = { require(it.isNotEmpty()) { "Captured schematic must not be empty" } },
+    )
+
+    private fun validatePlan(plan: CivPlacementPlan) {
+        require(plan.blocks.size in 1..MAX_PLAN_BLOCKS) { "Placement plan block count is invalid" }
+        val building = requireNotNull(plan.building) { "Placement plan is missing its building" }
+        requireNotNull(plan.id)
+        requireNotNull(plan.cityId)
+        requireNotNull(plan.worldId)
+        requireNotNull(building.id)
+        requireNotNull(building.type)
+        requireNotNull(building.phase)
+        require(validSha256(plan.capturedSha256)) { "Placement capture SHA-256 is invalid" }
+        require(building.level in 1..3) { "Placement building level is invalid" }
+        require(building.rotation in ROTATIONS) { "Placement building rotation is invalid" }
+        require(validBoundedText(building.schematicId, MAX_SCHEMATIC_ID_CHARS)) { "Placement schematic id is invalid" }
+
+        val bounds = requireNotNull(building.bounds) { "Placement building has no bounds" }
+        val min = requireNotNull(bounds.min)
+        val max = requireNotNull(bounds.max)
+        require(min.x <= max.x && min.y <= max.y && min.z <= max.z) { "Placement bounds are inverted" }
+        requireSafePosition(min)
+        requireSafePosition(max)
+        requireSafePosition(building.anchor)
+        requireSafePosition(building.entrance)
+
+        val coordinates = HashSet<CivPosition>(plan.blocks.size)
+        plan.blocks.forEach { block ->
+            val position = requireNotNull(requireNotNull(block).position)
+            requireSafePosition(position)
+            require(bounds.contains(position.x, position.y, position.z)) { "Plan block lies outside building bounds" }
+            require(coordinates.add(position)) { "Placement plan contains duplicate coordinates" }
+            require(validBoundedText(block.before, MAX_BLOCK_STATE_CHARS)) { "Plan before-state is invalid" }
+            require(validBoundedText(block.after, MAX_BLOCK_STATE_CHARS)) { "Plan after-state is invalid" }
+        }
+    }
+
+    private fun requireSafePosition(position: CivPosition) {
+        require(kotlin.math.abs(position.x.toLong()) <= MAX_HORIZONTAL_COORD &&
+            kotlin.math.abs(position.z.toLong()) <= MAX_HORIZONTAL_COORD &&
+            position.y.toLong() in -MAX_VERTICAL_COORD..MAX_VERTICAL_COORD) {
+            "Placement coordinate is outside the supported world range"
+        }
+    }
+
+    private fun validBoundedText(text: String, max: Int): Boolean =
+        text.isNotBlank() && text == text.trim() && text.length <= max && text.none { it.isISOControl() }
+
+    private fun validSha256(value: String?): Boolean = value == null ||
+        value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
+
+    private fun trustedRoot(): Path {
+        Files.createDirectories(root)
+        return root.toRealPath()
+    }
+
+    private fun <T> decodeJson(bytes: ByteArray, type: Class<T>): T {
+        val text = StandardCharsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+        return requireNotNull(gson.fromJson(text, type)) { "JSON record is empty" }
+    }
+
+    private fun <T> submit(action: () -> T): CompletableFuture<T> = synchronized(lifecycleLock) {
+        if (closed) return@synchronized CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
+        try {
+            CompletableFuture.supplyAsync({ synchronized(ioLock) { action() } }, executor)
+        } catch (error: RuntimeException) {
+            CompletableFuture.failedFuture(error)
+        }
+    }
+
+    private data class CityDocument(val schemaVersion: Int, val city: Settlement?)
+    private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
+    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long)
+
+    internal companion object {
+        const val SCHEMA_VERSION = 1
+        const val MAX_CITY_BYTES = 256L * 1024L
+        const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
+        const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
+        internal const val MAX_PLAN_BLOCKS = 150_000
+        const val MAX_SCHEMATIC_ID_CHARS = 512
+        internal const val MAX_BLOCK_STATE_CHARS = 2_048
+        internal const val MAX_HORIZONTAL_COORD = 30_000_000L
+        internal const val MAX_VERTICAL_COORD = 4_096L
+        val ROTATIONS = setOf(0, 90, 180, 270)
+    }
+}
