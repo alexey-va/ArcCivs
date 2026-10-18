@@ -1,6 +1,23 @@
 locale: ru
 force-language: ru
 use-client-locale: false
+# Required per backend. Fill this and the shared MySQL tuple before enabling.
+server-id: ''
+mysql:
+  host: ''
+  port: 3306
+  database: ''
+  username: ''
+  password: ''
+  ssl-mode: VERIFY_IDENTITY
+  pool:
+    minimum-idle: 1
+    maximum-size: 8
+    connection-timeout-ms: 10000
+    socket-timeout-ms: 30000
+    validation-timeout-ms: 5000
+    max-lifetime-ms: 1700000
+  fail-fast: false
 schematics-root: /home/freedeeml/McFine/arc_schematics
 allowed-worlds: [vanilla, survival]
 settlement-radius: 96

@@ -7,6 +7,8 @@ import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import io.mockk.spyk
 import io.mockk.just
@@ -23,6 +25,7 @@ import org.bukkit.Material
 import org.bukkit.event.player.PlayerChangedWorldEvent
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
+import ru.arc.network.BackendServerId
 import ru.arc.paper.menu.PaperDialogClickContext
 import ru.arc.paper.menu.PaperDialogRuntime
 import ru.arc.paper.menu.PaperDialogScreen
@@ -36,20 +39,113 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("source callbacks record accepted and ignored clicks with a stable visit id") {
+        withUi { h ->
+            val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+            mockkObject(CivsDiagnostics)
+            every { CivsDiagnostics.event(any(), *anyVararg()) } answers {
+                events += firstArg<String>() to secondArg<Array<Pair<String, Any?>>>().toMap()
+                Unit
+            }
+            try {
+                every { h.host.prepareFounding(any(), any(), any()) } returns CompletableFuture<Unit>()
+                h.open(); h.click("found"); h.click("style_0")
+                val form = h.screen
+                h.click("prepare", mapOf("city_name" to "Oak Town"))
+                h.click("prepare", mapOf("city_name" to "Second"), screen = form)
+                val clicks = events.filter { it.first == "ui_click" && it.second["screen"] == "civs.name" }.map { it.second }
+                clicks.map { it["outcome"] } shouldBe listOf("accepted", "ignored")
+                clicks.map { it["visit"] }.distinct().size shouldBe 1
+                clicks.last()["reason"] shouldBe "already-consumed"
+                clicks.first()["city_name"] shouldBe "Oak Town"
+                clicks.first()["player"] shouldBe h.player.uniqueId
+            } finally { unmockkObject(CivsDiagnostics) }
+        }
+    }
+
+    test("a remote town has a read-only overview and a backend request without local mutation controls") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val remote = CivsNetworkCity(BackendServerId.of("survival"), settlement(h.player), 1000)
+            every { h.host.remoteCity(h.player) } returns remote
+            every { h.host.transferHome(h.player) } returns CompletableFuture.completedFuture(Unit)
+            h.open()
+            h.screen.id shouldBe "civs.remote"
+            h.body() shouldContain "Ваш город находится на сервере survival"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("transfer", "refresh")
+            plainText(h.screen.buttons.first().label) shouldBe "На сервер survival ›"
+            h.click("transfer")
+            h.paper.performTicks(2)
+            h.body() shouldContain "Запрос перехода на survival отправлен"
+            h.click("refresh")
+            h.paper.performTicks(2)
+            verify(exactly = 2) { h.host.refreshCity(h.player) }
+            verify(exactly = 1) { h.host.transferHome(h.player) }
+            verify(exactly = 0) { h.host.prepareFounding(any(), any(), any()); h.host.recruit(any()) }
+        }
+    }
+
+    test("failed network lookup is prominent and never offers founding from an unknown membership") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            every { h.host.refreshCity(any()) } returns CompletableFuture.failedFuture(CivsRejection("network-unavailable"))
+            h.open()
+            h.screen.id shouldBe "civs.network-error"
+            plainText(h.screen.body.first().text) shouldBe "Не удалось загрузить город"
+            h.screen.body.first().text.color() shouldBe TextColor.color(0xFF6B61)
+            h.body() shouldContain "Не удалось получить данные города из сети"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            every { h.host.refreshCity(any()) } returns CompletableFuture.completedFuture(Unit)
+            h.click("refresh")
+            h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.welcome"
+        }
+    }
+
+    test("startup storage failure displays a failure rather than endless loading") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            every { h.host.ready() } returns false
+            every { h.host.unavailableReason() } returns "storage-unavailable"
+            h.open()
+            plainText(h.screen.body.first().text) shouldBe "Не удалось загрузить город"
+            h.screen.body.first().text.color() shouldBe TextColor.color(0xFF6B61)
+            h.body() shouldContain "Управление временно остановлено"
+            verify(exactly = 0) { h.host.refreshCity(any()) }
+        }
+    }
+
+    test("view-only backend does not expose founding and late lookup cannot reopen a closed screen") {
+        withUi { h ->
+            every { h.host.foundingAllowed() } returns false
+            h.open()
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            val pending = CompletableFuture<Unit>()
+            every { h.host.refreshCity(any()) } returns pending
+            h.click("refresh")
+            val count = h.screens.size
+            h.dismiss()
+            pending.complete(Unit)
+            h.paper.performTicks(2)
+            h.screens.size shouldBe count
+            h.ui.showingDialog(h.player) shouldBe false
+        }
+    }
+
     test("real Core dialog flow yields to world placement and details can return without reopening a modal") {
         withUi(realHistory = true) { h ->
             every { h.host.prepareFounding(any(), any(), any()) } answers {
                 h.preview = preview().copy(cityName = secondArg())
                 CompletableFuture.completedFuture(Unit)
             }
-            h.ui.open(h.player)
+            h.open()
             h.click("found")
             h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             h.paper.performTicks(2)
             h.ui.showingDialog(h.player) shouldBe false
             verify(exactly = 1) { h.player.closeDialog() }
-            h.ui.open(h.player)
+            h.open()
             h.screen.id shouldBe "civs.preview"
             h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
             h.click("placement")
@@ -63,7 +159,7 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             val preparing = CompletableFuture<Unit>()
             every { h.host.prepareFounding(any(), any(), any()) } returns preparing
-            h.ui.open(h.player)
+            h.open()
             h.click("found")
             h.click("style_0")
             val submitted = h.screen
@@ -87,7 +183,7 @@ class CivsUiTest : FunSpec({
                 CompletableFuture.failedFuture(CivsRejection("wrong-world", mapOf(
                     "world" to "world", "worlds" to "survival, vanilla",
                 )))
-            h.ui.open(h.player)
+            h.open()
             h.click("found")
             h.click("style_0")
             plainText(h.screen.buttons.single().label) shouldBe "Выбрать место ›"
@@ -122,7 +218,7 @@ class CivsUiTest : FunSpec({
         withUi(realHistory = true) { h ->
             val preparing = CompletableFuture<Unit>()
             every { h.host.prepareFounding(any(), any(), any()) } returns preparing
-            h.ui.open(h.player); h.click("found"); h.click("style_0")
+            h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             h.screen.id shouldBe "civs.preview"
             preparing.completeExceptionally(CivsRejection("look-at-ground"))
@@ -147,7 +243,7 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             val first = CompletableFuture<Unit>()
             every { h.host.prepareFounding(any(), any(), any()) } returns first
-            h.ui.open(h.player); h.click("found"); h.click("style_0")
+            h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             val count = h.screens.size
             h.dismiss()
@@ -160,7 +256,7 @@ class CivsUiTest : FunSpec({
             h.preview = null
             val second = CompletableFuture<Unit>()
             every { h.host.prepareFounding(any(), any(), any()) } returns second
-            h.ui.open(h.player); h.click("found"); h.click("style_0")
+            h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "New Town"))
             val nextCount = h.screens.size
             h.tasks.restart()
@@ -215,7 +311,7 @@ class CivsUiTest : FunSpec({
                 "working" to "Working",
             )) {
                 every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
-                h.ui.open(h.player)
+                h.open()
                 h.click("workers")
                 plainText(h.screen.buttons.first { it.id.value == "worker_3" }.tooltip) shouldBe label
                 h.click("worker_3")
@@ -227,10 +323,10 @@ class CivsUiTest : FunSpec({
     test("resource shortage explains the block and storage offers no export action") {
         withUi { h ->
             h.city = settlement(h.player).copy(stock = Stock())
-            h.ui.open(h.player); h.click("stock")
+            h.open(); h.click("stock")
             h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
             h.body() shouldContain "cannot be withdrawn"
-            h.ui.open(h.player); h.click("buildings"); h.click("catalog"); h.click("offer_0")
+            h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
             h.screen.buttons.map { it.id.value } shouldNotContain "prepare"
             h.body() shouldContain "does not have enough resources"
         }
@@ -239,10 +335,10 @@ class CivsUiTest : FunSpec({
     test("management members cannot edit membership and upgrade previews cannot move") {
         withUi { h ->
             h.city = settlement(h.player).copy(owner = UUID.randomUUID(), members = setOf(h.player.uniqueId))
-            h.ui.open(h.player); h.click("members")
+            h.open(); h.click("members")
             h.screen.buttons.map { it.id.value } shouldNotContain "add"
             h.preview = preview().copy(level = 2)
-            h.ui.open(h.player)
+            h.open()
             h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
         }
     }
@@ -250,7 +346,7 @@ class CivsUiTest : FunSpec({
     test("returning from preview details closes the screen while retaining the host preview") {
         withUi { h ->
             h.preview = preview()
-            h.ui.open(h.player); h.click("placement")
+            h.open(); h.click("placement")
             verify(exactly = 1) { h.runtime.close(h.player) }
             verify(exactly = 0) { h.host.cancelPreview(any()) }
             h.preview shouldBe preview()
@@ -260,7 +356,7 @@ class CivsUiTest : FunSpec({
     test("a stale details screen cannot mutate an expired placement") {
         withUi { h ->
             h.preview = preview()
-            h.ui.open(h.player)
+            h.open()
             h.preview = null
             h.click("placement")
             h.ui.showingDialog(h.player) shouldBe false
@@ -406,6 +502,10 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
     init {
         every { player.closeDialog() } just Runs
         every { host.ready() } returns true
+        every { host.unavailableReason() } returns null
+        every { host.refreshCity(any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.remoteCity(any()) } returns null
+        every { host.foundingAllowed() } returns true
         every { host.styles() } returns listOf("medieval-oak")
         every { host.city(any()) } answers { city }
         every { host.settlements() } answers { listOfNotNull(city) }
@@ -438,6 +538,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         ui = CivsUi(plugin, host, tasks, runtime, CivsText.fromYaml(civsLocaleSource()))
     }
 
+    fun open() { ui.open(player); paper.performTicks(2) }
     fun dismiss() = dismissAction()
     fun body(): String = screen.body.joinToString("\n") { plainText(it.text) }
     fun click(id: String, values: Map<String, String> = emptyMap(), screen: PaperDialogScreen = this.screen) {

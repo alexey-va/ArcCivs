@@ -17,6 +17,7 @@ class CivsStore(
     root: Path,
     private val executor: Executor,
     private val maximumCities: Int = 500,
+    private val network: CivsNetworkStore? = null,
 ) : AutoCloseable {
     private val root = root.toAbsolutePath().normalize()
     private val gson = Gson()
@@ -31,6 +32,14 @@ class CivsStore(
     }
 
     fun load(): CompletableFuture<List<Settlement>> = submit { reloadCityIndex(trustedRoot()) }
+        .thenCompose { legacy -> network?.loadOwned(legacy) ?: CompletableFuture.completedFuture(legacy) }
+
+    fun lookup(playerId: UUID): CompletableFuture<CivsNetworkCity?> = synchronized(lifecycleLock) {
+        if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
+        else network?.lookup(playerId) ?: CompletableFuture.completedFuture(null)
+    }
+
+    fun homeServer() = network?.server
 
     fun save(city: Settlement): CompletableFuture<Settlement> {
         val snapshot = city.copy(
@@ -38,6 +47,9 @@ class CivsStore(
             workers = city.workers.toList(),
             members = city.members.toSet(),
         )
+        if (network != null) return synchronized(lifecycleLock) {
+            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(snapshot)
+        }
         return submit {
             CivsRules.validate(snapshot)
             val trustedRoot = trustedRoot()

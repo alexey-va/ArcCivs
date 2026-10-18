@@ -15,6 +15,9 @@ import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.util.RayTraceResult
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
+import ru.arc.network.BackendServerId
+import ru.arc.paper.network.BackendTransfer
+import ru.arc.paper.network.BackendTransferResult
 import ru.arc.paper.api.*
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Path
@@ -22,8 +25,107 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
+import java.util.logging.Handler
+import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("unexpected preparation failure records the operation request and full exception") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            val records = mutableListOf<LogRecord>()
+            val handler = object : Handler() {
+                override fun publish(record: LogRecord) { records += record }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            h.plugin.logger.addHandler(handler)
+            try {
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                    CompletableFuture.completedFuture(h.previewBlueprint())
+                val cause = IllegalStateException("preview transport unavailable")
+                every { h.renderer.show(any(), any(), any()) } throws cause
+                val request = h.service.prepareFounding(h.player, "Test", "nordic"); h.tick()
+                request.isCompletedExceptionally shouldBe true
+                records.any { it.message.startsWith("ArcCivs operation prepare_founding failed (request=") &&
+                    generateSequence(it.thrown) { error -> error.cause }.any { error -> error === cause } } shouldBe true
+            } finally { h.plugin.logger.removeHandler(handler) }
+        }
+    }
+
+    test("remote membership never enters local simulation or mutation and uses a typed backend request") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.store.homeServer() } returns BackendServerId.of("spawn")
+            val record = CivsNetworkCity(BackendServerId.of("survival"), h.city, 1000)
+            every { h.store.lookup(h.owner) } returns CompletableFuture.completedFuture(record)
+            val loaded = h.service.refreshCity(h.player); h.tick(); loaded.join()
+            h.service.city(h.player) shouldBe null
+            h.service.settlements() shouldBe emptyList()
+            h.service.remoteCity(h.player) shouldBe record
+            val denied = shouldThrow<CompletionException> { h.service.recruit(h.player).join() }.cause as CivsRejection
+            denied.reason shouldBe "remote-city"
+            val found = shouldThrow<CompletionException> { h.service.prepareFounding(h.player, "Second", "nordic").join() }.cause as CivsRejection
+            found.reason shouldBe "already-member"
+            every { h.transfer.connect(h.player, BackendServerId.of("survival")) } returns BackendTransferResult.SENT
+            h.service.transferHome(h.player).join() shouldBe Unit
+            verify(exactly = 1) { h.transfer.connect(h.player, BackendServerId.of("survival")) }
+            verify(exactly = 0) { h.store.save(any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("fresh network read failure clears remote snapshot and reports an actionable rejection") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.store.homeServer() } returns BackendServerId.of("parkour")
+            every { h.store.lookup(h.owner) } returns CompletableFuture.completedFuture(CivsNetworkCity(BackendServerId.of("spawn"), h.city, 1000))
+            val loaded = h.service.refreshCity(h.player); h.tick(); loaded.join()
+            every { h.store.lookup(h.owner) } returns CompletableFuture.failedFuture(IllegalStateException("database offline"))
+            val failed = h.service.refreshCity(h.player); h.tick()
+            (shouldThrow<CompletionException> { failed.join() }.cause as CivsRejection).reason shouldBe "network-unavailable"
+            h.service.remoteCity(h.player) shouldBe null
+            h.service.settlements() shouldBe emptyList()
+        }
+    }
+
+    test("a late membership response cannot replace a newer request") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.store.homeServer() } returns BackendServerId.of("parkour")
+            val old = CompletableFuture<CivsNetworkCity?>()
+            val recent = CompletableFuture<CivsNetworkCity?>()
+            every { h.store.lookup(h.owner) } returnsMany listOf(old, recent)
+            val first = h.service.refreshCity(h.player)
+            val second = h.service.refreshCity(h.player)
+            val current = CivsNetworkCity(BackendServerId.of("spawn"), h.city, 2000)
+            recent.complete(current); h.tick(); second.join()
+            old.complete(CivsNetworkCity(BackendServerId.of("survival"), h.city, 1000)); h.tick()
+            first.isCompletedExceptionally shouldBe true
+            h.service.remoteCity(h.player) shouldBe current
+        }
+    }
+
+    test("view-only config prevents founding before terrain or schematic work") {
+        serviceScenario(empty = true, allowedWorlds = emptySet()) { h ->
+            h.start()
+            h.service.foundingAllowed() shouldBe false
+            val reason = shouldThrow<CompletionException> { h.service.prepareFounding(h.player, "Test", "nordic").join() }.cause as CivsRejection
+            reason.reason shouldBe "founding-disabled"
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("startup storage failure keeps simulation closed and exposes failure status") {
+        serviceScenario(empty = true) { h ->
+            every { h.store.load() } returns CompletableFuture.failedFuture(IllegalStateException("schema mismatch"))
+            val started = h.service.start(); h.tick()
+            started.isCompletedExceptionally shouldBe true
+            h.service.ready() shouldBe false
+            h.service.unavailableReason() shouldBe "storage-unavailable"
+            h.service.settlements() shouldBe emptyList()
+            verify(exactly = 0) { h.citizens.activateNavigating() }
+        }
+    }
+
     for (allowedWorld in listOf("vanilla", "survival")) test("founding rejects a disallowed world and accepts a numeric name in $allowedWorld") {
         val config = YamlConfiguration().apply {
             loadFromString(requireNotNull(javaClass.getResourceAsStream("/config.yml"))
@@ -447,6 +549,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     val worldAdapter = mockk<CivsWorld>(relaxed = true)
     val renderer = mockk<CivsPreviewRenderer>(relaxed = true)
     val citizens = mockk<CivsCitizens>(relaxed = true)
+    val transfer = mockk<BackendTransfer>()
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     val saves = mutableListOf<Pair<Settlement, CompletableFuture<Settlement>>>()
     val owner = UUID.randomUUID()
@@ -471,11 +574,14 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         city = CivsRules.validate(Settlement(UUID.randomUUID(), owner, "Oak Town", world.uid, CivPosition(0, 64, 0), 96,
             "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }))
         every { store.load() } returns CompletableFuture.completedFuture(if (empty) emptyList() else listOf(city))
+        every { store.homeServer() } returns null
+        every { store.lookup(any()) } returns CompletableFuture.completedFuture(null)
         every { store.save(any()) } answers {
             CompletableFuture<Settlement>().also { saves += firstArg<Settlement>() to it }
         }
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
-            maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens)
+            maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
+            backendTransfer = transfer)
     }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)

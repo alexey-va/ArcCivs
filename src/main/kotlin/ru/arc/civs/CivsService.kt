@@ -20,6 +20,8 @@ import ru.arc.paper.api.ArcSchematicSnapshot
 import ru.arc.paper.api.ArcBlockProtectionService
 import ru.arc.paper.api.ArcSchematicException
 import ru.arc.paper.api.ArcSchematicFailure
+import ru.arc.paper.network.BackendTransfer
+import ru.arc.paper.network.BackendTransferResult
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -37,6 +39,7 @@ class CivsService(
     previewRenderer: CivsPreviewRenderer? = null,
     citizenRuntime: CivsCitizens? = null,
     nativeWork: ru.arc.core.BudgetedTaskQueue? = null,
+    private val backendTransfer: BackendTransfer? = null,
     onCitizensCreated: (CivsCitizens) -> Unit = {},
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
@@ -47,6 +50,8 @@ class CivsService(
         var repairing = false
     }
     private var cities = linkedMapOf<UUID, Settlement>()
+    private val remoteCities = mutableMapOf<UUID, CivsNetworkCity>()
+    private val lookups = mutableMapOf<UUID, UUID>()
     private val busy = mutableSetOf<UUID>()
     private val unhealthy = mutableSetOf<UUID>()
     private val pendingFounders = mutableMapOf<UUID, Pair<UUID, CivPosition>>()
@@ -61,6 +66,7 @@ class CivsService(
     private var closed = false
     private var citizenDrain = CompletableFuture.completedFuture<Void>(null)
     private var loading = false
+    private var loadFailure: String? = null
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
@@ -109,9 +115,53 @@ class CivsService(
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
     override fun ready(): Boolean = initialized && !closed && !loading
+    override fun unavailableReason(): String? = loadFailure ?: if (!initialized && unhealthy.isNotEmpty()) "storage-unavailable" else null
     override fun styles(): List<String> = CivsBlueprints.STYLES
     override fun settlements(): List<Settlement> = cities.values.toList()
     override fun city(player: Player): Settlement? = cities.values.firstOrNull { it.canManage(player.uniqueId) }
+    override fun remoteCity(player: Player): CivsNetworkCity? = remoteCities[player.uniqueId]
+    override fun foundingAllowed(): Boolean = settings.worlds.isNotEmpty()
+    override fun refreshCity(player: Player): CompletableFuture<Unit> = action("lookup", player) {
+        requireReady(player)
+        val request = UUID.randomUUID()
+        lookups[player.uniqueId] = request
+        remoteCities.remove(player.uniqueId)
+        val result = tracked<Unit>()
+        store.lookup(player.uniqueId).whenCompleteSync(tasks) { record, failure ->
+            if (lookups[player.uniqueId] != request || !player.isOnline) {
+                result.completeExceptionally(CivsRejection("lookup-expired"))
+            } else {
+                lookups.remove(player.uniqueId)
+                when {
+                    failure != null -> {
+                        log("read network membership ${player.uniqueId}", failure)
+                        result.completeExceptionally(CivsRejection("network-unavailable"))
+                    }
+                    record != null && record.server != store.homeServer() -> {
+                        remoteCities[player.uniqueId] = record
+                        result.complete(Unit)
+                    }
+                    record != null && city(player)?.id != record.city.id -> {
+                        initialized = false
+                        loadFailure = "storage-unavailable"
+                        updateHealth()
+                        result.completeExceptionally(CivsRejection("storage-unavailable"))
+                    }
+                    else -> result.complete(Unit)
+                }
+            }
+        }
+        result
+    }
+    override fun transferHome(player: Player): CompletableFuture<Unit> = action("transfer", player) {
+        requireReady(player)
+        val destination = remoteCity(player)?.server ?: throw CivsRejection("no-city")
+        val outcome = backendTransfer?.connect(player, destination) ?: BackendTransferResult.TRANSFER_CLOSED
+        CivsDiagnostics.event("transfer", *CivsDiagnostics.actor(player), "destination" to destination.value,
+            "outcome" to if (outcome == BackendTransferResult.SENT) "requested" else outcome.name.lowercase())
+        rejectIf(outcome != BackendTransferResult.SENT, "transfer-failed")
+        CompletableFuture.completedFuture(Unit)
+    }
     override fun workerStatus(workerId: UUID): String = citizens.status(workerId)
     override fun activeNpcCount(): Int = citizens.activeCount()
 
@@ -123,16 +173,16 @@ class CivsService(
             it.id, it.blueprint.worldId, b.entrance, b.bounds, !it.upgrading, player.uniqueId in previewLoads)
     }
 
-    override fun prepareFounding(player: Player, name: String, style: String): CompletableFuture<Unit> = action {
+    override fun prepareFounding(player: Player, name: String, style: String): CompletableFuture<Unit> = action("prepare_founding", player, "city_name" to name, "style" to style) {
         requireReady(player)
-        rejectIf(city(player) != null || player.uniqueId in pendingFounders, "already-member")
+        rejectIf(city(player) != null || remoteCity(player) != null || player.uniqueId in pendingFounders, "already-member")
         rejectIf(name.trim().isBlank() || name.trim().length > 48 || name.any { it.isISOControl() }, "invalid-name")
         val entrance = target(player)
         checkSettlementSpace(player.world.uid, entrance)
         prepare(player, null, name.trim(), style, BuildingType.TOWN_HALL, 1, UUID.randomUUID(), entrance, false)
     }
 
-    override fun prepareBuilding(player: Player, type: BuildingType): CompletableFuture<Unit> = action {
+    override fun prepareBuilding(player: Player, type: BuildingType): CompletableFuture<Unit> = action("prepare_building", player, "type" to type) {
         val city = managed(player)
         rejectIf(type == BuildingType.TOWN_HALL, "invalid-building")
         rejectIf(city.construction != null, "construction-busy")
@@ -141,7 +191,7 @@ class CivsService(
         prepare(player, city.id, city.name, city.style, type, 1, UUID.randomUUID(), entrance, false)
     }
 
-    override fun prepareUpgrade(player: Player, buildingId: UUID): CompletableFuture<Unit> = action {
+    override fun prepareUpgrade(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("prepare_upgrade", player, "building" to buildingId) {
         val city = managed(player)
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         rejectIf(city.construction != null, "construction-busy")
@@ -152,7 +202,7 @@ class CivsService(
             building.entrance, true, building.rotation)
     }
 
-    override fun rotatePreview(player: Player, degrees: Int): CompletableFuture<Unit> = action {
+    override fun rotatePreview(player: Player, degrees: Int): CompletableFuture<Unit> = action("rotate_preview", player, "degrees" to degrees) {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
         require(degrees == -90 || degrees == 90)
@@ -161,7 +211,7 @@ class CivsService(
             Math.floorMod(b.rotation + degrees, 360), old.movementOrigin)
     }
 
-    override fun movePreview(player: Player): CompletableFuture<Unit> = action {
+    override fun movePreview(player: Player): CompletableFuture<Unit> = action("move_preview", player) {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
         val b = old.blueprint.building
@@ -170,7 +220,7 @@ class CivsService(
         prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, entrance, false, b.rotation)
     }
 
-    override fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit> = action {
+    override fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit> = action("nudge_preview", player, "direction" to direction) {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
         val b = old.blueprint.building
@@ -195,6 +245,9 @@ class CivsService(
         if (cityId != null) rejectIf(cities[cityId]?.let { !it.canManage(player.uniqueId) || it.worldId != worldId } != false, "not-authorized")
         val request = UUID.randomUUID()
         requests[player.uniqueId] = request
+        CivsDiagnostics.event("preview_load", *CivsDiagnostics.actor(player), "request" to request,
+            "city" to cityId, "city_name" to name, "style" to style, "type" to type,
+            "entrance" to entrance, "rotation" to rotation)
         previewLoads += player.uniqueId
         // Keep the last usable position visible until the replacement is ready.
         val result = tracked<Unit>()
@@ -215,6 +268,8 @@ class CivsService(
                     renderer.show(player, prepared.building, prepared.surface)
                     previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
                         now() + settings.previewSeconds * 1_000L, movementOrigin)
+                    CivsDiagnostics.event("preview_ready", "player" to player.uniqueId, "request" to request,
+                        "world" to worldId, "bounds" to prepared.building.bounds, "blocks" to prepared.snapshot.nonBarrierCount)
                     result.complete(Unit)
                 }.onFailure { result.completeExceptionally(it) }
             }
@@ -223,12 +278,13 @@ class CivsService(
 
     override fun cancelPreview(player: Player) { cancelPreview(player.uniqueId) }
     private fun cancelPreview(playerId: UUID) {
-        requests.remove(playerId)
+        val request = requests.remove(playerId)
+        if (request != null) CivsDiagnostics.event("preview_cancel", "player" to playerId, "request" to request)
         previews.remove(playerId)
         renderer.clear(playerId)
     }
 
-    override fun confirmPreview(player: Player): CompletableFuture<Unit> = action {
+    override fun confirmPreview(player: Player): CompletableFuture<Unit> = action("confirm_preview", player) {
         val preview = currentPreview(player)
         val blueprint = preview.blueprint
         near(player, blueprint.worldId, blueprint.building.entrance)
@@ -268,11 +324,19 @@ class CivsService(
                     store.saveSchematic(plan.id, blueprint.sourceBytes).thenCompose { store.savePlan(plan) }
                         .thenCompose { store.save(next) }.whenCompleteSync(tasks) { saved, saveFailure ->
                             if (saveFailure != null) {
-                                // An atomic replace may already have committed: never retry from stale cached stock.
-                                unhealthy += cityId
-                                initialized = false
-                                log("commit construction $cityId", saveFailure)
-                                finishReservation(cityId, player.uniqueId, result, CivsRejection("storage-unavailable"))
+                                val rejected = CivsDiagnostics.rejection(saveFailure)
+                                if (rejected != null) {
+                                    // A known transaction rejection rolled back; no city or start resources were granted.
+                                    store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
+                                        .whenComplete { _, failure -> if (failure != null) log("clean rejected plan ${plan.id}", failure) }
+                                    finishReservation(cityId, player.uniqueId, result, rejected)
+                                } else {
+                                    // Commit outcome may be unknown: reload canonical SQL before any further mutation.
+                                    unhealthy += cityId
+                                    initialized = false
+                                    log("commit construction $cityId", saveFailure)
+                                    finishReservation(cityId, player.uniqueId, result, CivsRejection("storage-unavailable"))
+                                }
                             } else {
                                 publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
                                     if (publishFailure == null) cancelPreview(player.uniqueId)
@@ -294,36 +358,36 @@ class CivsService(
         updateHealth()
     }
 
-    override fun recruit(player: Player): CompletableFuture<Unit> = action {
+    override fun recruit(player: Player): CompletableFuture<Unit> = action("recruit", player) {
         val city = managed(player)
         mutate(city.id) { CivsRules.recruit(it, player.uniqueId, UUID.randomUUID(), workerName(it.workers.size + 1)) }.thenApply { Unit }
     }
-    override fun assign(player: Player, workerId: UUID, buildingId: UUID?): CompletableFuture<Unit> = action {
+    override fun assign(player: Player, workerId: UUID, buildingId: UUID?): CompletableFuture<Unit> = action("assign", player, "worker" to workerId, "building" to buildingId) {
         mutate(managed(player).id) { CivsRules.assign(it, player.uniqueId, workerId, buildingId, now()) }.thenApply { Unit }
     }
-    override fun addMember(player: Player, name: String): CompletableFuture<Unit> = action {
+    override fun addMember(player: Player, name: String): CompletableFuture<Unit> = action("add_member", player, "member_name" to name) {
         val city = managed(player)
         val member = plugin.server.getPlayerExact(name.trim()) ?: throw CivsRejection("player-offline")
         rejectIf(cities.values.any { it.id != city.id && it.canManage(member.uniqueId) } || member.uniqueId in pendingFounders, "already-member")
         mutate(city.id) { CivsRules.addMember(it, player.uniqueId, member.uniqueId) }.thenApply { Unit }
     }
-    override fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit> = action {
+    override fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit> = action("remove_member", player, "member" to memberId) {
         mutate(managed(player).id) { CivsRules.removeMember(it, player.uniqueId, memberId) }.thenApply { Unit }
     }
-    override fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit> = action {
+    override fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit> = action("retry_construction", player, "city" to cityId) {
         requireReady(player)
         val city = cities[cityId] ?: throw CivsRejection("no-city")
         rejectIf(!city.canManage(player.uniqueId) && !player.hasPermission("arccivs.admin"), "not-authorized")
         val order = city.construction ?: throw CivsRejection("no-construction")
         mutate(cityId) { CivsRules.retryConstruction(it, it.owner, order.id) }.thenApply { Unit }
     }
-    override fun reload(player: Player): CompletableFuture<Unit> = action {
+    override fun reload(player: Player): CompletableFuture<Unit> = action("reload", player) {
         rejectIf(!player.hasPermission("arccivs.admin"), "not-authorized")
         rejectIf(busy.isNotEmpty() || placing.isNotEmpty() || previewLoads.isNotEmpty(), "city-busy")
         loadCities()
     }
 
-    private fun deliver(cityId: UUID, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long, constructionId: UUID?, at: Long): CompletableFuture<Settlement> = action {
+    private fun deliver(cityId: UUID, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long, constructionId: UUID?, at: Long): CompletableFuture<Settlement> = action("deliver", null, "city" to cityId, "worker" to workerId, "cycle" to cycle) {
         rejectIf(!ready(), "not-ready")
         mutate(cityId) { city ->
             if (city.building(assignment)?.type == BuildingType.TOWN_HALL) rejectIf(city.construction?.id != constructionId, "stale-delivery")
@@ -350,9 +414,13 @@ class CivsService(
                 }
             } else {
                 busy -= cityId
-                unhealthy += cityId
-                log("save settlement $cityId", failure)
-                result.completeExceptionally(CivsRejection("storage-unavailable"))
+                val rejected = CivsDiagnostics.rejection(failure)
+                if (rejected != null) result.completeExceptionally(rejected)
+                else {
+                    unhealthy += cityId
+                    log("save settlement $cityId", failure)
+                    result.completeExceptionally(CivsRejection("storage-unavailable"))
+                }
             }
             updateHealth()
         }
@@ -363,6 +431,7 @@ class CivsService(
         checkMain()
         rejectIf(loading || closed, "not-ready")
         loading = true
+        loadFailure = null
         previews.keys.toList().forEach(::cancelPreview)
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
@@ -374,6 +443,7 @@ class CivsService(
             loading = false
             if (failure != null) {
                 initialized = false
+                loadFailure = "storage-unavailable"
                 log("load settlements", failure)
                 result.completeExceptionally(failure)
             } else runCatching {
@@ -546,7 +616,9 @@ class CivsService(
     }
     private fun managed(player: Player): Settlement {
         requireReady(player)
-        val city = city(player) ?: throw CivsRejection("no-city")
+        val city = city(player) ?: throw remoteCity(player)?.let {
+            CivsRejection("remote-city", mapOf("server" to it.server.value))
+        } ?: CivsRejection("no-city")
         rejectIf(city.id in unhealthy, "storage-unavailable")
         return city
     }
@@ -556,6 +628,7 @@ class CivsService(
         rejectIf(!player.hasPermission("arccivs.use"), "not-authorized")
     }
     private fun target(player: Player): CivPosition {
+        rejectIf(settings.worlds.isEmpty(), "founding-disabled")
         if (player.world.name !in settings.worlds) throw CivsRejection("wrong-world", mapOf(
             "world" to player.world.name, "worlds" to settings.worlds.sorted().joinToString(),
         ))
@@ -585,13 +658,35 @@ class CivsService(
         completions += future
         future.whenComplete { _, _ -> if (Bukkit.isPrimaryThread()) completions -= future else tasks.runSync { completions -= future } }
     }
-    private fun <T> action(block: () -> CompletableFuture<T>): CompletableFuture<T> = try { checkMain(); block() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
+    private fun <T> action(name: String, player: Player? = null, vararg fields: Pair<String, Any?>,
+        block: () -> CompletableFuture<T>): CompletableFuture<T> {
+        checkMain()
+        val id = UUID.randomUUID()
+        val started = System.nanoTime()
+        val actor = player?.let(CivsDiagnostics::actor) ?: emptyArray()
+        CivsDiagnostics.event("operation_start", "operation" to name, "request" to id, *actor, *fields)
+        val result = try { block() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        return result.whenComplete { _, failure ->
+            val rejection = CivsDiagnostics.rejection(failure)
+            if (failure != null && rejection == null) plugin.logger.log(Level.WARNING,
+                "ArcCivs operation $name failed (request=$id)", failure)
+            CivsDiagnostics.event("operation_end", "operation" to name, "request" to id, *actor, *fields,
+                "outcome" to if (failure == null) "success" else if (rejection != null) "rejected" else "failed",
+                "reason" to rejection?.reason, "detail" to rejection?.values,
+                "cause" to CivsDiagnostics.cause(failure)?.javaClass?.simpleName,
+                "duration_ms" to (System.nanoTime() - started) / 1_000_000)
+        }
+    }
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }
     private fun now() = System.currentTimeMillis()
     private fun log(context: String, error: Throwable) = plugin.logger.log(Level.WARNING, "ArcCivs could not $context", error)
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "ArcCivs authority must run on Paper's main thread" }
 
-    @EventHandler fun quit(event: PlayerQuitEvent) { cancelPreview(event.player.uniqueId) }
+    @EventHandler fun quit(event: PlayerQuitEvent) {
+        cancelPreview(event.player.uniqueId)
+        remoteCities.remove(event.player.uniqueId)
+        lookups.remove(event.player.uniqueId)
+    }
     @EventHandler fun worldChanged(event: PlayerChangedWorldEvent) { cancelPreview(event.player.uniqueId) }
 
     override fun close() {
@@ -610,6 +705,8 @@ class CivsService(
         plugin.server.servicesManager.unregister(ArcBlockProtectionService::class.java, sharedProtection)
         renderer.close()
         previews.clear()
+        remoteCities.clear()
+        lookups.clear()
         requests.clear()
         previewLoads.clear()
         completions.toList().forEach { it.completeExceptionally(CivsRejection("not-ready")) }

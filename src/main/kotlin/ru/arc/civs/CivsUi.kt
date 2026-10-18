@@ -34,6 +34,7 @@ class CivsUi internal constructor(
         this(plugin, host, tasks, PaperDialogRuntime(plugin), text)
 
     private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token) {
+        val id: UUID = UUID.randomUUID()
         var consumed = false
         var cancelPending: (() -> Unit)? = null
     }
@@ -50,12 +51,36 @@ class CivsUi internal constructor(
     }
 
     fun open(player: Player) {
-        if (closed || !player.isOnline) return
+        if (closed || !player.isOnline) {
+            CivsDiagnostics.event("ui_open_ignored", "player" to player.uniqueId, "closed" to closed, "online" to player.isOnline)
+            return
+        }
+        CivsDiagnostics.event("ui_open", *CivsDiagnostics.actor(player))
         runtime.beginFlow(player)
+        if (!host.ready()) {
+            roots[player.uniqueId] = "civs.loading"
+            showEntry(player)
+            return
+        }
+        roots[player.uniqueId] = "civs.lookup"
+        perform(player, "civs.lookup", "common.title", { host.refreshCity(player) }, success = {
+            runtime.beginFlow(player)
+            openEntry(player)
+        }, failure = { error ->
+            runtime.beginFlow(player)
+            roots[player.uniqueId] = "civs.network-error"
+            present(player, "civs.network-error", "common.title", listOf(
+                body(tr(player, "network.lookup-failed").color(DANGER)), body(error)),
+                listOf(button(player, "refresh", "common.refresh") { open(player) }), reopen = { open(player) })
+        }, workingKey = "network.loading")
+    }
+
+    private fun openEntry(player: Player) {
         roots[player.uniqueId] = when {
             !host.ready() -> "civs.loading"
             host.preview(player) != null -> "civs.preview"
             host.city(player) != null -> "civs.overview"
+            host.remoteCity(player) != null -> "civs.remote"
             else -> "civs.welcome"
         }
         showEntry(player)
@@ -84,23 +109,50 @@ class CivsUi internal constructor(
     private fun showEntry(player: Player) {
         when {
             !host.ready() -> present(player, "civs.loading", "common.title",
-                listOf(body(player, "common.starting")), buildList {
-                    add(button(player, "refresh", "common.refresh") { showEntry(player) })
+                host.unavailableReason()?.let { listOf(body(tr(player, "network.lookup-failed").color(DANGER)),
+                    body(text.reason(player, it))) } ?: listOf(body(player, "common.starting")), buildList {
+                    add(button(player, "refresh", "common.refresh") { open(player) })
                     if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
                 }, reopen = { showEntry(player) })
             host.preview(player) != null -> showPreview(player)
             host.city(player) != null -> showOverview(player)
+            host.remoteCity(player) != null -> showRemote(player)
             else -> showWelcome(player)
         }
     }
 
     private fun showWelcome(player: Player): Unit { present(player, "civs.welcome", "common.title",
-        listOfNotNull(body(player, "founding.intro"), body(player, "city.sleep-rule"),
+        listOfNotNull(body(player, if (host.foundingAllowed()) "founding.intro" else "network.view-only"), body(player, "city.sleep-rule"),
             if (host.styles().isEmpty()) body(player, "founding.unavailable") else null), buildList {
-            if (host.styles().isNotEmpty()) add(button(player, "found", "founding.begin", PERSONAL) { showStyles(player) })
-            else add(button(player, "refresh", "common.refresh") { showWelcome(player) })
+            if (host.foundingAllowed() && host.styles().isNotEmpty()) add(button(player, "found", "founding.begin", PERSONAL) { showStyles(player) })
+            else add(button(player, "refresh", "common.refresh") { open(player) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
         }, reopen = { showEntry(player) }) }
+
+    private fun showRemote(player: Player, feedback: Component? = null) {
+        val remote = host.remoteCity(player) ?: return showEntry(player)
+        val city = remote.city
+        present(player, "civs.remote", "city.title", listOfNotNull(
+            body(tr(player, "city.intro", "name" to city.name)),
+            body(tr(player, "network.remote-help", "server" to remote.server.value)),
+            table(listOf(
+                tr(player, "network.server-label") to text.literal(remote.server.value),
+                tr(player, "label.level") to text.literal(city.level()),
+                tr(player, "label.population") to tr(player, "common.fraction", "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)),
+                tr(player, "label.buildings") to text.literal(city.buildings.size),
+                tr(player, "label.construction") to constructionText(player, city),
+            )),
+            table(Resource.entries.map { resource -> text.resource(player, resource) to text.literal(city.stock[resource]) }),
+            body(player, "network.snapshot-help"), feedback?.let(::body),
+        ), listOf(
+            valueButton(player, "transfer", "network.transfer", text.literal(remote.server.value), NAVIGATION) {
+                perform(player, "civs.remote", "city.title", { host.transferHome(player) },
+                    success = { showRemote(player, tr(player, "network.transfer-requested", "server" to remote.server.value)) },
+                    failure = { showRemote(player, it) }, workingKey = "network.connecting")
+            },
+            button(player, "refresh", "common.refresh") { open(player) },
+        ), reopen = { showRemote(player) })
+    }
 
     private fun showStyles(player: Player, page: Int = 0) {
         val styles = host.styles()
@@ -506,19 +558,23 @@ class CivsUi internal constructor(
     private fun city(player: Player): Settlement? {
         val city = host.city(player)
         if (city == null || !city.canManage(player.uniqueId)) {
-            showWelcome(player)
+            showEntry(player)
             return null
         }
         return city
     }
 
     private fun perform(player: Player, id: String, title: String, action: () -> CompletableFuture<Unit>,
-        success: () -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null) {
-        val visit = present(player, id, title, listOf(body(player, "common.working")), emptyList()) ?: return
+        success: () -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null,
+        workingKey: String = "common.working") {
+        val visit = present(player, id, title, listOf(body(player, workingKey)), emptyList()) ?: return
         visit.cancelPending = cancelPending
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { _, error ->
-            if (!current(player, visit)) return@whenCompleteSync
+            if (!current(player, visit)) {
+                CivsDiagnostics.event("ui_completion_ignored", "player" to player.uniqueId, "screen" to id, "visit" to visit.id)
+                return@whenCompleteSync
+            }
             visit.cancelPending = null
             if (error == null) success() else failure(text.failure(player, error))
         }
@@ -532,10 +588,17 @@ class CivsUi internal constructor(
         if (closed || !player.isOnline) return null
         val visit = Visit(id, tasks.token())
         visits[player.uniqueId] = visit
+        CivsDiagnostics.event("ui_screen", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
+            "actions" to buttons.joinToString { it.id.toString() }, "inputs" to inputs.size)
         val closeOnEscape = player.getMetadata("arc-menu-escape").any { it.asString() == "close" }
         val footerKey = if (closeOnEscape || roots[player.uniqueId] == id) "common.close" else "common.back"
         val guarded = buttons.map { button -> button.copy(closeDialogBeforeAction = false, onClick = { context ->
-            if (current(player, visit) && !visit.consumed) {
+            val accepted = current(player, visit) && !visit.consumed
+            CivsDiagnostics.event("ui_click", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
+                "action" to button.id.toString(), "outcome" to if (accepted) "accepted" else "ignored",
+                "reason" to if (accepted) null else if (visit.consumed) "already-consumed" else "stale-visit",
+                "city_name" to context.text(NAME), "member_name" to context.text(MEMBER))
+            if (accepted) {
                 visit.consumed = true
                 if (button.closeDialogBeforeAction) runtime.close(player)
                 button.onClick.handle(context)
@@ -545,6 +608,8 @@ class CivsUi internal constructor(
             inputs = inputs, buttons = guarded, columns = if (guarded.size == 1) 1 else 2,
             exitButton = button(player, "history", footerKey).copy(width = 200),
         ), reopen, {
+            CivsDiagnostics.event("ui_dismiss", "player" to player.uniqueId, "screen" to id, "visit" to visit.id,
+                "current" to (visits[player.uniqueId] === visit), "pending" to (visit.cancelPending != null))
             if (visits[player.uniqueId] === visit) {
                 visits.remove(player.uniqueId)
                 visit.cancelPending?.invoke()

@@ -3,11 +3,19 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.10"
+version = "0.1.11"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.16"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
 kotlin { jvmToolchain(25) }
+val integrationTestSourceSet = sourceSets.create("integrationTest") {
+    kotlin.srcDir("src/integrationTest/kotlin")
+    compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output
+    runtimeClasspath += sourceSets.main.get().output + sourceSets.test.get().output
+}
+kotlin.target.compilations.getByName("integrationTest").associateWith(kotlin.target.compilations.getByName("main"))
+configurations["integrationTestImplementation"].extendsFrom(configurations["testImplementation"])
+configurations["integrationTestRuntimeOnly"].extendsFrom(configurations["testRuntimeOnly"])
 dependencies {
     implementation(kotlin("stdlib"))
     implementation("ru.ruscrafting.arc:arc-core:2.7.41")
@@ -15,6 +23,7 @@ dependencies {
     implementation("ru.ruscrafting.arc:arc-core-menu:2.7.41")
     implementation("ru.ruscrafting.arc:arc-core-paper:2.7.41")
     implementation("ru.ruscrafting.arc:arc-core-paper-menu:2.7.41")
+    implementation("ru.ruscrafting.arc:arc-core-sql:2.7.41")
     implementation("com.google.code.gson:gson:2.11.0")
     compileOnly("ru.ruscrafting.arc:arc-core-paper-api:2.7.41")
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
@@ -22,6 +31,7 @@ dependencies {
     compileOnly("net.citizensnpcs:citizens-main:2.0.42-SNAPSHOT") { isTransitive = false }
     compileOnly("com.github.angeschossen:LandsAPI:6.26.18")
     testImplementation("ru.ruscrafting.arc:arc-core-paper-testing:2.7.41")
+    testImplementation("ru.ruscrafting.arc:arc-core-integration-testing:2.7.41")
     testImplementation("ru.ruscrafting.arc:arc-core-paper-api:2.7.41")
     testImplementation("io.kotest:kotest-runner-junit5:6.0.7")
     testImplementation("io.kotest:kotest-assertions-core:6.0.7")
@@ -34,6 +44,13 @@ tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
     maxParallelForks = 1
+}
+tasks.register<Test>("integrationTest") {
+    description = "Runs disposable MySQL network-authority tests."
+    group = "verification"
+    testClassesDirs = integrationTestSourceSet.output.classesDirs
+    classpath = integrationTestSourceSet.runtimeClasspath
+    shouldRunAfter(tasks.test)
 }
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false

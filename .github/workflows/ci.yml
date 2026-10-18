@@ -27,8 +27,8 @@ jobs:
       - name: Verify arc-core consumer architecture
         uses: alexey-va/arc-core/.github/actions/verify-consumer@7606a5039876f3f949657655e5364f41593aa8dd
       - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
-      - name: Unit tests and production JAR
-        run: ./gradlew --no-daemon --build-cache test shadowJar
+      - name: Unit and disposable MySQL tests, production JAR
+        run: ./gradlew --no-daemon --build-cache test integrationTest shadowJar
       - name: Verify production artifact
         id: artifact
         run: |

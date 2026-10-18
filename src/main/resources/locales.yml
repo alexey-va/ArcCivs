@@ -1,4 +1,14 @@
 ru:
+  network:
+    loading: 'Загружаем ваш город из сети…'
+    connecting: 'Отправляем запрос перехода…'
+    lookup-failed: 'Не удалось загрузить город'
+    view-only: 'Здесь можно посмотреть свой город и перейти на его сервер. Для основания нового города выберите сервер, где разрешено строительство.'
+    remote-help: 'Ваш город находится на сервере <server>. Строить и управлять жителями можно там.'
+    server-label: 'Сервер города'
+    snapshot-help: 'Данные загружены при открытии меню. Нажмите «Обновить», чтобы увидеть изменения. Жители работают только на сервере города и рядом с игроками.'
+    transfer: 'На сервер <value> ›'
+    transfer-requested: 'Запрос перехода на <server> отправлен. После подключения откройте /civs.'
   common:
     title: 'Города'
     starting: 'Города загружаются. Откройте меню чуть позже.'
@@ -245,6 +255,11 @@ ru:
     reload-confirm: 'Перезагрузить настройки'
     retry: 'Продолжить приостановленную стройку'
   reason:
+    network-unavailable: 'Не удалось получить данные города из сети. Нажмите «Обновить» чуть позже.'
+    lookup-expired: 'Этот запрос уже закрыт. Откройте /civs заново.'
+    remote-city: 'Ваш город находится на сервере <server>. Перейдите на него для управления городом.'
+    transfer-failed: 'Не удалось отправить запрос перехода. Повторите попытку или выберите сервер через меню сети.'
+    founding-disabled: 'На этом сервере доступен только просмотр городов. Перейдите на сервер, где разрешено строительство.'
     invalid-name: 'Укажите непустое название длиной до 32 символов без управляющих знаков.'
     not-member: 'У вас нет доступа к управлению этим городом.'
     not-authorized: 'У вас нет доступа к этому действию.'
@@ -295,7 +310,7 @@ ru:
       bootstrap-slots: 'Оставшиеся участки нужны для первых склада, дома, лесорубки, каменоломни и фермы. Сначала завершите основу города.'
     town-hall-level-required: 'Сначала улучшите ратушу до нужного уровня.'
     city-busy: 'Другое действие города ещё сохраняется. Дождитесь завершения и обновите экран.'
-    storage-unavailable: 'Склад городов временно недоступен. Попробуйте позже.'
+    storage-unavailable: 'Не удалось загрузить или сохранить город. Управление временно остановлено. Сообщите администратору и попробуйте позже.'
     already-member: 'Игрок уже состоит в городе.'
     too-many-previews: 'Сейчас открыто слишком много предпросмотров. Попробуйте немного позже.'
     wrong-world: 'В мире <world> нельзя размещать городские постройки.<newline>Разрешённые миры: <worlds>.<newline>Перейдите в один из них и повторите выбор места.'
@@ -322,6 +337,16 @@ ru:
     placement-cancelled: 'Размещение остановлено. Откройте меню города и проверьте состояние стройки.'
     placement-failed: 'Постройку не удалось разместить. Состояние сохранено; сообщите администратору для повторения.'
 en:
+  network:
+    loading: 'Loading your town from the network…'
+    connecting: 'Requesting a server connection…'
+    lookup-failed: 'Could not load your town'
+    view-only: 'View your town here or visit its server. To found a town, choose a server where building is allowed.'
+    remote-help: 'Your town is on <server>. Build and manage its citizens there.'
+    server-label: 'Town server'
+    snapshot-help: 'Loaded when this menu opened. Refresh to see changes. Citizens work only on the town server near players.'
+    transfer: 'Go to <value> ›'
+    transfer-requested: 'Connection to <server> requested. Open /civs after connecting.'
   common:
     title: 'Settlements'
     starting: 'Settlements are loading. Open this menu again shortly.'
@@ -568,6 +593,11 @@ en:
     reload-confirm: 'Reload settings'
     retry: 'Resume paused construction'
   reason:
+    network-unavailable: 'Could not retrieve your town from the network. Try Refresh shortly.'
+    lookup-expired: 'This request has closed. Open /civs again.'
+    remote-city: 'Your town is on <server>. Visit that server to manage it.'
+    transfer-failed: 'Could not request a connection. Try again or use the network server menu.'
+    founding-disabled: 'This server only supports viewing towns. Visit a server where building is allowed.'
     invalid-name: 'Enter a nonempty name up to 32 characters without control characters.'
     not-member: 'You cannot manage this settlement.'
     not-authorized: 'You do not have access to this action.'
@@ -618,7 +648,7 @@ en:
       bootstrap-slots: 'The remaining sites are needed for the first warehouse, house, forester, quarry and farm. Complete the settlement foundation first.'
     town-hall-level-required: 'Upgrade the town hall to the required level first.'
     city-busy: 'Another settlement action is still being saved. Wait for it to finish and refresh.'
-    storage-unavailable: 'Settlement storage is temporarily unavailable. Try again later.'
+    storage-unavailable: 'Could not load or save the town. Management is temporarily paused. Tell an administrator and try again later.'
     already-member: 'The player already belongs to a settlement.'
     too-many-previews: 'Too many previews are currently open. Try again shortly.'
     wrong-world: 'Settlement buildings cannot be placed in world <world>.<newline>Allowed worlds: <worlds>.<newline>Move to one of them and choose the location again.'

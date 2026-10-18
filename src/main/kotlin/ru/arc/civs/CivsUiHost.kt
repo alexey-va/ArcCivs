@@ -44,9 +44,14 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 /** Main-thread UI port. Every mutation validates authority in its owning service. */
 interface CivsUiHost {
     fun ready(): Boolean
+    fun unavailableReason(): String?
     fun styles(): List<String>
     fun settlements(): List<Settlement>
     fun city(player: Player): Settlement?
+    fun refreshCity(player: Player): CompletableFuture<Unit>
+    fun remoteCity(player: Player): CivsNetworkCity?
+    fun foundingAllowed(): Boolean
+    fun transferHome(player: Player): CompletableFuture<Unit>
     fun workerStatus(workerId: UUID): String
     fun activeNpcCount(): Int
     fun preview(player: Player): CivsPreviewView?

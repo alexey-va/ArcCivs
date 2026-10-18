@@ -6,11 +6,43 @@ recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management; unrelated players cannot build, break or loot city structures.
 
-Core 2.7.34 is mandatory: lifecycle/scheduling, atomic persistence, localized
+Core 2.7.41 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. NPCs use Citizens ordinary bounded point-to-point navigation;
 there is no Core packet-NPC API. No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
+
+## Network authority
+
+Every backend has an explicit, stable typed `server-id` and the same shared SQL
+configuration. Core's `PaperSqlServices` owns the provider lease; blocking runtime
+creation, migration and JDBC work run on workers. Shutdown seals admissions,
+drains admitted file-to-SQL chains and SQL work, then releases the lease. There
+is no local write fallback when SQL fails and no supported mixed old/new writer
+deployment. Missing identity/SQL configuration stops startup with an actionable
+error; settings changes and initial SQL failure recovery require a restart.
+
+`arc_civs_city` stores the canonical validated settlement snapshot, immutable
+home server/owner, revision and update time. `arc_civs_member.player_id` is globally
+unique for both owners and members. A short registry row lock serializes writes
+and multi-city imports; each save still enforces home and revision CAS. The only
+successful same-revision retry is the exact committed state. Membership conflict
+rolls the transaction back before any publication, world changes or start grant.
+An unknown commit result suspends the affected authority until canonical reload.
+
+Existing city JSON imports atomically, preserving originals. An existing SQL
+city with the same home/owner wins over its stale JSON; conflicting identity or
+membership fails closed. SQL city writes never update the legacy files. Immutable
+construction plans and captured schematics remain local to the home backend.
+`maximum-settlements` is per home backend, as the old file limit was per runtime.
+
+Only `loadOwned(server-id)` records reach protection, construction and Citizens.
+Foreign snapshots occupy a separate UI-only map and cannot be mutated or paid
+out locally. `/civs` reads membership afresh on every open; Refresh repeats it,
+with no background sync. Read failure shows an inline error and never presents
+founding from unknown membership. The remote overview offers Refresh and a
+typed Core Bungee backend request. SENT means requested, not arrival or teleport
+to the city. Empty allowed-worlds makes a backend view-only.
 
 ## Domain
 
@@ -19,6 +51,8 @@ Six building types: TOWN_HALL, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM; levels
 Food pays for recruitment/development; ordinary work does not consume food.
 Starting stock is 96 wood, 96 stone, 24 food, with four pioneers. This grant is
 part of the durable city creation, never repeated on join/reload.
+The network conversion changes no prices, rates, grants or caps. Remote viewing
+produces zero WOOD/STONE/FOOD and introduces no external currency or item flow.
 
 Town hall limits population to 4/8/12 and supplies four beds, base storage128,
 one builder slot and one construction project. Houses add2/4/6 beds; warehouse
@@ -45,6 +79,12 @@ confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery
 is permission gated. Suggestions reflect the exact argument only.
+Founding failures lead with a DANGER heading and concrete reason above the style
+table, preserve the draft and offer a working retry. Runtime DOWN is shown as an
+explicit storage failure rather than indefinite loading. Diagnostics use Core
+StructuredDebugLine/ArcLogging for source-owned callback and operation boundaries,
+with bounded sanitized input, correlation IDs, outcomes and exception stacks;
+they do not claim visibility into packets discarded inside Core.
 
 Prepared placement leaves the dialog and uses Core `PaperActionPanels` through
 `CivsPlacementControls`. The main page offers confirm, anchor movement, both
