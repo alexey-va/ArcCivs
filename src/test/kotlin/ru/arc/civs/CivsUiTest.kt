@@ -457,16 +457,20 @@ class CivsUiTest : FunSpec({
             h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
             every { h.host.buildingMaterials(h.player, site.id) } returns CompletableFuture.completedFuture(mapOf("OAK_LOG" to 900L))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
-            every { h.host.startBuilding(h.player, site.id) } returns CompletableFuture.completedFuture(Unit)
+            val pending = CompletableFuture<Unit>()
+            every { h.host.startBuilding(h.player, site.id) } returns pending
             h.ui.openBuilding(h.player, base.id, site.id)
             h.screen.id shouldBe "civs.building"
             h.body() shouldContain "Site marked out"
             h.click("materials"); h.paper.performTicks(2)
-            h.body() shouldContain "upper estimates"
+            h.body() shouldContain "is an estimate"
             h.body() shouldContain "0 / up to 900"
             val before = h.screen
             h.click("start"); h.click("start", screen = before)
+            h.body() shouldBe "Preparing construction…"
+            pending.complete(Unit)
             h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building"
             verify(exactly = 1) { h.host.startBuilding(h.player, site.id) }
         }
     }
@@ -487,7 +491,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "2 / 19"
             h.body() shouldContain "continue automatically"
             h.body().contains("up to") shouldBe false
-            h.screen.buttons shouldBe emptyList()
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
             h.city = h.city!!.copy(construction = order.copy(phase = ConstructionPhase.CONSTRUCTING,
                 materials = mapOf("COBBLESTONE" to 3L)))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
@@ -496,11 +500,12 @@ class CivsUiTest : FunSpec({
             h.city = h.city!!.copy(construction = order.copy(payment = null))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
             h.body() shouldContain "already paid"
+            h.screen.buttons shouldBe emptyList()
             verify(exactly = 0) { h.host.buildingMaterials(any(), any()); h.host.startBuilding(any(), any()); h.host.retryConstruction(any(), any()) }
         }
     }
 
-    test("construction materials use a framed localized table and preserve exact counts across pages") {
+    test("construction materials use a framed localized table and preserve exact counts") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -520,18 +525,138 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "0 / до 516"
             h.body() shouldContain "\uE570"
             h.body().contains("Cobblestone") shouldBe false
-            h.screen.buttons.map { it.id.value } shouldBe listOf("start", "next")
-            h.click("next")
             h.body() shouldContain "Еловые доски"
             h.body() shouldContain "9000001"
             h.body() shouldContain "2000003"
             h.body() shouldContain "до"
-            h.body().contains("Булыжник") shouldBe false
-            h.screen.buttons.map { it.id.value } shouldBe listOf("start", "previous")
-            h.click("previous")
-            h.body() shouldContain "5 / до 73"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "start")
             verify(exactly = 1) { h.host.buildingMaterials(h.player, site.id) }
             verify(exactly = 0) { h.host.startBuilding(any(), any()) }
+        }
+    }
+
+    test("construction materials show all thirteen builder materials and paginate only after sixteen") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val building = base.buildings.first { it.type == BuildingType.BUILDER_HUT }.copy(phase = BuildingPhase.CONSTRUCTING)
+            val order = CivConstruction(UUID.randomUUID(), building.id, 1, 475, 0,
+                ConstructionPhase.CONSTRUCTING, Stock(), materials = builderMaterialEstimate(), payment = CivConstructionPayment())
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it }, construction = order)
+            every { h.host.availableMaterials(h.player) } returns emptyMap()
+            fun openMaterials() { h.ui.openBuilding(h.player, base.id, building.id); h.click("materials") }
+            fun tableText() = plainText(h.screen.body.single { plainText(it.text).contains('\uE570') }.text)
+            fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
+
+            openMaterials()
+            plainText(h.screen.body.first().text) shouldBe "Дом строителя · ур. 1 · 0/475"
+            tableText().lineSequence().count { it.contains("0 / ") } shouldBe 13
+            listOf("Резная книжная полка", "Булыжник", "Верстак", "Земля", "Гравий", "Еловая дверь", "Еловый забор",
+                "Еловые ворота", "Еловое бревно", "Еловые доски", "Еловая плита", "Еловые ступеньки", "Факел").forEach {
+                tableText() shouldContain it
+            }
+            builderMaterialEstimate().values.forEach { tableText() shouldContain "0 / $it" }
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
+            export("materials-builder-13-ru")
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            openMaterials()
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "grant")
+            export("materials-builder-13-admin-ru")
+
+            val seventeen = builderMaterialEstimate() + mapOf("BIRCH_LOG" to 6L, "BRICKS" to 12L, "GLASS" to 8L, "OAK_PLANKS" to 24L)
+            h.city = h.city!!.copy(construction = order.copy(materials = seventeen - "TORCH"))
+            openMaterials()
+            tableText().lineSequence().count { it.contains("0 / ") } shouldBe 16
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "grant")
+            h.city = h.city!!.copy(construction = order.copy(materials = seventeen))
+            openMaterials()
+            val firstPage = tableText()
+            firstPage.lineSequence().count { it.contains("0 / ") } shouldBe 16
+            firstPage shouldContain "Еловые ступеньки"
+            firstPage shouldContain "0 / 233"
+            firstPage.contains("Факел") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "grant", "next")
+            export("materials-builder-17-page-1-ru")
+            h.click("next")
+            tableText().lineSequence().count { it.contains("0 / ") } shouldBe 1
+            tableText() shouldContain "Факел"
+            tableText() shouldContain "0 / 34"
+            tableText().contains("Еловые ступеньки") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "grant", "previous")
+            export("materials-builder-17-page-2-ru")
+            h.click("previous")
+            tableText() shouldBe firstPage
+            verify(exactly = 0) { h.host.buildingMaterials(any(), any()); h.host.startBuilding(any(), any()) }
+        }
+    }
+
+    test("construction supply refreshes stock once and admin grants report partial capacity") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.first()
+            h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), building.id, 3, 100, 40,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), materials = mapOf("COBBLESTONE" to 19L),
+                payment = CivConstructionPayment()))
+            var stored = 2L
+            every { h.host.availableMaterials(h.player) } answers { mapOf("COBBLESTONE" to stored) }
+            val pending = CompletableFuture<CivsSupplyResult>()
+            every { h.host.supplyConstruction(h.player, building.id) } returns pending
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
+            val before = h.screen
+            h.click("supply"); h.click("supply", screen = before)
+            h.body() shouldBe "Supplying storage…"
+            h.screen.buttons shouldBe emptyList()
+            stored = 7L
+            pending.complete(CivsSupplyResult(5L, 12L, false)); h.paper.performTicks(2)
+            h.body() shouldContain "7 / 19"
+            h.body() shouldContain "Added to storage: 5. Still needed: 12."
+            h.body().contains("Free up storage") shouldBe false
+            verify(exactly = 1) { h.host.supplyConstruction(h.player, building.id) }
+            verify(exactly = 0) { h.host.grantConstructionMaterials(any(), any()) }
+
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            every { h.host.grantConstructionMaterials(h.player, building.id) } answers {
+                stored = 11L
+                CompletableFuture.completedFuture(CivsSupplyResult(4L, 8L, true))
+            }
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.click("grant"); h.paper.performTicks(2)
+            h.body() shouldContain "11 / 19"
+            h.body() shouldContain "Added to storage: 4. Still needed: 8."
+            h.body() shouldContain "Free up storage space and try again."
+            verify(exactly = 1) { h.host.grantConstructionMaterials(h.player, building.id) }
+
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.screen.buttons shouldBe emptyList()
+            every { h.host.cityBusy(h.player) } returns false
+            stored = 19L
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.screen.buttons shouldBe emptyList()
+        }
+    }
+
+    test("supply failure stays on materials and dismissed supply completion cannot reopen it") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.first()
+            h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), building.id, 3, 100, 40,
+                ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("COBBLESTONE" to 19L),
+                payment = CivConstructionPayment()))
+            every { h.host.availableMaterials(h.player) } returns emptyMap()
+            every { h.host.supplyConstruction(h.player, building.id) } returns CompletableFuture.failedFuture(CivsRejection("construction-supplies-empty"))
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.click("supply"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building-materials"
+            h.body() shouldContain "Your inventory has no plain items needed for this construction."
+            h.body() shouldContain "0 / 19"
+            val pending = CompletableFuture<CivsSupplyResult>()
+            every { h.host.supplyConstruction(h.player, building.id) } returns pending
+            h.click("supply")
+            h.dismiss()
+            val count = h.screens.size
+            pending.complete(CivsSupplyResult(2L, 17L, false)); h.paper.performTicks(2)
+            h.screens.size shouldBe count
+            h.ui.showingDialog(h.player) shouldBe false
         }
     }
 
@@ -1140,8 +1265,6 @@ class CivsUiTest : FunSpec({
             every { h.host.availableMaterials(h.player) } returns mapOf("COBBLESTONE" to 5L, "SPRUCE_PLANKS" to 9_000_001L)
             h.ui.openBuilding(h.player, base.id, site.id); h.click("materials"); h.paper.performTicks(2)
             exportUiScreen(directory, "materials-site-ru", h.screen)
-            h.click("next")
-            exportUiScreen(directory, "materials-site-page-2-ru", h.screen)
             h.player.setLocale(Locale.US)
             h.ui.openBuilding(h.player, base.id, site.id); h.click("materials"); h.paper.performTicks(2)
             exportUiScreen(directory, "materials-site-en", h.screen)
@@ -1296,6 +1419,8 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         }
         every { host.relocateControl(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.startBuilding(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.supplyConstruction(any(), any()) } returns CompletableFuture.completedFuture(CivsSupplyResult(0L, 0L, false))
+        every { host.grantConstructionMaterials(any(), any()) } returns CompletableFuture.completedFuture(CivsSupplyResult(0L, 0L, false))
         every { host.deleteCity(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.openBuildingInventory(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.materializeStorage(any()) } returns CompletableFuture.completedFuture(Unit)
@@ -1375,6 +1500,11 @@ private fun materialEstimate() = mapOf("COBBLESTONE" to 73L, "COBBLESTONE_STAIRS
     "COBBLESTONE_WALL" to 28L, "DIRT" to 516L, "OAK_PLANKS" to 48L, "RED_BED" to 1L,
     "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 90L, "SPRUCE_PLANKS" to 2_000_003L)
 
+private fun builderMaterialEstimate() = mapOf("CHISELED_BOOKSHELF" to 2L, "COBBLESTONE" to 4L,
+    "CRAFTING_TABLE" to 1L, "DIRT" to 161L, "GRAVEL" to 47L, "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 83L,
+    "SPRUCE_FENCE_GATE" to 1L, "SPRUCE_LOG" to 142L, "SPRUCE_PLANKS" to 182L, "SPRUCE_SLAB" to 4L,
+    "SPRUCE_STAIRS" to 233L, "TORCH" to 34L)
+
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,
         CivPosition(x, 64, 0), 0, "medieval-oak/${type.name.lowercase()}",
@@ -1391,7 +1521,7 @@ private fun settlement(player: Player): Settlement {
 }
 
 /** Opt-in source export for the shared native dialog renderer; no UI behavior is mirrored here. */
-private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScreen) {
+private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScreen, viewport: List<Int> = listOf(854, 480)) {
     val legacy = LegacyComponentSerializer.builder().character('&').hexColors().build()
     val content = linkedMapOf("title" to legacy.serialize(screen.title))
     val body = screen.body.mapIndexed { index, value ->
@@ -1414,7 +1544,7 @@ private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScr
     val dialog = mapOf("id" to id, "source" to id, "format" to "reference-multi-action", "name-key" to "title",
         "external-title-key" to "title", "columns" to screen.columns, "body" to body,
         "buttons" to screen.buttons.map(::button), "exit-button" to screen.exitButton?.let(::button),
-        "viewport" to listOf(854, 480), "variants" to listOf(mapOf("id" to "example"))) +
+        "viewport" to viewport, "variants" to listOf(mapOf("id" to "example"))) +
         if (inputs.isEmpty()) emptyMap() else mapOf("inputs" to inputs)
     val out = Path.of(directory)
     Files.createDirectories(out)

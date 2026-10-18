@@ -80,7 +80,7 @@ class CivsService(
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
-    private val storage = storageAdapter ?: CivsStorage(plugin)
+    private val storage = (storageAdapter ?: CivsStorage(plugin)).also { it.beginReceiptBootstrap() }
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
@@ -473,6 +473,62 @@ class CivsService(
         }, executor)
     }
 
+    override fun supplyConstruction(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult> =
+        action("construction_supply", player, "building" to buildingId) { supplyConstruction(player, buildingId, false) }
+
+    override fun grantConstructionMaterials(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult> =
+        action("construction_grant", player, "building" to buildingId) { supplyConstruction(player, buildingId, true) }
+
+    private fun supplyConstruction(player: Player, buildingId: UUID, grant: Boolean): CompletableFuture<CivsSupplyResult> {
+        rejectIf(grant && !player.hasPermission("arccivs.admin"), "not-authorized")
+        val city = managed(player)
+        rejectIf(city.id in busy, "city-busy")
+        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
+        near(player, city.worldId, building.entrance)
+        rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
+        val order = city.construction?.takeIf { it.buildingId == buildingId }
+        rejectIf(order == null && building.phase != BuildingPhase.SITE, "invalid-building")
+        // Legacy orders paid their complete bill when reserved; their estimate must never mint another payment.
+        if (order != null && order.payment == null) return CompletableFuture.completedFuture(CivsSupplyResult(0, 0, false))
+        val required = if (order != null) CompletableFuture.completedFuture(order.materials.orEmpty())
+        else store.loadPlan(buildingId).thenApplyAsync({ stored ->
+            val plan = requireNotNull(stored) { "Missing site design $buildingId" }
+            require(plan.cityId == city.id && plan.worldId == city.worldId &&
+                plan.building.copy(phase = BuildingPhase.SITE, production = building.production) == building)
+            CivsMaterials.required(plan)
+        }, executor)
+        busy += city.id
+        val result = tracked<CivsSupplyResult>()
+        required.whenCompleteSync(tasks) { materials, failure ->
+            busy -= city.id
+            if (failure != null) { result.completeExceptionally(failure); return@whenCompleteSync }
+            runCatching {
+                rejectIf(!player.isOnline || grant && !player.hasPermission("arccivs.admin"), "not-authorized")
+                val current = managed(player)
+                rejectIf(current.id != city.id || current.building(buildingId) != building || current.construction != city.construction, "invalid-building")
+                near(player, current.worldId, building.entrance)
+                var supplied: CivStorageSupplyPlan? = null
+                inventoryMutation(current.id, { lockedCity ->
+                    storage.prepareConstructionSupply(lockedCity, buildingId, requireNotNull(materials), if (grant) null else player)
+                        .also { supplied = it }.plan
+                }, sourcePlayer = if (grant) null else player) { before, inventory ->
+                    if (requireNotNull(supplied).plan.changes.isEmpty()) before
+                    else before.copy(inventory = inventory, revision = Math.addExact(before.revision, 1))
+                }.whenCompleteSync(tasks) { _, applyFailure ->
+                    if (applyFailure != null) result.completeExceptionally(applyFailure)
+                    else {
+                        val outcome = requireNotNull(supplied).result
+                        CivsDiagnostics.event("construction_supplied", "city" to city.id, "building" to buildingId,
+                            "player" to player.uniqueId, "grant" to grant, "moved" to outcome.moved,
+                            "remaining" to outcome.remaining, "storage_full" to outcome.storageFull)
+                        result.complete(outcome)
+                    }
+                }
+            }.onFailure(result::completeExceptionally)
+        }
+        return result
+    }
+
     override fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("construction_order", player, "building" to buildingId) {
         val city = managed(player)
         rejectIf(city.id in busy || city.construction != null, "construction-busy")
@@ -480,6 +536,7 @@ class CivsService(
         rejectIf(building.phase != BuildingPhase.SITE, "invalid-building")
         near(player, city.worldId, building.entrance)
         requireControlBarrel(city.worldId, building)
+        requireAssignedBuilder(city, building.id)
         busy += city.id
         val result = tracked<Unit>()
         store.loadPlan(buildingId).thenCompose { plan ->
@@ -516,11 +573,7 @@ class CivsService(
         rejectIf(city.inventory == null, "materials-migration-pending")
         rejectIf(!city.canManage(player.uniqueId), "not-authorized")
         val building = plan.building
-        val assignedBuilder = city.workers.mapNotNull { worker -> worker.assignment?.let(city::building) }.any {
-            it.type == BuildingType.BUILDER_HUT && (it.phase == BuildingPhase.ACTIVE || it.id == building.id) ||
-                it.type == BuildingType.TOWN_HALL && CivsRules.legacyHallBuilder(city)
-        }
-        rejectIf(!assignedBuilder, "builder-required")
+        requireAssignedBuilder(city, building.id)
         if (building.type == BuildingType.TOWN_HALL && building.level > city.level()) {
             rejectIf(cities.values.any { it.id != city.id && it.worldId == city.worldId &&
                 areasOverlap(city.center, city.radius + 32, it.center, it.radius) }, "city-overlap")
@@ -564,6 +617,13 @@ class CivsService(
             }.onFailure { result.completeExceptionally(it) }
         }
         return result
+    }
+
+    private fun requireAssignedBuilder(city: Settlement, buildingId: UUID) {
+        rejectIf(city.workers.none { worker -> worker.assignment?.let(city::building)?.let { assigned ->
+            assigned.type == BuildingType.BUILDER_HUT && (assigned.phase == BuildingPhase.ACTIVE || assigned.id == buildingId) ||
+                assigned.type == BuildingType.TOWN_HALL && CivsRules.legacyHallBuilder(city)
+        } == true }, "builder-required")
     }
 
     private fun finishReservation(cityId: UUID, playerId: UUID, future: CompletableFuture<Unit>, failure: Throwable?) {
@@ -625,6 +685,7 @@ class CivsService(
 
     private fun inventoryMutation(
         cityId: UUID, prepare: (Settlement) -> CivStoragePlan?,
+        sourcePlayer: Player? = null,
         transition: (Settlement, CivInventory) -> Settlement,
     ): CompletableFuture<Settlement> {
         checkMain()
@@ -632,7 +693,7 @@ class CivsService(
         rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
         val city = cities[cityId] ?: throw CivsRejection("no-city")
         val id = UUID.randomUUID()
-        storage.lock(city, id)
+        storage.lock(city, id, sourcePlayer)
         val tx = try {
             val prepared = prepare(city) ?: run {
                 storage.unlock(id)
@@ -644,7 +705,7 @@ class CivsService(
                 return CompletableFuture.completedFuture(city)
             }
             require(after.revision == city.revision + 1)
-            CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes)
+            CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes, prepared.playerDebit)
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         busy += cityId
         val result = tracked<Settlement>()
@@ -722,7 +783,8 @@ class CivsService(
     }
 
     private fun recoverInventories() {
-        val tx = inventoryRecovery.values.firstOrNull { it.cityId !in busy && it.cityId !in blockedRecovery } ?: return
+        val tx = inventoryRecovery.values.firstOrNull { it.cityId !in busy && it.cityId !in blockedRecovery &&
+            (cities[it.cityId]?.revision != it.beforeRevision || !storage.waitingForPlayer(it)) } ?: return
         val city = cities[tx.cityId] ?: run { blockedRecovery += tx.cityId; return }
         busy += city.id
         runCatching {
@@ -1016,11 +1078,10 @@ class CivsService(
         (previews.keys + selections.keys + requests.keys).toList().forEach { cancelPreview(it, "reload") }
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
-        store.load().thenCombine(store.loadInventoryTransactions()) { records, transactions -> records to transactions }.thenApplyAsync({ (records, transactions) ->
+        loadInventoryReceipts().thenCompose { store.load() }.thenApplyAsync({ records ->
             val members = records.flatMap { it.members + it.owner }
             require(members.distinct().size == members.size) { "A player belongs to more than one settlement" }
-            require(transactions.map { it.cityId }.distinct().size == transactions.size) { "Multiple inventory receipts for one city" }
-            Triple(records.associateByTo(linkedMapOf(), Settlement::id), CivsProtection.prepare(records), transactions)
+            records.associateByTo(linkedMapOf(), Settlement::id) to CivsProtection.prepare(records)
         }, executor).whenCompleteSync(tasks) { loaded, failure ->
             if (closed) { result.completeExceptionally(CivsRejection("not-ready")); return@whenCompleteSync }
             loading = false
@@ -1030,14 +1091,8 @@ class CivsService(
                 log("load settlements", failure)
                 result.completeExceptionally(failure)
             } else runCatching {
-                val (records, prepared, transactions) = requireNotNull(loaded)
-                inventoryRecovery.values.forEach { storage.unlock(it.id) }
-                inventoryRecovery.clear()
-                blockedRecovery.clear()
-                inventoryRecovery.putAll(transactions.associateBy { it.cityId })
+                val (records, prepared) = requireNotNull(loaded)
                 storage.replaceCities(records.values)
-                // Recovery is gradual, but native containers must be locked before any player can reopen them.
-                transactions.forEach(storage::lock)
                 cities = records
                 protection.publish(prepared)
                 geometryGeneration++
@@ -1048,6 +1103,31 @@ class CivsService(
                 pulseConstruction()
             }.onFailure { initialized = false; result.completeExceptionally(it); log("validate settlements", it) }
             updateHealth()
+        }
+        return result
+    }
+
+    private fun loadInventoryReceipts(): CompletableFuture<Unit> {
+        storage.beginReceiptBootstrap()
+        val result = tracked<Unit>()
+        store.loadInventoryTransactions().whenCompleteSync(tasks) { transactions, failure ->
+            if (closed) { result.completeExceptionally(CivsRejection("not-ready")); return@whenCompleteSync }
+            runCatching {
+                if (failure != null) throw failure
+                val receipts = requireNotNull(transactions)
+                require(receipts.map { it.cityId }.distinct().size == receipts.size) { "Multiple inventory receipts for one city" }
+                inventoryRecovery.values.forEach { storage.unlock(it.id) }
+                inventoryRecovery.clear()
+                blockedRecovery.clear()
+                inventoryRecovery.putAll(receipts.associateBy { it.cityId })
+                storage.completeReceiptBootstrap(receipts)
+                result.complete(Unit)
+            }.onFailure {
+                // Unknown local debits must never be mistaken for an empty journal, even if SQL is unavailable.
+                plugin.logger.log(Level.SEVERE, "ArcCivs inventory journal bootstrap failed closed; player item changes remain blocked. Repair the local receipt error before restarting the server.", it)
+                CivsDiagnostics.event("inventory_bootstrap", "state" to "failed", "cause" to it.javaClass.simpleName)
+                result.completeExceptionally(it)
+            }
         }
         return result
     }
@@ -1090,6 +1170,7 @@ class CivsService(
         if (ready()) {
             recoverInventories()
             pulseImmigration()
+            pulseAutoAssignments()
             pulseControls()
             pulseStorage()
         }
@@ -1259,6 +1340,20 @@ class CivsService(
                         "remaining" to saved.immigration?.remaining)
                 } }.onFailure { log("admit resident ${city.id}", it) }
         }
+    }
+
+    private fun pulseAutoAssignments() {
+        val city = cities.values.firstOrNull { city ->
+            city.id !in busy && city.id !in unhealthy && CivsRules.needsAutoAssignment(city) &&
+                plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId && city.contains(player.location.blockX, player.location.blockZ) }
+        } ?: return
+        runCatching { mutate(city.id) { CivsRules.autoAssign(it, it.owner, now()) } }.onSuccess { future ->
+            future.whenCompleteSync(tasks) { saved, failure ->
+                if (failure != null) log("auto assign residents ${city.id}", failure)
+                else CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,
+                    "assigned" to requireNotNull(saved).workers.count { worker -> city.workers.firstOrNull { it.id == worker.id }?.assignment != worker.assignment })
+            }
+        }.onFailure { log("auto assign residents ${city.id}", it) }
     }
 
     @EventHandler(priority = org.bukkit.event.EventPriority.HIGHEST, ignoreCancelled = false)

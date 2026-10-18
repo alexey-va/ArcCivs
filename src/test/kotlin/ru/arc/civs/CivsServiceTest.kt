@@ -29,6 +29,248 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("receipt bootstrap blocks drops before journal locks then releases only unrelated players while SQL is pending") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("BootstrapSupplier")
+            val bystander = h.paper.addPlayer("BootstrapBystander")
+            for (viewer in listOf(player, bystander)) {
+                (viewer.openInventory as org.mockbukkit.mockbukkit.inventory.InventoryViewMock)
+                    .setTopInventory(h.paper.server.createInventory(viewer, 9))
+            }
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val plan = h.supplySite(player.uniqueId, 4)
+            val city = h.store.load().join().single()
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 4))
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
+                city.copy(revision = city.revision + 1), listOf(CivInventorySlotChange(requireNotNull(plan.building.control),
+                    "BARREL", 0, null, CivPlainItem("OAK_LOG", 4))),
+                CivPlayerDebit(player.uniqueId, listOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 4), null))))
+            val local = CompletableFuture<List<CivInventoryTransaction>>()
+            val canonical = CompletableFuture<List<Settlement>>()
+            every { h.store.loadInventoryTransactions() } returns local
+            every { h.store.load() } returns canonical
+            every { h.store.deleteInventoryTransaction(receipt.id) } returns CompletableFuture.completedFuture(true)
+            fun drop(target: Player) = h.paper.callEvent(org.bukkit.event.player.PlayerDropItemEvent(target, mockk(relaxed = true)))
+            drop(player).isCancelled shouldBe true // The constructor closes the window even before start().
+            val started = h.service.start(); h.tick()
+            drop(player).isCancelled shouldBe true
+            drop(bystander).isCancelled shouldBe true
+            player.inventory.getItem(0)!!.amount shouldBe 4
+            local.complete(listOf(receipt)); h.tick()
+            started.isDone shouldBe false
+            drop(player).isCancelled shouldBe true
+            drop(bystander).isCancelled shouldBe false
+            barrel.isEmpty shouldBe true
+            canonical.complete(listOf(city)); h.tick(); started.join()
+            h.paper.performTicks(20)
+            player.inventory.getItem(0) shouldBe null
+            barrel.getItem(0)!!.amount shouldBe 4
+            h.saves.size shouldBe 1
+            drop(player).isCancelled shouldBe true
+            h.commit(); h.paper.performTicks(40)
+            drop(player).isCancelled shouldBe false
+            barrel.getItem(0)!!.amount shouldBe 4
+            h.saves.size shouldBe 1
+        }
+    }
+
+    test("known empty receipts release item changes independently of SQL failure and reload reacquires only the local bootstrap barrier") {
+        serviceScenario(empty = true) { h ->
+            val player = h.paper.addPlayer("BootstrapFree")
+            val local = CompletableFuture<List<CivInventoryTransaction>>()
+            val canonical = CompletableFuture<List<Settlement>>()
+            every { h.store.loadInventoryTransactions() } returns local
+            every { h.store.load() } returns canonical
+            fun drop() = h.paper.callEvent(org.bukkit.event.player.PlayerDropItemEvent(player, mockk(relaxed = true)))
+            val started = h.service.start(); h.tick()
+            drop().isCancelled shouldBe true
+            verify(exactly = 0) { h.store.load() }
+            local.complete(emptyList()); h.tick()
+            started.isDone shouldBe false
+            drop().isCancelled shouldBe false
+            canonical.completeExceptionally(IllegalStateException("SQL unavailable")); h.tick()
+            started.isCompletedExceptionally shouldBe true
+            h.service.unavailableReason() shouldBe "storage-unavailable"
+            drop().isCancelled shouldBe false
+            val reloadedReceipts = CompletableFuture<List<CivInventoryTransaction>>()
+            every { h.store.loadInventoryTransactions() } returns reloadedReceipts
+            every { h.store.load() } returns CompletableFuture.completedFuture(emptyList())
+            val reloaded = h.service.reload(h.player)
+            drop().isCancelled shouldBe true
+            reloadedReceipts.complete(emptyList()); h.tick(); reloaded.join()
+            drop().isCancelled shouldBe false
+        }
+    }
+
+    test("a failed local receipt bootstrap never guesses an empty journal or unlocks a newly joined player") {
+        serviceScenario(empty = true) { h ->
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.failedFuture(java.io.IOException("corrupt local receipt"))
+            val started = h.service.start(); h.tick()
+            started.isCompletedExceptionally shouldBe true
+            h.service.ready() shouldBe false
+            h.service.unavailableReason() shouldBe "storage-unavailable"
+            verify(exactly = 0) { h.store.load() }
+            val player = h.paper.addPlayer("BootstrapJoined")
+            h.paper.callEvent(org.bukkit.event.player.PlayerDropItemEvent(player, mockk(relaxed = true))).isCancelled shouldBe true
+            h.paper.callEvent(org.bukkit.event.player.PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe true
+        }
+    }
+
+    test("construction supply journals both endpoints before debit and keeps their locks until receipt retirement") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("SupplyOwner").also { it.setOp(true) }
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val site = h.supplySite(player.uniqueId, 6)
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 2))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 10))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            val retirement = CompletableFuture<Boolean>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns retirement
+            h.start()
+            val supplied = h.service.supplyConstruction(player, site.building.id); h.tick()
+            player.inventory.getItem(0)!!.amount shouldBe 10
+            barrel.getItem(0)!!.amount shouldBe 2
+            h.saves shouldBe emptyList()
+            requireNotNull(receipt).playerDebit!!.playerId shouldBe player.uniqueId
+            val second = h.service.supplyConstruction(player, site.building.id)
+            (shouldThrow<CompletionException> { second.join() }.cause as CivsRejection).reason shouldBe "city-busy"
+            journal.complete(receipt); h.tick()
+            player.inventory.getItem(0)!!.amount shouldBe 6
+            barrel.getItem(0)!!.amount shouldBe 6
+            h.saves.size shouldBe 1
+            supplied.isDone shouldBe false
+            h.commit()
+            supplied.isDone shouldBe false
+            h.paper.callEvent(org.bukkit.event.player.PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe true
+            retirement.complete(true); h.tick()
+            supplied.join() shouldBe CivsSupplyResult(4, 0, false)
+            h.paper.callEvent(org.bukkit.event.player.PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe false
+            val repeated = h.service.supplyConstruction(player, site.building.id); h.tick()
+            repeated.join() shouldBe CivsSupplyResult(0, 0, false)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("admin construction grant checks its server permission before reading or changing materials") {
+        serviceScenario { h ->
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.start()
+            val result = h.service.grantConstructionMaterials(h.player, h.city.buildings.first().id)
+            (shouldThrow<CompletionException> { result.join() }.cause as CivsRejection).reason shouldBe "not-authorized"
+            verify(exactly = 0) { h.store.loadPlan(any()); h.store.saveInventoryTransaction(any()); h.store.save(any()) }
+        }
+    }
+
+    test("admin construction grant uses the same journal without debiting the administrator") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("SupplyAdmin").also { it.setOp(true) }
+            // Unlike Paper, a fresh MockBukkit player has a view with no top inventory.
+            (player.openInventory as org.mockbukkit.mockbukkit.inventory.InventoryViewMock)
+                .setTopInventory(h.paper.server.createInventory(player, 9))
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val site = h.supplySite(player.uniqueId, 6)
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 2))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 10))
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers {
+                val accepted = firstArg<CivInventoryTransaction>()
+                receipt = accepted; CompletableFuture.completedFuture(accepted)
+            }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val result = h.service.grantConstructionMaterials(player, site.building.id); h.tick()
+            requireNotNull(receipt).playerDebit shouldBe null
+            barrel.getItem(0)!!.amount shouldBe 6
+            player.inventory.getItem(0)!!.amount shouldBe 10
+            h.commit()
+            result.join() shouldBe CivsSupplyResult(4, 0, false)
+        }
+    }
+
+    for (prepaid in listOf(false, true)) test("construction supplies use the unpaid remainder and never refill a prepaid order prepaid=$prepaid") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("RemainderOwner").also { it.setOp(true) }
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val plan = h.supplySite(player.uniqueId, 20)
+            val original = h.store.load().join().single()
+            val building = plan.building
+            val order = CivConstruction(UUID.randomUUID(), building.id, 1, 2, 1, ConstructionPhase.PAUSED,
+                Stock(), failure = "placement-cancelled", plannedBuilding = building,
+                batches = CivConstructionBatches(2, 16), materials = mapOf("OAK_LOG" to 4L),
+                payment = if (prepaid) null else CivConstructionPayment())
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(original.copy(
+                buildings = original.buildings.map { if (it.id == building.id) building else it }, construction = order)))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 1))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 10))
+            h.start()
+            val result = h.service.supplyConstruction(player, building.id); h.tick()
+            if (!prepaid) h.commit()
+            result.join() shouldBe CivsSupplyResult(if (prepaid) 0 else 3, 0, false)
+            barrel.getItem(0)!!.amount shouldBe if (prepaid) 1 else 4
+            player.inventory.getItem(0)!!.amount shouldBe if (prepaid) 10 else 7
+            verify(exactly = 0) { h.store.loadPlan(any()) }
+            verify(exactly = if (prepaid) 0 else 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("a player supply receipt loaded after restart waits for login then completes its original transfer once") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("SupplyReturn").also { it.setOp(true) }
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val plan = h.supplySite(player.uniqueId, 4)
+            val city = h.store.load().join().single()
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 10))
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
+                city.copy(revision = city.revision + 1), listOf(CivInventorySlotChange(requireNotNull(plan.building.control),
+                    "BARREL", 0, null, CivPlainItem("OAK_LOG", 4))),
+                CivPlayerDebit(player.uniqueId, listOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 10), CivPlainItem("OAK_LOG", 6)))))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(receipt.id) } returns CompletableFuture.completedFuture(true)
+            player.disconnect()
+            h.start(); h.paper.performTicks(20)
+            h.saves shouldBe emptyList()
+            barrel.isEmpty shouldBe true
+            player.reconnect(); h.paper.performTicks(20)
+            h.saves.size shouldBe 1
+            player.inventory.getItem(0)!!.amount shouldBe 6
+            barrel.getItem(0)!!.amount shouldBe 4
+            h.commit(); h.paper.performTicks(20)
+            h.service.city(player)!!.revision shouldBe receipt.after.revision
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+        }
+    }
+
+    test("idle residents are assigned only near a viewer and only after the assignment save is acknowledged") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("ResidentOwner")
+            player.teleport(Location(h.world, 1_000.0, 65.0, 0.0))
+            val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
+                control = CivPosition(10, 63, 0))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val city = h.city.copy(owner = player.uniqueId, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), hut))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start(); h.paper.performTicks(20)
+            h.saves shouldBe emptyList()
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0)); h.paper.performTicks(20)
+            h.saves.single().first.workers.count { it.assignment == hut.id } shouldBe 1
+            h.service.city(player)!!.workers.all { it.assignment == null } shouldBe true
+            h.commit(); h.paper.performTicks(40)
+            h.service.city(player)!!.workers.count { it.assignment == hut.id } shouldBe 1
+            h.saves.size shouldBe 1
+        }
+    }
+
     test("the first ready row uses bounded debit and remains waiting without a partial journal or paste") {
         val storage = mockk<CivsStorage>(relaxed = true)
         every { storage.prepareDebitBackground(any(), any()) } returns null
@@ -74,6 +316,24 @@ class CivsServiceTest : FunSpec({
             h.paper.performTicks(60)
             block.type shouldBe Material.AIR
             h.saves.size shouldBe 1
+        }
+    }
+
+    test("starting an unstaffed site rejects before loading or capturing its design") {
+        serviceScenario { h ->
+            val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
+                control = CivPosition(10, 63, 0))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(
+                buildings = listOf(h.city.buildings.first(), hut))))
+            h.start()
+            val result = h.service.startBuilding(h.player, hut.id)
+            result.isCompletedExceptionally shouldBe true
+            (shouldThrow<CompletionException> { result.join() }.cause as CivsRejection).reason shouldBe "builder-required"
+            verify(exactly = 0) {
+                h.store.loadPlan(any()); h.store.loadSchematic(any()); h.blueprints.recover(any())
+                h.worldAdapter.capture(any(), any(), any(), any(), any(), any())
+            }
         }
     }
 
@@ -1577,6 +1837,18 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun supplySite(owner: UUID, logs: Int): CivPlacementPlan {
+        val site = city.buildings.last().copy(phase = BuildingPhase.SITE, control = CivPosition(10, 63, 0))
+        world.getBlockAt(10, 63, 0).type = Material.BARREL
+        val ready = city.copy(owner = owner, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = listOf(city.buildings.first(), site))
+        val plan = CivPlacementPlan(site.id, ready.id, world.uid, site.copy(phase = BuildingPhase.CONSTRUCTING),
+            List(logs) { i -> CivPlanBlock(CivPosition(8 + i % 5, 64 + i / 25, -2 + i / 5 % 5),
+                "minecraft:air", "minecraft:oak_log[axis=y]") }, "a".repeat(64))
+        every { store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+        every { store.loadPlan(site.id) } returns CompletableFuture.completedFuture(plan)
+        return plan
+    }
     fun sitePreview(blueprint: CivBlueprint = previewBlueprint()): CivBlueprint {
         every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
         every { blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)

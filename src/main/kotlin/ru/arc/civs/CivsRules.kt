@@ -197,6 +197,27 @@ object CivsRules {
         }))
     }
 
+    fun needsAutoAssignment(city: Settlement): Boolean = city.workers.any { it.assignment == null } &&
+        city.buildings.any { building -> city.workers.count { it.assignment == building.id } < slots(city, building) }
+
+    /** Fill vacancies without moving a resident who already has a job. Builder sites bootstrap themselves. */
+    fun autoAssign(city: Settlement, actor: UUID, now: Long): Settlement {
+        authorized(city, actor)
+        check(now >= 0, "invalid-time")
+        if (!needsAutoAssignment(city)) return city
+        val vacancies = city.buildings.sortedBy { if (isBuilder(it)) 0 else 1 }.flatMap { building ->
+            List((slots(city, building) - city.workers.count { it.assignment == building.id }).coerceAtLeast(0)) { building }
+        }.iterator()
+        val workers = city.workers.map { worker ->
+            if (worker.assignment != null || !vacancies.hasNext()) worker else {
+                val building = vacancies.next()
+                worker.copy(assignment = building.id,
+                    nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1), add(now, deliveryInterval(building.type))))
+            }
+        }
+        return changed(city, city.copy(workers = workers))
+    }
+
     fun addMember(city: Settlement, actor: UUID, member: UUID): Settlement {
         ownerOnly(city, actor)
         if (member == city.owner || member in city.members) return city

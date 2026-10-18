@@ -69,6 +69,9 @@ The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. Idle residents choose bounded safe loaded wander targets.
+One eligible nearby city per pulse fills vacant jobs in one persisted revision,
+builder first. Existing assignments, delivery rates and completed-cycle tokens
+are preserved; full jobs and inactive production sites are skipped.
 
 The SITE hall supplies the initial four beds and a depot. A SITE builder hut
 has one assignable slot: its builder can construct that same hut first, then
@@ -77,6 +80,23 @@ Population remains4/8/12 by hall level,12maximum; houses add2/4/6beds. Building
 limit16 and native NPC limit48 remain. Completed hall upgrades expand the actual
 persisted radius by32, including96→128→160 for new default cities. New founding
 reserves future maximum spacing; existing cities keep their actual radius.
+
+Materials pages show16 rows and provide one explicit player supply action plus
+an admin-only deficit grant. Both subtract existing town stock and fit physical
+slot capacity. Player supply journals exact plain-slot before/after debit together
+with container credits, locks the source inventory, and uses Core native player
+data persistence before applying container credits. Recovery waits for an offline
+source player; unknown slot drift remains a conflict. Initial/reload item changes
+wait for local receipt discovery; exact locks are installed and unrelated players
+are released before network city loading begins. Local journal failure remains
+explicitly blocked instead of being treated as an empty journal. Old receipts
+without player debits remain compatible. No full player state is restored or virtual surplus created.
+
+World capture/revalidation shares up to2048 cells across four scans per tick,
+yielding after the2ms budget between native calls and rotating the next scan.
+A single native call is not preempted. Builder availability is checked before
+schematic recovery/capture and again after asynchronous work. Scan completion
+logs phase, cell count and elapsed time independently of SQL timings.
 
 Items replace the closed WOOD/STONE/FOOD ledger. One-time founder reserve is
 96OAK_LOG,96COBBLESTONE,24BREAD. Legacy remaining stock converts1:1 exactly once

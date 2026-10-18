@@ -357,6 +357,47 @@ class CivsStoreTest : FreeSpec({
         CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(expected)
     }
 
+    "player source slots are captured immutably and survive reopening the inventory journal" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val base = inventoryTransaction(settlement())
+        val source = mutableListOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 10), CivPlainItem("OAK_LOG", 6)))
+        val transaction = base.copy(changes = listOf(base.changes.single().copy(before = null, after = CivPlainItem("OAK_LOG", 4))),
+            playerDebit = CivPlayerDebit(base.after.owner, source))
+        val expected = transaction.copy(playerDebit = transaction.playerDebit!!.copy(changes = source.toList()))
+        val saved = store.saveInventoryTransaction(transaction)
+        source.clear()
+        queued.runNext()
+        saved.join() shouldBe expected
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
+        reopened.saveInventoryTransaction(expected).join() shouldBe expected
+        val otherCity = inventoryTransaction(settlement(owner = expected.after.owner))
+        val second = otherCity.copy(changes = listOf(otherCity.changes.single().copy(before = null, after = CivPlainItem("OAK_LOG", 4))),
+            playerDebit = expected.playerDebit)
+        shouldThrow<CompletionException> { reopened.saveInventoryTransaction(second).join() }
+        Files.exists(root.resolve("inventory-transactions/${second.id}.json")) shouldBe false
+        reopened.deleteInventoryTransaction(expected.id).join() shouldBe true
+        reopened.saveInventoryTransaction(second).join() shouldBe second
+    }
+
+    "legacy receipts without a player endpoint still load and malformed player endpoints stay preserved" {
+        val legacy = inventoryTransaction(settlement())
+        val path = root.resolve("inventory-transactions/${legacy.id}.json")
+        Files.createDirectories(path.parent)
+        val json = Gson().toJson(mapOf("schemaVersion" to 1, "transaction" to legacy))
+        json.contains("playerDebit") shouldBe false
+        Files.writeString(path, json)
+        val store = CivsStore(root, directExecutor)
+        store.loadInventoryTransactions().join() shouldBe listOf(legacy)
+        val invalid = legacy.copy(playerDebit = CivPlayerDebit(legacy.after.owner,
+            listOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 10), CivPlainItem("OAK_LOG", 6)))))
+        val invalidJson = Gson().toJson(mapOf("schemaVersion" to 1, "transaction" to invalid))
+        Files.writeString(path, invalidJson)
+        shouldThrow<CompletionException> { store.loadInventoryTransactions().join() }
+        Files.readString(path) shouldBe invalidJson
+    }
+
     "invalid inventory receipts are rejected before writing and corrupt records are preserved" {
         val transaction = inventoryTransaction(settlement())
         val store = CivsStore(root, directExecutor)

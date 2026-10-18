@@ -20,6 +20,10 @@ import java.util.concurrent.CompletionException
 import java.io.ByteArrayInputStream
 
 class CivsTextTest : FunSpec({
+    lateinit var paper: ru.arc.paper.testing.MockBukkitTestRuntime
+    beforeEach { paper = ru.arc.paper.testing.MockBukkitTestRuntime.open() }
+    afterEach { paper.close() }
+
     test("bundled locales have parity and unknown client locales fall back to Russian") {
         val text = CivsText.fromYaml(civsLocaleSource())
         text.keys("ru") shouldBe text.keys("en")

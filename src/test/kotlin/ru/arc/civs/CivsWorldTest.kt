@@ -118,10 +118,11 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("four scans share one 256-cell budget and a fifth request fails without reading the world") {
+    test("four scans share one 2048-cell budget and a fifth request fails without reading the world") {
         worldScenario { s ->
-            for (x in 0..3) s.world.loadChunk(x, 0)
-            val building = worldBuilding(worldBox(0, 63))
+            val size = CivsWorld.CELLS_PER_TICK / 4
+            for (x in 0..(size shr 4)) s.world.loadChunk(x, 0)
+            val building = worldBuilding(worldBox(0, size - 1))
             val requests = List(4) {
                 s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
             }
@@ -129,8 +130,24 @@ class CivsWorldTest : FunSpec({
             s.scheduler.tick()
             requests.all { !it.isDone } shouldBe true
             s.scheduler.tick()
-            requests.forEach { completed(it).blocks.size shouldBe 64 }
+            requests.forEach { completed(it).blocks.size shouldBe size }
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("the time budget yields after an expensive cell without starving other scans") {
+        MockBukkitTestRuntime.open().use { paper ->
+            var nanos = 0L
+            WorldScenario(paper) { nanos.also { nanos += CivsWorld.NANOS_PER_TICK } }.use { s ->
+                val building = worldBuilding(worldBox(0, 0))
+                val requests = List(4) {
+                    s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
+                }
+                repeat(4) { s.scheduler.tick() }
+                requests.all { !it.isDone } shouldBe true
+                repeat(4) { s.scheduler.tick() }
+                requests.forEach { completed(it).blocks.size shouldBe 1 }
+            }
         }
     }
 
@@ -271,12 +288,12 @@ class CivsWorldTest : FunSpec({
 
     test("the separate control permission check shares the scan budget after a full cell slice") {
         worldScenario { s ->
-            for (x in 0..16) s.world.loadChunk(x, 0)
+            for (x in 0..(CivsWorld.CELLS_PER_TICK shr 4)) s.world.loadChunk(x, 0)
             val control = CivPosition(0, 64, 0)
             s.world.getBlockAt(0, 64, 0).type = Material.BARREL
-            val building = worldBuilding(worldBox(0, 256)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val building = worldBuilding(worldBox(0, CivsWorld.CELLS_PER_TICK)).copy(anchor = CivPosition(-1, 63, 0), control = control)
             val plan = CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
-                (1..256).map { CivPlanBlock(CivPosition(it, 64, 0), "minecraft:air", "minecraft:air") })
+                (1..CivsWorld.CELLS_PER_TICK).map { CivPlanBlock(CivPosition(it, 64, 0), "minecraft:air", "minecraft:air") })
             val revalidated = s.subject.revalidate(plan, UUID.randomUUID())
             s.scheduler.tick()
             revalidated.isDone shouldBe false
@@ -587,12 +604,12 @@ class CivsWorldTest : FunSpec({
     }
 })
 
-private class WorldScenario(val paper: MockBukkitTestRuntime) : AutoCloseable {
+private class WorldScenario(val paper: MockBukkitTestRuntime, nanoTime: () -> Long = { 0L }) : AutoCloseable {
     val world = paper.addSimpleWorld("civs-world")
     val cities = mutableListOf<Settlement>()
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
-    val subject = CivsWorld(paper.createSimplePlugin("CivsWorldTest"), tasks, { cities })
+    val subject = CivsWorld(paper.createSimplePlugin("CivsWorldTest"), tasks, nanoTime) { cities }
     init {
         for (x in -2..1) for (z in -1..1) world.loadChunk(x, z)
         world.getBlockAt(-1, 63, 0).type = Material.STONE

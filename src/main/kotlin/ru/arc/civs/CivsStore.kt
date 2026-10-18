@@ -159,7 +159,8 @@ class CivsStore(
 
     /** Immutable write-ahead item receipt; the same UUID can only retry identical bytes/state. */
     fun saveInventoryTransaction(transaction: CivInventoryTransaction): CompletableFuture<CivInventoryTransaction> {
-        val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList())
+        val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList(),
+            playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) })
         return submit {
             snapshot.validated()
             val trustedRoot = trustedRoot()
@@ -172,6 +173,9 @@ class CivsStore(
             val pending = loadInventoryTransactions(trustedRoot)
             require(pending.size < maximumCities && pending.none { it.cityId == snapshot.cityId }) {
                 "City already has an inventory transaction or journal capacity is full"
+            }
+            require(snapshot.playerDebit == null || pending.none { it.playerDebit?.playerId == snapshot.playerDebit.playerId }) {
+                "Player already has an inventory transaction"
             }
             val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
             if (gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
@@ -329,6 +333,8 @@ class CivsStore(
             }
         }
         require(records.map { it.cityId }.distinct().size == records.size) { "City has multiple pending inventory transactions" }
+        val players = records.mapNotNull { it.playerDebit?.playerId }
+        require(players.distinct().size == players.size) { "Player has multiple pending inventory transactions" }
         return records
     }
 

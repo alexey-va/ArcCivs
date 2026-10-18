@@ -8,6 +8,28 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    test("automatic jobs fill the builder site first and preserve manual assignments and delivery tokens") {
+        val farm = building(2, BuildingType.FARM, 8, phase = BuildingPhase.ACTIVE)
+        val hut = building(3, BuildingType.BUILDER_HUT, 16, phase = BuildingPhase.SITE)
+        val quarry = building(4, BuildingType.QUARRY, 24, phase = BuildingPhase.ACTIVE)
+        val unavailable = building(5, BuildingType.FORESTER, 32, phase = BuildingPhase.SITE)
+        val city = activeCity().let { it.copy(buildings = it.buildings + listOf(farm, hut, quarry, unavailable),
+            workers = it.workers.mapIndexed { index, worker -> worker.copy(assignment = if (index == 3) farm.id else null,
+                nextDeliveryAt = if (index == 3) 1_000 else worker.nextDeliveryAt) }) }
+        CivsRules.needsAutoAssignment(city) shouldBe true
+        val assigned = CivsRules.autoAssign(city, owner, 20_000)
+        assigned.revision shouldBe city.revision + 1
+        assigned.workers.map { it.assignment } shouldBe listOf(hut.id, quarry.id, null, farm.id)
+        assigned.workers[3] shouldBe city.workers[3]
+        assigned.workers[0].nextDeliveryAt shouldBe 20_000 + CivsRules.deliveryInterval(hut.type)
+        assigned.workers[1].nextDeliveryAt shouldBe 20_000 + CivsRules.deliveryInterval(quarry.type)
+        assigned.workers.map { it.completedCycles } shouldBe city.workers.map { it.completedCycles }
+        assigned.stock shouldBe city.stock
+        CivsRules.needsAutoAssignment(assigned) shouldBe false
+        CivsRules.autoAssign(assigned, owner, 30_000) shouldBe assigned
+        rejects("not-authorized") { CivsRules.autoAssign(city, uuid(999), 20_000) }
+    }
+
     test("deletion requires current owner and exact name but permits virtual and legacy stock") {
         val city = activeCity().copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), members = setOf(uuid(900)))
         CivsRules.requireDeletion(city, owner, city.id, " ${city.name} ") shouldBe Unit

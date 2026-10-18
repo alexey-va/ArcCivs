@@ -47,6 +47,8 @@ data class CivsSelectionView(
     val id: UUID, val worldId: UUID, val type: BuildingType, val expiresAt: Long, val busy: Boolean,
 )
 
+data class CivsSupplyResult(val moved: Long, val remaining: Long, val storageFull: Boolean)
+
 /** One block relative to Bukkit yaw: 0 south, 1 west, 2 north, 3 east. */
 enum class CivsPreviewMove { UP, DOWN, LEFT, RIGHT, TOWARD, AWAY }
 
@@ -99,6 +101,8 @@ interface CivsUiHost {
     fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit>
     fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>
+    fun supplyConstruction(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
+    fun grantConstructionMaterials(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
     fun availableMaterials(player: Player): Map<String, Long>
     fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>

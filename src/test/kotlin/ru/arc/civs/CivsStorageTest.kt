@@ -29,6 +29,8 @@ import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.block.BlockExplodeEvent
 import org.bukkit.event.world.ChunkLoadEvent
 import org.bukkit.event.world.ChunkUnloadEvent
+import org.bukkit.event.player.PlayerCommandPreprocessEvent
+import org.bukkit.event.player.PlayerItemConsumeEvent
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.ItemStack
@@ -37,6 +39,7 @@ import org.bukkit.persistence.PersistentDataType
 import org.bukkit.plugin.Plugin
 import org.mockbukkit.mockbukkit.world.WorldMock
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.playerstate.PaperPlayerDataPersistence
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
@@ -80,6 +83,154 @@ class CivsStorageTest : FunSpec({
         }
     }
     afterEach { storage.close(); paper.close() }
+
+    test("construction supplies transfer only missing plain storage cargo and preserve custom items and offhand") {
+        val player = paper.addPlayer("Supplier")
+        city = city.copy(owner = player.uniqueId)
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 4))
+        chest.setItem(0, ItemStack(Material.OAK_LOG, 2))
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        val custom = named(Material.OAK_LOG, 64)
+        player.inventory.setItem(1, custom)
+        player.inventory.setItem(2, ItemStack(Material.BREAD, 2))
+        player.inventory.setItemInOffHand(ItemStack(Material.BREAD, 20))
+        val id = UUID.randomUUID()
+        storage.lock(city, id, player)
+        val supplied = storage.prepareConstructionSupply(city, city.buildings.single().id,
+            mapOf("OAK_LOG" to 10L, "BREAD" to 5L), player)
+        supplied.result shouldBe CivsSupplyResult(6, 3, false)
+        player.inventory.getItem(0)!!.amount shouldBe 10
+        barrel.getItem(0)!!.amount shouldBe 4
+        val receipt = transaction(id, city, supplied.plan).validated()
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0)!!.amount shouldBe 6
+        player.inventory.getItem(1) shouldBe custom
+        player.inventory.getItem(2) shouldBe null
+        player.inventory.itemInOffHand.amount shouldBe 20
+        barrel.getItem(0)!!.amount shouldBe 8
+        storage.available(city) shouldBe mapOf("BREAD" to 2L, "OAK_LOG" to 10L)
+        supplied.plan.inventoryAfter.materials shouldBe mapOf("OAK_LOG" to 3L)
+        (paper.playerDataSaveCount(player) > 0) shouldBe true
+    }
+
+    for (grant in listOf(false, true)) test("construction supply grant=$grant keeps overflow out of both native and virtual storage") {
+        val player = paper.addPlayer("PartialSupplier")
+        // Paper's current view always has a top inventory; MockBukkit's initial view leaves it null.
+        player.openInventory(paper.server.createInventory(player, 9))
+        city = city.copy(owner = player.uniqueId)
+        for (slot in 0 until 27) {
+            barrel.setItem(slot, ItemStack(Material.STONE, 64))
+            chest.setItem(slot, ItemStack(Material.STONE, 64))
+        }
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 62))
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        val id = UUID.randomUUID()
+        storage.lock(city, id, if (grant) null else player)
+        val supplied = storage.prepareConstructionSupply(city, city.buildings.single().id, mapOf("OAK_LOG" to 70L), if (grant) null else player)
+        supplied.result shouldBe CivsSupplyResult(2, 6, true)
+        storage.reconcile(transaction(id, city, supplied.plan)) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.amount shouldBe 64
+        player.inventory.getItem(0)!!.amount shouldBe if (grant) 10 else 8
+        supplied.plan.inventoryAfter shouldBe city.inventory
+        val next = storage.prepareConstructionSupply(city, city.buildings.single().id, mapOf("OAK_LOG" to 70L), if (grant) null else player)
+        next.result shouldBe CivsSupplyResult(0, 6, true)
+        next.plan.changes shouldBe emptyList()
+        next.plan.playerDebit shouldBe null
+    }
+
+    test("changed player metadata conflicts before every native write and before saving player data") {
+        val player = paper.addPlayer("ChangedSupplier")
+        city = city.copy(owner = player.uniqueId)
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        val id = UUID.randomUUID()
+        storage.lock(city, id, player)
+        val prepared = storage.prepareConstructionSupply(city, city.buildings.single().id, mapOf("OAK_LOG" to 4L), player)
+        val custom = named(Material.OAK_LOG, 10)
+        player.inventory.setItem(0, custom) // An external plugin bypassed the event lock while journal IO was pending.
+        val beforeSaves = paper.playerDataSaveCount(player)
+        val outcome = storage.reconcile(transaction(id, city, prepared.plan)) as CivInventoryApplyResult.Conflict
+        outcome.values["reason"] shouldBe "player-slot-drift"
+        player.inventory.getItem(0) shouldBe custom
+        barrel.isEmpty shouldBe true
+        chest.isEmpty shouldBe true
+        paper.playerDataSaveCount(player) shouldBe beforeSaves
+    }
+
+    test("a failed player save never credits containers and recovery reuses the already applied debit") {
+        val player = paper.addPlayer("DurableSupplier")
+        city = city.copy(owner = player.uniqueId)
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        storage.close()
+        var saves = 0
+        val persistence = PaperPlayerDataPersistence { source ->
+            saves++
+            source.inventory.getItem(0)!!.amount shouldBe 6
+            if (saves == 1) {
+                barrel.isEmpty shouldBe true
+                throw java.io.IOException("player save unavailable")
+            }
+        }
+        storage = CivsStorage(plugin, persistence) { emptyArray() }
+        val id = UUID.randomUUID()
+        storage.lock(city, id, player)
+        val receipt = transaction(id, city, storage.prepareConstructionSupply(city, city.buildings.single().id,
+            mapOf("OAK_LOG" to 4L), player).plan)
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        player.inventory.getItem(0)!!.amount shouldBe 6
+        barrel.isEmpty shouldBe true
+        storage.close()
+        storage = CivsStorage(plugin, persistence) { emptyArray() }
+        storage.lock(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0)!!.amount shouldBe 6
+        barrel.getItem(0)!!.amount shouldBe 4
+    }
+
+    test("offline supply recovery waits for its player and locks gameplay inventory mutations until release") {
+        val player = paper.addPlayer("ReturningSupplier")
+        city = city.copy(owner = player.uniqueId)
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        val id = UUID.randomUUID()
+        storage.lock(city, id, player)
+        val receipt = transaction(id, city, storage.prepareConstructionSupply(city, city.buildings.single().id,
+            mapOf("OAK_LOG" to 4L), player).plan)
+        val command = PlayerCommandPreprocessEvent(player, "/sellall")
+        paper.callEvent(command).isCancelled shouldBe true
+        paper.callEvent(PlayerItemConsumeEvent(player, ItemStack(Material.BREAD))).isCancelled shouldBe true
+        shouldThrow<CivsRejection> { storage.lock(city, UUID.randomUUID(), player) }.reason shouldBe "storage-busy"
+        player.disconnect()
+        storage.waitingForPlayer(receipt) shouldBe true
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        barrel.isEmpty shouldBe true
+        player.reconnect()
+        storage.waitingForPlayer(receipt) shouldBe false
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0)!!.amount shouldBe 6
+        storage.unlock(id)
+        paper.callEvent(PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe false
+        paper.callEvent(PlayerItemConsumeEvent(player, ItemStack(Material.BREAD))).isCancelled shouldBe false
+    }
+
+    test("player supply receipts reject duplicated slots foreign players growth and unequal material totals") {
+        val player = paper.addPlayer("CheckedSupplier")
+        city = city.copy(owner = player.uniqueId)
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 10))
+        val id = UUID.randomUUID()
+        storage.lock(city, id, player)
+        val receipt = transaction(id, city, storage.prepareConstructionSupply(city, city.buildings.single().id,
+            mapOf("OAK_LOG" to 4L), player).plan).validated()
+        val debit = requireNotNull(receipt.playerDebit)
+        val change = debit.changes.single()
+        listOf(
+            debit.copy(playerId = UUID.randomUUID()),
+            debit.copy(changes = listOf(change, change)),
+            debit.copy(changes = listOf(change.copy(slot = 36))),
+            debit.copy(changes = listOf(change.copy(after = CivPlainItem("OAK_LOG", 11)))),
+            debit.copy(changes = listOf(change.copy(after = CivPlainItem("OAK_LOG", 5)))),
+        ).forEach { invalid -> shouldThrow<IllegalArgumentException> { receipt.copy(playerDebit = invalid).validated() } }
+    }
 
     test("physical debit uses control before registered containers and never spends reserves or named cargo") {
         barrel.setItem(0, ItemStack(Material.OAK_LOG, 4))
@@ -726,7 +877,7 @@ class CivsStorageTest : FunSpec({
 })
 
 private fun transaction(id: UUID, city: Settlement, plan: CivStoragePlan) = CivInventoryTransaction(
-    id, city.id, city.revision, city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes,
+    id, city.id, city.revision, city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes, plan.playerDebit,
 )
 
 private fun named(material: Material, count: Int): ItemStack = ItemStack(material, count).also { item ->

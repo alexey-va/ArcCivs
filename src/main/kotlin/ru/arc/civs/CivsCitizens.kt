@@ -298,12 +298,21 @@ class CivsCitizens(
         }
         if (!actor.wander.ready(now) || wanderBudget == 0) return
         wanderBudget--
+        // Keep short invalid-target retries fair within the shared eight-check budget.
+        actors.remove(actor.workerId)
+        actors[actor.workerId] = actor
         val target = citizenWanderTarget(city, actor.plan.storage, actor.workerId, actor.wander.step)
-        actor.wander.finish(now, false)
-        if (target == null || !standable(world, target) ||
-            !CitizenChunks.between(actor.npc.entity.location.blockX, actor.npc.entity.location.blockZ, target.x, target.z).ready(world)) return
-        if (startRoute(actor, world, target, now)) CivsDiagnostics.event("citizen_wander", "city" to city.id,
-            "worker" to actor.workerId, "outcome" to "started", "target" to target)
+        // startRoute owns the single loaded-chunk, support and headroom check.
+        if (target != null && startRoute(actor, world, target, now)) {
+            CivsDiagnostics.event("citizen_wander", "city" to city.id,
+                "worker" to actor.workerId, "outcome" to "started", "target" to target)
+        } else {
+            actor.wander.reject(now)
+            if (actor.wander.step % CITIZEN_WANDER_HEIGHTS.size == 0) {
+                CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
+                    "outcome" to "target-unavailable", "target" to target, "next_step" to actor.wander.step)
+            }
+        }
     }
 
     private fun startRoute(actor: Actor, world: World, target: CivPosition, now: Long): Boolean {
@@ -316,10 +325,10 @@ class CivsCitizens(
         }
         val chunks = CitizenChunks.between(from.blockX, from.blockZ, target.x, target.z)
         if (!chunks.ready(world)) {
-            remove(actor, "chunk-unloaded")
+            if (actor.plan.idleReason == null) remove(actor, "chunk-unloaded")
             return false
         }
-        if (!standable(world, target)) {
+        if (!citizenStandable(world, target)) {
             if (actor.plan.idleReason == null) pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now)
             return false
         }
@@ -472,26 +481,12 @@ class CivsCitizens(
             1 to -1, -1 to -1, 2 to 0, -2 to 0, 0 to 2, 0 to -2)
         return offsets.indices.asSequence().map { offsets[(it + ordinal) % offsets.size] }
             .map { (x, z) -> CivPosition(storage.x + x, storage.y, storage.z + z) }
-            .filter { standable(world, it) }
+            .filter { citizenStandable(world, it) }
             .map { it.location(world) }
             .filter { citizenHasViewer(world.uid, it.point(), viewers, viewerRange) }
             .firstOrNull { location -> actors.values.none { actor ->
                 actor.npc.isSpawned && actor.worldId == world.uid && actor.npc.entity.location.distanceSquared(location) < 0.8
             } }
-    }
-
-    private fun standable(world: World, point: CivPosition): Boolean {
-        if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
-            point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return false
-        val feet = world.getBlockAt(point.x, point.y, point.z)
-        val head = world.getBlockAt(point.x, point.y + 1, point.z)
-        val floor = world.getBlockAt(point.x, point.y - 1, point.z)
-        val support = floor.boundingBox
-        val clearFeet = feet.isPassable || feet.type.name.endsWith("_CARPET") && feet.boundingBox.maxY <= point.y + 0.125
-        return clearFeet && !feet.isLiquid && head.isPassable && !head.isLiquid &&
-            !floor.isLiquid && support.maxY >= point.y - 0.01 &&
-            support.minX <= point.x + 0.2 && support.maxX >= point.x + 0.8 &&
-            support.minZ <= point.z + 0.2 && support.maxZ >= point.z + 0.8
     }
 
     private fun arrived(from: Location, to: Location): Boolean {
@@ -790,25 +785,48 @@ internal class CitizenWander {
         private set
     private var nextAt = 0L
     fun ready(now: Long): Boolean = now >= nextAt
+    fun reject(now: Long) {
+        step = (step + 1) % (CITIZEN_WANDER_OFFSETS.size * CITIZEN_WANDER_HEIGHTS.size)
+        schedule(now, 1_000L)
+    }
     fun finish(now: Long, arrived: Boolean) {
-        step = (step + 1) % 24
-        val delay = if (arrived) 5_000L else 15_000L
+        step = ((step / CITIZEN_WANDER_HEIGHTS.size + 1) % CITIZEN_WANDER_OFFSETS.size) * CITIZEN_WANDER_HEIGHTS.size
+        schedule(now, if (arrived) 5_000L else 15_000L)
+    }
+    private fun schedule(now: Long, delay: Long) {
         nextAt = if (now > Long.MAX_VALUE - delay) Long.MAX_VALUE else now + delay
     }
 }
 
+private val CITIZEN_WANDER_OFFSETS = listOf(4 to 0, 3 to 3, 0 to 4, -3 to 3, -4 to 0, -3 to -3, 0 to -4, 3 to -3)
+private val CITIZEN_WANDER_HEIGHTS = listOf(0, 1, -1, 2, -2)
+
 /** One candidate per actor admission. Native support/headroom checks belong to the bounded pulse. */
 internal fun citizenWanderTarget(city: Settlement, storage: CivPosition, workerId: UUID, step: Int): CivPosition? {
-    val offsets = listOf(4 to 0, 3 to 3, 0 to 4, -3 to 3, -4 to 0, -3 to -3, 0 to -4, 3 to -3)
     val seed = workerId.mostSignificantBits xor workerId.leastSignificantBits
-    val (dx, dz) = offsets[Math.floorMod(Math.floorMod(seed, 8L).toInt() + step, offsets.size)]
-    val dy = listOf(0, 1, -1)[Math.floorMod(step / offsets.size, 3)]
+    val offset = Math.floorDiv(step, CITIZEN_WANDER_HEIGHTS.size)
+    val (dx, dz) = CITIZEN_WANDER_OFFSETS[Math.floorMod(Math.floorMod(seed, 8L).toInt() + offset, CITIZEN_WANDER_OFFSETS.size)]
+    val dy = CITIZEN_WANDER_HEIGHTS[Math.floorMod(step, CITIZEN_WANDER_HEIGHTS.size)]
     val x = storage.x.toLong() + dx
     val y = storage.y.toLong() + dy
     val z = storage.z.toLong() + dz
     if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
         z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) return null
     return CivPosition(x.toInt(), y.toInt(), z.toInt()).takeIf { city.contains(it.x, it.z) }
+}
+
+internal fun citizenStandable(world: World, point: CivPosition): Boolean {
+    if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
+        point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return false
+    val feet = world.getBlockAt(point.x, point.y, point.z)
+    val head = world.getBlockAt(point.x, point.y + 1, point.z)
+    val floor = world.getBlockAt(point.x, point.y - 1, point.z)
+    val support = floor.boundingBox
+    val clearFeet = feet.isPassable || feet.type.name.endsWith("_CARPET") && feet.boundingBox.maxY <= point.y + 0.125
+    return clearFeet && !feet.isLiquid && head.isPassable && !head.isLiquid &&
+        !floor.isLiquid && support.maxY >= point.y - 0.01 &&
+        support.minX <= point.x + 0.2 && support.maxX >= point.x + 0.8 &&
+        support.minZ <= point.z + 0.2 && support.maxZ >= point.z + 0.8
 }
 
 internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, RETURNING, READY, DELIVERING, PAUSED, CLOSED }

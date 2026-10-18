@@ -662,26 +662,51 @@ class CivsUi internal constructor(
         val available = runCatching { host.availableMaterials(player) }
         val entries = (order?.materials ?: estimate).toSortedMap().entries.toList()
         val incremental = order?.payment != null
-        val current = page.coerceIn(0, lastPage(entries.size))
+        val current = page.coerceIn(0, lastPage(entries.size, MATERIALS_PAGE_SIZE))
+        val canSupply = !host.cityBusy(player) && available.isSuccess && (order == null || incremental) &&
+            entries.any { (material, count) -> count > (available.getOrNull()?.get(material) ?: 0) }
+        fun supplied(result: CivsSupplyResult) {
+            var message = if (result.moved == 0L && result.remaining == 0L) tr(player, "materials.supplies-ready")
+                else tr(player, "materials.supplied", "moved" to result.moved, "remaining" to result.remaining)
+            if (result.storageFull) message = message.append(Component.space()).append(tr(player, "materials.storage-full"))
+            showBuildingMaterials(player, buildingId, estimate, current, message.color(if (result.remaining > 0) STOCK else COMMIT))
+        }
         present(player, "civs.building-materials", "materials.title", listOfNotNull(
-            body(buildingName(player, building.type, order?.targetLevel ?: building.level)),
-            body(player, when { incremental -> "materials.remaining-help"; order != null -> "materials.prepaid-help"; else -> "materials.estimate-help" }),
-            order?.let { body(constructionText(player, city)) },
-            if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
+            PaperDialogBody(buildingName(player, building.type, order?.targetLevel ?: building.level).let { name ->
+                if (order == null) name else name.append(Component.text(" · ${order.workDone}/${order.workRequired}"))
+            }, 460),
+            PaperDialogBody(error ?: tr(player, when {
+                order != null && !incremental -> "materials.prepaid-help"
+                order?.phase == ConstructionPhase.WAITING_MATERIALS -> "materials.waiting-help"
+                incremental -> "materials.remaining-help"
+                else -> "materials.site-help"
+            }), 460),
+            if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * MATERIALS_PAGE_SIZE).take(MATERIALS_PAGE_SIZE).map { (material, count) ->
                 materialName(player, material) to tr(player, if (incremental) "materials.available-remaining" else "materials.available-needed",
                     "have" to (available.getOrNull()?.get(material) ?: 0), "need" to count)
             }, tr(player, "materials.item") to tr(player, "materials.stock-needed"),
                 DialogTables.Frame.EPIC, 320, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
-            if (order == null) body(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help") else null,
-            if (order?.phase == ConstructionPhase.WAITING_MATERIALS) body(player, "materials.waiting-help") else null,
             if (city.construction != null && order == null) body(player, "reason.construction-busy") else null,
-            available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player), error?.let(::body),
+            available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player),
         ), buildList {
+            if (canSupply) {
+                add(button(player, "supply", "materials.supply", STOCK) {
+                    perform(player, "civs.building-materials", "materials.title", { host.supplyConstruction(player, buildingId) },
+                        success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
+                        workingKey = "materials.supplying")
+                }.copy(tooltip = tr(player, "materials.supply-help")))
+                if (isAdmin(player)) add(button(player, "grant", "materials.grant", PERSONAL) {
+                    perform(player, "civs.building-materials", "materials.title", { host.grantConstructionMaterials(player, buildingId) },
+                        success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
+                        workingKey = "materials.supplying")
+                }.copy(tooltip = tr(player, "materials.grant-help")))
+            }
             if (city.construction == null && !host.cityBusy(player) && available.isSuccess) add(button(player, "start", "materials.start", COMMIT) {
                 perform(player, "civs.building-materials", "materials.title", { host.startBuilding(player, buildingId) },
-                    success = { showBuilding(player, buildingId) }, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) })
-            })
-            pages(player, current, entries.size) { showBuildingMaterials(player, buildingId, estimate, it) }
+                    success = { showBuilding(player, buildingId) }, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
+                    workingKey = "materials.preparing")
+            }.copy(tooltip = tr(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help")))
+            pages(player, current, entries.size, MATERIALS_PAGE_SIZE) { showBuildingMaterials(player, buildingId, estimate, it) }
         }, reopen = { showBuildingMaterials(player, buildingId, estimate, current) })
     }
 
@@ -1014,19 +1039,19 @@ class CivsUi internal constructor(
         }
     }
 
-    private fun perform(player: Player, id: String, title: String, action: () -> CompletableFuture<Unit>,
-        success: () -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null,
+    private fun <T : Any> perform(player: Player, id: String, title: String, action: () -> CompletableFuture<T>,
+        success: (T) -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null,
         workingKey: String = "common.working") {
         val visit = present(player, id, title, listOf(body(player, workingKey)), emptyList()) ?: return
         visit.cancelPending = cancelPending
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
-        future.whenCompleteSync(tasks, visit.epoch) { _, error ->
+        future.whenCompleteSync(tasks, visit.epoch) { result, error ->
             if (!current(player, visit)) {
                 CivsDiagnostics.event("ui_completion_ignored", "player" to player.uniqueId, "screen" to id, "visit" to visit.id)
                 return@whenCompleteSync
             }
             visit.cancelPending = null
-            if (error == null) success() else failure(text.failure(player, error))
+            if (error == null) success(requireNotNull(result)) else failure(text.failure(player, error))
         }
     }
 
@@ -1081,12 +1106,12 @@ class CivsUi internal constructor(
         PaperDialogButton(PaperDialogActionId.of(id), tr(player, key, "value" to value).color(color), tooltip,
             width = 230, onClick = { action() })
 
-    private fun MutableList<PaperDialogButton>.pages(player: Player, page: Int, count: Int, show: (Int) -> Unit) {
+    private fun MutableList<PaperDialogButton>.pages(player: Player, page: Int, count: Int, pageSize: Int = PAGE_SIZE, show: (Int) -> Unit) {
         if (page > 0) add(button(player, "previous", "common.previous", NAVIGATION) { show(page - 1) })
-        if (page < lastPage(count)) add(button(player, "next", "common.next", NAVIGATION) { show(page + 1) })
+        if (page < lastPage(count, pageSize)) add(button(player, "next", "common.next", NAVIGATION) { show(page + 1) })
     }
 
-    private fun lastPage(count: Int): Int = ((count - 1).coerceAtLeast(0)) / PAGE_SIZE
+    private fun lastPage(count: Int, pageSize: Int = PAGE_SIZE): Int = ((count - 1).coerceAtLeast(0)) / pageSize
     private fun isAdmin(player: Player): Boolean = player.hasPermission("arccivs.admin")
     private fun tr(player: Player, key: String, vararg values: Pair<String, Any?>): Component = text.render(player, key, *values)
     private fun body(player: Player, key: String): PaperDialogBody = body(tr(player, key))
@@ -1115,6 +1140,7 @@ class CivsUi internal constructor(
 
     private companion object {
         const val PAGE_SIZE = 8
+        const val MATERIALS_PAGE_SIZE = 16
         val NAME = PaperDialogInputId.of("city_name")
         val DELETE_NAME = PaperDialogInputId.of("delete_city_name")
         val MEMBER = PaperDialogInputId.of("member_name")

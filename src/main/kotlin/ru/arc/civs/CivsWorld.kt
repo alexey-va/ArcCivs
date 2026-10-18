@@ -18,17 +18,19 @@ import java.util.concurrent.CompletableFuture
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
  * Requests may arrive on any thread. All Bukkit reads run in one lifecycle-owned timer,
- * sharing 256 cells/tick across at most four scans. No scan loads a chunk or changes a block.
+ * sharing a time-bounded 2048-cell budget across at most four scans. No scan loads a chunk or changes a block.
  * Final revalidation must follow publication of the durable, protected construction footprint.
  */
 class CivsWorld(
     private val plugin: Plugin,
     tasks: LifecycleTaskScope,
+    private val nanoTime: () -> Long = System::nanoTime,
     private val cities: () -> Collection<Settlement>,
 ) : AutoCloseable {
     private val monitor = Any()
     private val pending = LinkedHashSet<Scan<*>>()
     private var closed = false
+    private var nextScan = 0
     private var lands: CivsLandsAccess? = null
     private val timer = tasks.runTimer(1, 1, ::tick)
 
@@ -94,15 +96,18 @@ class CivsWorld(
             pending.removeIf { it.future.isDone }
             pending.toList()
         }
+        if (scans.isEmpty()) return
+        val started = nanoTime()
         scans.forEach { scan -> scan.guarded { scan.validateContext() } }
         var remaining = CELLS_PER_TICK
+        // Keep the next participant across ticks even when one expensive cell exhausts the time budget.
         while (remaining > 0 && scans.any { !it.future.isDone }) {
-            for (scan in scans) {
-                if (remaining == 0) break
-                if (scan.future.isDone) continue
-                scan.guarded { scan.step() }
-                remaining--
-            }
+            if (remaining < CELLS_PER_TICK && nanoTime() - started >= NANOS_PER_TICK) break
+            val scan = scans[nextScan.mod(scans.size)]
+            nextScan = (nextScan + 1).mod(scans.size)
+            if (scan.future.isDone) continue
+            scan.guarded { scan.step() }
+            remaining--
         }
     }
 
@@ -115,6 +120,7 @@ class CivsWorld(
         private val palette = HashMap<String, BlockData>()
         private val authoredControl = building.control.takeIf { CivsBlueprints.hasAuthoredControl(building) }
         protected var index = 0
+        private val startedAt = System.nanoTime()
 
         init {
             requireCivs(civsBoxVolume(building.bounds) in 1..CivsStore.MAX_PLAN_BLOCKS.toLong(), "invalid-building")
@@ -201,6 +207,9 @@ class CivsWorld(
         protected fun finish(value: T) {
             validateContext()
             synchronized(monitor) { pending.remove(this) }
+            CivsDiagnostics.event("world_scan", "city" to cityId, "building" to building.id,
+                "phase" to javaClass.simpleName.lowercase(), "cells" to index,
+                "elapsed_ms" to (System.nanoTime() - startedAt) / 1_000_000, "outcome" to "completed")
             future.complete(value)
         }
 
@@ -262,10 +271,11 @@ class CivsWorld(
                 checkControl(block)
                 return
             }
+            val state = if (block.type.isAir) null else block.state
             if (block.type == Material.BEDROCK || previous?.bounds?.contains(position.x, position.y, position.z) != true &&
-                block.state is TileState) rejectAt("protected-terrain", block)
+                state is TileState) rejectAt("protected-terrain", block)
             // Never replace a player's inventory, including chests installed while a SITE was waiting.
-            if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
+            if ((state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             if (cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
                 rejectAt("registered-container", block)
             val after = parse(cell.blockData)
@@ -311,7 +321,8 @@ class CivsWorld(
     }
 
     companion object {
-        const val CELLS_PER_TICK = 256
+        const val CELLS_PER_TICK = 2048
+        const val NANOS_PER_TICK = 2_000_000L
         const val MAX_SCANS = 4
     }
 }
