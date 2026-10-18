@@ -91,7 +91,7 @@
    резервного режима записи нет. Пароль доставляется отдельно штатной процедурой.
    `mysql` использует Core-ключи `host`, `port`, `database`, `username`, `password`,
    `ssl-mode`, `pool` и `fail-fast`; учётной записи нужны SELECT, INSERT, UPDATE,
-   DELETE, CREATE для схемы `arc_civs`.
+   DELETE, CREATE, REFERENCES для общей базы, указанной в `mysql.database`.
    Проверьте также корень схем, разрешённые миры,
    пределы городов/предпросмотров и язык. По умолчанию разрешены миры `vanilla` и `survival`,
    язык — русский для всех клиентов (`force-language: ru`). Английский каталог
