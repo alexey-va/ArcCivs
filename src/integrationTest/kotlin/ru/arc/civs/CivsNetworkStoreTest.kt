@@ -48,6 +48,7 @@ class CivsNetworkStoreTest : FreeSpec({
             connection.createStatement().use { statement ->
                 statement.executeUpdate("DELETE FROM arc_civs_member")
                 statement.executeUpdate("DELETE FROM arc_civs_city")
+                statement.executeUpdate("DELETE FROM arc_civs_deleted")
             }
         }
     }
@@ -208,6 +209,167 @@ class CivsNetworkStoreTest : FreeSpec({
         }
     }
 
+    "deletion atomically releases all membership and permanently fences its UUID under the home owner and snapshot" {
+        val member = UUID.randomUUID()
+        val initial = settlement().copy(members = setOf(member))
+        spawn.save(initial).await()
+        val canonical = emptyInventory(initial).copy(revision = 1)
+        spawn.save(canonical).await()
+
+        failure { survival.delete(canonical).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "remote-city"
+        failure { spawn.delete(canonical.copy(owner = UUID.randomUUID())).await() }
+            .shouldBeInstanceOf<CivsRejection>().reason shouldBe "owner-required"
+        listOf(initial, canonical.copy(name = "Different same revision"), canonical.copy(revision = 2)).forEach { stale ->
+            failure { spawn.delete(stale).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "stale-city"
+        }
+        spawn.lookup(member).await()?.city shouldBe canonical
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 0
+
+        spawn.delete(canonical).await() shouldBe Unit
+        spawn.delete(canonical).await() shouldBe Unit
+        listOf(canonical.owner, member).forEach { survival.lookup(it).await() shouldBe null }
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_member") shouldBe 0
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_city") shouldBe 0
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 1
+        failure { survival.delete(canonical).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "remote-city"
+        failure { spawn.delete(canonical.copy(revision = 0)).await() }
+            .shouldBeInstanceOf<CivsRejection>().reason shouldBe "stale-city"
+        listOf(initial, canonical, canonical.copy(revision = 2)).forEach { stale ->
+            failure { spawn.save(stale).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+        }
+        spawn.loadOwned(listOf(initial)).await() shouldBe emptyList()
+
+        val proposal = settlement(owner = canonical.owner)
+        val recreated = emptyInventory(proposal)
+        survival.save(proposal).await() shouldBe recreated
+        survival.save(proposal).await() shouldBe recreated
+        spawn.lookup(canonical.owner).await()?.city shouldBe recreated
+        val formerMember = settlement(owner = member)
+        spawn.save(formerMember).await() shouldBe formerMember
+        val earned = recreated.copy(revision = 1,
+            inventory = requireNotNull(recreated.inventory).copy(materials = mapOf("BREAD" to 5L)))
+        survival.save(earned).await() shouldBe earned
+    }
+
+    "legacy-shaped new founding cannot repeat a grant while legacy import remains lossless" {
+        val deleted = emptyInventory(settlement())
+        spawn.save(deleted).await()
+        spawn.delete(deleted).await()
+        val proposal = settlement(owner = deleted.owner).copy(inventory = null, stock = CivsRules.STARTING_STOCK)
+        val recreated = proposal.copy(stock = Stock())
+        survival.save(proposal).await() shouldBe recreated
+        survival.save(proposal).await() shouldBe recreated
+        spawn.lookup(deleted.owner).await()?.city shouldBe recreated
+        survival.delete(recreated).await()
+        val legacy = settlement(owner = deleted.owner).copy(inventory = null, stock = CivsRules.STARTING_STOCK)
+        spawn.loadOwned(listOf(legacy)).await() shouldBe listOf(legacy)
+        spawn.save(legacy).await() shouldBe legacy
+    }
+
+    "a racing deletion and revision update cannot resurrect or partially delete a city" {
+        val city = emptyInventory(settlement()).copy(members = setOf(UUID.randomUUID()))
+        spawn.save(city).await()
+        val secondHome = openStore(requireNotNull(mysql).endpoint, "spawn").also(opened::add)
+        secondHome.loadOwned(emptyList()).await()
+        val updated = city.copy(name = "Updated before deletion", revision = 1)
+        val ready = CyclicBarrier(2)
+        val results = Executors.newFixedThreadPool(2).use { workers ->
+            listOf<() -> Unit>({ spawn.delete(city).await() }, { secondHome.save(updated).await(); Unit }).map { action ->
+                CompletableFuture.supplyAsync({ ready.await(10, TimeUnit.SECONDS); runCatching(action) }, workers)
+            }.map { it.await() }
+        }
+        results.count { it.isSuccess } shouldBe 1
+        results.count { it.isFailure } shouldBe 1
+        val remaining = spawn.lookup(city.owner).await()?.city
+        if (remaining == null) {
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 1
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_member") shouldBe 0
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_city") shouldBe 0
+            results.single { it.isFailure }.exceptionOrNull()!!.unwrapped()
+                .shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+        } else {
+            remaining shouldBe updated
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 0
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_member") shouldBe 2
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_city") shouldBe 1
+            results.single { it.isFailure }.exceptionOrNull()!!.unwrapped()
+                .shouldBeInstanceOf<CivsRejection>().reason shouldBe "stale-city"
+        }
+    }
+
+    "local deletion history imports before old JSON and preserves both owner history and genuine legacy reserves" {
+        val root = Files.createTempDirectory("arc-civs-local-deletion-")
+        try {
+            val deleted = emptyInventory(settlement())
+            CivsStore(root, directExecutor).use { local -> local.save(deleted).await(); local.delete(deleted).await() }
+            val oldPath = root.resolve("cities/${deleted.id}.json")
+            writeCity(oldPath, deleted)
+            val oldBytes = Files.readAllBytes(oldPath).toList()
+            // A different legacy UUID at revision zero is imported as-is, rather than treated as a fresh founding.
+            val legacy = settlement(owner = deleted.owner)
+            val legacyPath = root.resolve("cities/${legacy.id}.json")
+            writeCity(legacyPath, legacy)
+            val legacyBytes = Files.readAllBytes(legacyPath).toList()
+            CivsStore(root, directExecutor, network = spawn).use { store ->
+                store.load().await() shouldBe listOf(legacy)
+                store.load().await() shouldBe listOf(legacy)
+                store.save(legacy).await() shouldBe legacy
+            }
+            Files.readAllBytes(oldPath).toList() shouldBe oldBytes
+            Files.readAllBytes(legacyPath).toList() shouldBe legacyBytes
+            tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 1
+            failure { spawn.save(deleted).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+            val emptied = emptyInventory(legacy).copy(revision = 1)
+            spawn.save(emptied).await()
+            spawn.delete(emptied).await()
+            val next = settlement(owner = deleted.owner)
+            survival.save(next).await() shouldBe emptyInventory(next)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    "legacy deletion history cannot remove a canonical SQL city or commit a partial import" {
+        val first = CivsDeletedCity(UUID.randomUUID(), UUID.randomUUID(), null, 0, 1_000)
+        val live = emptyInventory(settlement())
+        spawn.save(live).await()
+        val conflicting = CivsDeletedCity(live.id, live.owner, null, live.revision, 1_000)
+        failure { spawn.loadOwned(emptyList(), listOf(first, conflicting)).await() }.shouldBeInstanceOf<IllegalStateException>()
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_deleted") shouldBe 0
+        spawn.lookup(live.owner).await()?.city shouldBe live
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_member") shouldBe 1
+    }
+
+    "network deletion persists local history before old JSON cleanup and preserves plans and captures" {
+        val root = Files.createTempDirectory("arc-civs-network-deletion-")
+        try {
+            val initial = emptyInventory(settlement())
+            val canonical = initial.copy(name = "Canonical before delete", revision = 1)
+            val plan = placementPlan(initial)
+            CivsStore(root, directExecutor, network = spawn).use { store ->
+                store.save(initial).await()
+                store.save(canonical).await()
+                writeCity(root.resolve("cities/${initial.id}.json"), initial)
+                store.savePlan(plan).await()
+                store.saveSchematic(plan.id, byteArrayOf(1, 2, 3)).await()
+                store.delete(canonical).await() shouldBe Unit
+                store.delete(canonical).await() shouldBe Unit
+            }
+            Files.exists(root.resolve("cities/${initial.id}.json")) shouldBe false
+            Files.exists(root.resolve("deleted-cities/${initial.id}.json")) shouldBe true
+            CivsStore(root, directExecutor, network = spawn).use { reopened ->
+                reopened.load().await() shouldBe emptyList()
+                reopened.loadPlan(plan.id).await() shouldBe plan
+                reopened.loadSchematic(plan.id).await()?.toList() shouldBe listOf<Byte>(1, 2, 3)
+                reopened.delete(canonical).await() shouldBe Unit
+            }
+            val proposal = settlement(owner = canonical.owner)
+            survival.save(proposal).await() shouldBe emptyInventory(proposal)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
     "failed initialization drains and closes owned SQL without waiting on its own worker" {
         val admin = requireNotNull(mysql).endpoint.copy(username = "root", password = mysqlSettings.rootPassword)
         val schema = "arc_civs_initialization_failure"
@@ -252,6 +414,10 @@ class CivsNetworkStoreTest : FreeSpec({
 }) {
     companion object {
         private val directExecutor = Executor { it.run() }
+
+        private fun emptyInventory(city: Settlement): Settlement = city.copy(stock = Stock(),
+            inventory = city.inventory?.let { it.copy(materials = emptyMap(),
+                buildingMaterials = it.buildingMaterials?.mapValues { emptyMap() }) })
 
         private fun openStore(endpoint: MySqlTestEndpoint, server: String): CivsNetworkStore =
             CivsNetworkStore.create(BackendServerId.of(server), 500, CompletableFuture.completedFuture(openRuntime(endpoint, server)))

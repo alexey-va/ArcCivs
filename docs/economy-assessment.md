@@ -1,4 +1,4 @@
-# ArcCivs 0.1.13 economy assessment
+# ArcCivs 0.1.14 economy assessment
 
 The requested change opens the former closed WOOD/STONE/FOOD stock into real
 vanilla items. Buildings now reserve their exact material palette; owners can
@@ -83,8 +83,11 @@ withdrawals and sales; it is not observed income or a guaranteed return.
 The planned EconomyShopGUI SELL-to-contract transition remains a future
 scenario. This task does not disable SELL, AutoSellChests, or change shop prices.
 No current contract multiplier, payout or stacking bonus is assumed for these
-items. Multi-account city grants remain bounded by global unique membership and
-lack of a public city-reset/delete loop; the once-only grant is not daily income.
+items. Global unique membership limits simultaneous cities per account. Version
+0.1.14 adds deletion: a durable deleted-city record also records the owner, so a
+new city after deletion receives no new starting reserve, including on another
+backend. Different accounts still have separate first grants. The grant is not
+daily income.
 
 ## Decision and verification boundary
 
@@ -102,3 +105,31 @@ failure that rolls back a chunk after receipt retirement remains a platform
 boundary. Back up SQL, world chunks and local plans/captured/inventory journal
 files together. Ordinary restart recovery and repeated actions have focused
 regression coverage; this assessment does not claim power-loss atomicity.
+
+## Deletion change (0.1.13 to 0.1.14)
+
+First founding remains 96 oak logs, 96 cobblestone and 24 bread per owner. Before,
+there was no deletion action; after, any number of delete/refound cycles grants
+0 additional logs, 0 cobblestone and 0 bread. Common and building virtual stock,
+and remaining legacy stock, must be withdrawn before deletion. Native contents
+and placed buildings remain in the world. Reserved construction materials are
+not refunded; unfinished buildings remain partially built. No direct Vault,
+token or XP flow is introduced, and production rates/capacities are unchanged.
+
+SQL migration 2 records immutable deleted city IDs and owner history under the
+existing registry transaction lock. Standalone storage writes an atomic deletion
+record before removing its city file; later SQL import imports that history.
+Exact deletion retries are idempotent; stale saves/imports cannot restore the
+deleted ID. Backups must retain the deletion history as well as active cities.
+This is a resource-preservation and repeat-grant check, not a claim of live
+activation or measured behavior.
+
+Independent review also identified a free-control loop: keeping a generated
+barrel after deletion could mint another on refounding. New SITE registration
+now requires a player-placed barrel, checked before and after world capture.
+SITE/CONSTRUCTING controls never regenerate automatically; a missing SITE
+control can be replaced by an owner/member using an ordinary barrel. Starting
+construction requires it present. Thus each new site uses an existing item and
+delete/refound creates zero net new barrels. Existing ACTIVE legacy controls
+keep compatibility repair; new cities are never founded as ACTIVE. No native
+container contents are removed, converted or refunded by deletion.

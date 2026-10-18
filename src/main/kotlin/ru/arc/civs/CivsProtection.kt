@@ -4,6 +4,7 @@ import com.destroystokyo.paper.event.block.BlockDestroyEvent
 import io.papermc.paper.event.block.PlayerShearBlockEvent
 import org.bukkit.Bukkit
 import org.bukkit.Location
+import org.bukkit.Material
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
 import org.bukkit.block.BlockState
@@ -33,8 +34,8 @@ import org.bukkit.inventory.InventoryHolder
 import java.util.UUID
 
 /**
- * Members may remodel finished buildings and unstarted sites. Control blocks and the
- * current/planned footprint of an accepted construction stay locked for everyone.
+ * Members may remodel finished buildings and unstarted sites, and restore a missing SITE barrel.
+ * Existing control blocks and the current/planned footprint of accepted construction stay locked for everyone.
  * Environmental changes and third-party pastes retain the complete footprint guard;
  * the settlement radius itself grants no event protection. Core pastes do not emit these events.
  */
@@ -43,13 +44,15 @@ class CivsProtection(
     private val available: () -> Boolean = { true },
     private val protectedWorlds: Set<String> = emptySet(),
 ) : Listener {
-    internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>)
+    internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>,
+        val barrelRestorers: Set<UUID> = emptySet())
     internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
         val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>)
     internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
-        fun contains(x: Int, y: Int, z: Int, actor: UUID?): Boolean = bounds.contains(x, y, z) &&
-            (boxes.any { it.bounds.contains(x, y, z) && (actor == null || actor !in it.editors) } ||
-                left?.contains(x, y, z, actor) == true || right?.contains(x, y, z, actor) == true)
+        fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false): Boolean = bounds.contains(x, y, z) &&
+            (boxes.any { it.bounds.contains(x, y, z) &&
+                (actor == null || actor !in it.editors && (!restoringBarrel || actor !in it.barrelRestorers)) } ||
+                left?.contains(x, y, z, actor, restoringBarrel) == true || right?.contains(x, y, z, actor, restoringBarrel) == true)
     }
     private var snapshot = prepare(emptyList())
 
@@ -80,8 +83,11 @@ class CivsProtection(
                         add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
                     }
                     city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
-                    civsProtectedBuildings(city).mapNotNull { it.control }.distinct().forEach { point ->
-                        add(Footprint(city.worldId, CivBox(point, point), emptySet()))
+                    civsProtectedBuildings(city).forEach { building ->
+                        val point = building.control ?: return@forEach
+                        val restorers = if (building.phase == BuildingPhase.SITE && city.construction?.buildingId != building.id)
+                            editors else emptySet()
+                        add(Footprint(city.worldId, CivBox(point, point), emptySet(), restorers))
                     }
                 }
             }.distinct()
@@ -104,8 +110,11 @@ class CivsProtection(
     }
 
     fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID? = null): Boolean =
+        isProtected(worldId, x, y, z, actor, false)
+
+    private fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean): Boolean =
         (!available() && Bukkit.getWorld(worldId)?.name in protectedWorlds) ||
-            snapshot.worlds[worldId]?.contains(x, y, z, actor) == true
+            snapshot.worlds[worldId]?.contains(x, y, z, actor, restoringBarrel) == true
 
     private fun protected(block: Block): Boolean = isProtected(block.world.uid, block.x, block.y, block.z)
     private fun protected(location: Location?): Boolean = location?.world?.let {
@@ -143,7 +152,12 @@ class CivsProtection(
     fun breakBlock(event: BlockBreakEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun placeBlock(event: BlockPlaceEvent) { if (protected(event.blockPlaced, event.player.uniqueId)) event.isCancelled = true }
+    fun placeBlock(event: BlockPlaceEvent) {
+        val block = event.blockPlaced
+        val restoringBarrel = event !is BlockMultiPlaceEvent && block.type == Material.BARREL &&
+            event.blockReplacedState.type != Material.BARREL
+        if (isProtected(block.world.uid, block.x, block.y, block.z, event.player.uniqueId, restoringBarrel)) event.isCancelled = true
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun placeMultiple(event: BlockMultiPlaceEvent) {

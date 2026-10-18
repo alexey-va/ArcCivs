@@ -342,8 +342,25 @@ class CivsUiTest : FunSpec({
             h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit", "refresh")
             h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
             h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
-            h.body() shouldContain "Marking a site is free"
+            h.body() shouldContain "Place a normal barrel below the future entrance"
             verify(exactly = 0) { h.host.startBuilding(any(), any()); h.host.availableMaterials(any()) }
+        }
+    }
+
+    test("site instructions identify the player barrel and display its exact position below the entrance") {
+        withUi { h ->
+            h.open(); h.click("found"); h.click("style_0")
+            h.body() shouldContain "right-click your barrel below the future town hall entrance"
+            h.preview = preview().copy(anchor = CivPosition(20, 60, 30), entrance = CivPosition(8, 66, 9))
+            h.open()
+            h.body() shouldContain "Control block"
+            h.body() shouldContain "8, 65, 9"
+            h.body() shouldContain "Place a barrel at the new position before moving"
+            h.body().contains("20, 60, 30") shouldBe false
+            h.preview = h.preview!!.copy(movable = false)
+            h.open()
+            h.body() shouldContain "20, 60, 30"
+            h.body() shouldContain "Confirm to start the upgrade"
         }
     }
 
@@ -554,11 +571,128 @@ class CivsUiTest : FunSpec({
     test("management members cannot edit membership and upgrade previews cannot move") {
         withUi { h ->
             h.city = settlement(h.player).copy(owner = UUID.randomUUID(), members = setOf(h.player.uniqueId))
-            h.open(); h.click("members")
+            h.open()
+            h.screen.buttons.map { it.id.value } shouldNotContain "delete_city"
+            h.click("members")
             h.screen.buttons.map { it.id.value } shouldNotContain "add"
             h.preview = preview().copy(level = 2)
             h.open()
             h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
+        }
+    }
+
+    test("the owner deletes the captured town and the completed flow cannot return to its overview") {
+        withUi(realHistory = true) { h ->
+            val base = settlement(h.player)
+            val city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), construction = CivConstruction(
+                UUID.randomUUID(), base.buildings.last().id, 2, 100, 20, ConstructionPhase.CONSTRUCTING,
+                Stock(), materials = mapOf("OAK_LOG" to 24L)))
+            h.city = city
+            every { h.host.deleteCity(any(), any(), any()) } answers {
+                h.city = null
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.open()
+            h.screen.buttons.single { it.id.value == "delete_city" }.label.color() shouldBe TextColor.color(0xFF6B61)
+            h.click("delete_city")
+            h.body() shouldContain "Buildings and items in chests and barrels remain"
+            h.body() shouldContain "Starting materials are not granted again"
+            h.body() shouldContain "Materials already spent are not refunded"
+            h.click("delete", mapOf("delete_city_name" to city.name))
+            h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.deleteCity(h.player, city.id, city.name) }
+            h.screen.id shouldBe "civs.welcome"
+            h.click("history")
+            h.ui.showingDialog(h.player) shouldBe false
+            h.screen.id shouldBe "civs.welcome"
+        }
+    }
+
+    test("a wrong deletion name stays in the form without submitting the destructive action") {
+        withUi { h ->
+            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+            h.open(); h.click("delete_city")
+            h.click("delete", mapOf("delete_city_name" to "oak town"))
+            h.screen.id shouldBe "civs.delete-city"
+            h.screen.inputs.single().initial shouldBe "oak town"
+            h.body() shouldContain "The name does not match"
+            verify(exactly = 0) { h.host.deleteCity(any(), any(), any()) }
+        }
+    }
+
+    test("busy deletion stays visible without a confirm button and backend errors retain the exact name") {
+        withUi { h ->
+            val city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+            h.city = city
+            every { h.host.cityBusy(h.player) } returns true
+            h.open(); h.click("delete_city")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.body() shouldContain "Another settlement action"
+            every { h.host.cityBusy(h.player) } returns false
+            h.click("refresh", mapOf("delete_city_name" to city.name))
+            every { h.host.deleteCity(any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("city-busy"))
+            h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
+            h.screen.inputs.single().initial shouldBe city.name
+            h.body() shouldContain "Another settlement action"
+            verify(exactly = 1) { h.host.deleteCity(h.player, city.id, city.name) }
+        }
+    }
+
+    test("shared reserve and each building warehouse block deletion and lead to storage") {
+        withUi { h ->
+            val base = settlement(h.player)
+            for (inventory in listOf(
+                CivInventory(CivStorageMode.PHYSICAL, mapOf("OAK_LOG" to 1L)),
+                CivInventory(CivStorageMode.VIRTUAL, buildingMaterials = mapOf(base.buildings.last().id.toString() to mapOf("STONE" to 1L))),
+            )) {
+                h.city = base.copy(inventory = inventory)
+                h.open(); h.click("delete_city")
+                h.body() shouldContain "First withdraw all virtual stock into barrels"
+                h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "refresh")
+                h.screen.inputs shouldBe emptyList()
+                h.click("stock")
+                h.screen.id shouldBe "civs.stock"
+            }
+            h.city = base.copy(inventory = null, stock = Stock(food = 1))
+            h.open(); h.click("delete_city")
+            h.body() shouldContain "being converted"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            verify(exactly = 0) { h.host.deleteCity(any(), any(), any()) }
+        }
+    }
+
+    test("a delivery arriving after deletion confirmation was opened blocks the retried form") {
+        withUi { h ->
+            val city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+            h.city = city
+            h.open(); h.click("delete_city")
+            every { h.host.deleteCity(any(), any(), any()) } answers {
+                h.city = city.copy(inventory = city.inventory!!.copy(materials = mapOf("BREAD" to 1L)))
+                CompletableFuture.failedFuture(CivsRejection("delete-storage-not-empty"))
+            }
+            h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "refresh")
+            h.body() shouldContain "First withdraw all virtual stock into barrels"
+        }
+    }
+
+    test("a stale deletion form passes its original town id and cannot target a replacement with the same name") {
+        withUi { h ->
+            val original = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+            h.city = original
+            h.open(); h.click("delete_city")
+            val replacement = original.copy(id = UUID.randomUUID())
+            h.city = replacement
+            every { h.host.deleteCity(any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("delete-city-changed"))
+            h.click("delete", mapOf("delete_city_name" to original.name)); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.deleteCity(h.player, original.id, original.name) }
+            verify(exactly = 0) { h.host.deleteCity(h.player, replacement.id, any()) }
+            h.body() shouldContain "The town has changed or was already deleted"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("return")
+            h.screen.inputs shouldBe emptyList()
+            h.click("return")
+            h.screen.id shouldBe "civs.overview"
+            h.city shouldBe replacement
         }
     }
 
@@ -601,6 +735,20 @@ class CivsUiTest : FunSpec({
         val directory = System.getenv("CIVS_UI_PREVIEW_OUT") ?: return@test
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.open(); h.click("found"); h.click("style_0")
+            exportUiScreen(directory, "founding-barrel", h.screen)
+            every { h.host.beginFoundingSelection(any(), any(), any()) } answers {
+                h.selection = CivsSelectionView(UUID.randomUUID(), h.player.world.uid, BuildingType.TOWN_HALL,
+                    System.currentTimeMillis() + 120_000, false)
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.click("prepare", mapOf("city_name" to "Oak Town")); h.paper.performTicks(2)
+            exportUiActionBar(directory, "selection-barrel", requireNotNull(h.player.nextActionBar()))
+            h.selection = null
+            h.preview = preview()
+            h.open()
+            exportUiScreen(directory, "preview-barrel", h.screen)
+            h.preview = null
             val base = settlement(h.player)
             val building = base.buildings.last()
             val own = listOf("BIRCH_LOG", "BRICKS", "CARROT", "COBBLESTONE", "DIRT", "GLASS", "OAK_LOG", "POTATO", "SAND", "STONE")
@@ -611,6 +759,11 @@ class CivsUiTest : FunSpec({
             exportUiScreen(directory, "building", h.screen)
             h.click("warehouse")
             exportUiScreen(directory, "warehouse", h.screen)
+            every { h.host.openBuildingInventory(h.player, building.id) } returns CompletableFuture.failedFuture(CivsRejection("control-missing"))
+            h.click("intake"); h.paper.performTicks(2)
+            exportUiScreen(directory, "control-missing", h.screen)
+            every { h.host.openBuildingInventory(h.player, building.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("warehouse")
             h.click("next")
             exportUiScreen(directory, "warehouse-page-2", h.screen)
             h.click("withdraw")
@@ -626,6 +779,16 @@ class CivsUiTest : FunSpec({
                 mapOf("OAK_LOG" to 124L, "COBBLESTONE" to 260L, "GLASS" to 16L))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.paper.performTicks(2)
             exportUiScreen(directory, "site-materials", h.screen)
+            h.open(); h.click("delete_city")
+            exportUiScreen(directory, "delete-stock", h.screen)
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL), construction = CivConstruction(
+                UUID.randomUUID(), building.id, 2, 100, 20, ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("OAK_LOG" to 24L)))
+            h.open()
+            exportUiScreen(directory, "overview", h.screen)
+            h.click("delete_city")
+            exportUiScreen(directory, "delete-ready", h.screen)
+            h.click("delete", mapOf("delete_city_name" to "Oak town"))
+            exportUiScreen(directory, "delete-name-error", h.screen)
         }
     }
 
@@ -765,6 +928,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         }
         every { host.buildingMaterials(any(), any()) } returns CompletableFuture.completedFuture(emptyMap())
         every { host.startBuilding(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.deleteCity(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.openBuildingInventory(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.depositMaterials(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.withdrawMaterial(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
@@ -861,6 +1025,12 @@ private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScr
         content[key] = legacy.serialize(value.text)
         mapOf("id" to key, "text-key" to key, "width" to value.width)
     }
+    val inputs = screen.inputs.map { value ->
+        val key = value.id.value
+        content["$key-label"] = legacy.serialize(value.label)
+        content["$key-initial"] = value.initial
+        mapOf("id" to key, "label-key" to "$key-label", "initial-key" to "$key-initial", "width" to value.width)
+    }
     fun button(value: ru.arc.paper.menu.PaperDialogButton): Map<String, Any> {
         val key = value.id.value
         content[key] = legacy.serialize(value.label)
@@ -870,15 +1040,31 @@ private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScr
     val dialog = mapOf("id" to id, "source" to id, "format" to "reference-multi-action", "name-key" to "title",
         "external-title-key" to "title", "columns" to screen.columns, "body" to body,
         "buttons" to screen.buttons.map(::button), "exit-button" to screen.exitButton?.let(::button),
-        "viewport" to listOf(854, 480), "variants" to listOf(mapOf("id" to "example")))
-    val hashes = listOf("src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml").associateWith { source ->
-        MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(source))).joinToString("") { "%02x".format(it) }
-    }
+        "viewport" to listOf(854, 480), "variants" to listOf(mapOf("id" to "example"))) +
+        if (inputs.isEmpty()) emptyMap() else mapOf("inputs" to inputs)
     val out = Path.of(directory)
     Files.createDirectories(out)
     Files.writeString(out.resolve("$id.json"), GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create().toJson(
-        mapOf("content" to content, "dialog" to dialog, "sourceSha256" to hashes,
+        mapOf("content" to content, "dialog" to dialog, "sourceSha256" to uiSourceHashes(),
             "evidence" to "Actual native dialog presenter components with fixture town state; native translations require Minecraft language assets. No native-client acceptance.")))
+}
+
+private fun exportUiActionBar(directory: String, id: String, component: Component) {
+    val out = Path.of(directory)
+    Files.createDirectories(out)
+    val legacy = LegacyComponentSerializer.builder().character('&').hexColors().build()
+    Files.writeString(out.resolve("$id.json"), GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create().toJson(mapOf(
+        "content" to mapOf("text" to legacy.serialize(component)),
+        "hud" to mapOf("id" to id, "actionbar" to "$id.text"),
+        "sourceSha256" to uiSourceHashes(),
+        "evidence" to "Actual actionbar captured after the founding form yields to barrel selection. No native-client acceptance.",
+    )))
+}
+
+private fun uiSourceHashes(): Map<String, String> = listOf(
+    "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
+).associateWith { source ->
+    MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(source))).joinToString("") { "%02x".format(it) }
 }
 
 private fun withPreview(action: (PreviewHarness) -> Unit) = MockBukkitTestRuntime.open().use { paper ->

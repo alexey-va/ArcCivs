@@ -223,7 +223,8 @@ class CivsUi internal constructor(
             table(listOf(
                 tr(player, "label.building") to buildingName(player, preview.type, preview.level),
                 tr(player, "label.city") to text.literal(preview.cityName),
-                tr(player, "label.position") to coordinates(player, preview.anchor),
+                tr(player, if (preview.movable) "label.control" else "label.position") to coordinates(player,
+                    if (preview.movable) preview.entrance.copy(y = preview.entrance.y - 1) else preview.anchor),
                 tr(player, "label.size") to tr(player, "preview.size", "x" to preview.sizeX, "y" to preview.sizeY, "z" to preview.sizeZ),
                 tr(player, "label.rotation") to tr(player, "preview.rotation", "value" to preview.rotation),
             )),
@@ -263,8 +264,55 @@ class CivsUi internal constructor(
             add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
             add(button(player, "upgrades", "upgrades.open", PERSONAL) { showUpgrades(player) })
             add(button(player, "members", "members.open") { showMembers(player) })
+            if (city.owner == player.uniqueId) add(button(player, "delete_city", "delete.open", DANGER) { showDeleteCity(player, city.id) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
         }, reopen = { showOverview(player) })
+    }
+
+    private fun showDeleteCity(player: Player, expectedCityId: UUID, initial: String = "", error: Component? = null) {
+        val city = host.city(player)
+        if (city == null || city.id != expectedCityId) {
+            notice(player, "civs.delete-city", "delete.title", text.reason(player, "delete-city-changed")) {
+                runtime.beginFlow(player)
+                openEntry(player)
+            }
+            return
+        }
+        if (city.owner != player.uniqueId) return showEntry(player)
+        val inventory = city.inventory
+        val hasVirtualStock = inventory?.materials?.values.orEmpty().any { it > 0 } ||
+            inventory?.buildingMaterials.orEmpty().values.any { stock -> stock.values.any { it > 0 } }
+        val legacyStock = city.stock != Stock()
+        val busy = host.cityBusy(player)
+        val canConfirm = !hasVirtualStock && !legacyStock && !busy
+        var draft = initial
+        present(player, "civs.delete-city", "delete.title", listOfNotNull(
+            body(tr(player, "delete.city", "name" to city.name).color(DANGER)),
+            body(player, "delete.world-help"), body(player, "delete.founding-help"),
+            if (city.construction != null) body(player, "delete.construction-help") else null,
+            if (legacyStock) body(text.reason(player, "materials-migration-pending")) else null,
+            if (hasVirtualStock) body(text.reason(player, "delete-storage-not-empty")) else null,
+            if (!hasVirtualStock && !legacyStock) body(player, "delete.name-help") else null,
+            busyBody(player), error?.let { body(it.color(DANGER)) },
+        ), buildList {
+            if (hasVirtualStock) add(button(player, "stock", "delete.open-storage", STOCK) { showStock(player) })
+            if (canConfirm) add(button(player, "delete", "delete.confirm", DANGER) { context ->
+                val name = context.text(DELETE_NAME).orEmpty()
+                draft = name
+                if (name != city.name) showDeleteCity(player, expectedCityId, name, text.reason(player, "delete-name-mismatch"))
+                else perform(player, "civs.delete-city", "delete.title", { host.deleteCity(player, expectedCityId, name) },
+                    success = {
+                        runtime.beginFlow(player)
+                        openEntry(player)
+                        player.sendMessage(tr(player, "delete.success", "name" to city.name))
+                    }, failure = { showDeleteCity(player, expectedCityId, name, it) })
+            })
+            add(button(player, "refresh", "common.refresh") { context ->
+                showDeleteCity(player, expectedCityId, context.text(DELETE_NAME) ?: draft)
+            })
+        }, inputs = if (!hasVirtualStock && !legacyStock) listOf(
+            PaperDialogTextInput(DELETE_NAME, tr(player, "delete.name-label"), initial = initial.take(32), width = 320, maxLength = 32),
+        ) else emptyList(), reopen = { showDeleteCity(player, expectedCityId, draft) })
     }
 
     private fun showStock(player: Player, page: Int = 0, error: Component? = null) {
@@ -494,7 +542,7 @@ class CivsUi internal constructor(
             body(buildingName(player, building.type, building.level)),
             body(player, "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
             table(buildList {
-                add(tr(player, "label.position") to coordinates(player, building.control ?: building.anchor))
+                add(tr(player, if (building.control != null) "label.control" else "label.position") to coordinates(player, building.control ?: building.anchor))
                 add(tr(player, "label.state") to tr(player, "building-phase.${building.phase.name.lowercase(Locale.ROOT)}"))
                 add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
                 CivsProduction.material(building)?.let { material ->
@@ -987,6 +1035,7 @@ class CivsUi internal constructor(
     private companion object {
         const val PAGE_SIZE = 8
         val NAME = PaperDialogInputId.of("city_name")
+        val DELETE_NAME = PaperDialogInputId.of("delete_city_name")
         val MEMBER = PaperDialogInputId.of("member_name")
         val WHITE = TextColor.color(0xFFFFFF)
         val LAND = TextColor.color(0x9BD48D)

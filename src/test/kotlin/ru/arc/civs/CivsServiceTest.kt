@@ -29,6 +29,127 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("new town sites require a player barrel and recheck it after asynchronous capture") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            val blueprint = h.previewBlueprint()
+            every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+            val prepared = h.prepareFounding("Barrel town", "nordic"); h.tick(); prepared.join()
+            val missing = h.service.confirmPreview(h.player)
+            (shouldThrow<CompletionException> { missing.join() }.cause as CivsRejection).reason shouldBe "control-missing"
+            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.save(any()) }
+            val point = blueprint.building.control!!
+            val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            val capture = CompletableFuture<CivPlacementPlan>()
+            var cityId: UUID? = null
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers { cityId = firstArg(); capture }
+            val confirming = h.service.confirmPreview(h.player)
+            block.type = Material.AIR
+            capture.complete(CivPlacementPlan(UUID.randomUUID(), cityId!!, h.world.uid, blueprint.building, emptyList()))
+            h.tick()
+            (shouldThrow<CompletionException> { confirming.join() }.cause as CivsRejection).reason shouldBe "control-missing"
+            block.type shouldBe Material.AIR
+            h.service.city(h.player) shouldBe null
+            verify(exactly = 0) { h.store.save(any()) }
+        }
+    }
+
+    test("a barrel broken during site commit is never recreated and construction requires its replacement") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            val blueprint = h.previewBlueprint()
+            every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
+                CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), h.world.uid, blueprint.building, emptyList()))
+            }
+            every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+            every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            val prepared = h.prepareFounding("Barrel town", "nordic"); h.tick(); prepared.join()
+            val point = blueprint.building.control!!
+            val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            val confirming = h.service.confirmPreview(h.player); h.tick()
+            h.saves.size shouldBe 1
+            block.type = Material.AIR
+            h.commit(); confirming.join() shouldBe Unit
+            block.type shouldBe Material.AIR
+            val city = h.service.city(h.player)!!
+            city.buildings.single().phase shouldBe BuildingPhase.SITE
+            val start = h.service.startBuilding(h.player, blueprint.building.id)
+            (shouldThrow<CompletionException> { start.join() }.cause as CivsRejection).reason shouldBe "control-missing"
+            verify(exactly = 0) { h.store.loadPlan(any()) }
+            block.type shouldBe Material.AIR
+        }
+    }
+
+    test("city deletion waits for durable confirmation then removes authority while preserving native blocks and items") {
+        serviceScenario { h ->
+            val control = CivPosition(0, 63, 0)
+            val block = h.world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
+            val barrel = (block.state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val durable = CompletableFuture<Unit>()
+            every { h.store.delete(city) } returns durable
+            h.start()
+            val lookup = CompletableFuture<CivsNetworkCity?>()
+            every { h.store.lookup(h.owner) } returns lookup
+            val pendingLookup = h.service.refreshCity(h.player)
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            val deleted = h.service.deleteCity(h.player, city.id, city.name)
+            deleted.isDone shouldBe false
+            h.service.city(h.player) shouldBe city
+            protection.isProtected(h.world.uid, 0, 63, 0) shouldBe true
+            h.service.deleteCity(h.player, city.id, city.name).isCompletedExceptionally shouldBe true
+            durable.complete(Unit); h.tick()
+            deleted.join() shouldBe Unit
+            h.service.city(h.player) shouldBe null
+            lookup.complete(CivsNetworkCity(BackendServerId.of("spawn"), city, 1L)); h.tick()
+            pendingLookup.isCompletedExceptionally shouldBe true
+            h.service.remoteCity(h.player) shouldBe null
+            h.service.ready() shouldBe true
+            protection.isProtected(h.world.uid, 0, 63, 0) shouldBe false
+            block.type shouldBe Material.BARREL
+            barrel.getItem(0)!!.amount shouldBe 7
+            verify(exactly = 1) { h.store.delete(city); h.boundary.clear(h.owner) }
+            h.service.beginFoundingSelection(h.player, city.name, city.style).join() shouldBe Unit
+        }
+    }
+
+    test("deletion guards cannot reach storage with a stale confirmation or remaining stock") {
+        serviceScenario { h ->
+            h.start()
+            for ((id, name, reason) in listOf(Triple(UUID.randomUUID(), h.city.name, "delete-city-changed"),
+                Triple(h.city.id, "wrong", "delete-name-mismatch"), Triple(h.city.id, h.city.name, "delete-storage-not-empty"))) {
+                val failure = shouldThrow<CompletionException> { h.service.deleteCity(h.player, id, name).join() }
+                (failure.cause as CivsRejection).reason shouldBe reason
+            }
+            verify(exactly = 0) { h.store.delete(any()) }
+            h.service.city(h.player) shouldBe h.city
+        }
+    }
+
+    test("ambiguous deletion freezes the city until canonical reload without retrying a write") {
+        serviceScenario { h ->
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.delete(city) } returns CompletableFuture.failedFuture(java.io.IOException("ack lost"))
+            h.start()
+            val deletion = h.service.deleteCity(h.player, city.id, city.name); h.tick()
+            (shouldThrow<CompletionException> { deletion.join() }.cause as CivsRejection).reason shouldBe "storage-unavailable"
+            h.service.city(h.player) shouldBe city
+            h.service.cityBusy(h.player) shouldBe true
+            h.service.deleteCity(h.player, city.id, city.name).isCompletedExceptionally shouldBe true
+            verify(exactly = 1) { h.store.delete(city) }
+            every { h.store.load() } returns CompletableFuture.completedFuture(emptyList())
+            val reload = h.service.reload(h.player); h.tick(); reload.join() shouldBe Unit
+            h.service.city(h.player) shouldBe null
+        }
+    }
+
     test("physical recruitment journals before debit and blocks repetition until the receipt is retired") {
         serviceScenario { h ->
             val control = CivPosition(0, 63, 0)
@@ -527,7 +648,9 @@ class CivsServiceTest : FunSpec({
             h.start()
             val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
             every { snapshot.fileSha256 } returns "a".repeat(64)
-            val hall = h.city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING)
+            val control = CivPosition(0, 63, 0)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            val hall = h.city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, control = control)
             val blueprint = CivBlueprint(hall, h.world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
             every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
@@ -847,7 +970,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
         val anchor = entrance.copy(y = entrance.y - 1)
         val hall = city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, anchor = anchor,
-            entrance = entrance, rotation = rotation,
+            entrance = entrance, rotation = rotation, control = anchor,
             bounds = CivBox(CivPosition(anchor.x - 2, anchor.y, anchor.z - 5), CivPosition(anchor.x + 2, anchor.y + 5, anchor.z - 1)))
         return CivBlueprint(hall, world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
     }

@@ -104,6 +104,129 @@ class CivsStoreTest : FreeSpec({
         store.load().join() shouldBe listOf(committed)
     }
 
+    "deletion fences the full snapshot owner and revision before retaining an idempotent tombstone" {
+        val initial = emptyInventory(settlement()).copy(members = setOf(UUID.randomUUID()))
+        val store = CivsStore(root, directExecutor)
+        store.save(initial).join()
+        val committed = initial.copy(name = "Ready to delete", revision = 1)
+        store.save(committed).join()
+        val plan = placementPlan(committed)
+        store.savePlan(plan).join()
+        store.saveSchematic(plan.id, byteArrayOf(1, 2, 3)).join()
+
+        shouldThrow<CompletionException> { store.delete(committed.copy(owner = UUID.randomUUID())).join() }
+            .cause.let { it as CivsRejection }.reason shouldBe "owner-required"
+        listOf(initial, committed.copy(name = "Different same revision"), committed.copy(revision = 2)).forEach { stale ->
+            shouldThrow<CompletionException> { store.delete(stale).join() }
+                .cause.let { it as CivsRejection }.reason shouldBe "stale-city"
+        }
+        store.load().join() shouldBe listOf(committed)
+        Files.exists(root.resolve("deleted-cities/${committed.id}.json")) shouldBe false
+
+        store.delete(committed).join() shouldBe Unit
+        store.delete(committed).join() shouldBe Unit
+        Files.exists(root.resolve("cities/${committed.id}.json")) shouldBe false
+        Files.exists(root.resolve("deleted-cities/${committed.id}.json")) shouldBe true
+        store.load().join() shouldBe emptyList()
+        store.loadPlan(plan.id).join() shouldBe plan
+        store.loadSchematic(plan.id).join()?.toList() shouldBe listOf<Byte>(1, 2, 3)
+        shouldThrow<CompletionException> { store.delete(initial).join() }
+            .cause.let { it as CivsRejection }.reason shouldBe "stale-city"
+        listOf(initial, committed, committed.copy(revision = 2)).forEach { stale ->
+            shouldThrow<CompletionException> { store.save(stale).join() }
+                .cause.let { it as CivsRejection }.reason shouldBe "city-deleted"
+        }
+    }
+
+    "durable deletion ignores a leftover old JSON and releases capacity without granting a second reserve" {
+        val initial = settlement()
+        val store = CivsStore(root, directExecutor, maximumCities = 1)
+        store.save(initial).join() shouldBe initial
+        val emptied = emptyInventory(initial).copy(revision = 1)
+        store.save(emptied).join()
+        store.delete(emptied).join()
+        // Simulate a crash after the tombstone commit, before old city-file cleanup.
+        val oldPath = root.resolve("cities/${initial.id}.json")
+        writeCity(oldPath, initial)
+        val oldBytes = Files.readAllBytes(oldPath).toList()
+        val reopened = CivsStore(root, directExecutor, maximumCities = 1)
+        reopened.load().join() shouldBe emptyList()
+
+        val proposal = settlement(owner = initial.owner)
+        val recreated = emptyInventory(proposal)
+        reopened.save(proposal).join() shouldBe recreated
+        reopened.save(proposal).join() shouldBe recreated
+        CivsStore(root, directExecutor, maximumCities = 1).load().join() shouldBe listOf(recreated)
+        Files.readAllBytes(oldPath).toList() shouldBe oldBytes
+        val earned = recreated.copy(revision = 1,
+            inventory = requireNotNull(recreated.inventory).copy(materials = mapOf("BREAD" to 5L)))
+        reopened.save(earned).join() shouldBe earned
+        reopened.save(earned).join() shouldBe earned
+    }
+
+    "deletion history does not alter unrelated first grants or exact legacy revision-zero retries" {
+        val deleted = emptyInventory(settlement())
+        val store = CivsStore(root, directExecutor)
+        store.save(deleted).join()
+        store.delete(deleted).join()
+        val unrelated = settlement()
+        store.save(unrelated).join() shouldBe unrelated
+        val legacy = settlement(owner = deleted.owner)
+        writeCity(root.resolve("cities/${legacy.id}.json"), legacy)
+        val reopened = CivsStore(root, directExecutor)
+        reopened.load().join().toSet() shouldBe setOf(unrelated, legacy)
+        reopened.save(legacy).join() shouldBe legacy
+    }
+
+    "a fresh legacy-shaped founding cannot turn owner history back into a migration grant" {
+        val city = emptyInventory(settlement())
+        val store = CivsStore(root, directExecutor)
+        store.save(city).join()
+        store.delete(city).join()
+        val proposal = settlement(owner = city.owner).copy(inventory = null, stock = CivsRules.STARTING_STOCK)
+        val recreated = proposal.copy(stock = Stock())
+        store.save(proposal).join() shouldBe recreated
+        store.save(proposal).join() shouldBe recreated
+        CivsStore(root, directExecutor).load().join() shouldBe listOf(recreated)
+        val unrelated = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK)
+        store.save(unrelated).join() shouldBe unrelated
+    }
+
+    "invalid bounded deletion history is preserved and blocks load or a resurrection save" {
+        val city = emptyInventory(settlement())
+        val store = CivsStore(root, directExecutor)
+        store.save(city).join()
+        store.delete(city).join()
+        val path = root.resolve("deleted-cities/${city.id}.json")
+        RandomAccessFile(path.toFile(), "rw").use { it.setLength(CivsStore.MAX_DELETED_CITY_BYTES + 1) }
+        shouldThrow<CompletionException> { CivsStore(root, directExecutor).load().join() }
+        shouldThrow<CompletionException> { CivsStore(root, directExecutor).save(city).join() }
+        Files.size(path) shouldBe CivsStore.MAX_DELETED_CITY_BYTES + 1
+        val invalid = Gson().toJson(mapOf("schemaVersion" to 1,
+            "deleted" to CivsDeletedCity(UUID.randomUUID(), city.owner, null, city.revision, 1_000)))
+        Files.writeString(path, invalid)
+        shouldThrow<CompletionException> { CivsStore(root, directExecutor).load().join() }
+        Files.readString(path) shouldBe invalid
+        Files.exists(root.resolve("cities/${city.id}.json")) shouldBe false
+    }
+
+    "queued deletion snapshots caller collections and finishes admitted work after close" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val members = mutableSetOf(UUID.randomUUID())
+        val city = emptyInventory(settlement()).copy(members = members)
+        val saved = store.save(city)
+        queued.runNext()
+        saved.join() shouldBe city
+        val deletion = store.delete(city)
+        members.clear()
+        store.close()
+        queued.runNext()
+        deletion.join() shouldBe Unit
+        shouldThrow<CompletionException> { store.delete(city).join() }
+        CivsStore(root, directExecutor).load().join() shouldBe emptyList()
+    }
+
     "rejects corrupt, future-schema and oversized city files without deleting them" {
         val corruptRoot = root.resolve("corrupt")
         val corrupt = corruptRoot.resolve("cities/${UUID.randomUUID()}.json")
@@ -272,6 +395,10 @@ class CivsStoreTest : FreeSpec({
         private const val MAX_PLAN_BYTES = 32L * 1024 * 1024
         private const val MAX_PLAN_BLOCKS = 150_000
         private val directExecutor = Executor { it.run() }
+
+        private fun emptyInventory(city: Settlement): Settlement = city.copy(stock = Stock(),
+            inventory = city.inventory?.let { it.copy(materials = emptyMap(),
+                buildingMaterials = it.buildingMaterials?.mapValues { emptyMap() }) })
 
         private fun settlement(id: UUID = UUID.randomUUID(), owner: UUID = UUID.randomUUID()): Settlement {
             val hallId = UUID.randomUUID()

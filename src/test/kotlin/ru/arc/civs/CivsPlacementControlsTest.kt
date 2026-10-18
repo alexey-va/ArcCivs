@@ -85,9 +85,9 @@ class CivsPlacementControlsTest : FunSpec({
             h.aimedBlock = ground
             h.startSelection()
             h.paper.performTicks(1)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click barrel"
             h.paper.performTicks(21)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click barrel"
             verify(exactly = 12) { h.displays.spawnBlock(any(), any()) }
             every { h.host.cancelSelection(h.player, "player-cancelled") } answers { h.selection = null; Unit }
             h.player.isSneaking = true

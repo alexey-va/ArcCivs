@@ -25,14 +25,16 @@ class CivsStore(
     // ponytail: one bounded global lock serializes store paths; use keyed locks only if disk contention is measured.
     private val ioLock = Any()
     private var cityIndex: Map<UUID, CityIndex>? = null
+    private var deletedCityIndex: Map<UUID, CivsDeletedCity>? = null
     private var closed = false
 
     init {
         require(maximumCities > 0) { "maximumCities must be positive" }
     }
 
-    fun load(): CompletableFuture<List<Settlement>> = submit { reloadCityIndex(trustedRoot()) }
-        .thenCompose { legacy -> network?.loadOwned(legacy) ?: CompletableFuture.completedFuture(legacy) }
+    fun load(): CompletableFuture<List<Settlement>> = submit {
+        reloadCityIndex(trustedRoot()) to requireNotNull(deletedCityIndex).values.toList()
+    }.thenCompose { (legacy, deleted) -> network?.loadOwned(legacy, deleted) ?: CompletableFuture.completedFuture(legacy) }
 
     fun lookup(playerId: UUID): CompletableFuture<CivsNetworkCity?> = synchronized(lifecycleLock) {
         if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
@@ -42,14 +44,18 @@ class CivsStore(
     fun homeServer() = network?.server
 
     fun save(city: Settlement): CompletableFuture<Settlement> {
-        val snapshot = snapshotCity(city)
+        val proposed = snapshotCity(city)
         if (network != null) return synchronized(lifecycleLock) {
-            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(snapshot)
+            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(proposed)
         }
         return submit {
-            CivsRules.validate(snapshot)
+            CivsRules.validate(proposed)
             val trustedRoot = trustedRoot()
             val index = ensureCityIndex(trustedRoot)
+            val deleted = requireNotNull(deletedCityIndex)
+            if (proposed.id in deleted) throw CivsRejection("city-deleted")
+            val snapshot = if (proposed.revision == 0L && deleted.values.any { it.owner == proposed.owner })
+                proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
             val sameCity = index[snapshot.id]
             require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
             val otherParticipants = HashSet<UUID>()
@@ -73,6 +79,7 @@ class CivsStore(
                     cityIndex = null
                     throw error
                 }
+                if (persisted.city == proposed) return@submit proposed
                 require(persisted.city == snapshot) { "Same-revision city retry does not match saved state" }
                 return@submit snapshot
             } else {
@@ -89,6 +96,42 @@ class CivsStore(
             }
             cityIndex = index + (saved.id to indexEntry(saved))
             saved
+        }
+    }
+
+    /** The canonical commit precedes local cleanup; a tombstone is durable before its old JSON disappears. */
+    fun delete(city: Settlement): CompletableFuture<Unit> {
+        val snapshot = snapshotCity(city)
+        if (network != null) return synchronized(lifecycleLock) {
+            if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
+            else network.delete(snapshot).thenCompose { enqueue { deleteLocal(snapshot, network.server.value) } }
+        }
+        return submit { deleteLocal(snapshot, null) }
+    }
+
+    private fun deleteLocal(city: Settlement, home: String?) {
+        CivsRules.validate(city)
+        val trustedRoot = trustedRoot()
+        val deleted = deletedCityIndex ?: loadDeletedCities(trustedRoot).also { deletedCityIndex = it }
+        val existing = deleted[city.id]
+        try {
+            if (existing != null) existing.copy(server = existing.server ?: home).verify(city, home)
+            else {
+                val saved = cityStore(trustedRoot, city.id).loadOrNull()?.city
+                if (home == null) {
+                    if (saved == null) throw CivsRejection("stale-city")
+                    if (saved.owner != city.owner) throw CivsRejection("owner-required")
+                    if (saved != city) throw CivsRejection("stale-city")
+                } else if (saved != null && saved.owner != city.owner) throw CivsRejection("owner-required")
+                require(deleted.size < MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
+                deletedCityStore(trustedRoot, city.id).write(DeletedCityDocument(SCHEMA_VERSION,
+                    CivsDeletedCity(city.id, city.owner, home, city.revision, System.currentTimeMillis())))
+            }
+            cityStore(trustedRoot, city.id).deleteIfExists()
+        } finally {
+            // A failed atomic write can have an unknown outcome: rescan its durable fence before the next action.
+            cityIndex = null
+            deletedCityIndex = null
         }
     }
 
@@ -181,7 +224,10 @@ class CivsStore(
 
     private fun reloadCityIndex(trustedRoot: Path): List<Settlement> {
         cityIndex = null
-        val cities = loadCities(trustedRoot)
+        deletedCityIndex = null
+        val deleted = loadDeletedCities(trustedRoot)
+        deletedCityIndex = deleted
+        val cities = loadCities(trustedRoot, deleted.keys)
         cityIndex = cities.associate { it.id to indexEntry(it) }
         return cities
     }
@@ -194,7 +240,7 @@ class CivsStore(
 
     private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision)
 
-    private fun loadCities(trustedRoot: Path): List<Settlement> {
+    private fun loadCities(trustedRoot: Path, deleted: Set<UUID>): List<Settlement> {
         val directory = trustedRoot.resolve("cities")
         if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyList()
         require(!Files.isSymbolicLink(directory)) { "City directory must not be a symbolic link" }
@@ -204,6 +250,7 @@ class CivsStore(
         Files.newDirectoryStream(directory).use { entries ->
             for (entry in entries) {
                 if (!entry.fileName.toString().endsWith(".json")) continue
+                if (idFromJsonFilename(entry) in deleted) continue
                 require(files.size < maximumCities) { "City directory exceeds the configured limit" }
                 files.add(entry)
             }
@@ -224,6 +271,27 @@ class CivsStore(
             }
             city
         }
+    }
+
+    private fun loadDeletedCities(trustedRoot: Path): Map<UUID, CivsDeletedCity> {
+        val directory = trustedRoot.resolve("deleted-cities")
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyMap()
+        require(!Files.isSymbolicLink(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            "City deletion directory is invalid"
+        }
+        val deleted = linkedMapOf<UUID, CivsDeletedCity>()
+        Files.newDirectoryStream(directory).use { files ->
+            files.forEach { file ->
+                if (file.fileName.toString().endsWith(".json")) {
+                    require(deleted.size < MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
+                    val id = idFromJsonFilename(file)
+                    deleted[id] = requireNotNull(deletedCityStore(trustedRoot, id).loadOrNull()?.deleted) {
+                        "City deletion record disappeared during load"
+                    }
+                }
+            }
+        }
+        return deleted
     }
 
     private fun idFromJsonFilename(file: Path): UUID {
@@ -272,6 +340,19 @@ class CivsStore(
             val city = requireNotNull(record.city) { "City record is missing its city" }
             require(city.id == id) { "City id does not match its filename" }
             CivsRules.validate(city)
+        },
+    )
+
+    private fun deletedCityStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
+        root = trustedRoot,
+        relativePath = Path.of("deleted-cities", "$id.json"),
+        maxBytes = MAX_DELETED_CITY_BYTES,
+        encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
+        decode = { decodeJson(it, DeletedCityDocument::class.java) },
+        validate = { record ->
+            require(record.schemaVersion == SCHEMA_VERSION) { "Unsupported city deletion schema" }
+            val deleted = requireNotNull(record.deleted) { "City deletion record is missing" }.validated()
+            require(deleted.cityId == id) { "Deleted city id does not match its filename" }
         },
     )
 
@@ -383,14 +464,17 @@ class CivsStore(
 
     private fun <T> submit(action: () -> T): CompletableFuture<T> = synchronized(lifecycleLock) {
         if (closed) return@synchronized CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed"))
-        try {
-            CompletableFuture.supplyAsync({ synchronized(ioLock) { action() } }, executor)
-        } catch (error: RuntimeException) {
-            CompletableFuture.failedFuture(error)
-        }
+        enqueue(action)
+    }
+
+    private fun <T> enqueue(action: () -> T): CompletableFuture<T> = try {
+        CompletableFuture.supplyAsync({ synchronized(ioLock) { action() } }, executor)
+    } catch (error: RuntimeException) {
+        CompletableFuture.failedFuture(error)
     }
 
     private data class CityDocument(val schemaVersion: Int, val city: Settlement?)
+    private data class DeletedCityDocument(val schemaVersion: Int, val deleted: CivsDeletedCity?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
     private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
     private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long)
@@ -401,6 +485,8 @@ class CivsStore(
         const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
         const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
         const val MAX_INVENTORY_TRANSACTION_BYTES = 512L * 1024L
+        const val MAX_DELETED_CITY_BYTES = 1_024L
+        const val MAX_DELETED_CITIES = 100_000
         internal const val MAX_PLAN_BLOCKS = 150_000
         const val MAX_SCHEMATIC_ID_CHARS = 512
         internal const val MAX_BLOCK_STATE_CHARS = 2_048

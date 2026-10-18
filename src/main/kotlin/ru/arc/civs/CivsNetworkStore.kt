@@ -15,6 +15,23 @@ import java.util.concurrent.Executor
 
 data class CivsNetworkCity(val server: BackendServerId, val city: Settlement, val updatedAt: Long)
 
+/** A deleted UUID is never reusable; owner history also fences the one-time founding reserve. */
+internal data class CivsDeletedCity(
+    val cityId: UUID, val owner: UUID, val server: String?, val revision: Long, val deletedAt: Long,
+) {
+    fun validated(): CivsDeletedCity = apply {
+        requireNotNull(cityId); requireNotNull(owner)
+        require(revision >= 0 && deletedAt > 0) { "Invalid city deletion record" }
+        server?.let { BackendServerId.of(it) }
+    }
+
+    fun verify(city: Settlement, home: String?) {
+        if (owner != city.owner) throw CivsRejection("owner-required")
+        if (server != home) throw CivsRejection("remote-city", mapOf("server" to server.orEmpty()))
+        if (cityId != city.id || revision != city.revision) throw CivsRejection("stale-city")
+    }
+}
+
 /** SQL is the sole city authority; placement plans stay on the immutable home server. */
 class CivsNetworkStore internal constructor(
     val server: BackendServerId,
@@ -28,11 +45,29 @@ class CivsNetworkStore internal constructor(
     private var drain: CompletableFuture<Unit>? = null
 
     /** Imports old JSON without changing the originals; existing canonical SQL always wins. */
-    fun loadOwned(legacy: List<Settlement>): CompletableFuture<List<Settlement>> = admit("load_owned", "legacy_count" to legacy.size) { runtime ->
+    fun loadOwned(legacy: List<Settlement>): CompletableFuture<List<Settlement>> = loadOwned(legacy, emptyList())
+
+    internal fun loadOwned(legacy: List<Settlement>, deleted: List<CivsDeletedCity>): CompletableFuture<List<Settlement>> =
+        admit("load_owned", "legacy_count" to legacy.size, "deleted_count" to deleted.size) { runtime ->
         runtime.executor.transaction { connection ->
             lockRegistry(connection)
+            deleted.forEach { tombstone ->
+                tombstone.validated()
+                check(tombstone.server == null || tombstone.server == server.value) { "Legacy deletion has a different home server" }
+                val imported = tombstone.copy(server = server.value)
+                val existing = findDeleted(connection, imported.cityId)
+                if (existing != null) {
+                    check(existing.owner == imported.owner && existing.server == imported.server && existing.revision == imported.revision) {
+                        "Legacy deletion conflicts with canonical deletion history"
+                    }
+                } else {
+                    check(findCity(connection, imported.cityId) == null) { "Legacy deletion conflicts with a canonical live city" }
+                    insertDeleted(connection, imported)
+                }
+            }
             legacy.forEach { city ->
                 CivsRules.validate(city)
+                if (findDeleted(connection, city.id) != null) return@forEach
                 val existing = findCity(connection, city.id)
                 if (existing == null) save(connection, city, importing = true)
                 else check(existing.server == server && existing.city.owner == city.owner) {
@@ -62,23 +97,61 @@ class CivsNetworkStore internal constructor(
         }
     }
 
-    fun save(city: Settlement): CompletableFuture<Settlement> = admit("save", "city" to city.id, "revision" to city.revision,
-        "owner" to city.owner, "members" to city.members.size, "construction" to city.construction?.id) { runtime ->
-        val snapshot = city.copy(buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet())
-        runtime.executor.transaction { connection ->
-            lockRegistry(connection)
-            save(connection, snapshot, importing = false)
+    fun save(city: Settlement): CompletableFuture<Settlement> {
+        val snapshot = snapshotCity(city)
+        return admit("save", "city" to snapshot.id, "revision" to snapshot.revision,
+            "owner" to snapshot.owner, "members" to snapshot.members.size, "construction" to snapshot.construction?.id) { runtime ->
+            runtime.executor.transaction { connection ->
+                lockRegistry(connection)
+                save(connection, snapshot, importing = false)
+            }
         }
     }
 
-    private fun save(connection: Connection, city: Settlement, importing: Boolean): Settlement {
-        CivsRules.validate(city)
+    /** Deletes only the complete expected home snapshot; retries retain the durable deletion fence. */
+    fun delete(city: Settlement): CompletableFuture<Unit> {
+        val snapshot = snapshotCity(city)
+        return admit("delete", "city" to snapshot.id, "revision" to snapshot.revision, "owner" to snapshot.owner) { runtime ->
+            runtime.executor.transaction { connection ->
+                CivsRules.validate(snapshot)
+                lockRegistry(connection)
+                val deleted = findDeleted(connection, snapshot.id)
+                if (deleted != null) {
+                    deleted.verify(snapshot, server.value)
+                    return@transaction Unit
+                }
+                val existing = findCity(connection, snapshot.id) ?: throw CivsRejection("stale-city")
+                if (existing.city.owner != snapshot.owner) throw CivsRejection("owner-required")
+                if (existing.server != server) throw CivsRejection("remote-city", mapOf("server" to existing.server.value))
+                if (existing.city != snapshot) throw CivsRejection("stale-city")
+                connection.prepareStatement("DELETE FROM arc_civs_member WHERE city_id = ?").use {
+                    it.setString(1, snapshot.id.toString()); it.executeUpdate()
+                }
+                connection.prepareStatement("DELETE FROM arc_civs_city WHERE city_id = ? AND server_id = ? AND owner_id = ? AND revision = ?").use {
+                    it.setString(1, snapshot.id.toString()); it.setString(2, server.value)
+                    it.setString(3, snapshot.owner.toString()); it.setLong(4, snapshot.revision)
+                    check(it.executeUpdate() == 1) { "Home/revision fence rejected settlement deletion" }
+                }
+                insertDeleted(connection, CivsDeletedCity(snapshot.id, snapshot.owner, server.value, snapshot.revision, System.currentTimeMillis()))
+                Unit
+            }
+        }
+    }
+
+    private fun save(connection: Connection, proposed: Settlement, importing: Boolean): Settlement {
+        CivsRules.validate(proposed)
+        if (findDeleted(connection, proposed.id) != null) throw CivsRejection("city-deleted")
+        val previous = findCity(connection, proposed.id)
+        if (previous != null) {
+            check(previous.server == server) { "Only the home server may change settlement ${proposed.id}" }
+            check(previous.city.owner == proposed.owner) { "City owner cannot change" }
+            if (previous.city == proposed) return previous.city
+        }
+        val city = if (!importing && proposed.revision == 0L && hasDeletedOwner(connection, proposed.owner))
+            proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
         val json = gson.toJson(city)
         require(json.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "City snapshot exceeds 256 KiB" }
-        val previous = findCity(connection, city.id)
         if (previous != null) {
-            check(previous.server == server) { "Only the home server may change settlement ${city.id}" }
-            check(previous.city.owner == city.owner) { "City owner cannot change" }
             if (previous.city.revision == city.revision) {
                 check(previous.city == city) { "Same-revision retry differs from the committed snapshot" }
                 return previous.city
@@ -131,6 +204,37 @@ class CivsNetworkStore internal constructor(
         return city
     }
 
+    private fun hasDeletedOwner(connection: Connection, owner: UUID): Boolean =
+        connection.prepareStatement("SELECT 1 FROM arc_civs_deleted WHERE owner_id = ? LIMIT 1").use {
+            it.setString(1, owner.toString())
+            it.executeQuery().use(ResultSet::next)
+        }
+
+    private fun findDeleted(connection: Connection, id: UUID): CivsDeletedCity? =
+        connection.prepareStatement("SELECT * FROM arc_civs_deleted WHERE city_id = ?").use { statement ->
+            statement.setString(1, id.toString())
+            statement.executeQuery().use { rows -> if (rows.next()) CivsDeletedCity(
+                UUID.fromString(rows.getString("city_id")), UUID.fromString(rows.getString("owner_id")),
+                BackendServerId.of(rows.getString("server_id")).value, rows.getLong("revision"), rows.getLong("deleted_at_ms"),
+            ).validated() else null }
+        }
+
+    private fun insertDeleted(connection: Connection, deleted: CivsDeletedCity) {
+        deleted.validated()
+        connection.prepareStatement("INSERT INTO arc_civs_deleted(city_id, owner_id, server_id, revision, deleted_at_ms) VALUES (?, ?, ?, ?, ?)").use {
+            it.setString(1, deleted.cityId.toString()); it.setString(2, deleted.owner.toString()); it.setString(3, requireNotNull(deleted.server))
+            it.setLong(4, deleted.revision); it.setLong(5, deleted.deletedAt)
+            check(it.executeUpdate() == 1)
+        }
+    }
+
+    private fun snapshotCity(city: Settlement): Settlement = city.copy(
+        buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet(),
+        inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
+            buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
+        construction = city.construction?.let { it.copy(materials = it.materials?.toMap()) },
+    )
+
     private fun findCity(connection: Connection, id: UUID): CivsNetworkCity? =
         connection.prepareStatement("SELECT * FROM arc_civs_city WHERE city_id = ?").use { statement ->
             statement.setString(1, id.toString())
@@ -166,7 +270,7 @@ class CivsNetworkStore internal constructor(
             synchronized(lifecycle) { pending -= future }
             val committed = when (value) { is Settlement -> value; is CivsNetworkCity -> value.city; else -> null }
             CivsDiagnostics.event("sql_end", "operation" to operation, "request" to request, "server" to server.value, *fields,
-                "outcome" to if (failure == null) if (operation == "save") "committed" else "read" else if (CivsDiagnostics.rejection(failure) != null) "rejected" else "failed",
+                "outcome" to if (failure == null) if (operation == "save" || operation == "delete") "committed" else "read" else if (CivsDiagnostics.rejection(failure) != null) "rejected" else "failed",
                 "owner_server" to if (value is CivsNetworkCity) value.server.value else server.value,
                 "result_city" to committed?.id, "result_revision" to committed?.revision,
                 "participants" to committed?.let { it.members.size + 1 },
@@ -198,7 +302,7 @@ class CivsNetworkStore internal constructor(
         internal fun create(server: BackendServerId, maximumCities: Int, runtime: CompletableFuture<SqlRuntime>): CivsNetworkStore {
             require(maximumCities > 0)
             val initialized = runtime.thenCompose { sql ->
-                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION)); sql }
+                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION, DELETION_MIGRATION)); sql }
                     .handle { result, failure ->
                         if (failure == null) CompletableFuture.completedFuture(result)
                         else sql.executor.closeAsync().thenCompose {
@@ -224,6 +328,16 @@ class CivsNetworkStore internal constructor(
                 player_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
                 city_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
                 CONSTRAINT arc_civs_member_city FOREIGN KEY (city_id) REFERENCES arc_civs_city(city_id)
+            ) ENGINE=InnoDB""".trimIndent(),
+        ))
+
+        private val DELETION_MIGRATION = SqlMigration(2, "Deleted settlement identities and founding grant history", listOf(
+            """CREATE TABLE IF NOT EXISTS arc_civs_deleted (
+                city_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+                owner_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                server_id VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                revision BIGINT NOT NULL, deleted_at_ms BIGINT NOT NULL,
+                INDEX arc_civs_deleted_owner(owner_id)
             ) ENGINE=InnoDB""".trimIndent(),
         ))
     }

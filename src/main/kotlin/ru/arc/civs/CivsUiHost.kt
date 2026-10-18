@@ -94,6 +94,7 @@ interface CivsUiHost {
     fun assign(player: Player, workerId: UUID, buildingId: UUID?): CompletableFuture<Unit>
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
+    fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>
     fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit>
     fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>

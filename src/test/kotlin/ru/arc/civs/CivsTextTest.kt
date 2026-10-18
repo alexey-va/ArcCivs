@@ -100,11 +100,14 @@ class CivsTextTest : FunSpec({
             val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag(locale) }
             listOf("inventory-recovery", "inventory-conflict", "materials-migration-pending", "container-not-empty",
                 "control-missing", "control-obstructed", "look-at-container", "container-limit", "registered-container",
-                "invalid-production", "builder-required", "storage-busy", "storage-container-invalid", "storage-empty").forEach { reason ->
+                "invalid-production", "builder-required", "storage-busy", "storage-container-invalid", "storage-empty",
+                "delete-name-mismatch", "delete-city-changed", "delete-storage-not-empty", "stale-city", "city-deleted").forEach { reason ->
                 (plainText(text.reason(player, reason)) != plainText(text.render(player, "common.error"))) shouldBe true
             }
             plainText(text.render(player, "building-phase.site")).isNotBlank() shouldBe true
             plainText(text.building(player, BuildingType.BUILDER_HUT)).isNotBlank() shouldBe true
+            plainText(text.render(player, "selection.hint")) shouldContain if (locale == "ru") "ПКМ по бочке" else "Right-click barrel"
+            plainText(text.reason(player, "control-missing")) shouldContain if (locale == "ru") "Поставьте обычную бочку под входом" else "Place a normal barrel below the entrance"
         }
     }
 
