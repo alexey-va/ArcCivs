@@ -335,32 +335,114 @@ class CivsUiTest : FunSpec({
     test("an empty warehouse does not block marking another building site") {
         withUi { h ->
             h.city = settlement(h.player).copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
-            h.open(); h.click("stock")
+            h.open(); h.click("management"); h.click("stock")
             h.body() shouldContain "Each building has its own warehouse"
             h.click("warehouse_0")
             h.body() shouldContain "Nothing stored yet"
             h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit", "refresh")
             h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
             h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
-            h.body() shouldContain "Place a normal barrel below the future entrance"
+            h.body() shouldContain "place a normal barrel inside the green preview frame"
             verify(exactly = 0) { h.host.startBuilding(any(), any()); h.host.availableMaterials(any()) }
         }
     }
 
-    test("site instructions identify the player barrel and display its exact position below the entrance") {
+    test("preview coordinates use the authored control position and separate entrance instead of the paste origin") {
         withUi { h ->
             h.open(); h.click("found"); h.click("style_0")
-            h.body() shouldContain "right-click your barrel below the future town hall entrance"
-            h.preview = preview().copy(anchor = CivPosition(20, 60, 30), entrance = CivPosition(8, 66, 9))
+            h.body() shouldContain "Right-click the ground"
+            h.preview = preview().copy(anchor = CivPosition(20, 60, 30), entrance = CivPosition(8, 66, 9), control = CivPosition(12, 68, 14))
             h.open()
             h.body() shouldContain "Control block"
-            h.body() shouldContain "8, 65, 9"
-            h.body() shouldContain "Place a barrel at the new position before moving"
+            h.body() shouldContain "12, 68, 14"
+            h.body() shouldContain "Entrance"
+            h.body() shouldContain "8, 66, 9"
+            h.body() shouldContain "it may be above the ground"
             h.body().contains("20, 60, 30") shouldBe false
             h.preview = h.preview!!.copy(movable = false)
             h.open()
-            h.body() shouldContain "20, 60, 30"
+            h.body() shouldContain "12, 68, 14"
+            h.body().contains("20, 60, 30") shouldBe false
             h.body() shouldContain "Confirm to start the upgrade"
+        }
+    }
+
+    test("legacy control relocation shows the exact destination and submits only the selected building once") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val old = base.buildings.last().let { it.copy(control = it.anchor) }
+            val target = CivPosition(22, 66, 2)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == old.id) old else it })
+            every { h.host.buildingControl(h.player, old.id) } returns CompletableFuture.completedFuture(target)
+            every { h.host.relocateControl(h.player, old.id, target) } answers {
+                h.city = h.city!!.copy(buildings = h.city!!.buildings.map { if (it.id == old.id) it.copy(control = target) else it })
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.click("relocate_control"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.control-relocation"
+            h.body() shouldContain "20, 64, 0"
+            h.body() shouldContain "22, 66, 2"
+            h.body() shouldContain "Place a normal barrel at the new coordinates"
+            h.body() shouldContain "remains a linked storage container"
+            val page = h.screen
+            h.click("relocate"); h.click("relocate", screen = page); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.relocateControl(h.player, old.id, target) }
+            h.screen.id shouldBe "civs.building"
+            h.body() shouldContain "22, 66, 2"
+            h.body() shouldContain "Control block relocated"
+            h.screen.buttons.map { it.id.value } shouldNotContain "relocate_control"
+            verify(exactly = 0) { h.host.depositMaterials(any(), any()); h.host.withdrawMaterial(any(), any(), any()) }
+        }
+    }
+
+    test("relocation errors retain the destination and busy or constructing settlements cannot confirm") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val old = base.buildings.last().let { it.copy(control = it.anchor) }
+            val target = CivPosition(22, 66, 2)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == old.id) old else it })
+            every { h.host.buildingControl(h.player, old.id) } returns CompletableFuture.completedFuture(target)
+            every { h.host.relocateControl(h.player, old.id, target) } returns CompletableFuture.failedFuture(
+                CivsRejection("control-position-missing", mapOf("x" to "22", "y" to "66", "z" to "2")))
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.click("relocate_control"); h.paper.performTicks(2)
+            h.click("relocate"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.control-relocation"
+            h.body() shouldContain "Place a normal barrel at the control block location: 22, 66, 2"
+            every { h.host.cityBusy(h.player) } returns true
+            h.click("refresh"); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.body() shouldContain "Another settlement action"
+            every { h.host.cityBusy(h.player) } returns false
+            h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), base.buildings.first().id,
+                3, 100, 20, ConstructionPhase.CONSTRUCTING, Stock()))
+            h.click("refresh"); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.body() shouldContain "Construction is already in progress"
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "relocate_control"
+        }
+    }
+
+    test("only completed legacy buildings offer relocation and a closed target lookup cannot reopen") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val old = base.buildings.last().copy(control = null)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == old.id) old.copy(phase = BuildingPhase.SITE) else it })
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "relocate_control"
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == old.id) old else it })
+            val pending = CompletableFuture<CivPosition>()
+            every { h.host.buildingControl(h.player, old.id) } returns pending
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.click("relocate_control")
+            val count = h.screens.size
+            h.dismiss()
+            pending.complete(CivPosition(22, 66, 2)); h.paper.performTicks(2)
+            h.screens.size shouldBe count
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 0) { h.host.relocateControl(any(), any(), any()) }
         }
     }
 
@@ -519,9 +601,9 @@ class CivsUiTest : FunSpec({
                 CompletableFuture.completedFuture(Unit)
             }
             every { h.host.unregisterContainer(h.player, container) } returns CompletableFuture.completedFuture(Unit)
-            h.open(); h.click("stock"); h.click("mode"); h.click("mode_virtual"); h.paper.performTicks(2)
+            h.open(); h.click("management"); h.click("stock"); h.click("mode"); h.click("mode_virtual"); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.setStorageMode(h.player, CivStorageMode.VIRTUAL) }
-            h.open(); h.click("stock"); h.click("containers"); h.click("register"); h.paper.performTicks(2)
+            h.open(); h.click("management"); h.click("stock"); h.click("containers"); h.click("register"); h.paper.performTicks(2)
             h.click("container_0"); h.click("unregister"); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.registerContainer(h.player); h.host.unregisterContainer(h.player, container) }
         }
@@ -568,16 +650,61 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("settlement management keeps existing submenus and returns through real Core history") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.city = settlement(h.player)
+            h.open()
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers")
+            plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
+            h.click("management")
+            h.screen.id shouldBe "civs.management"
+            plainText(h.screen.title) shouldBe "Управление поселением"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "upgrades", "members", "delete_city")
+            h.screen.buttons.single { it.id.value == "delete_city" }.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(h.screen.buttons.last().label) shouldBe "Удалить поселение"
+            for ((action, screen) in listOf("stock" to "civs.stock", "upgrades" to "civs.upgrades", "members" to "civs.members")) {
+                h.click(action)
+                h.screen.id shouldBe screen
+                h.click("history")
+                h.screen.id shouldBe "civs.management"
+            }
+            h.click("history")
+            h.screen.id shouldBe "civs.overview"
+        }
+    }
+
     test("management members cannot edit membership and upgrade previews cannot move") {
         withUi { h ->
             h.city = settlement(h.player).copy(owner = UUID.randomUUID(), members = setOf(h.player.uniqueId))
             h.open()
             h.screen.buttons.map { it.id.value } shouldNotContain "delete_city"
+            h.click("management")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "upgrades", "members")
             h.click("members")
             h.screen.buttons.map { it.id.value } shouldNotContain "add"
-            h.preview = preview().copy(level = 2)
+            h.preview = preview().copy(level = 2, movable = false)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("placement", "management")
+        }
+    }
+
+    test("an existing town preview keeps management reachable without losing placement") {
+        withUi(realHistory = true) { h ->
+            h.city = settlement(h.player)
+            val preview = preview().copy(level = 2, movable = false)
+            h.preview = preview
+            h.open()
+            h.screen.id shouldBe "civs.preview"
+            h.click("management")
+            h.screen.id shouldBe "civs.management"
+            h.click("history")
+            h.screen.id shouldBe "civs.preview"
+            h.preview shouldBe preview
+            h.click("placement")
+            h.ui.showingDialog(h.player) shouldBe false
+            h.preview shouldBe preview
+            verify(exactly = 0) { h.host.cancelPreview(any()); h.host.confirmPreview(any()); h.host.movePreview(any()) }
         }
     }
 
@@ -593,6 +720,7 @@ class CivsUiTest : FunSpec({
                 CompletableFuture.completedFuture(Unit)
             }
             h.open()
+            h.click("management")
             h.screen.buttons.single { it.id.value == "delete_city" }.label.color() shouldBe TextColor.color(0xFF6B61)
             h.click("delete_city")
             h.body() shouldContain "Buildings and items in chests and barrels remain"
@@ -611,7 +739,7 @@ class CivsUiTest : FunSpec({
     test("a wrong deletion name stays in the form without submitting the destructive action") {
         withUi { h ->
             h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             h.click("delete", mapOf("delete_city_name" to "oak town"))
             h.screen.id shouldBe "civs.delete-city"
             h.screen.inputs.single().initial shouldBe "oak town"
@@ -625,7 +753,7 @@ class CivsUiTest : FunSpec({
             val city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
             h.city = city
             every { h.host.cityBusy(h.player) } returns true
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
             h.body() shouldContain "Another settlement action"
             every { h.host.cityBusy(h.player) } returns false
@@ -646,7 +774,7 @@ class CivsUiTest : FunSpec({
                 CivInventory(CivStorageMode.VIRTUAL, buildingMaterials = mapOf(base.buildings.last().id.toString() to mapOf("STONE" to 1L))),
             )) {
                 h.city = base.copy(inventory = inventory)
-                h.open(); h.click("delete_city")
+                h.open(); h.click("management"); h.click("delete_city")
                 h.body() shouldContain "First withdraw all virtual stock into barrels"
                 h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "refresh")
                 h.screen.inputs shouldBe emptyList()
@@ -654,7 +782,7 @@ class CivsUiTest : FunSpec({
                 h.screen.id shouldBe "civs.stock"
             }
             h.city = base.copy(inventory = null, stock = Stock(food = 1))
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             h.body() shouldContain "being converted"
             h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
             verify(exactly = 0) { h.host.deleteCity(any(), any(), any()) }
@@ -665,7 +793,7 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             val city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
             h.city = city
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             every { h.host.deleteCity(any(), any(), any()) } answers {
                 h.city = city.copy(inventory = city.inventory!!.copy(materials = mapOf("BREAD" to 1L)))
                 CompletableFuture.failedFuture(CivsRejection("delete-storage-not-empty"))
@@ -680,7 +808,7 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             val original = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
             h.city = original
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             val replacement = original.copy(id = UUID.randomUUID())
             h.city = replacement
             every { h.host.deleteCity(any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("delete-city-changed"))
@@ -779,16 +907,40 @@ class CivsUiTest : FunSpec({
                 mapOf("OAK_LOG" to 124L, "COBBLESTONE" to 260L, "GLASS" to 16L))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.paper.performTicks(2)
             exportUiScreen(directory, "site-materials", h.screen)
-            h.open(); h.click("delete_city")
+            h.open(); h.click("management"); h.click("delete_city")
             exportUiScreen(directory, "delete-stock", h.screen)
             h.city = base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL), construction = CivConstruction(
                 UUID.randomUUID(), building.id, 2, 100, 20, ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("OAK_LOG" to 24L)))
             h.open()
             exportUiScreen(directory, "overview", h.screen)
+            h.click("management")
+            exportUiScreen(directory, "management-owner", h.screen)
             h.click("delete_city")
             exportUiScreen(directory, "delete-ready", h.screen)
             h.click("delete", mapOf("delete_city_name" to "Oak town"))
             exportUiScreen(directory, "delete-name-error", h.screen)
+            h.city = base.copy(owner = UUID.randomUUID(), members = setOf(h.player.uniqueId))
+            h.open(); h.click("management")
+            exportUiScreen(directory, "management-member", h.screen)
+            h.preview = preview().copy(level = 2, movable = false)
+            h.open()
+            exportUiScreen(directory, "preview-management", h.screen)
+            h.preview = null
+            val legacy = building.copy(control = building.anchor)
+            val target = CivPosition(22, 66, 2)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == legacy.id) legacy else it })
+            every { h.host.buildingControl(h.player, legacy.id) } returns CompletableFuture.completedFuture(target)
+            h.ui.openBuilding(h.player, base.id, legacy.id)
+            exportUiScreen(directory, "control-legacy-building", h.screen)
+            h.click("relocate_control"); h.paper.performTicks(2)
+            exportUiScreen(directory, "control-relocate-ready", h.screen)
+            every { h.host.relocateControl(h.player, legacy.id, target) } returns CompletableFuture.failedFuture(
+                CivsRejection("control-position-missing", mapOf("x" to "22", "y" to "66", "z" to "2")))
+            h.click("relocate"); h.paper.performTicks(2)
+            exportUiScreen(directory, "control-relocate-missing", h.screen)
+            every { h.host.cityBusy(h.player) } returns true
+            h.click("refresh"); h.paper.performTicks(2)
+            exportUiScreen(directory, "control-relocate-busy", h.screen)
         }
     }
 
@@ -927,6 +1079,11 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
             }
         }
         every { host.buildingMaterials(any(), any()) } returns CompletableFuture.completedFuture(emptyMap())
+        every { host.buildingControl(any(), any()) } answers {
+            val building = requireNotNull(city?.building(secondArg()))
+            CompletableFuture.completedFuture(building.anchor.copy(y = building.anchor.y + 2))
+        }
+        every { host.relocateControl(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.startBuilding(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.deleteCity(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.openBuildingInventory(any(), any()) } returns CompletableFuture.completedFuture(Unit)
@@ -999,12 +1156,13 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
 
 private fun preview() = CivsPreviewView(BuildingType.TOWN_HALL, 1, "medieval-oak", "Oak Town",
     CivPosition(0, 64, 0), 0, 12, 10, 12, Stock(), 400, UUID(0, 1), UUID(0, 2),
-    CivPosition(0, 65, 0), CivBox(CivPosition(-6, 64, -12), CivPosition(5, 73, -1)), true, false)
+    CivPosition(0, 65, 0), CivBox(CivPosition(-6, 64, -12), CivPosition(5, 73, -1)), true, false,
+    control = CivPosition(0, 66, -6))
 
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,
         CivPosition(x, 64, 0), 0, "medieval-oak/${type.name.lowercase()}",
-        CivBox(CivPosition(x, 64, 0), CivPosition(x + 4, 70, 4)), CivPosition(x + 2, 64, -1), BuildingPhase.ACTIVE, control = CivPosition(x + 2, 63, -1))
+        CivBox(CivPosition(x, 64, 0), CivPosition(x + 4, 70, 4)), CivPosition(x + 2, 64, -1), BuildingPhase.ACTIVE, control = CivPosition(x + 2, 65, 2))
     val hall = building(BuildingType.TOWN_HALL, 0, 2)
     val house = building(BuildingType.HOUSE, 10)
     val builder = building(BuildingType.BUILDER_HUT, -10)
@@ -1057,7 +1215,7 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
         "content" to mapOf("text" to legacy.serialize(component)),
         "hud" to mapOf("id" to id, "actionbar" to "$id.text"),
         "sourceSha256" to uiSourceHashes(),
-        "evidence" to "Actual actionbar captured after the founding form yields to barrel selection. No native-client acceptance.",
+        "evidence" to "Actual actionbar captured after the founding form yields to ground or barrel selection. No native-client acceptance.",
     )))
 }
 

@@ -9,6 +9,7 @@ import io.mockk.verify
 import org.bukkit.Material
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
+import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
 import org.bukkit.util.RayTraceResult
@@ -17,9 +18,13 @@ import org.mockbukkit.mockbukkit.entity.PlayerMock
 import org.bukkit.event.block.Action
 import org.bukkit.event.player.PlayerInteractEvent
 import org.bukkit.inventory.EquipmentSlot
+import org.bukkit.inventory.ItemStack
+import org.bukkit.entity.Player
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.actionpanel.PaperActionPanels
+import ru.arc.paper.actionpanel.ActionPanelPlacement
+import ru.arc.paper.actionpanel.ActionPanelPoint
 import ru.arc.paper.display.PaperPacketDisplays
 import net.kyori.adventure.text.format.TextColor
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -85,9 +90,9 @@ class CivsPlacementControlsTest : FunSpec({
             h.aimedBlock = ground
             h.startSelection()
             h.paper.performTicks(1)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click barrel"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground or barrel"
             h.paper.performTicks(21)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click barrel"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground or barrel"
             verify(exactly = 12) { h.displays.spawnBlock(any(), any()) }
             every { h.host.cancelSelection(h.player, "player-cancelled") } answers { h.selection = null; Unit }
             h.player.isSneaking = true
@@ -101,7 +106,9 @@ class CivsPlacementControlsTest : FunSpec({
 
     test("normal placement has six world actions and changing mode rejects the old confirmation context") {
         controlsScenario { h ->
+            h.preview = h.preview!!.copy(control = CivPosition(3, 66, -7))
             val initial = h.controls.frame(h.player)!!
+            (initial.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(3.5, 66.5, -6.5)
             initial.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.MOVE,
                 CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.ROTATE_RIGHT, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
             h.controls.activate(h.player, initial.context, CivsPlacementAction.MOVE)
@@ -179,6 +186,7 @@ class CivsPlacementControlsTest : FunSpec({
             h.preview = h.preview!!.copy(level = 2, movable = false)
             val frame = h.controls.frame(h.player)!!
             frame.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
+            frame.layout.buttons.forEach { (kotlin.math.abs(it.rect.center.x) - it.rect.width / 2 >= 0.5) shouldBe true }
             every { h.host.confirmPreview(any()) } answers {
                 h.preview = null
                 CompletableFuture.completedFuture(Unit)
@@ -191,7 +199,50 @@ class CivsPlacementControlsTest : FunSpec({
         }
     }
 
-    test("nudges are cardinal and the green anchor is a visible twelve-edge block frame") {
+    test("the control shortcut follows the authored marker and leaves barrel and support placement alone") {
+        controlsScenario { h ->
+            val world = mockk<World>(relaxed = true) {
+                every { uid } returns h.player.world.uid
+                every { rayTraceBlocks(any<Location>(), any<Vector>(), 12.0, FluidCollisionMode.NEVER, true) } returns null
+            }
+            val actor = mockk<Player>(relaxed = true) {
+                every { isOnline } returns true
+                every { uniqueId } returns UUID.randomUUID()
+                every { getWorld() } returns world
+                every { hasPermission("arccivs.use") } returns true
+                every { inventory.itemInOffHand } returns ItemStack(Material.AIR)
+                every { location } returns Location(world, 4.5, 64.0, 4.5)
+                every { eyeLocation } returns Location(world, 4.5, 65.5, 4.5, 180f, 0f)
+            }
+            every { h.host.selection(actor) } returns null
+            every { h.host.preview(actor) } returns h.preview!!.copy(anchor = CivPosition(40, 63, 40),
+                control = CivPosition(4, 65, 0), worldId = world.uid)
+            every { h.ui.showingDialog(actor) } returns false
+            fun click(material: Material?): PlayerInteractEvent = mockk<PlayerInteractEvent>(relaxed = true).also { event ->
+                every { event.player } returns actor
+                every { event.action } returns Action.RIGHT_CLICK_BLOCK
+                every { event.hand } returns EquipmentSlot.HAND
+                every { event.item } returns material?.let(::ItemStack)
+                h.controls.interact(event)
+            }
+            for (material in listOf(Material.BARREL, Material.DIRT)) {
+                val event = click(material)
+                verify(exactly = 0) { event.isCancelled = true }
+                h.controls.frame(actor)!!.context.moving shouldBe false
+            }
+            every { actor.inventory.itemInOffHand } returns ItemStack(Material.BARREL)
+            val offhandBarrel = click(null)
+            verify(exactly = 0) { offhandBarrel.isCancelled = true }
+            h.controls.frame(actor)!!.context.moving shouldBe false
+            every { actor.inventory.itemInOffHand } returns ItemStack(Material.AIR)
+            val emptyHand = click(null)
+            verify(exactly = 1) { emptyHand.isCancelled = true }
+            h.controls.frame(actor)!!.context.moving shouldBe true
+            verify(exactly = 0) { h.host.movePreview(any(), any()); h.host.confirmPreview(any()) }
+        }
+    }
+
+    test("nudges are cardinal and the control frame remains separate from the origin and entrance") {
         val center = CivPosition(4, 64, 9)
         for (facing in 0..3) {
             val moved = civsMovedEntrance(center, CivsPreviewMove.RIGHT, facing)
@@ -213,6 +264,13 @@ class CivsPlacementControlsTest : FunSpec({
         (cues.minOf { it.x } < center.x && cues.maxOf { it.x + it.sx } > center.x + 1) shouldBe true
         (cues.minOf { it.y } < center.y && cues.maxOf { it.y + it.sy } > center.y + 1) shouldBe true
         (cues.minOf { it.z } < center.z && cues.maxOf { it.z + it.sz } > center.z + 1) shouldBe true
+        val building = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(0, 62, 0), 0,
+            "fixture", CivBox(CivPosition(-6, 62, -12), CivPosition(6, 74, 10)), CivPosition(0, 63, -1),
+            BuildingPhase.SITE, control = center)
+        val preview = civsPreviewCues(building)
+        preview.filter { it.material == Material.LIME_CONCRETE } shouldBe cues
+        preview.filter { it.material == Material.CYAN_CONCRETE }.forEach { it.y shouldBe building.entrance.y + 0.025 }
+        civsPreviewCues(building.copy(control = null)).count { it.material == Material.LIME_CONCRETE } shouldBe 0
     }
 })
 

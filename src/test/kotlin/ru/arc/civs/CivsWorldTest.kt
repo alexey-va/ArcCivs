@@ -4,6 +4,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.Barrel
 import org.bukkit.block.Chest
 import org.bukkit.inventory.ItemStack
 import ru.arc.core.LifecycleTaskScope
@@ -159,6 +160,132 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("the exact authored marker preserves a filled barrel during capture and revalidation") {
+        worldScenario { s ->
+            val control = CivPosition(0, 64, 0)
+            val building = worldBuilding(worldBox(0, 1)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val block = s.world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
+            (block.state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val original = block.blockData.asString
+            val owner = UUID.randomUUID()
+            val captured = s.subject.capture(UUID.randomUUID(), owner, s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:structure_void"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            val plan = completed(captured)
+            plan.blocks.map { it.position } shouldBe listOf(CivPosition(1, 64, 0))
+            block.blockData.asString shouldBe original
+            (block.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+
+            // Deposits after capture are permitted: the control's native inventory is never part of the paste.
+            (block.state as Barrel).inventory.setItem(1, ItemStack(Material.OAK_LOG, 8))
+            val revalidated = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(revalidated) shouldBe Unit
+            block.blockData.asString shouldBe original
+            (block.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+            (block.state as Barrel).inventory.getItem(1) shouldBe ItemStack(Material.OAK_LOG, 8)
+        }
+    }
+
+    test("a missing authored barrel or any attempted plan write at its control is rejected with no mutation") {
+        worldScenario { s ->
+            val control = CivPosition(0, 64, 0)
+            val building = worldBuilding(worldBox(0, 1)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val cells = listOf(worldCell(0, 64, "minecraft:structure_void"), worldCell(1, 64, "minecraft:air"))
+            val owner = UUID.randomUUID()
+            val missing = s.subject.capture(UUID.randomUUID(), owner, s.world.uid, building, cells, null)
+            s.scheduler.tick()
+            val rejected = rejection(missing)
+            rejected.reason shouldBe "control-position-missing"
+            rejected.values shouldBe mapOf("block" to "AIR", "x" to "0", "y" to "64", "z" to "0",
+                "world" to s.world.uid.toString(), "world_name" to s.world.name)
+            val block = s.world.getBlockAt(0, 64, 0).also { it.type = Material.BARREL }
+            val capture = s.subject.capture(UUID.randomUUID(), owner, s.world.uid, building, cells, null)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            val malformed = plan.copy(blocks = plan.blocks + CivPlanBlock(control, block.blockData.asString, "minecraft:structure_void"))
+            failureReason(s.subject.revalidate(malformed, owner)) shouldBe "invalid-plan"
+            block.type = Material.STONE
+            val changed = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            failureReason(changed) shouldBe "control-position-missing"
+            block.type shouldBe Material.STONE
+        }
+    }
+
+    test("preserved marker cells still require Lands permission and never empty their barrel") {
+        worldScenario { s ->
+            val control = CivPosition(0, 64, 0)
+            val block = s.world.getBlockAt(0, 64, 0).also { it.type = Material.BARREL }
+            (block.state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            val building = worldBuilding(worldBox(0, 1)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val captured = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:structure_void"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            val failure = rejection(captured)
+            failure.reason shouldBe "lands-denied"
+            failure.values["x"] shouldBe "0"
+            failure.values["block"] shouldBe "BARREL"
+            (block.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
+    test("a batch away from the control still checks its chunk without loading it") {
+        worldScenario { s ->
+            val control = CivPosition(32, 64, 0)
+            val building = worldBuilding(worldBox(0, 32)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val plan = CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:air")))
+            s.world.isChunkLoaded(2, 0) shouldBe false
+            val revalidated = s.subject.revalidate(plan, UUID.randomUUID())
+            s.scheduler.tick()
+            failureReason(revalidated) shouldBe "chunks-unloaded"
+            s.world.isChunkLoaded(2, 0) shouldBe false
+        }
+    }
+
+    test("the separate control permission check shares the scan budget after a full cell slice") {
+        worldScenario { s ->
+            for (x in 0..16) s.world.loadChunk(x, 0)
+            val control = CivPosition(0, 64, 0)
+            s.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val building = worldBuilding(worldBox(0, 256)).copy(anchor = CivPosition(-1, 63, 0), control = control)
+            val plan = CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                (1..256).map { CivPlanBlock(CivPosition(it, 64, 0), "minecraft:air", "minecraft:air") })
+            val revalidated = s.subject.revalidate(plan, UUID.randomUUID())
+            s.scheduler.tick()
+            revalidated.isDone shouldBe false
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            s.scheduler.tick()
+            val failure = rejection(revalidated)
+            failure.reason shouldBe "lands-denied"
+            failure.values["block"] shouldBe "BARREL"
+            failure.values["x"] shouldBe "0"
+        }
+    }
+
+    test("legacy origin controls retain their original structure-void cells and revalidation semantics") {
+        worldScenario { s ->
+            val origin = CivPosition(-1, 63, 0)
+            val building = worldBuilding(worldBox(0, 1)).copy(anchor = origin, control = origin)
+            val owner = UUID.randomUUID()
+            val captured = s.subject.capture(UUID.randomUUID(), owner, s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:structure_void"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            val plan = completed(captured)
+            plan.blocks.size shouldBe 2
+            plan.blocks.first().after shouldBe "minecraft:structure_void"
+            val revalidated = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(revalidated) shouldBe Unit
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(origin.x, origin.y, origin.z).type shouldBe Material.STONE
+        }
+    }
+
     for (material in listOf(Material.CHEST, Material.LAVA, Material.BEDROCK, Material.OAK_PLANKS,
         Material.STRIPPED_JUNGLE_LOG)) test("actual replacement still rejects ${material.name} with exact coordinates") {
         worldScenario { s ->
@@ -297,7 +424,7 @@ class CivsWorldTest : FunSpec({
         worldScenario { s ->
             val control = CivPosition(-1, 63, 0)
             s.world.getBlockAt(control.x, control.y, control.z).type = material
-            val building = worldBuilding(worldBox(0, 0)).copy(control = control)
+            val building = worldBuilding(worldBox(0, 0)).copy(anchor = control, control = control)
             val capture = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
             s.scheduler.tick()
             failureReason(capture) shouldBe "control-obstructed"

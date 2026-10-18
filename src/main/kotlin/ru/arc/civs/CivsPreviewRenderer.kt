@@ -174,7 +174,7 @@ internal data class CivsPreviewCuboid(
     val material: Material,
 )
 
-/** Amber building bounds, an unmistakable green anchor block and a cyan walkable entrance. */
+/** Amber building bounds, the green control block and a separate cyan walkable entrance. */
 internal fun civsPreviewCues(building: CivBuilding): List<CivsPreviewCuboid> = buildList {
     val thickness = 0.035f
     val half = thickness / 2.0
@@ -192,14 +192,14 @@ internal fun civsPreviewCues(building: CivBuilding): List<CivsPreviewCuboid> = b
     for (x in listOf(x0, x1)) for (z in listOf(z0, z1)) add(CivsPreviewCuboid(x, y0, z, thickness, sy, thickness, Material.ORANGE_CONCRETE))
     for (x in listOf(x0, x1)) for (y in listOf(y0, y1)) add(CivsPreviewCuboid(x, y, z0, thickness, thickness, sz, Material.ORANGE_CONCRETE))
     val entry = building.entrance
-    // Keep the walkable entrance inside the support frame; coincident rings hide the green handle.
+    // The inset footprint distinguishes the walkable entrance from the full control-block frame.
     val ex = entry.x + 0.16
     val ey = entry.y + 0.025
     val ez = entry.z + 0.16
     val edge = 0.045f
     for (z in listOf(ez, ez + 0.635)) add(CivsPreviewCuboid(ex, ey, z, 0.68f, 0.035f, edge, Material.CYAN_CONCRETE))
     for (x in listOf(ex, ex + 0.635)) add(CivsPreviewCuboid(x, ey, ez, edge, 0.035f, 0.68f, Material.CYAN_CONCRETE))
-    addAll(civsAnchorCues(building.anchor, Material.LIME_CONCRETE))
+    building.control?.let { addAll(civsAnchorCues(it, Material.LIME_CONCRETE)) }
 }
 
 /** Same twelve-edge, 0.08-block frame as Builder's movable origin marker. */

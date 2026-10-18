@@ -47,9 +47,17 @@ to the city. Empty allowed-worlds makes a backend view-only.
 ## Domain
 
 Seven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
-QUARRY, FARM; levels1..3. New placement creates a SITE and its physical barrel
-control at the selected ground approach, outside the schematic write volume.
-It does not paste the completed building. The first pioneer arrives after30s,
+QUARRY, FARM; levels1..3. The curated catalog remains63 assets across21
+style/type families. Each schematic has one `minecraft:structure_void` primary-hut
+marker inside the building; it is the physical control position, not the authored
+origin or visual entrance. The primary ground-click flow aligns marker X/Z with the
+selected ground X/Z, leaves the schematic anchor at ground Y and places the control
+at ground Y plus the marker's authored Y-minus-origin offset. Clicking an existing
+BARREL at the exact control XYZ is an alternate selection path. The visible entrance
+is independent. The player supplies the BARREL; no control item is minted, and new
+ACTIVE controls are never auto-recreated. A newly
+placed SITE creates a control at the marker without pasting the completed building.
+The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. Idle residents choose bounded safe loaded wander targets.
@@ -71,6 +79,13 @@ items remain untouched in physical inventory. There is no Vault or token payout.
 Each building has a paginated virtual warehouse of1728/3456/5184items by level,
 plus its real27-slot control barrel for input/output. Explicitly registered city
 chests/barrels are physical sources; only one half of a double chest is used.
+An owner or city member with management access may explicitly rebind only a legacy
+ACTIVE building's control through its building menu after placing a new player-owned
+BARREL at the target coordinates. The old barrel and its inventory are never moved
+or cleared; the old container is
+automatically registered as an additional warehouse within the 16-container limit.
+The city UUID and stocks remain unchanged. SITE buildings and buildings with an
+accepted construction cannot be rebound.
 PHYSICAL mode consumes loaded containers first, then the common reserve and
 building warehouses; VIRTUAL consumes those durable virtual maps. Mode changes
 create no items. Deposit moves actual control-barrel cargo to that building's
@@ -96,14 +111,15 @@ atomic transaction; a power-loss rollback of already-acknowledged chunk data rem
 a platform persistence boundary. No blind repeat after an unknown result.
 
 Construction reserves exact obtainable materials for the immutable captured
-before/after plan once. Matching existing blocks need no replacement. A builder's
-observed trip authorizes one deterministic horizontal tile of at most256cells;
-Core's provider-owned crop/paste does the bounded native writes. Only its successful
-completion advances the durable tile cursor. Callback fencing includes order and
-expected cursor, not just the order UUID. PLACING restart rechecks that same tile
-and accepts only planned before/after states; completed tiles are not repasted.
-Old paid orders retain their original whole-plan algorithm. Mutable source files
-cannot change an accepted design. Full snapshots are released after each step.
+before/after plan once. The unique marker cell is omitted from new paste plans;
+matching existing target blocks need no replacement. Core's provider-owned paste
+splits new placement around the control into at most six crops, applied sequentially
+in one batch while preserving the barrel and its inventory. Durable completion
+advances the plan, and restart recovery accepts only known planned before/after
+states. Callback fencing includes the order and expected cursor, not only the UUID.
+Previously captured paid plans retain their stored snapshots and original algorithm;
+mutable source assets cannot change an accepted design. Full snapshots are released
+after a batch.
 
 World placement validates ownership, loaded chunks, borders, Lands, building boxes
 and foreign controlpoints. It preserves nonempty inventories and registered storage.
@@ -116,8 +132,10 @@ with at most60parts per viewer and no perimeter/world scans.
 
 ## UI
 
-/civs (alias /city) opens a native dialog hub. Founding, buildings, stock,
-workers, upgrades and members are separate stable screens. Right-clicking a building control opens that building: level, work assignments, output choice, materials and its paginated warehouse. Selection and
+/civs (alias /city) opens the city overview. Its **Управление поселением** submenu
+contains storage, development, members and owner-only deletion. Founding and building
+screens remain separate. Right-clicking a building control opens that building:
+level, work assignments, output choice, materials and its paginated warehouse. Selection and
 confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery
@@ -131,10 +149,14 @@ they do not claim visibility into packets discarded inside Core.
 
 Founding and new-building forms start a service-owned ground selection and close
 the dialog before reading any aim target. A persistent action-bar instruction
-refreshes every 20 ticks; a light-blue twelve-edge frame marks the ground support.
-The main-hand right-click supplies the actual clicked block, with the same bounded
-plant-to-support resolution used by the marker. There is no second aiming ray
-after the click. Shift + right-click, menu reopen, logout, world change, expiry,
+refreshes every 20 ticks. The primary-hut marker is the unique inside-building
+`structure_void` cell in the curated schematic; it is separate from the visible
+entrance and authored origin. Right-clicking ground starts the preview and selects
+ground X/Z. The schematic anchor remains at ground Y; the control coordinate Y is
+ground Y plus the marker's authored Y-minus-origin offset. The player places a BARREL
+at that control coordinate; an already placed BARREL can instead be right-clicked
+at its exact control XYZ. There is no second aiming ray after the click. Shift +
+right-click, menu reopen, logout, world change, expiry,
 reload and shutdown retire the selection. Its identity fences asynchronous
 blueprint completion; a rejected location preserves the draft for the next click.
 Ground selection neither captures world blocks nor writes stock or city state.
@@ -143,12 +165,13 @@ After a successful ground click, prepared placement uses Core `PaperActionPanels
 `CivsPlacementControls`. The main page offers confirm, anchor movement, both
 quarter-turn rotations, optional details and cancellation. Movement has a separate
 page of six one-block nudges, Done and Cancel; a ground right-click relocates the
-whole preview. The green twelve-edge support block is also a direct movement
-entry. It is the normalized support pivot below the walkable entrance and outside
-the building footprint; the authored origin stays fixed. Cyan marks the entrance; a light-blue frame
-shows the ground destination. Upgrades keep their existing position and rotation.
-Move controls sit slightly higher and farther away to leave a clear terrain-pick
-corridor below them; the normal placement page uses the shared Core defaults.
+whole preview. The green marker identifies the inside-building control coordinate;
+cyan marks the separate visual entrance and the light-blue frame shows the ground
+destination. Upgrades preserve the existing entrance and rotation.
+Both control pages face the authored control point from three blocks away. Their
+two columns and left-aligned status leave a clear central corridor for seeing and
+placing the barrel; move controls also sit slightly higher to keep terrain picking
+clear below them. Core still owns obstacle avoidance, reach checks and hit testing.
 
 `CivsService` keeps the last valid preview until an asynchronous replacement is
 ready, blocks confirmation during that load and fences obsolete completions.

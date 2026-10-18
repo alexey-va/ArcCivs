@@ -119,24 +119,29 @@ class CivsWorld internal constructor(
             building.entrance.copy(y = building.entrance.y + 1),
         )
         private val predictedEntrance = HashMap<CivPosition, BlockData>()
+        private val authoredControl = building.control.takeIf { CivsBlueprints.hasAuthoredControl(building) }
+        private var controlChecked = false
         private var entranceIndex = 0
         protected var index = 0
 
         init {
             requireCivs(civsBoxVolume(building.bounds) in 1..CivsStore.MAX_PLAN_BLOCKS.toLong(), "invalid-building")
             requireCivs(building.entrance.y in -4_095..4_095, "invalid-building")
+            authoredControl?.let { requireCivs(building.bounds.contains(it.x, it.y, it.z), "invalid-building") }
         }
 
         fun validateContext() {
             world = plugin.server.getWorld(worldId) ?: throw CivsRejection("world-unavailable")
             requireCivs(building.bounds.min.y >= world.minHeight && building.bounds.max.y < world.maxHeight &&
-                entranceCells.all { it.y in world.minHeight until world.maxHeight }, "outside-world")
+                entranceCells.all { it.y in world.minHeight until world.maxHeight } &&
+                (authoredControl?.y?.let { it in world.minHeight until world.maxHeight } != false), "outside-world")
             val border = world.worldBorder
             val min = building.bounds.min
             val max = building.bounds.max
             requireCivs(border.isInside(Location(world, min.x.toDouble(), min.y.toDouble(), min.z.toDouble())) &&
                 border.isInside(Location(world, max.x + 1.0 - 1e-6, max.y.toDouble(), max.z + 1.0 - 1e-6)) &&
-                border.isInside(Location(world, building.entrance.x + 0.5, building.entrance.y.toDouble(), building.entrance.z + 0.5)),
+                border.isInside(Location(world, building.entrance.x + 0.5, building.entrance.y.toDouble(), building.entrance.z + 0.5)) &&
+                (authoredControl?.let { border.isInside(Location(world, it.x + 0.5, it.y.toDouble(), it.z + 0.5)) } != false),
                 "outside-border")
             val all = cities()
             val city = all.firstOrNull { it.id == cityId }
@@ -183,6 +188,21 @@ class CivsWorld internal constructor(
 
         protected fun predict(position: CivPosition, after: BlockData) {
             if (position in entranceCells) predictedEntrance[position] = after
+        }
+
+        protected fun checkControl(block: Block) {
+            if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
+            if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+        }
+
+        /** The preserved marker barrel has its own bounded check, including for batches away from its chunk. */
+        protected fun checkApproach(): Boolean {
+            if (!controlChecked && authoredControl != null) {
+                checkControl(read(authoredControl))
+                controlChecked = true
+                return false
+            }
+            return checkEntrance()
         }
 
         /** One additional world cell per step, including an entrance outside the schematic box. */
@@ -241,7 +261,7 @@ class CivsWorld internal constructor(
 
         override fun step() {
             if (index == cells.size) {
-                if (checkEntrance()) {
+                if (checkApproach()) {
                     requireCivs(blocks.isNotEmpty(), "invalid-plan")
                     finish(CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList()))
                 }
@@ -255,6 +275,11 @@ class CivsWorld internal constructor(
             if (cell.isBarrier) {
                 requireCivs(parse(cell.blockData).material == Material.BARRIER, "invalid-plan")
                 if (!canModify(owner, block)) rejectAt("lands-denied", block)
+                return
+            }
+            if (position == building.control && parse(cell.blockData).material == Material.STRUCTURE_VOID) {
+                requireCivs(!cell.isAir, "invalid-plan")
+                checkControl(block)
                 return
             }
             if (previous?.bounds?.contains(position.x, position.y, position.z) != true &&
@@ -273,6 +298,9 @@ class CivsWorld internal constructor(
 
     private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID) :
         Scan<Unit>(plan.cityId, owner, plan.worldId, plan.building) {
+        init {
+            requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
+        }
         override fun validateIdentity(city: Settlement?) {
             val current = city?.building(building.id)
             requireCivs(current == null || current == building || current.type == building.type &&
@@ -286,7 +314,7 @@ class CivsWorld internal constructor(
 
         override fun step() {
             if (index == plan.blocks.size) {
-                if (checkEntrance()) finish(Unit)
+                if (checkApproach()) finish(Unit)
                 return
             }
             val cell = plan.blocks[index++]

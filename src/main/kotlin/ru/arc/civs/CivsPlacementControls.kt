@@ -132,12 +132,10 @@ internal class CivsPlacementControls(
             else -> text.render(player, "panel.status", "building" to text.building(player, preview.type), "rotation" to preview.rotation)
         }
         val actions = if (busy) emptyList() else actions(preview, session.moving)
-        val box = preview.bounds
         return ActionPanelFrame(
             CivsPlacementContext(preview.id, session.moving, session.pending),
             ActionPanelPlacement.FollowTarget(preview.worldId,
-                ActionPanelPoint((box.min.x.toDouble() + box.max.x + 1) / 2,
-                    preview.entrance.y.toDouble(), (box.min.z.toDouble() + box.max.z + 1) / 2),
+                ActionPanelPoint(preview.control.x + 0.5, preview.control.y + 0.5, preview.control.z + 0.5),
                 followingSettings(session.moving)),
             layout(player, actions, status, session.moving), !busy,
             ActionPanelOptions(ActionPanelInputProfile.ENTITY_BOTH, 4.0, false), null,
@@ -155,13 +153,17 @@ internal class CivsPlacementControls(
                 else -> TextColor.color(0xFFFFFF)
             }))
         }
-        if (!moving) return ActionPanelLayouts.twoColumn(buttons, status)
-        // Eight controls need lateral clearance near terrain, without pushing the group above view.
-        val grid = ActionPanelGridSettings(0.26, 1.45, 1.4f, 0.23f, 0.75f)
+        // Leave the authored control visible and placeable between the two columns.
+        val grid = if (moving) ActionPanelGridSettings(0.26, 2.5, 1.4f, 0.23f, 0.75f)
+            else ActionPanelGridSettings(0.26, 2.8, 1.75f, 0.23f, 0.8f)
         val layout = ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0, grid)
-        val width = grid.columnSpacing + grid.buttonWidth
-        return ActionPanelLayout(layout.buttons, layout.labels.map { label ->
-            ActionPanelLabel(label.key, ActionPanelRect(label.rect.center, minOf(label.rect.width, width), label.rect.height),
+        if (buttons.isEmpty()) return layout
+        return ActionPanelLayout(layout.buttons.mapIndexed { index, button ->
+            val center = button.rect.center.copy(x = (index % 2 - 0.5) * grid.columnSpacing)
+            ActionPanelButton(button.action, button.rect.copy(center = center), button.text, button.style, button.visible, button.enabled)
+        }, layout.labels.map { label ->
+            ActionPanelLabel(label.key, label.rect.copy(center = label.rect.center.copy(x = -grid.columnSpacing / 2),
+                width = grid.buttonWidth.toDouble()),
                 label.text, label.style, label.visible)
         })
     }
@@ -280,13 +282,18 @@ internal class CivsPlacementControls(
             else perform(player, session, finishMove = true) {
                 host.movePreview(player, CivsGroundTarget(clicked.world.uid, CivPosition(clicked.x, clicked.y, clicked.z)))
             }
-        } else if (aimsAtAnchor(player, preview.anchor)) {
-            event.isCancelled = true
-            beginMove(player, session)
+        } else {
+            // Placing the required barrel (or its support) must remain an ordinary block interaction.
+            val mainHandBlock = event.item?.type?.let { !it.isAir && it.isBlock } == true
+            val offHandBlock = player.inventory.itemInOffHand.type.let { !it.isAir && it.isBlock }
+            if (!mainHandBlock && !offHandBlock && aimsAtControl(player, preview.control)) {
+                event.isCancelled = true
+                beginMove(player, session)
+            }
         }
     }
 
-    private fun aimsAtAnchor(player: Player, point: CivPosition): Boolean {
+    private fun aimsAtControl(player: Player, point: CivPosition): Boolean {
         val eye = player.eyeLocation
         val hit = BoundingBox(point.x - 0.04, point.y - 0.04, point.z - 0.04,
             point.x + 1.04, point.y + 1.04, point.z + 1.04).rayTrace(eye.toVector(), eye.direction, 12.0) ?: return false
@@ -358,9 +365,9 @@ internal class CivsPlacementControls(
     }
 
     companion object {
-        /** Keep the terrain-pick corridor below the move controls; other Civs modes use Core defaults. */
-        internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings = if (moving)
-            ActionPanelFollowSettings(3.0, -0.5, 0.2, 1.25, 0.03) else ActionPanelFollowSettings()
+        /** Symmetric columns leave the control ray clear; move controls also leave terrain visible below. */
+        internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings =
+            ActionPanelFollowSettings(3.0, 0.0, if (moving) 0.3 else 0.0, 1.25, 0.03)
 
         internal fun actions(preview: CivsPreviewView, moving: Boolean): List<CivsPlacementAction> = when {
             moving && preview.movable -> listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,

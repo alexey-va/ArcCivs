@@ -185,14 +185,14 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("owners and members may restore only a missing SITE control barrel while its breaking stays denied") {
+    for (phase in listOf(BuildingPhase.SITE, BuildingPhase.ACTIVE)) test("owners and members may restore only a missing $phase control barrel while its breaking stays denied") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("restore-site-control")
             val owner = paper.addPlayer("Owner")
             val member = paper.addPlayer("Member")
             val stranger = paper.addPlayer("Stranger")
             val control = CivPosition(-1, 63, 0)
-            val building = protectionBuilding(0, 2).copy(phase = BuildingPhase.SITE, control = control)
+            val building = protectionBuilding(0, 2).copy(phase = phase, control = control)
             var city = protectionCity(world.uid, owner.uniqueId, building).copy(members = setOf(member.uniqueId))
             val listener = CivsProtection({ listOf(city) })
             paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("RestoreSiteControlTest"))
@@ -209,7 +209,7 @@ class CivsProtectionTest : FunSpec({
             listener.refresh() shouldBe true
             paper.callEvent(controlPlacement(world, control, member)).isCancelled shouldBe true
             paper.callEvent(controlPlacement(world, control, owner)).isCancelled shouldBe false
-            city = city.copy(buildings = listOf(building.copy(phase = BuildingPhase.ACTIVE)))
+            city = city.copy(buildings = listOf(building.copy(phase = BuildingPhase.CONSTRUCTING)))
             listener.refresh() shouldBe true
             paper.callEvent(controlPlacement(world, control, owner)).isCancelled shouldBe true
         }

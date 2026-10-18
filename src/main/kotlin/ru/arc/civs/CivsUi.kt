@@ -223,8 +223,8 @@ class CivsUi internal constructor(
             table(listOf(
                 tr(player, "label.building") to buildingName(player, preview.type, preview.level),
                 tr(player, "label.city") to text.literal(preview.cityName),
-                tr(player, if (preview.movable) "label.control" else "label.position") to coordinates(player,
-                    if (preview.movable) preview.entrance.copy(y = preview.entrance.y - 1) else preview.anchor),
+                tr(player, "label.control") to coordinates(player, preview.control),
+                tr(player, "label.entrance") to coordinates(player, preview.entrance),
                 tr(player, "label.size") to tr(player, "preview.size", "x" to preview.sizeX, "y" to preview.sizeY, "z" to preview.sizeZ),
                 tr(player, "label.rotation") to tr(player, "preview.rotation", "value" to preview.rotation),
             )),
@@ -235,6 +235,9 @@ class CivsUi internal constructor(
             body(player, "preview.protected"), error?.let(::body),
         ), buildList {
             add(button(player, "placement", "panel.return", NAVIGATION) { resumePlacement(player) })
+            if (host.city(player)?.canManage(player.uniqueId) == true) {
+                add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
+            }
             pages(player, current, materials.size) { showPreview(player, error, it) }
         }, reopen = { showPreview(player, page = current) })
     }
@@ -259,14 +262,24 @@ class CivsUi internal constructor(
             construction?.failure?.let { body(text.reason(player, it)) },
             body(nextStep(player, city)), body(player, "city.boundary-help"), body(player, "city.sleep-rule"), busyBody(player), feedback?.let(::body),
         ), buildList {
+            add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             add(button(player, "buildings", "buildings.open", LAND) { showBuildings(player) })
-            add(button(player, "stock", "stock.open", STOCK) { showStock(player) })
             add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
+        }, reopen = { showOverview(player) })
+    }
+
+    private fun showManagement(player: Player) {
+        val city = city(player) ?: return
+        present(player, "civs.management", "management.title", listOfNotNull(
+            body(tr(player, "city.intro", "name" to city.name)),
+            body(player, "management.help"), busyBody(player),
+        ), buildList {
+            add(button(player, "stock", "stock.open", STOCK) { showStock(player) })
             add(button(player, "upgrades", "upgrades.open", PERSONAL) { showUpgrades(player) })
             add(button(player, "members", "members.open") { showMembers(player) })
             if (city.owner == player.uniqueId) add(button(player, "delete_city", "delete.open", DANGER) { showDeleteCity(player, city.id) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
-        }, reopen = { showOverview(player) })
+        }, reopen = { showManagement(player) })
     }
 
     private fun showDeleteCity(player: Player, expectedCityId: UUID, initial: String = "", error: Component? = null) {
@@ -538,11 +551,12 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         val assigned = city.workers.count { it.assignment == buildingId }
+        val legacyControl = building.phase == BuildingPhase.ACTIVE && (building.control == null || building.control == building.anchor)
         present(player, "civs.building", "buildings.detail-title", listOfNotNull(
             body(buildingName(player, building.type, building.level)),
             body(player, "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
             table(buildList {
-                add(tr(player, if (building.control != null) "label.control" else "label.position") to coordinates(player, building.control ?: building.anchor))
+                add(tr(player, "label.control") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")))
                 add(tr(player, "label.state") to tr(player, "building-phase.${building.phase.name.lowercase(Locale.ROOT)}"))
                 add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
                 CivsProduction.material(building)?.let { material ->
@@ -550,6 +564,8 @@ class CivsUi internal constructor(
                 }
                 if (city.construction?.buildingId == buildingId) add(tr(player, "label.construction") to constructionText(player, city))
             }), body(player, "buildings.control-help"),
+            if (legacyControl) body(player, "control.legacy-help") else null,
+            if (legacyControl && city.construction != null) body(player, "reason.construction-busy") else null,
             if (building.type == BuildingType.TOWN_HALL && CivsRules.legacyHallBuilder(city)) body(player, "buildings.legacy-builder-help") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
@@ -558,8 +574,48 @@ class CivsUi internal constructor(
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (CivsProduction.options(building.type).isNotEmpty()) add(button(player, "production", "production.open", PERSONAL) { showProduction(player, buildingId) })
             if (building.level < 3 && building.phase == BuildingPhase.ACTIVE) add(button(player, "upgrade", "upgrades.open", PERSONAL) { showUpgrade(player, building.id) })
+            if (legacyControl && !host.cityBusy(player) && city.construction == null) {
+                add(button(player, "relocate_control", "control.open", NAVIGATION) { loadControlRelocation(player, buildingId) })
+            }
             add(button(player, "refresh", "common.refresh") { showBuilding(player, buildingId) })
         }, reopen = { showBuilding(player, buildingId) })
+    }
+
+    private fun loadControlRelocation(player: Player, buildingId: UUID, error: Component? = null) {
+        val city = city(player) ?: return
+        val building = city.building(buildingId) ?: return showBuildings(player)
+        if (building.phase != BuildingPhase.ACTIVE) return showBuilding(player, buildingId, text.reason(player, "control-relocation-site"))
+        val visit = present(player, "civs.control-relocation", "control.title", listOf(body(player, "control.loading")), emptyList()) ?: return
+        val future = try { host.buildingControl(player, buildingId) } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
+        future.whenCompleteSync(tasks, visit.epoch) { target, failure ->
+            if (!current(player, visit)) return@whenCompleteSync
+            if (host.city(player)?.id != city.id) showEntry(player)
+            else if (failure != null) showBuilding(player, buildingId, text.failure(player, failure).color(DANGER))
+            else showControlRelocation(player, buildingId, requireNotNull(target), error)
+        }
+    }
+
+    private fun showControlRelocation(player: Player, buildingId: UUID, target: CivPosition, error: Component? = null) {
+        val city = city(player) ?: return
+        val building = city.building(buildingId) ?: return showBuildings(player)
+        if (building.phase != BuildingPhase.ACTIVE || building.control == target) return showBuilding(player, buildingId, error)
+        val busy = host.cityBusy(player)
+        present(player, "civs.control-relocation", "control.title", listOfNotNull(
+            body(buildingName(player, building.type, building.level)),
+            table(listOf(
+                tr(player, "control.old-position") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")),
+                tr(player, "control.new-position") to coordinates(player, target),
+            )), body(player, "control.help"), body(player, "control.retained-help"),
+            if (city.construction != null) body(player, "reason.construction-busy") else null,
+            busyBody(player), error?.let { body(it.color(DANGER)) },
+        ), buildList {
+            if (!busy && city.construction == null) add(button(player, "relocate", "control.confirm", COMMIT) {
+                perform(player, "civs.control-relocation", "control.title", { host.relocateControl(player, buildingId, target) },
+                    success = { showBuilding(player, buildingId, tr(player, "control.success").color(COMMIT)) },
+                    failure = { loadControlRelocation(player, buildingId, it) })
+            })
+            add(button(player, "refresh", "common.refresh") { loadControlRelocation(player, buildingId) })
+        }, reopen = { loadControlRelocation(player, buildingId) })
     }
 
     private fun loadBuildingMaterials(player: Player, buildingId: UUID) {

@@ -25,6 +25,7 @@ data class CivsPreviewView(
     val movable: Boolean,
     val busy: Boolean,
     val materials: Map<String, Long> = emptyMap(),
+    val control: CivPosition = anchor,
 )
 
 /** Coordinates from the interaction, never a second ray cast after the click. */
@@ -100,6 +101,8 @@ interface CivsUiHost {
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>
     fun availableMaterials(player: Player): Map<String, Long>
     fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>
+    fun relocateControl(player: Player, buildingId: UUID, expectedTarget: CivPosition): CompletableFuture<Unit>
     fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit>
     fun depositMaterials(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun withdrawMaterial(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>

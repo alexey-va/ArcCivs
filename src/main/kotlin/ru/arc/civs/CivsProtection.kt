@@ -34,7 +34,7 @@ import org.bukkit.inventory.InventoryHolder
 import java.util.UUID
 
 /**
- * Members may remodel finished buildings and unstarted sites, and restore a missing SITE barrel.
+ * Members may remodel finished buildings and unstarted sites, and restore their missing control barrel.
  * Existing control blocks and the current/planned footprint of accepted construction stay locked for everyone.
  * Environmental changes and third-party pastes retain the complete footprint guard;
  * the settlement radius itself grants no event protection. Core pastes do not emit these events.
@@ -85,7 +85,7 @@ class CivsProtection(
                     city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
                     civsProtectedBuildings(city).forEach { building ->
                         val point = building.control ?: return@forEach
-                        val restorers = if (building.phase == BuildingPhase.SITE && city.construction?.buildingId != building.id)
+                        val restorers = if (building.phase != BuildingPhase.CONSTRUCTING && city.construction?.buildingId != building.id)
                             editors else emptySet()
                         add(Footprint(city.worldId, CivBox(point, point), emptySet(), restorers))
                     }

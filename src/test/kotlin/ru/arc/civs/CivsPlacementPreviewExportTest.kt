@@ -35,17 +35,18 @@ class CivsPlacementPreviewExportTest : FunSpec({
             val controls = CivsPlacementControls(plugin, host, ui, tasks, text, displays, panels)
             try {
                 val base = CivBuilding(UUID(0, 1), BuildingType.TOWN_HALL, 1, CivPosition(0, 63, 0), 0,
-                    "fixture", CivBox(CivPosition(-6, 63, -12), CivPosition(5, 72, -1)), CivPosition(0, 64, 0), BuildingPhase.CONSTRUCTING)
+                    "fixture", CivBox(CivPosition(-6, 63, -12), CivPosition(5, 72, -1)), CivPosition(0, 64, 0),
+                    BuildingPhase.CONSTRUCTING, control = CivPosition(0, 65, -6))
                 fun scene(name: String, building: CivBuilding, eye: ActionPanelPoint, moving: Boolean, obstacle: Boolean): Map<String, Any> {
                     val preview = CivsPreviewView(building.type, 1, "nordic", "Oak Town", building.anchor,
                         building.rotation, 12, 10, 12, Stock(), 400, UUID(0, 2), player.world.uid, building.entrance,
-                        building.bounds, true, false)
+                        building.bounds, true, false, control = requireNotNull(building.control))
                     val status = if (moving) text.render(player, "panel.moving") else text.render(player, "panel.status",
                         "building" to text.building(player, building.type), "rotation" to building.rotation)
                     val layout = controls.layout(player, CivsPlacementControls.actions(preview, moving), status, moving)
                     val rects = layout.buttons.map { it.rect } + layout.labels.filter { it.visible }.map { it.rect }
-                    val target = ActionPanelPoint((building.bounds.min.x.toDouble() + building.bounds.max.x + 1) / 2,
-                        building.entrance.y.toDouble(), (building.bounds.min.z.toDouble() + building.bounds.max.z + 1) / 2)
+                    val control = requireNotNull(building.control)
+                    val target = ActionPanelPoint(control.x + 0.5, control.y + 0.5, control.z + 0.5)
                     val settings = CivsPlacementControls.followingSettings(moving)
                     val yaw = Math.toDegrees(atan2(target.x - eye.x, eye.z - target.z)).toFloat()
                     fun anchor(distance: Double, shift: ActionPanelShift) =
@@ -75,6 +76,18 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     })
                     val placed = anchor(distance, chosenShift)
                     safe(distance, chosenShift, 0.0) shouldBe true
+                    // The complete green block remains outside all control and status rectangles.
+                    // The same rays must reach a barrel or its support when the player holds a block.
+                    val occupiedPlanes = rects.map { ActionPanelPlane(Unit,
+                        ActionPanelGeometry.localToWorld(placed, it.center), placed.yaw, it.width, it.height, true) }
+                    val controlRays = listOf(-0.04, 0.5, 1.04).flatMap { x ->
+                        listOf(-0.04, 0.5, 1.04).flatMap { y -> listOf(-0.04, 0.5, 1.04).map { z ->
+                            ActionPanelPoint(control.x + x - eye.x, control.y + y - eye.y, control.z + z - eye.z)
+                        } }
+                    }
+                    controlRays.forEach { ray ->
+                        ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, 4.0, null) shouldBe null
+                    }
                     fun label(key: String, rect: ActionPanelRect, component: net.kyori.adventure.text.Component, style: ActionPanelTextStyle) =
                         mapOf("key" to key, "center" to ActionPanelGeometry.localToWorld(placed, rect.center), "width" to rect.width,
                             "height" to rect.height, "yaw" to placed.yaw, "text" to plainText(component),
@@ -105,8 +118,10 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     } else emptyMap<String, Any>()
                     return mapOf("id" to name, "eye" to eye, "target" to target, "cameraTarget" to cameraTarget, "anchor" to placed,
                         "distance" to distance, "shift" to chosenShift, "labels" to labels, "obstacles" to obstacles,
+                        "controlCorridor" to mapOf("sampledRays" to controlRays.size, "interceptedRays" to 0),
                         "terrainCorridor" to corridor, "cues" to (civsPreviewCues(building) + candidate),
-                        "bounds" to building.bounds, "groundY" to 63)
+                        "bounds" to building.bounds, "control" to requireNotNull(building.control),
+                        "entrance" to building.entrance, "pasteOrigin" to building.anchor, "groundY" to 63)
                 }
                 val selection = CivsSelectionView(UUID(0, 3), player.world.uid, BuildingType.TOWN_HALL,
                     System.currentTimeMillis() + 120_000, false)
@@ -122,8 +137,10 @@ class CivsPlacementPreviewExportTest : FunSpec({
                 val scenes = listOf(groundSelection, scene("open", base, ActionPanelPoint(0.5, 65.62, 5.5), false, false),
                     scene("obstructed", base, ActionPanelPoint(0.5, 65.62, 5.5), false, true),
                     scene("moved-rotated", base.copy(anchor = CivPosition(3, 63, 2), entrance = CivPosition(3, 64, 2), rotation = 90,
+                        control = CivPosition(10, 65, 2),
                         bounds = CivBox(CivPosition(4, 63, -4), CivPosition(15, 72, 7))), ActionPanelPoint(6.5, 65.62, 11.5), true, false),
                     scene("moved-obstructed", base.copy(anchor = CivPosition(3, 63, 2), entrance = CivPosition(3, 64, 2), rotation = 90,
+                        control = CivPosition(10, 65, 2),
                         bounds = CivBox(CivPosition(4, 63, -4), CivPosition(15, 72, 7))), ActionPanelPoint(6.5, 65.62, 11.5), true, true))
                 val out = System.getenv("CIVS_PLACEMENT_PREVIEW_OUT")?.let(Path::of)
                 if (out != null) {
