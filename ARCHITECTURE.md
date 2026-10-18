@@ -86,7 +86,17 @@ StructuredDebugLine/ArcLogging for source-owned callback and operation boundarie
 with bounded sanitized input, correlation IDs, outcomes and exception stacks;
 they do not claim visibility into packets discarded inside Core.
 
-Prepared placement leaves the dialog and uses Core `PaperActionPanels` through
+Founding and new-building forms start a service-owned ground selection and close
+the dialog before reading any aim target. A persistent action-bar instruction
+refreshes every 20 ticks; a light-blue twelve-edge frame marks the ground support.
+The main-hand right-click supplies the actual clicked block, with the same bounded
+plant-to-support resolution used by the marker. There is no second aiming ray
+after the click. Shift + right-click, menu reopen, logout, world change, expiry,
+reload and shutdown retire the selection. Its identity fences asynchronous
+blueprint completion; a rejected location preserves the draft for the next click.
+Ground selection neither captures world blocks nor writes stock or city state.
+
+After a successful ground click, prepared placement uses Core `PaperActionPanels` through
 `CivsPlacementControls`. The main page offers confirm, anchor movement, both
 quarter-turn rotations, optional details and cancellation. Movement has a separate
 page of six one-block nudges, Done and Cancel; a ground right-click relocates the

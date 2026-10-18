@@ -41,10 +41,15 @@ class CivsService(
     nativeWork: ru.arc.core.BudgetedTaskQueue? = null,
     private val backendTransfer: BackendTransfer? = null,
     onCitizensCreated: (CivsCitizens) -> Unit = {},
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
         val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
         val upgrading: Boolean, val expires: Long, val movementOrigin: CivPosition,
+    )
+    private data class Selection(
+        val id: UUID, val worldId: UUID, val cityId: UUID?, val name: String, val style: String,
+        val type: BuildingType, val expires: Long,
     )
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>) {
         var repairing = false
@@ -56,6 +61,7 @@ class CivsService(
     private val unhealthy = mutableSetOf<UUID>()
     private val pendingFounders = mutableMapOf<UUID, Pair<UUID, CivPosition>>()
     private val previews = mutableMapOf<UUID, Preview>()
+    private val selections = mutableMapOf<UUID, Selection>()
     private val requests = mutableMapOf<UUID, UUID>()
     private val previewLoads = mutableSetOf<UUID>()
     private val completions = mutableSetOf<CompletableFuture<*>>()
@@ -173,22 +179,84 @@ class CivsService(
             it.id, it.blueprint.worldId, b.entrance, b.bounds, !it.upgrading, player.uniqueId in previewLoads)
     }
 
-    override fun prepareFounding(player: Player, name: String, style: String): CompletableFuture<Unit> = action("prepare_founding", player, "city_name" to name, "style" to style) {
-        requireReady(player)
-        rejectIf(city(player) != null || remoteCity(player) != null || player.uniqueId in pendingFounders, "already-member")
-        rejectIf(name.trim().isBlank() || name.trim().length > 48 || name.any { it.isISOControl() }, "invalid-name")
-        val entrance = target(player)
-        checkSettlementSpace(player.world.uid, entrance)
-        prepare(player, null, name.trim(), style, BuildingType.TOWN_HALL, 1, UUID.randomUUID(), entrance, false)
+    override fun selection(player: Player): CivsSelectionView? {
+        val selection = selections[player.uniqueId] ?: return null
+        if (selection.expires <= now()) {
+            cancelSelection(player.uniqueId, "expired")
+            return null
+        }
+        return CivsSelectionView(selection.id, selection.worldId, selection.type, selection.expires,
+            player.uniqueId in previewLoads)
     }
 
-    override fun prepareBuilding(player: Player, type: BuildingType): CompletableFuture<Unit> = action("prepare_building", player, "type" to type) {
+    override fun beginFoundingSelection(player: Player, name: String, style: String): CompletableFuture<Unit> = action("begin_founding_selection", player, "city_name" to name, "style" to style) {
+        requireReady(player)
+        requireFounder(player)
+        rejectIf(name.trim().isBlank() || name.trim().length > 48 || name.any { it.isISOControl() }, "invalid-name")
+        beginSelection(player, null, name.trim(), style, BuildingType.TOWN_HALL)
+    }
+
+    override fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit> = action("begin_building_selection", player, "type" to type) {
         val city = managed(player)
         rejectIf(type == BuildingType.TOWN_HALL, "invalid-building")
         rejectIf(city.construction != null, "construction-busy")
-        val entrance = target(player)
-        rejectIf(player.world.uid != city.worldId || !city.contains(entrance.x, entrance.z), "outside-city")
-        prepare(player, city.id, city.name, city.style, type, 1, UUID.randomUUID(), entrance, false)
+        rejectIf(player.world.uid != city.worldId, "outside-city")
+        beginSelection(player, city.id, city.name, city.style, type)
+    }
+
+    private fun beginSelection(player: Player, cityId: UUID?, name: String, style: String, type: BuildingType): CompletableFuture<Unit> {
+        requirePlacementWorld(player)
+        rejectIf(style !in styles(), "invalid-style")
+        requirePreviewSlot(player)
+        if (player.uniqueId in previews || player.uniqueId in selections || player.uniqueId in requests)
+            cancelPreview(player.uniqueId, "replaced")
+        val selection = Selection(UUID.randomUUID(), player.world.uid, cityId, name, style, type,
+            now() + settings.previewSeconds * 1_000L)
+        selections[player.uniqueId] = selection
+        CivsDiagnostics.event("selection_begin", *CivsDiagnostics.actor(player), "selection" to selection.id,
+            "city" to cityId, "city_name" to name, "style" to style, "type" to type, "expires_at" to selection.expires)
+        return CompletableFuture.completedFuture(Unit)
+    }
+
+    override fun selectGround(player: Player, selectionId: UUID, target: CivsGroundTarget): CompletableFuture<Unit> =
+        action("select_ground", player, "selection" to selectionId, "target_world" to target.worldId, "block" to target.block) {
+            requireReady(player)
+            val selection = selections[player.uniqueId]?.takeIf { it.id == selectionId && it.expires > now() }
+                ?: throw CivsRejection("selection-expired")
+            rejectIf(selection.worldId != player.world.uid, "selection-expired")
+            rejectIf(player.uniqueId in previewLoads, "city-busy")
+            val entrance = clickedEntrance(player, target)
+            if (selection.cityId == null) {
+                requireFounder(player)
+                checkSettlementSpace(player.world.uid, entrance)
+            } else {
+                val city = managed(player)
+                rejectIf(city.id != selection.cityId, "not-authorized")
+                rejectIf(city.construction != null, "construction-busy")
+                rejectIf(!city.contains(entrance.x, entrance.z), "outside-city")
+            }
+            CivsDiagnostics.event("selection_selected", *CivsDiagnostics.actor(player), "selection" to selection.id,
+                "block" to target.block, "entrance" to entrance, "type" to selection.type)
+            prepare(player, selection.cityId, selection.name, selection.style, selection.type, 1, UUID.randomUUID(),
+                entrance, false, selectionId = selection.id)
+        }.whenComplete { _, failure ->
+            if (failure != null) CivsDiagnostics.event("selection_rejected", "player" to player.uniqueId,
+                "selection" to selectionId, "block" to target.block, "reason" to CivsDiagnostics.rejection(failure)?.reason,
+                "cause" to CivsDiagnostics.cause(failure)?.javaClass?.simpleName)
+        }
+
+    override fun cancelSelection(player: Player, reason: String) = cancelSelection(player.uniqueId, reason)
+
+    private fun cancelSelection(playerId: UUID, reason: String) {
+        val selection = selections.remove(playerId) ?: return
+        requests.remove(playerId)
+        CivsDiagnostics.event(if (reason == "expired") "selection_expired" else "selection_cancel",
+            "player" to playerId, "selection" to selection.id, "reason" to reason,
+            "world" to selection.worldId, "type" to selection.type)
+    }
+
+    private fun requireFounder(player: Player) {
+        rejectIf(city(player) != null || remoteCity(player) != null || player.uniqueId in pendingFounders, "already-member")
     }
 
     override fun prepareUpgrade(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("prepare_upgrade", player, "building" to buildingId) {
@@ -214,10 +282,20 @@ class CivsService(
     override fun movePreview(player: Player): CompletableFuture<Unit> = action("move_preview", player) {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
+        movePreviewTo(player, old, target(player))
+    }
+
+    override fun movePreview(player: Player, target: CivsGroundTarget): CompletableFuture<Unit> =
+        action("move_preview", player, "target_world" to target.worldId, "block" to target.block) {
+            val old = currentPreview(player)
+            rejectIf(old.upgrading, "upgrade-position-fixed")
+            movePreviewTo(player, old, clickedEntrance(player, target))
+        }
+
+    private fun movePreviewTo(player: Player, old: Preview, entrance: CivPosition): CompletableFuture<Unit> {
         val b = old.blueprint.building
-        val entrance = target(player)
         if (old.cityId == null) checkSettlementSpace(player.world.uid, entrance)
-        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, entrance, false, b.rotation)
+        return prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, entrance, false, b.rotation)
     }
 
     override fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit> = action("nudge_preview", player, "direction" to direction) {
@@ -236,11 +314,11 @@ class CivsService(
     private fun prepare(
         player: Player, cityId: UUID?, name: String, style: String, type: BuildingType, level: Int,
         buildingId: UUID, entrance: CivPosition, upgrading: Boolean, rotation: Int? = null, movementOrigin: CivPosition = entrance,
+        selectionId: UUID? = null,
     ): CompletableFuture<Unit> {
         requireReady(player)
         rejectIf(style !in styles(), "invalid-style")
-        rejectIf(player.uniqueId in previewLoads, "city-busy")
-        rejectIf((previews.keys + previewLoads).size >= settings.maximumPreviews && player.uniqueId !in previews, "too-many-previews")
+        requirePreviewSlot(player)
         val worldId = player.world.uid
         if (cityId != null) rejectIf(cities[cityId]?.let { !it.canManage(player.uniqueId) || it.worldId != worldId } != false, "not-authorized")
         val request = UUID.randomUUID()
@@ -254,7 +332,8 @@ class CivsService(
         blueprints.prepare(style, type, level, buildingId, worldId, entrance, facing(player), rotation)
             .whenCompleteSync(tasks) { blueprint, failure ->
                 previewLoads -= player.uniqueId
-                if (requests[player.uniqueId] != request || !player.isOnline || player.world.uid != worldId) {
+                if (requests[player.uniqueId] != request || !player.isOnline || player.world.uid != worldId ||
+                    selectionId != null && selections[player.uniqueId]?.let { it.id == selectionId && it.expires > now() } != true) {
                     result.completeExceptionally(CivsRejection("preview-expired"))
                 } else if (failure != null) {
                     log("prepare preview", failure)
@@ -268,8 +347,9 @@ class CivsService(
                     renderer.show(player, prepared.building, prepared.surface)
                     previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
                         now() + settings.previewSeconds * 1_000L, movementOrigin)
+                    if (selectionId != null) selections.remove(player.uniqueId)
                     CivsDiagnostics.event("preview_ready", "player" to player.uniqueId, "request" to request,
-                        "world" to worldId, "bounds" to prepared.building.bounds, "blocks" to prepared.snapshot.nonBarrierCount)
+                        "selection" to selectionId, "world" to worldId, "bounds" to prepared.building.bounds, "blocks" to prepared.snapshot.nonBarrierCount)
                     result.complete(Unit)
                 }.onFailure { result.completeExceptionally(it) }
             }
@@ -277,7 +357,8 @@ class CivsService(
     }
 
     override fun cancelPreview(player: Player) { cancelPreview(player.uniqueId) }
-    private fun cancelPreview(playerId: UUID) {
+    private fun cancelPreview(playerId: UUID, reason: String = "cancelled") {
+        cancelSelection(playerId, reason)
         val request = requests.remove(playerId)
         if (request != null) CivsDiagnostics.event("preview_cancel", "player" to playerId, "request" to request)
         previews.remove(playerId)
@@ -432,7 +513,7 @@ class CivsService(
         rejectIf(loading || closed, "not-ready")
         loading = true
         loadFailure = null
-        previews.keys.toList().forEach(::cancelPreview)
+        (previews.keys + selections.keys + requests.keys).toList().forEach { cancelPreview(it, "reload") }
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
         store.load().thenApplyAsync({ records ->
@@ -487,7 +568,8 @@ class CivsService(
 
     private fun pulse() {
         if (closed) return
-        previews.filterValues { it.expires <= now() }.keys.toList().forEach(::cancelPreview)
+        selections.filterValues { it.expires <= now() }.keys.toList().forEach { cancelSelection(it, "expired") }
+        previews.filterValues { it.expires <= now() }.keys.toList().forEach { cancelPreview(it, "expired") }
         citizens.pulse(now())
         pulseConstruction()
         updateHealth()
@@ -627,14 +709,35 @@ class CivsService(
         rejectIf(!ready(), "not-ready")
         rejectIf(!player.hasPermission("arccivs.use"), "not-authorized")
     }
-    private fun target(player: Player): CivPosition {
+    private fun requirePreviewSlot(player: Player) {
+        rejectIf(player.uniqueId in previewLoads, "city-busy")
+        val occupied = previews.keys + selections.keys + previewLoads
+        rejectIf(occupied.size >= settings.maximumPreviews && player.uniqueId !in occupied, "too-many-previews")
+    }
+    private fun requirePlacementWorld(player: Player) {
         rejectIf(settings.worlds.isEmpty(), "founding-disabled")
         if (player.world.name !in settings.worlds) throw CivsRejection("wrong-world", mapOf(
             "world" to player.world.name, "worlds" to settings.worlds.sorted().joinToString(),
         ))
+    }
+    /** Only the legacy command uses the current aim; world interactions pass their actual clicked block. */
+    private fun target(player: Player): CivPosition {
+        requirePlacementWorld(player)
         val hit = player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER)?.hitBlock ?: throw CivsRejection("look-at-ground")
-        rejectIf(!hit.type.isSolid || hit.isLiquid, "look-at-ground")
-        return CivPosition(hit.x, hit.y + 1, hit.z)
+        return clickedEntrance(player, CivsGroundTarget(hit.world.uid, CivPosition(hit.x, hit.y, hit.z)))
+    }
+    private fun clickedEntrance(player: Player, target: CivsGroundTarget): CivPosition {
+        requirePlacementWorld(player)
+        rejectIf(target.worldId != player.world.uid, "selection-expired")
+        val point = target.block
+        val world = player.world
+        rejectIf(point.y < world.minHeight || point.y.toLong() + 2 >= world.maxHeight, "outside-world")
+        rejectIf(!world.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
+        val eye = player.eyeLocation
+        rejectIf(eye.toVector().distanceSquared(org.bukkit.util.Vector(point.x + 0.5, point.y + 0.5, point.z + 0.5)) > 12.0 * 12.0, "too-far")
+        val block = world.getBlockAt(point.x, point.y, point.z)
+        val support = civsGroundSupport(block) ?: throw CivsRejection("look-at-ground")
+        return support.copy(y = support.y + 1)
     }
     private fun near(player: Player, worldId: UUID, point: CivPosition) {
         rejectIf(player.world.uid != worldId || player.location.toVector().distanceSquared(org.bukkit.util.Vector(point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) > 96.0 * 96.0, "too-far")
@@ -649,7 +752,7 @@ class CivsService(
         health = RuntimeHealthContribution(
             state = when { closed || !initialized && !loading -> RuntimeHealthState.DOWN; loading -> RuntimeHealthState.STARTING; unhealthy.isNotEmpty() -> RuntimeHealthState.DEGRADED; else -> RuntimeHealthState.UP },
             recoveryBacklog = cities.values.count { it.construction != null } + unhealthy.count { it !in cities },
-            activeLeases = previews.size + placing.size,
+            activeLeases = previews.size + selections.size + placing.size,
             schemas = mapOf("city" to 1, "plan" to 1),
             dependencies = mapOf("storage" to (initialized && unhealthy.isEmpty())),
         )
@@ -678,16 +781,16 @@ class CivsService(
         }
     }
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }
-    private fun now() = System.currentTimeMillis()
+    private fun now() = clock()
     private fun log(context: String, error: Throwable) = plugin.logger.log(Level.WARNING, "ArcCivs could not $context", error)
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "ArcCivs authority must run on Paper's main thread" }
 
     @EventHandler fun quit(event: PlayerQuitEvent) {
-        cancelPreview(event.player.uniqueId)
+        cancelPreview(event.player.uniqueId, "logout")
         remoteCities.remove(event.player.uniqueId)
         lookups.remove(event.player.uniqueId)
     }
-    @EventHandler fun worldChanged(event: PlayerChangedWorldEvent) { cancelPreview(event.player.uniqueId) }
+    @EventHandler fun worldChanged(event: PlayerChangedWorldEvent) { cancelPreview(event.player.uniqueId, "world-changed") }
 
     override fun close() {
         if (closed) return
@@ -705,6 +808,7 @@ class CivsService(
         plugin.server.servicesManager.unregister(ArcBlockProtectionService::class.java, sharedProtection)
         renderer.close()
         previews.clear()
+        selections.keys.toList().forEach { cancelSelection(it, "shutdown") }
         remoteCities.clear()
         lookups.clear()
         requests.clear()

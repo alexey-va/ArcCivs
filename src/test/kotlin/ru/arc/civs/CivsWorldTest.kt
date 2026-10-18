@@ -2,7 +2,10 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.Chest
+import org.bukkit.inventory.ItemStack
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.TestTaskScheduler
 import ru.arc.paper.api.ArcSchematicBlock
@@ -27,12 +30,67 @@ class CivsWorldTest : FunSpec({
         civsContainsBox(worldBox(1, 2), worldBox(0, 1)) shouldBe false
     }
 
-    test("natural material policy rejects fluids containers and manufactured blocks") {
+    test("terrain material policy admits ordinary vegetation rivers and snow without claiming provenance") {
         listOf(Material.AIR, Material.DIRT, Material.STONE, Material.OAK_LEAVES, Material.SHORT_GRASS,
-            Material.IRON_ORE).all(::civsNaturalTerrain) shouldBe true
-        listOf(Material.WATER, Material.LAVA, Material.CHEST, Material.BARREL, Material.OAK_LOG,
+            Material.IRON_ORE, Material.OAK_LOG, Material.JUNGLE_LOG, Material.CRIMSON_STEM, Material.WARPED_STEM,
+            Material.MANGROVE_ROOTS, Material.MUDDY_MANGROVE_ROOTS, Material.COCOA, Material.MELON,
+            Material.PUMPKIN, Material.SWEET_BERRY_BUSH, Material.WATER, Material.ICE, Material.PACKED_ICE,
+            Material.BLUE_ICE, Material.POWDER_SNOW, Material.SEAGRASS, Material.TALL_SEAGRASS,
+            Material.KELP, Material.KELP_PLANT, Material.LILY_PAD).all(::civsNaturalTerrain) shouldBe true
+        listOf(Material.LAVA, Material.CHEST, Material.BARREL, Material.STRIPPED_OAK_LOG, Material.OAK_WOOD,
             Material.OAK_PLANKS, Material.STONE_BRICKS, Material.GLASS, Material.BEDROCK,
-            Material.WHITE_CONCRETE, Material.POWDER_SNOW).none(::civsNaturalTerrain) shouldBe true
+            Material.WHITE_CONCRETE, Material.CARVED_PUMPKIN, Material.JACK_O_LANTERN).none(::civsNaturalTerrain) shouldBe true
+    }
+
+    test("jungle logs cocoa and ground are captured for clearing or building with exact before states") {
+        worldScenario { s ->
+            val before = listOf("minecraft:jungle_log[axis=y]", "minecraft:cocoa[age=2,facing=west]",
+                "minecraft:grass_block[snowy=false]", "minecraft:dirt", "minecraft:short_grass")
+            before.forEachIndexed { x, data -> s.world.getBlockAt(x, 64, 0).blockData = Bukkit.createBlockData(data) }
+            val originals = before.indices.map { s.world.getBlockAt(it, 64, 0).blockData.asString }
+            val after = listOf("minecraft:air", "minecraft:air", "minecraft:stone", "minecraft:oak_planks", "minecraft:air")
+            val building = worldBuilding(worldBox(0, 4))
+            val owner = UUID.randomUUID()
+            val captured = s.subject.capture(UUID.randomUUID(), owner, s.world.uid, building,
+                after.mapIndexed { x, data -> worldCell(x, 64, data) }, null)
+            s.scheduler.tick()
+            val plan = completed(captured)
+            plan.blocks.map { it.before } shouldBe originals
+            plan.blocks.map { it.after } shouldBe after
+            before.indices.map { s.world.getBlockAt(it, 64, 0).blockData.asString } shouldBe originals
+
+            val unchanged = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(unchanged) shouldBe Unit
+            s.world.getBlockAt(0, 64, 0).type = Material.AIR
+            val partiallyPlaced = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(partiallyPlaced) shouldBe Unit
+            s.world.getBlockAt(1, 64, 0).blockData = Bukkit.createBlockData("minecraft:cocoa[age=1,facing=west]")
+            val drifted = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            val failure = rejection(drifted)
+            failure.reason shouldBe "world-changed"
+            failure.values shouldBe mapOf("block" to "COCOA", "x" to "1", "y" to "64", "z" to "0",
+                "world" to s.world.uid.toString(), "world_name" to s.world.name)
+            s.world.getBlockAt(1, 64, 0).blockData.asString shouldBe "minecraft:cocoa[age=1,facing=west]"
+        }
+    }
+
+    test("water and waterlogged natural mangrove roots can be replaced by a foundation or air") {
+        worldScenario { s ->
+            s.world.getBlockAt(0, 64, 0).blockData = Bukkit.createBlockData("minecraft:water[level=3]")
+            s.world.getBlockAt(1, 64, 0).blockData = Bukkit.createBlockData("minecraft:mangrove_roots[waterlogged=true]")
+            val originals = (0..1).map { s.world.getBlockAt(it, 64, 0).blockData.asString }
+            val building = worldBuilding(worldBox(0, 1))
+            val captured = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:stone"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            val plan = completed(captured)
+            plan.blocks.map { it.before } shouldBe originals
+            plan.blocks.map { it.after } shouldBe listOf("minecraft:stone", "minecraft:air")
+            (0..1).map { s.world.getBlockAt(it, 64, 0).blockData.asString } shouldBe originals
+        }
     }
 
     test("four scans share one 256-cell budget and a fifth request fails without reading the world") {
@@ -83,14 +141,61 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("a foreign chest is rejected even when the schematic would skip that barrier cell") {
+    test("a skipped barrier leaves a chest and its inventory outside the replacement plan") {
         worldScenario { s ->
-            s.world.getBlockAt(0, 64, 0).type = Material.CHEST
+            val block = s.world.getBlockAt(0, 64, 0)
+            block.type = Material.CHEST
+            val chest = block.state as Chest
+            chest.blockInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+            val original = block.blockData.asString
             val building = worldBuilding(worldBox(0, 1))
             val future = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
                 listOf(worldCell(0, 64, "minecraft:barrier"), worldCell(1, 64, "minecraft:air")), null)
             s.scheduler.tick()
-            failureReason(future) shouldBe "protected-terrain"
+            completed(future).blocks.map { it.position } shouldBe listOf(CivPosition(1, 64, 0))
+            block.blockData.asString shouldBe original
+            (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
+    for (material in listOf(Material.CHEST, Material.LAVA, Material.BEDROCK, Material.OAK_PLANKS,
+        Material.STRIPPED_JUNGLE_LOG)) test("actual replacement still rejects ${material.name} with exact coordinates") {
+        worldScenario { s ->
+            val block = s.world.getBlockAt(0, 64, 0)
+            block.type = material
+            val original = block.blockData.asString
+            val building = worldBuilding(worldBox(0, 0))
+            val future = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
+            s.scheduler.tick()
+            val failure = rejection(future)
+            failure.reason shouldBe "protected-terrain"
+            failure.values shouldBe mapOf("block" to material.name, "x" to "0", "y" to "64", "z" to "0",
+                "world" to s.world.uid.toString(), "world_name" to s.world.name)
+            block.blockData.asString shouldBe original
+        }
+    }
+
+    test("skipped barriers and replaceable river terrain retain fail-closed Lands checks") {
+        worldScenario { s ->
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            val building = worldBuilding(worldBox(0, 1))
+            s.world.getBlockAt(0, 64, 0).type = Material.CHEST
+            val barrier = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:barrier"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            val deniedBarrier = rejection(barrier)
+            deniedBarrier.reason shouldBe "lands-denied"
+            deniedBarrier.values["block"] shouldBe "CHEST"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.CHEST
+
+            s.world.getBlockAt(0, 64, 0).type = Material.WATER
+            val terrain = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:stone"), worldCell(1, 64, "minecraft:air")), null)
+            s.scheduler.tick()
+            failureReason(terrain) shouldBe "lands-denied"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.WATER
         }
     }
 
@@ -217,7 +322,7 @@ class CivsWorldTest : FunSpec({
     }
 })
 
-private class WorldScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
+private class WorldScenario(val paper: MockBukkitTestRuntime) : AutoCloseable {
     val world = paper.addSimpleWorld("civs-world")
     val cities = mutableListOf<Settlement>()
     val scheduler = TestTaskScheduler()
@@ -248,7 +353,8 @@ private fun worldCell(x: Int, y: Int, data: String) = ArcSchematicBlock(ArcSchem
     data == "minecraft:air", data == "minecraft:barrier")
 private fun worldCells(building: CivBuilding) = (building.bounds.min.x..building.bounds.max.x).map { worldCell(it, 64, "minecraft:air") }
 private fun <T> completed(future: CompletableFuture<T>): T { future.isDone shouldBe true; return future.join() }
-private fun failureReason(future: CompletableFuture<*>): String {
+private fun rejection(future: CompletableFuture<*>): CivsRejection {
     future.isDone shouldBe true
-    return try { future.join(); "success" } catch (failure: CompletionException) { (failure.cause as CivsRejection).reason }
+    return try { future.join(); error("Expected a CivsRejection") } catch (failure: CompletionException) { failure.cause as CivsRejection }
 }
+private fun failureReason(future: CompletableFuture<*>): String = rejection(future).reason

@@ -56,6 +56,7 @@ class CivsUi internal constructor(
             return
         }
         CivsDiagnostics.event("ui_open", *CivsDiagnostics.actor(player))
+        host.cancelSelection(player, "menu-reopened")
         runtime.beginFlow(player)
         if (!host.ready()) {
             roots[player.uniqueId] = "civs.loading"
@@ -90,14 +91,16 @@ class CivsUi internal constructor(
 
     /** Forms and details yield to the world instead of reopening a placement modal. */
     fun resumePlacement(player: Player) {
-        runtime.close(player)
         visits.remove(player.uniqueId)
         roots.remove(player.uniqueId)
-        if (host.preview(player) != null) player.sendMessage(tr(player, "panel.opened"))
+        runtime.close(player)
+        if (host.selection(player) != null) player.sendActionBar(tr(player, "selection.hint"))
+        else if (host.preview(player) != null) player.sendMessage(tr(player, "panel.opened"))
     }
 
     fun openWorker(player: Player, cityId: UUID, workerId: UUID) {
         if (closed || !player.isOnline) return
+        host.cancelSelection(player, "menu-reopened")
         runtime.beginFlow(player)
         roots[player.uniqueId] = "civs.worker"
         val city = host.settlements().firstOrNull { it.id == cityId }
@@ -180,9 +183,9 @@ class CivsUi internal constructor(
                 val name = context.text(NAME)?.trim().orEmpty()
                 draft = name
                 if (name.isBlank()) showName(player, style, name, text.reason(player, "invalid-name"))
-                else perform(player, "civs.preview", "preview.title", { host.prepareFounding(player, name, style) },
-                    success = { resumePlacement(player) }, failure = { showName(player, style, name, it) },
-                    cancelPending = { host.cancelPreview(player) })
+                else beginSelection(player, { host.beginFoundingSelection(player, name, style) }) {
+                    showName(player, style, name, it)
+                }
             }),
             inputs = listOf(PaperDialogTextInput(NAME, tr(player, "founding.name-label"), initial = initial.take(32), width = 320, maxLength = 32)),
             reopen = { showName(player, style, draft) },
@@ -287,9 +290,7 @@ class CivsUi internal constructor(
                 else -> null
             }, error?.let(::body),
         ), if (eligible) listOf(button(player, "prepare", "buildings.prepare", COMMIT) {
-            perform(player, "civs.preview", "preview.title", { host.prepareBuilding(player, type) },
-                success = { resumePlacement(player) }, failure = { showOffer(player, type, it) },
-                cancelPending = { host.cancelPreview(player) })
+            beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
         }) else emptyList(), reopen = { showOffer(player, type) })
     }
 
@@ -562,6 +563,17 @@ class CivsUi internal constructor(
             return null
         }
         return city
+    }
+
+    private fun beginSelection(player: Player, action: () -> CompletableFuture<Unit>, failure: (Component) -> Unit) {
+        val visit = visits[player.uniqueId] ?: return
+        visit.cancelPending = { host.cancelSelection(player, "dialog-closed") }
+        val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        future.whenCompleteSync(tasks, visit.epoch) { _, error ->
+            if (!current(player, visit)) return@whenCompleteSync
+            visit.cancelPending = null
+            if (error == null) resumePlacement(player) else failure(text.failure(player, error))
+        }
     }
 
     private fun perform(player: Player, id: String, title: String, action: () -> CompletableFuture<Unit>,

@@ -1,6 +1,8 @@
 package ru.arc.civs
 
 import org.bukkit.entity.Player
+import org.bukkit.block.Block
+import org.bukkit.block.BlockFace
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
@@ -22,6 +24,25 @@ data class CivsPreviewView(
     val bounds: CivBox,
     val movable: Boolean,
     val busy: Boolean,
+)
+
+/** Coordinates from the interaction, never a second ray cast after the click. */
+data class CivsGroundTarget(val worldId: UUID, val block: CivPosition)
+
+/** Share the same bounded ground resolution between the aim marker and the clicked input. */
+internal fun civsGroundSupport(hit: Block): CivPosition? {
+    var block = hit
+    repeat(3) { depth ->
+        if (block.type.isSolid && !block.isLiquid) return CivPosition(block.x, block.y, block.z)
+        // Short grass, flowers and two-block ferns resolve to their support; air and water are not ground.
+        if (depth == 2 || block.type.isAir || block.isLiquid || !block.isPassable || block.y <= block.world.minHeight) return null
+        block = block.getRelative(BlockFace.DOWN)
+    }
+    return null
+}
+
+data class CivsSelectionView(
+    val id: UUID, val worldId: UUID, val type: BuildingType, val expiresAt: Long, val busy: Boolean,
 )
 
 /** One block relative to Bukkit yaw: 0 south, 1 west, 2 north, 3 east. */
@@ -55,11 +76,15 @@ interface CivsUiHost {
     fun workerStatus(workerId: UUID): String
     fun activeNpcCount(): Int
     fun preview(player: Player): CivsPreviewView?
-    fun prepareFounding(player: Player, name: String, style: String): CompletableFuture<Unit>
-    fun prepareBuilding(player: Player, type: BuildingType): CompletableFuture<Unit>
+    fun selection(player: Player): CivsSelectionView?
+    fun beginFoundingSelection(player: Player, name: String, style: String): CompletableFuture<Unit>
+    fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit>
+    fun selectGround(player: Player, selectionId: UUID, target: CivsGroundTarget): CompletableFuture<Unit>
+    fun cancelSelection(player: Player, reason: String)
     fun prepareUpgrade(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun rotatePreview(player: Player, degrees: Int = 90): CompletableFuture<Unit>
     fun movePreview(player: Player): CompletableFuture<Unit>
+    fun movePreview(player: Player, target: CivsGroundTarget): CompletableFuture<Unit>
     fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit>
     fun confirmPreview(player: Player): CompletableFuture<Unit>
     fun cancelPreview(player: Player)

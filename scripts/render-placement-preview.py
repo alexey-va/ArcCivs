@@ -167,6 +167,9 @@ def main():
                 label_metrics.append({"key": label["key"], "text": label["text"], "renderedWidth": width,
                                       "hitWidth": label["width"], "withinHitWidth": width <= label["width"]})
             image = view.image()
+            if scene.get("actionBar") and camera_name == "player":
+                glyph_image = font_core.render_text_line("#FFFFFF" + scene["actionBar"], stack)
+                image.paste(glyph_image, ((view.width - glyph_image.width) // 2, view.height - 155), glyph_image)
             draw = ImageDraw.Draw(image)
             if camera_name == "player":
                 cx, cy = view.width // 2, view.height // 2
@@ -177,7 +180,9 @@ def main():
             font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 24)
             small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 17)
             draw.text((24, 12), title, font=font, fill=(238, 238, 231))
-            note = f"Source projection | distance {scene['distance']:.2f} m | shift {scene['shift']['side']:+.2f}/{scene['shift']['up']:+.2f} m | explicit fixture, no schematic mesh/native client"
+            note = ("Source projection | 1-block ground support | no floating panel | action bar position approximated | no native client"
+                    if scene.get("actionBar") else
+                    f"Source projection | distance {scene['distance']:.2f} m | shift {scene['shift']['side']:+.2f}/{scene['shift']['up']:+.2f} m | explicit fixture, no schematic mesh/native client")
             draw.text((24, 44), note, font=small, fill=(178, 194, 203))
             name = f"{scene['id']}-{camera_name}.png"
             image.save(args.out / name)
@@ -191,6 +196,7 @@ def main():
         "assetSha256": {str(path): sha256(path.read_bytes()).hexdigest() for path in (args.client, args.fonts)},
         "limitations": ["Explicit flat terrain and obstacle fixture, no actual schematic surface model",
                         "TextDisplay vertical raster origin is approximated within the exported label footprint",
+                        "Action bar HUD position is approximate; text is exported from the current locale",
                         "No native packet, culling, input, animation or lighting acceptance"],
         "views": render_report}, ensure_ascii=False, indent=2))
 

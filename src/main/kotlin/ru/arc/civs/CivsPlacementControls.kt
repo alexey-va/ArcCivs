@@ -52,10 +52,15 @@ internal class CivsPlacementControls(
     private val displays = displays ?: nativeWork?.let { PaperPacketDisplays(plugin, "civs-placement-controls", it) }
         ?: PaperPacketDisplays(plugin, "civs-placement-controls")
     private class Session(var previewId: UUID, val worldId: UUID) {
+        var selecting = false
+        var expiresAt = 0L
         var moving = false
         var pending: UUID? = null
         var confirming = false
         var target: CivPosition? = null
+        var hintTicks = 0
+        var feedback: Component? = null
+        var feedbackTicks = 0
         val marker = mutableListOf<PacketBlockDisplay>()
     }
 
@@ -74,7 +79,11 @@ internal class CivsPlacementControls(
                 sessions.toMap().forEach { (id, session) ->
                     val player = plugin.server.getPlayer(id)
                     if (player == null || !player.isOnline || player.world.uid != session.worldId ||
-                        eligible(player) == null && session.pending == null) clear(id)
+                        !available(player) || host.selection(player) == null && eligible(player) == null) {
+                        if (player?.isOnline == true && session.selecting && !ui.showingDialog(player) &&
+                            System.currentTimeMillis() >= session.expiresAt) player.sendActionBar(text.render(player, "selection.expired"))
+                        clear(id)
+                    }
                     else refreshTarget(player, session)
                 }
             }
@@ -82,7 +91,7 @@ internal class CivsPlacementControls(
     }
 
     private fun eligible(player: Player): CivsPreviewView? {
-        if (closed || !player.isOnline || !host.ready() || !player.hasPermission("arccivs.use")) return null
+        if (!available(player)) return null
         val preview = host.preview(player) ?: return null
         if (preview.worldId != player.world.uid) return null
         val location = player.location
@@ -91,11 +100,30 @@ internal class CivsPlacementControls(
         return preview
     }
 
+    private fun available(player: Player): Boolean =
+        !closed && player.isOnline && host.ready() && player.hasPermission("arccivs.use")
+
     override fun frame(player: Player): ActionPanelFrame<CivsPlacementContext, CivsPlacementAction>? {
+        if (!available(player) || ui.showingDialog(player)) return null
+        val selection = host.selection(player)?.takeIf { it.worldId == player.world.uid }
+        if (selection != null) {
+            val previous = sessions[player.uniqueId]
+            if (previous?.previewId != selection.id) {
+                clear(player.uniqueId)
+                sessions[player.uniqueId] = Session(selection.id, selection.worldId).also {
+                    it.selecting = true
+                    it.expiresAt = selection.expiresAt
+                }
+            }
+            return null // A ground selection has no floating controls covering the terrain.
+        }
         val preview = eligible(player) ?: return null
         val session = sessions.getOrPut(player.uniqueId) { Session(preview.id, preview.worldId) }
-        if (ui.showingDialog(player)) return null
-        if (session.previewId != preview.id && session.pending == null) session.previewId = preview.id
+        if (session.previewId != preview.id && session.pending == null) {
+            session.previewId = preview.id
+            session.selecting = false
+            clearTarget(session)
+        }
         val busy = preview.busy || session.pending != null
         val status = when {
             session.confirming -> text.render(player, "panel.saving")
@@ -139,8 +167,12 @@ internal class CivsPlacementControls(
     }
 
     override fun activate(player: Player, context: CivsPlacementContext, action: CivsPlacementAction) {
-        val fresh = frame(player) ?: return
-        if (fresh.context != context || !fresh.inputEnabled || fresh.layout.buttons.none { it.action == action && it.enabled }) return
+        val fresh = frame(player)
+        val accepted = fresh != null && fresh.context == context && fresh.inputEnabled &&
+            fresh.layout.buttons.any { it.action == action && it.enabled }
+        CivsDiagnostics.event("placement_click", *CivsDiagnostics.actor(player), "preview" to context.previewId,
+            "action" to action, "outcome" to if (accepted) "accepted" else "ignored")
+        if (!accepted) return
         val session = sessions[player.uniqueId] ?: return
         when (action) {
             CivsPlacementAction.MOVE -> beginMove(player, session)
@@ -166,39 +198,87 @@ internal class CivsPlacementControls(
     }
 
     private fun perform(player: Player, session: Session, confirming: Boolean = false, finishMove: Boolean = false,
+        selected: CivPosition? = null,
         action: () -> CompletableFuture<Unit>) {
         if (session.pending != null) return
         val request = UUID.randomUUID()
         session.pending = request
         session.confirming = confirming
-        clearTarget(session)
+        if (selected == null) clearTarget(session) else showTarget(player, session, selected)
         val future = try { action() } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
         future.whenCompleteSync(tasks) { _, failure ->
             if (closed || !player.isOnline || sessions[player.uniqueId] !== session || session.pending != request) return@whenCompleteSync
             session.pending = null
             session.confirming = false
-            if (failure != null) player.sendMessage(text.failure(player, failure))
+            if (failure != null && session.selecting) {
+                session.feedback = text.failure(player, failure).color(TextColor.color(0xFF6B61))
+                session.feedbackTicks = 80
+                session.hintTicks = 0
+                player.sendActionBar(requireNotNull(session.feedback))
+            } else if (failure != null) player.sendMessage(text.failure(player, failure))
             else if (confirming) player.sendMessage(text.render(player, "panel.confirmed"))
+            else if (session.selecting) {
+                session.selecting = false
+                clearTarget(session)
+                player.sendActionBar(text.render(player, "selection.ready"))
+            }
             else if (finishMove) session.moving = false
             val preview = eligible(player)
-            if (preview == null) clear(player.uniqueId) else session.previewId = preview.id
+            if (preview != null) session.previewId = preview.id
+            else if (host.selection(player) == null) clear(player.uniqueId)
         }
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun interact(event: PlayerInteractEvent) {
-        if (event.hand != EquipmentSlot.HAND || event.action !in setOf(Action.RIGHT_CLICK_AIR, Action.RIGHT_CLICK_BLOCK,
-                Action.LEFT_CLICK_AIR, Action.LEFT_CLICK_BLOCK)) return
+        if (event.action !in setOf(Action.RIGHT_CLICK_AIR, Action.RIGHT_CLICK_BLOCK, Action.LEFT_CLICK_AIR, Action.LEFT_CLICK_BLOCK)) return
         val player = event.player
+        val rightClick = event.action == Action.RIGHT_CLICK_AIR || event.action == Action.RIGHT_CLICK_BLOCK
+        val selection = if (rightClick && available(player) && !ui.showingDialog(player)) host.selection(player) else null
+        if (selection != null) {
+            event.isCancelled = true // Also suppress off-hand use; the selection never places or uses an item.
+            frame(player)
+            val session = sessions[player.uniqueId] ?: return
+            val clicked = event.clickedBlock?.let { CivsGroundTarget(it.world.uid, CivPosition(it.x, it.y, it.z)) }
+            val reason = when {
+                event.hand != EquipmentSlot.HAND -> "off-hand"
+                player.isSneaking -> "cancel"
+                session.pending != null || selection.busy -> "awaiting-preview"
+                clicked == null -> "no-block"
+                else -> "selected"
+            }
+            CivsDiagnostics.event("selection_input", *CivsDiagnostics.actor(player), "selection" to selection.id,
+                "action" to event.action, "hand" to event.hand, "block" to clicked?.block, "reason" to reason)
+            when (reason) {
+                "cancel" -> {
+                    host.cancelSelection(player, "player-cancelled")
+                    clear(player.uniqueId)
+                    player.sendActionBar(text.render(player, "panel.cancelled"))
+                }
+                "selected" -> perform(player, session, selected = event.clickedBlock?.let(::civsGroundSupport)) {
+                    host.selectGround(player, selection.id, requireNotNull(clicked))
+                }
+                "no-block" -> player.sendActionBar(text.render(player, "selection.hint"))
+            }
+            return
+        }
+        if (event.hand != EquipmentSlot.HAND) {
+            if (rightClick && sessions[player.uniqueId]?.moving == true && !ui.showingDialog(player)) event.isCancelled = true
+            return
+        }
         if (panels.intercept(player)) { event.isCancelled = true; return }
-        if (event.action != Action.RIGHT_CLICK_AIR && event.action != Action.RIGHT_CLICK_BLOCK) return
+        if (!rightClick) return
         val preview = eligible(player) ?: return
         if (!preview.movable || preview.busy || ui.showingDialog(player)) return
         val session = sessions.getOrPut(player.uniqueId) { Session(preview.id, preview.worldId) }
         if (session.pending != null) return
         if (session.moving) {
             event.isCancelled = true
-            perform(player, session, finishMove = true) { host.movePreview(player) }
+            val clicked = event.clickedBlock
+            if (clicked == null) player.sendActionBar(text.render(player, "panel.pick-hint"))
+            else perform(player, session, finishMove = true) {
+                host.movePreview(player, CivsGroundTarget(clicked.world.uid, CivPosition(clicked.x, clicked.y, clicked.z)))
+            }
         } else if (aimsAtAnchor(player, preview.anchor)) {
             event.isCancelled = true
             beginMove(player, session)
@@ -214,10 +294,24 @@ internal class CivsPlacementControls(
     }
 
     private fun refreshTarget(player: Player, session: Session) {
-        if (!session.moving || session.pending != null || ui.showingDialog(player)) { clearTarget(session); return }
+        if ((!session.selecting && !session.moving) || ui.showingDialog(player)) { clearTarget(session); return }
+        if (session.feedbackTicks > 0) session.feedbackTicks-- else session.feedback = null
+        if (session.hintTicks-- <= 0) {
+            player.sendActionBar(session.feedback ?: text.render(player, when {
+                session.pending != null -> "selection.loading"
+                session.selecting -> "selection.hint"
+                else -> "panel.pick-hint"
+            }))
+            session.hintTicks = 20
+        }
+        if (session.pending != null) return // Keep the explicitly clicked block lit until its preview arrives.
         val block = player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER)?.hitBlock
-        val target = block?.takeIf { it.type.isSolid && !it.isLiquid }?.let { CivPosition(it.x, it.y, it.z) }
+        val target = block?.let(::civsGroundSupport)
         if (target == null) { clearTarget(session); return }
+        showTarget(player, session, target)
+    }
+
+    private fun showTarget(player: Player, session: Session, target: CivPosition) {
         if (target == session.target) return
         val cues = civsAnchorCues(target, Material.LIGHT_BLUE_CONCRETE)
         if (session.marker.isEmpty()) cues.forEach { cue ->
@@ -237,7 +331,6 @@ internal class CivsPlacementControls(
             handle.teleport(Location(player.world, cue.x, cue.y, cue.z))
         }
         session.target = target
-        player.sendActionBar(text.render(player, "panel.pick-hint"))
     }
 
     private fun clearTarget(session: Session) {

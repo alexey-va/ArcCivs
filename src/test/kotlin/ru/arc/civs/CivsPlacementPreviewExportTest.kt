@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
+import io.mockk.every
 import org.bukkit.Material
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.Vector
@@ -107,7 +108,18 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         "terrainCorridor" to corridor, "cues" to (civsPreviewCues(building) + candidate),
                         "bounds" to building.bounds, "groundY" to 63)
                 }
-                val scenes = listOf(scene("open", base, ActionPanelPoint(0.5, 65.62, 5.5), false, false),
+                val selection = CivsSelectionView(UUID(0, 3), player.world.uid, BuildingType.TOWN_HALL,
+                    System.currentTimeMillis() + 120_000, false)
+                every { host.ready() } returns true
+                every { host.selection(player) } returns selection
+                every { ui.showingDialog(player) } returns false
+                controls.frame(player) shouldBe null
+                val groundSelection = mapOf("id" to "ground-selection", "eye" to ActionPanelPoint(0.5, 65.62, 4.5),
+                    "cameraTarget" to ActionPanelPoint(0.5, 64.0, 0.5), "distance" to 0.0,
+                    "shift" to ActionPanelShift(0.0, 0.0), "labels" to emptyList<Any>(), "obstacles" to emptyList<Any>(),
+                    "cues" to civsAnchorCues(CivPosition(0, 63, 0), Material.LIGHT_BLUE_CONCRETE), "groundY" to 63,
+                    "actionBar" to plainText(text.render(player, "selection.hint")))
+                val scenes = listOf(groundSelection, scene("open", base, ActionPanelPoint(0.5, 65.62, 5.5), false, false),
                     scene("obstructed", base, ActionPanelPoint(0.5, 65.62, 5.5), false, true),
                     scene("moved-rotated", base.copy(anchor = CivPosition(3, 63, 2), entrance = CivPosition(3, 64, 2), rotation = 90,
                         bounds = CivBox(CivPosition(4, 63, -4), CivPosition(15, 72, 7))), ActionPanelPoint(6.5, 65.62, 11.5), true, false),

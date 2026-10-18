@@ -29,6 +29,114 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("founding starts ground selection without reading the player's aim or changing the world") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.player.rayTraceBlocks(any(), any()) } returns null
+            h.service.beginFoundingSelection(h.player, "123123", "nordic").join() shouldBe Unit
+            h.service.selection(h.player)!!.type shouldBe BuildingType.TOWN_HALL
+            h.service.preview(h.player) shouldBe null
+            verify(exactly = 0) {
+                h.player.rayTraceBlocks(any(), any())
+                h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any())
+                h.worldAdapter.capture(any(), any(), any(), any(), any(), any())
+                h.store.save(any())
+            }
+        }
+    }
+
+    for (plant in listOf(Material.SHORT_GRASS, Material.FERN, Material.LARGE_FERN))
+        test("explicit click on $plant uses its highlighted support and preserves the founding draft") {
+            serviceScenario(empty = true) { h ->
+                h.start()
+                val support = h.world.getBlockAt(3, 63, 4).also { it.type = Material.GRASS_BLOCK }
+                h.world.getBlockAt(3, 64, 4).type = plant
+                val clicked = if (plant == Material.LARGE_FERN) h.world.getBlockAt(3, 65, 4).also { it.type = plant }
+                    else h.world.getBlockAt(3, 64, 4)
+                civsGroundSupport(clicked) shouldBe CivPosition(3, 63, 4)
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                    CompletableFuture.completedFuture(h.previewBlueprint(arg(5)))
+                }
+                h.service.beginFoundingSelection(h.player, "123123", "nordic").join()
+                val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                    CivsGroundTarget(h.world.uid, CivPosition(clicked.x, clicked.y, clicked.z)))
+                h.tick(); selected.join()
+                h.service.selection(h.player) shouldBe null
+                val preview = h.service.preview(h.player)!!
+                preview.cityName shouldBe "123123"
+                preview.entrance shouldBe CivPosition(3, 64, 4)
+                preview.anchor shouldBe CivPosition(3, 63, 4)
+                support.type shouldBe Material.GRASS_BLOCK
+                clicked.type shouldBe plant
+                verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.store.save(any()) }
+            }
+        }
+
+    test("an invalid ground click retains the same selection and a later click can prepare the preview") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            h.service.beginFoundingSelection(h.player, "Oak Town", "nordic").join()
+            val selection = h.service.selection(h.player)!!
+            val invalid = h.service.selectGround(h.player, selection.id, CivsGroundTarget(h.world.uid, CivPosition(2, 80, 2)))
+            (shouldThrow<CompletionException> { invalid.join() }.cause as CivsRejection).reason shouldBe "too-far"
+            h.service.selection(h.player) shouldBe selection
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                CompletableFuture.completedFuture(h.previewBlueprint())
+            val retry = h.service.selectGround(h.player, selection.id, CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0)))
+            h.tick(); retry.join()
+            h.service.preview(h.player)!!.cityName shouldBe "Oak Town"
+            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.save(any()) }
+        }
+    }
+
+    for (exit in listOf("cancel", "menu-reopened", "world-changed", "logout", "expired", "shutdown"))
+        test("$exit retires a pending selection before a late blueprint can render") {
+            serviceScenario(empty = true) { h ->
+                h.start()
+                val pending = CompletableFuture<CivBlueprint>()
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+                h.service.beginFoundingSelection(h.player, "First", "nordic").join()
+                val id = h.service.selection(h.player)!!.id
+                val loading = h.service.selectGround(h.player, id, CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0)))
+                when (exit) {
+                    "world-changed" -> h.service.worldChanged(org.bukkit.event.player.PlayerChangedWorldEvent(h.player, h.world))
+                    "logout" -> h.service.quit(mockk { every { player } returns h.player })
+                    "expired" -> { h.time += 120_001; h.service.selection(h.player) shouldBe null }
+                    "shutdown" -> h.service.close()
+                    else -> h.service.cancelSelection(h.player, exit)
+                }
+                pending.complete(h.previewBlueprint()); h.tick()
+                loading.isCompletedExceptionally shouldBe true
+                h.service.preview(h.player) shouldBe null
+                h.service.selection(h.player) shouldBe null
+                verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
+                if (exit != "shutdown") {
+                    val retry = h.prepareFounding("Retry", "nordic"); h.tick(); retry.join()
+                    h.service.preview(h.player)!!.cityName shouldBe "Retry"
+                }
+            }
+        }
+
+    test("new buildings also wait for an explicit ground click and keep current city ownership") {
+        serviceScenario { h ->
+            h.start()
+            h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
+            h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
+            val position = CivPosition(6, 63, 6)
+            h.world.getBlockAt(position.x, position.y, position.z).type = Material.GRASS_BLOCK
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                val blueprint = h.previewBlueprint(arg(5))
+                CompletableFuture.completedFuture(blueprint.copy(building = blueprint.building.copy(type = BuildingType.WAREHOUSE)))
+            }
+            val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id, CivsGroundTarget(h.world.uid, position))
+            h.tick(); selected.join()
+            h.service.preview(h.player)!!.type shouldBe BuildingType.WAREHOUSE
+            h.service.city(h.player) shouldBe h.city
+            verify(exactly = 0) { h.store.save(any()) }
+        }
+    }
+
     test("unexpected preparation failure records the operation request and full exception") {
         serviceScenario(empty = true) { h ->
             h.start()
@@ -44,9 +152,9 @@ class CivsServiceTest : FunSpec({
                     CompletableFuture.completedFuture(h.previewBlueprint())
                 val cause = IllegalStateException("preview transport unavailable")
                 every { h.renderer.show(any(), any(), any()) } throws cause
-                val request = h.service.prepareFounding(h.player, "Test", "nordic"); h.tick()
+                val request = h.prepareFounding("Test", "nordic"); h.tick()
                 request.isCompletedExceptionally shouldBe true
-                records.any { it.message.startsWith("ArcCivs operation prepare_founding failed (request=") &&
+                records.any { it.message.startsWith("ArcCivs operation select_ground failed (request=") &&
                     generateSequence(it.thrown) { error -> error.cause }.any { error -> error === cause } } shouldBe true
             } finally { h.plugin.logger.removeHandler(handler) }
         }
@@ -64,7 +172,7 @@ class CivsServiceTest : FunSpec({
             h.service.remoteCity(h.player) shouldBe record
             val denied = shouldThrow<CompletionException> { h.service.recruit(h.player).join() }.cause as CivsRejection
             denied.reason shouldBe "remote-city"
-            val found = shouldThrow<CompletionException> { h.service.prepareFounding(h.player, "Second", "nordic").join() }.cause as CivsRejection
+            val found = shouldThrow<CompletionException> { h.prepareFounding("Second", "nordic").join() }.cause as CivsRejection
             found.reason shouldBe "already-member"
             every { h.transfer.connect(h.player, BackendServerId.of("survival")) } returns BackendTransferResult.SENT
             h.service.transferHome(h.player).join() shouldBe Unit
@@ -108,7 +216,7 @@ class CivsServiceTest : FunSpec({
         serviceScenario(empty = true, allowedWorlds = emptySet()) { h ->
             h.start()
             h.service.foundingAllowed() shouldBe false
-            val reason = shouldThrow<CompletionException> { h.service.prepareFounding(h.player, "Test", "nordic").join() }.cause as CivsRejection
+            val reason = shouldThrow<CompletionException> { h.prepareFounding("Test", "nordic").join() }.cause as CivsRejection
             reason.reason shouldBe "founding-disabled"
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
         }
@@ -136,7 +244,7 @@ class CivsServiceTest : FunSpec({
         serviceScenario(empty = true, worldName = allowedWorld, allowedWorlds = settings.worlds) { h ->
             h.start()
             every { h.player.world } returns h.paper.addSimpleWorld("world")
-            val rejected = h.service.prepareFounding(h.player, "123123", "nordic")
+            val rejected = h.prepareFounding("123123", "nordic")
             val reason = shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection
             reason.reason shouldBe "wrong-world"
             reason.values shouldBe mapOf("world" to "world", "worlds" to "survival, vanilla")
@@ -145,7 +253,7 @@ class CivsServiceTest : FunSpec({
             every { h.player.world } returns h.world
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(h.previewBlueprint())
-            val retry = h.service.prepareFounding(h.player, "123123", "nordic")
+            val retry = h.prepareFounding("123123", "nordic")
             h.tick()
             retry.join() shouldBe Unit
             h.service.preview(h.player)!!.cityName shouldBe "123123"
@@ -155,7 +263,7 @@ class CivsServiceTest : FunSpec({
     test("world rejection reports the configured world names instead of bundled defaults") {
         serviceScenario(empty = true, allowedWorlds = setOf("custom-realm", "builder-world")) { h ->
             h.start()
-            val rejected = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            val rejected = h.prepareFounding("Oak Town", "nordic")
             val reason = shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection
             reason.reason shouldBe "wrong-world"
             reason.values shouldBe mapOf("world" to "vanilla", "worlds" to "builder-world, custom-realm")
@@ -168,7 +276,7 @@ class CivsServiceTest : FunSpec({
             val firstBlueprint = h.previewBlueprint()
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(firstBlueprint)
-            val first = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            val first = h.prepareFounding("Oak Town", "nordic")
             h.tick(); first.join()
             val original = h.service.preview(h.player)!!
             val pending = CompletableFuture<CivBlueprint>()
@@ -192,7 +300,7 @@ class CivsServiceTest : FunSpec({
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
                 CompletableFuture.completedFuture(h.previewBlueprint(arg(5), arg<Int?>(7) ?: 0))
             }
-            val first = h.service.prepareFounding(h.player, "Oak Town", "nordic"); h.tick(); first.join()
+            val first = h.prepareFounding("Oak Town", "nordic"); h.tick(); first.join()
             val before = h.service.preview(h.player)!!
             val left = h.service.rotatePreview(h.player, -90); h.tick(); left.join()
             h.service.preview(h.player)!!.rotation shouldBe 270
@@ -211,9 +319,9 @@ class CivsServiceTest : FunSpec({
             h.start()
             val pending = CompletableFuture<CivBlueprint>()
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
-            val preparing = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            val preparing = h.prepareFounding("Oak Town", "nordic")
             h.service.cancelPreview(h.player)
-            h.service.prepareFounding(h.player, "Another Town", "nordic").isCompletedExceptionally shouldBe true
+            h.prepareFounding("Another Town", "nordic").isCompletedExceptionally shouldBe true
             verify(exactly = 1) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
             pending.complete(h.previewBlueprint()); h.tick()
             preparing.isCompletedExceptionally shouldBe true
@@ -221,7 +329,7 @@ class CivsServiceTest : FunSpec({
             verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(h.previewBlueprint())
-            val next = h.service.prepareFounding(h.player, "Another Town", "nordic"); h.tick()
+            val next = h.prepareFounding("Another Town", "nordic"); h.tick()
             next.join() shouldBe Unit
             h.service.preview(h.player)!!.cityName shouldBe "Another Town"
         }
@@ -348,7 +456,7 @@ class CivsServiceTest : FunSpec({
             }
             every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
             every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            val preparing = h.service.prepareFounding(h.player, "First Town", "nordic")
+            val preparing = h.prepareFounding("First Town", "nordic")
             h.tick()
             preparing.join() shouldBe Unit
             val confirm = h.service.confirmPreview(h.player)
@@ -359,7 +467,7 @@ class CivsServiceTest : FunSpec({
             h.tick()
             confirm.isCompletedExceptionally shouldBe true
             h.service.ready() shouldBe false
-            h.service.prepareFounding(h.player, "Retry", "nordic").isCompletedExceptionally shouldBe true
+            h.prepareFounding("Retry", "nordic").isCompletedExceptionally shouldBe true
             h.saves.size shouldBe 1
         }
     }
@@ -553,6 +661,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     val saves = mutableListOf<Pair<Settlement, CompletableFuture<Settlement>>>()
     val owner = UUID.randomUUID()
+    var time = System.currentTimeMillis()
     val city: Settlement
     val service: CivsService
 
@@ -562,8 +671,10 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         every { player.uniqueId } returns owner
         every { player.world } returns world
         every { player.location } returns Location(world, 0.0, 65.0, 0.0)
+        every { player.eyeLocation } returns Location(world, 0.0, 66.62, 0.0)
         every { player.hasPermission(any<String>()) } returns true
         every { player.isOnline } returns true
+        world.loadChunk(0, 0)
         val ground = world.getBlockAt(0, 63, 0).also { it.type = Material.GRASS_BLOCK }
         every { player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER) } returns RayTraceResult(ground.location.toVector(), ground, BlockFace.UP)
         val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 2, CivPosition(0, 64, 0), 0,
@@ -581,8 +692,12 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
-            backendTransfer = transfer)
+            backendTransfer = transfer, clock = { time })
     }
+    fun prepareFounding(name: String, style: String): CompletableFuture<Unit> =
+        service.beginFoundingSelection(player, name, style).thenCompose {
+            service.selectGround(player, service.selection(player)!!.id, CivsGroundTarget(world.uid, CivPosition(0, 63, 0)))
+        }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
     fun previewBlueprint(entrance: CivPosition = CivPosition(0, 64, 0), rotation: Int = 0): CivBlueprint {

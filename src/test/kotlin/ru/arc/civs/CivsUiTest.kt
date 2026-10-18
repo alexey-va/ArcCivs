@@ -4,6 +4,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldNotContain
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
 import io.mockk.every
 import io.mockk.mockk
@@ -48,7 +49,7 @@ class CivsUiTest : FunSpec({
                 Unit
             }
             try {
-                every { h.host.prepareFounding(any(), any(), any()) } returns CompletableFuture<Unit>()
+                every { h.host.beginFoundingSelection(any(), any(), any()) } returns CompletableFuture<Unit>()
                 h.open(); h.click("found"); h.click("style_0")
                 val form = h.screen
                 h.click("prepare", mapOf("city_name" to "Oak Town"))
@@ -81,7 +82,7 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             verify(exactly = 2) { h.host.refreshCity(h.player) }
             verify(exactly = 1) { h.host.transferHome(h.player) }
-            verify(exactly = 0) { h.host.prepareFounding(any(), any(), any()); h.host.recruit(any()) }
+            verify(exactly = 0) { h.host.beginFoundingSelection(any(), any(), any()); h.host.recruit(any()) }
         }
     }
 
@@ -134,8 +135,9 @@ class CivsUiTest : FunSpec({
 
     test("real Core dialog flow yields to world placement and details can return without reopening a modal") {
         withUi(realHistory = true) { h ->
-            every { h.host.prepareFounding(any(), any(), any()) } answers {
-                h.preview = preview().copy(cityName = secondArg())
+            every { h.host.beginFoundingSelection(any(), any(), any()) } answers {
+                h.selection = CivsSelectionView(UUID.randomUUID(), h.player.world.uid, BuildingType.TOWN_HALL,
+                    System.currentTimeMillis() + 120_000, false)
                 CompletableFuture.completedFuture(Unit)
             }
             h.open()
@@ -144,13 +146,17 @@ class CivsUiTest : FunSpec({
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             h.paper.performTicks(2)
             h.ui.showingDialog(h.player) shouldBe false
+            h.preview shouldBe null
+            verify(exactly = 0) { h.host.selectGround(any(), any(), any()) }
             verify(exactly = 1) { h.player.closeDialog() }
+            h.selection = null
+            h.preview = preview()
             h.open()
             h.screen.id shouldBe "civs.preview"
             h.screen.buttons.map { it.id.value } shouldBe listOf("placement")
             h.click("placement")
             h.ui.showingDialog(h.player) shouldBe false
-            verify(exactly = 1) { h.host.prepareFounding(h.player, "Oak Town", "medieval-oak") }
+            verify(exactly = 1) { h.host.beginFoundingSelection(h.player, "Oak Town", "medieval-oak") }
             verify(exactly = 2) { h.player.closeDialog() }
         }
     }
@@ -158,14 +164,14 @@ class CivsUiTest : FunSpec({
     test("founding submits the literal name once then leaves confirmation to the world controls") {
         withUi { h ->
             val preparing = CompletableFuture<Unit>()
-            every { h.host.prepareFounding(any(), any(), any()) } returns preparing
+            every { h.host.beginFoundingSelection(any(), any(), any()) } returns preparing
             h.open()
             h.click("found")
             h.click("style_0")
             val submitted = h.screen
             h.click("prepare", mapOf("city_name" to "<red>Oak Town</red>"))
             h.click("prepare", mapOf("city_name" to "duplicate"), screen = submitted)
-            verify(exactly = 1) { h.host.prepareFounding(h.player, "<red>Oak Town</red>", "medieval-oak") }
+            verify(exactly = 1) { h.host.beginFoundingSelection(h.player, "<red>Oak Town</red>", "medieval-oak") }
             h.preview = preview()
             preparing.complete(Unit)
             h.paper.performTicks(2)
@@ -179,7 +185,7 @@ class CivsUiTest : FunSpec({
     test("a rejected founding request preserves the name and the real Core form can retry") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
-            every { h.host.prepareFounding(any(), any(), any()) } returns
+            every { h.host.beginFoundingSelection(any(), any(), any()) } returns
                 CompletableFuture.failedFuture(CivsRejection("wrong-world", mapOf(
                     "world" to "world", "worlds" to "survival, vanilla",
                 )))
@@ -201,39 +207,39 @@ class CivsUiTest : FunSpec({
                 plainText(h.screen.buttons.single().label) shouldBe "Повторить выбор места ›"
             }
             verify(exactly = 0) { h.player.sendMessage(any<Component>()) }
-            verify(exactly = 2) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
-            every { h.host.prepareFounding(any(), any(), any()) } answers {
+            verify(exactly = 2) { h.host.beginFoundingSelection(h.player, "123123", "medieval-oak") }
+            every { h.host.beginFoundingSelection(any(), any(), any()) } answers {
                 h.preview = preview().copy(cityName = secondArg())
                 CompletableFuture.completedFuture(Unit)
             }
             h.click("prepare", mapOf("city_name" to "123123"))
             h.paper.performTicks(2)
             h.ui.showingDialog(h.player) shouldBe false
-            verify(exactly = 3) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
+            verify(exactly = 3) { h.host.beginFoundingSelection(h.player, "123123", "medieval-oak") }
             verify(exactly = 1) { h.player.closeDialog() }
         }
     }
 
-    test("delayed ground rejection and empty names use the same prominent inline failure state") {
+    test("selection rejection and empty names use the same prominent inline failure state") {
         withUi(realHistory = true) { h ->
             val preparing = CompletableFuture<Unit>()
-            every { h.host.prepareFounding(any(), any(), any()) } returns preparing
+            every { h.host.beginFoundingSelection(any(), any(), any()) } returns preparing
             h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
-            h.screen.id shouldBe "civs.preview"
-            preparing.completeExceptionally(CivsRejection("look-at-ground"))
+            h.screen.id shouldBe "civs.name"
+            preparing.completeExceptionally(CivsRejection("invalid-style"))
             h.paper.performTicks(2)
             h.screen.id shouldBe "civs.name"
             h.screen.inputs.single().initial shouldBe "Oak Town"
             plainText(h.screen.body[0].text) shouldBe "Could not choose a location"
             h.screen.body[0].text.color() shouldBe TextColor.color(0xFF6B61)
-            plainText(h.screen.body[1].text) shouldBe "Look at nearby ground and choose the location again."
+            plainText(h.screen.body[1].text) shouldBe "This style is no longer available. Choose a style again."
             h.click("prepare", mapOf("city_name" to "   "))
             h.screen.inputs.single().initial shouldBe ""
             plainText(h.screen.body[0].text) shouldBe "Could not choose a location"
             h.screen.body[0].text.color() shouldBe TextColor.color(0xFF6B61)
             plainText(h.screen.body[1].text) shouldBe "Enter a nonempty name up to 32 characters without control characters."
-            verify(exactly = 1) { h.host.prepareFounding(any(), any(), any()) }
+            verify(exactly = 1) { h.host.beginFoundingSelection(any(), any(), any()) }
             verify(exactly = 0) { h.player.closeDialog() }
             verify(exactly = 0) { h.player.sendMessage(any<Component>()) }
         }
@@ -242,12 +248,12 @@ class CivsUiTest : FunSpec({
     test("an async preview cannot reopen a dismissed flow or an old lifecycle") {
         withUi { h ->
             val first = CompletableFuture<Unit>()
-            every { h.host.prepareFounding(any(), any(), any()) } returns first
+            every { h.host.beginFoundingSelection(any(), any(), any()) } returns first
             h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "Oak Town"))
             val count = h.screens.size
             h.dismiss()
-            verify(exactly = 1) { h.host.cancelPreview(h.player) }
+            verify(exactly = 1) { h.host.cancelSelection(h.player, "dialog-closed") }
             h.preview = preview()
             first.complete(Unit)
             h.paper.performTicks(2)
@@ -255,7 +261,7 @@ class CivsUiTest : FunSpec({
 
             h.preview = null
             val second = CompletableFuture<Unit>()
-            every { h.host.prepareFounding(any(), any(), any()) } returns second
+            every { h.host.beginFoundingSelection(any(), any(), any()) } returns second
             h.open(); h.click("found"); h.click("style_0")
             h.click("prepare", mapOf("city_name" to "New Town"))
             val nextCount = h.screens.size
@@ -329,6 +335,29 @@ class CivsUiTest : FunSpec({
             h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
             h.screen.buttons.map { it.id.value } shouldNotContain "prepare"
             h.body() shouldContain "does not have enough resources"
+        }
+    }
+
+    test("new building starts ground selection and reopening the menu cancels that selection") {
+        withUi(realHistory = true) { h ->
+            h.city = settlement(h.player)
+            every { h.host.beginBuildingSelection(any(), any()) } answers {
+                h.selection = CivsSelectionView(UUID.randomUUID(), h.player.world.uid, secondArg(),
+                    System.currentTimeMillis() + 120_000, false)
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.host.cancelSelection(h.player, "menu-reopened") } answers { h.selection = null; Unit }
+            h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
+            h.click("prepare"); h.paper.performTicks(2)
+            h.selection shouldNotBe null
+            h.ui.showingDialog(h.player) shouldBe false
+            h.preview shouldBe null
+            verify(exactly = 1) { h.host.beginBuildingSelection(h.player, any()) }
+            verify(exactly = 0) { h.host.selectGround(any(), any(), any()) }
+            h.open()
+            h.selection shouldBe null
+            h.screen.id shouldBe "civs.overview"
+            verify(exactly = 2) { h.host.cancelSelection(h.player, "menu-reopened") }
         }
     }
 
@@ -494,6 +523,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
     val screens = mutableListOf<PaperDialogScreen>()
     var city: Settlement? = null
     var preview: CivsPreviewView? = null
+    var selection: CivsSelectionView? = null
     private var dismissAction: () -> Unit = {}
     private lateinit var registration: Any
     val ui: CivsUi
@@ -510,6 +540,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.city(any()) } answers { city }
         every { host.settlements() } answers { listOfNotNull(city) }
         every { host.preview(any()) } answers { preview }
+        every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"
         every { host.confirmPreview(any()) } answers {
             city = settlement(player)

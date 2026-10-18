@@ -164,6 +164,12 @@ class CivsWorld internal constructor(
             return world.getBlockAt(position.x, position.y, position.z)
         }
 
+        protected fun rejectAt(reason: String, block: Block): Nothing = throw CivsRejection(reason, mapOf(
+            "block" to block.type.name,
+            "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString(),
+            "world" to block.world.uid.toString(), "world_name" to block.world.name,
+        ))
+
         protected fun checkCell(position: CivPosition) {
             requireCivs(building.bounds.contains(position.x, position.y, position.z) && seen.add(position), "invalid-plan")
         }
@@ -186,7 +192,7 @@ class CivsWorld internal constructor(
             requireCivs((-1..1).all { dx -> (-1..1).all { dz -> world.isChunkLoaded(chunkX + dx, chunkZ + dz) } }, "chunks-unloaded")
             val block = read(position)
             val data = predictedEntrance[position] ?: block.blockData
-            requireCivs(entranceSafety(data, block, entranceIndex == 0), "entrance-blocked")
+            if (!entranceSafety(data, block, entranceIndex == 0)) rejectAt("entrance-blocked", block)
             entranceIndex++
             return entranceIndex == entranceCells.size
         }
@@ -238,19 +244,16 @@ class CivsWorld internal constructor(
             checkCell(position)
             // Even skipped barrier cells must belong to loaded chunks; Core skips these exact cells.
             val block = read(position)
-            if (previous?.bounds?.contains(position.x, position.y, position.z) != true) {
-                val current = block.blockData
-                requireCivs(civsNaturalTerrain(block.type) && block.state !is TileState &&
-                    (current !is Waterlogged || !current.isWaterlogged), "protected-terrain")
-            }
             if (cell.isBarrier) {
                 requireCivs(parse(cell.blockData).material == Material.BARRIER, "invalid-plan")
-                requireCivs(canModify(owner, block), "lands-denied")
+                if (!canModify(owner, block)) rejectAt("lands-denied", block)
                 return
             }
+            if (previous?.bounds?.contains(position.x, position.y, position.z) != true &&
+                (!civsNaturalTerrain(block.type) || block.state is TileState)) rejectAt("protected-terrain", block)
             val after = parse(cell.blockData)
             requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")
-            requireCivs(canModify(owner, block, after.material), "lands-denied")
+            if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
             blocks += CivPlanBlock(position, block.blockData.asString, after.asString)
             predict(position, after)
         }
@@ -278,10 +281,10 @@ class CivsWorld internal constructor(
             checkCell(cell.position)
             val block = read(cell.position)
             val current = block.blockData.asString
-            requireCivs(current == cell.before || current == cell.after, "world-changed")
+            if (current != cell.before && current != cell.after) rejectAt("world-changed", block)
             val after = parse(cell.after)
             requireCivs(after.material != Material.BARRIER, "invalid-plan")
-            requireCivs(canModify(owner, block, after.material), "lands-denied")
+            if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
             predict(cell.position, after)
         }
     }
@@ -330,14 +333,17 @@ internal fun civsProtectedBuildings(city: Settlement): Sequence<CivBuilding> = s
     city.construction?.plannedBuilding?.let { yield(it) }
 }
 
-/** Material policy, not a claim of placement provenance. Logs are deliberately not replaceable. */
+/** Material policy only: placed terrain and unstripped logs have no reliable natural-provenance marker. */
 internal fun civsNaturalTerrain(material: Material): Boolean = material.isAir || material.name in NATURAL_TERRAIN ||
-    material.name.endsWith("_LEAVES") || material.name.endsWith("_SAPLING") || material.name.endsWith("_ORE")
+    material.name.endsWith("_LEAVES") || material.name.endsWith("_SAPLING") || material.name.endsWith("_ORE") ||
+    material.name.endsWith("_LOG") && !material.name.startsWith("STRIPPED_")
 
 private val NATURAL_TERRAIN = setOf(
     "STONE", "GRANITE", "DIORITE", "ANDESITE", "DEEPSLATE", "TUFF", "CALCITE", "DIRT", "GRASS_BLOCK",
     "COARSE_DIRT", "ROOTED_DIRT", "PODZOL", "MYCELIUM", "MUD", "CLAY", "SAND", "RED_SAND", "GRAVEL",
     "MOSS_BLOCK", "PALE_MOSS_BLOCK", "MOSS_CARPET", "PALE_MOSS_CARPET", "SNOW", "SNOW_BLOCK",
+    "WATER", "ICE", "PACKED_ICE", "BLUE_ICE", "POWDER_SNOW", "SEAGRASS", "TALL_SEAGRASS", "KELP", "KELP_PLANT", "LILY_PAD",
+    "CRIMSON_STEM", "WARPED_STEM", "MANGROVE_ROOTS", "MUDDY_MANGROVE_ROOTS", "COCOA", "MELON", "PUMPKIN", "SWEET_BERRY_BUSH",
     "NETHERRACK", "SOUL_SAND", "SOUL_SOIL", "BASALT", "BLACKSTONE", "END_STONE",
     "SHORT_GRASS", "TALL_GRASS", "FERN", "LARGE_FERN", "DEAD_BUSH", "BUSH", "FIREFLY_BUSH",
     "SHORT_DRY_GRASS", "TALL_DRY_GRASS", "VINE", "CAVE_VINES", "CAVE_VINES_PLANT", "GLOW_LICHEN",
