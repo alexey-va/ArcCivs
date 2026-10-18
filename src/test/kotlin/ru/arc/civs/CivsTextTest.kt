@@ -120,10 +120,36 @@ class CivsTextTest : FunSpec({
             plainText(text.render(player, "guide.open")) shouldBe if (locale == "ru") "Гайд ›" else "Guide ›"
             plainText(text.render(player, "delete.stock-help")) shouldContain if (locale == "ru") "будут потеряны" else "will be lost"
             plainText(text.building(player, BuildingType.BUILDER_HUT)).isNotBlank() shouldBe true
-            plainText(text.render(player, "selection.hint")) shouldContain if (locale == "ru") "ПКМ по земле или бочке" else "Right-click ground or barrel"
+            plainText(text.render(player, "selection.hint")) shouldContain if (locale == "ru") "ПКМ по блоку" else "Right-click a block"
             plainText(text.reason(player, "control-missing")) shouldContain if (locale == "ru") "координаты блока управления" else "coordinates in the building menu"
             plainText(text.reason(player, "control-relocation-required")) shouldContain if (locale == "ru") "Перенести блок управления" else "Relocate control block"
             plainText(text.reason(player, "control-position-missing", mapOf("x" to "-15", "y" to "68", "z" to "42"))) shouldContain "-15, 68, 42"
+        }
+    }
+
+    test("feedback uses semantic colors without recoloring ordinary menu text or parsing names") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru") }
+        val name = "<red>Town</red>"
+        val success = text.success(player, "delete.success", "name" to name)
+        fun colors(value: Component): List<net.kyori.adventure.text.format.TextColor?> =
+            listOf(value.color()) + value.children().flatMap(::colors)
+        colors(success).all { it == CivsText.SUCCESS } shouldBe true
+        plainText(success) shouldContain name
+        colors(text.info(player, "panel.opened")).all { it == CivsText.INFO } shouldBe true
+        colors(text.warning(player, "panel.cancelled")).all { it == CivsText.WARNING } shouldBe true
+        colors(text.failure(player, CivsRejection("materials-missing", mapOf("material" to "OAK_LOG", "count" to "7"))))
+            .all { it == CivsText.ERROR } shouldBe true
+        text.render(player, "delete.success", "name" to name).color() shouldBe CivsText.BODY
+        text.render(player, "city.title").color() shouldBe CivsText.BODY
+        for (locale in listOf("ru", "en")) {
+            every { player.locale() } returns Locale.forLanguageTag(locale)
+            for (key in listOf("founding.name-help", "preview.move-hint", "selection.hint", "panel.move-opened", "panel.pick-hint", "buildings.site-help")) {
+                val line = plainText(text.render(player, key)).lowercase()
+                line.contains("origin") shouldBe false
+                line.contains("existing barrel") shouldBe false
+                line.contains("установленную бочку") shouldBe false
+            }
         }
     }
 

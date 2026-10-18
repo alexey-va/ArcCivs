@@ -41,7 +41,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    for (material in listOf(Material.CHEST, Material.BEDROCK, Material.OAK_PLANKS)) test("automatic site control cannot replace $material") {
+    for (material in listOf(Material.CHEST, Material.BEDROCK)) test("automatic site control cannot replace $material") {
         worldScenario { s ->
             val marker = CivPosition(1, 64, 0)
             s.world.getBlockAt(1, 64, 0).type = material
@@ -65,18 +65,6 @@ class CivsWorldTest : FunSpec({
         civsIntersectsCity(CivBox(CivPosition(0, 1_000, 0), CivPosition(0, 1_001, 0)), city) shouldBe true
         civsContainsBox(worldBox(0, 2), worldBox(0, 1)) shouldBe true
         civsContainsBox(worldBox(1, 2), worldBox(0, 1)) shouldBe false
-    }
-
-    test("terrain material policy admits ordinary vegetation rivers and snow without claiming provenance") {
-        listOf(Material.AIR, Material.DIRT, Material.STONE, Material.OAK_LEAVES, Material.SHORT_GRASS,
-            Material.IRON_ORE, Material.OAK_LOG, Material.JUNGLE_LOG, Material.CRIMSON_STEM, Material.WARPED_STEM,
-            Material.MANGROVE_ROOTS, Material.MUDDY_MANGROVE_ROOTS, Material.COCOA, Material.MELON,
-            Material.PUMPKIN, Material.SWEET_BERRY_BUSH, Material.WATER, Material.ICE, Material.PACKED_ICE,
-            Material.BLUE_ICE, Material.POWDER_SNOW, Material.SEAGRASS, Material.TALL_SEAGRASS,
-            Material.KELP, Material.KELP_PLANT, Material.LILY_PAD).all(::civsNaturalTerrain) shouldBe true
-        listOf(Material.LAVA, Material.CHEST, Material.BARREL, Material.STRIPPED_OAK_LOG, Material.OAK_WOOD,
-            Material.OAK_PLANKS, Material.STONE_BRICKS, Material.GLASS, Material.BEDROCK,
-            Material.WHITE_CONCRETE, Material.CARVED_PUMPKIN, Material.JACK_O_LANTERN).none(::civsNaturalTerrain) shouldBe true
     }
 
     test("jungle logs cocoa and ground are captured for clearing or building with exact before states") {
@@ -159,7 +147,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("barriers remain absent from the before-image and entrance checks see predicted source blocks") {
+    test("barriers remain absent from the before-image while the foundation is still empty") {
         worldScenario { s ->
             val building = worldBuilding(CivBox(CivPosition(0, 63, 0), CivPosition(0, 66, 0)))
                 .copy(entrance = CivPosition(0, 64, 0))
@@ -173,7 +161,6 @@ class CivsWorldTest : FunSpec({
             plan.blocks.size shouldBe 3
             plan.blocks.all { it.before == "minecraft:air" } shouldBe true
             plan.blocks.first().after shouldBe "minecraft:stone"
-            s.entranceObservations shouldBe listOf(Material.STONE, Material.AIR, Material.AIR)
             s.world.getBlockAt(0, 63, 0).type shouldBe Material.AIR
         }
     }
@@ -322,8 +309,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    for (material in listOf(Material.CHEST, Material.LAVA, Material.BEDROCK, Material.OAK_PLANKS,
-        Material.STRIPPED_JUNGLE_LOG)) test("actual replacement still rejects ${material.name} with exact coordinates") {
+    for (material in listOf(Material.CHEST, Material.BEDROCK)) test("actual replacement still rejects ${material.name} with exact coordinates") {
         worldScenario { s ->
             val block = s.world.getBlockAt(0, 64, 0)
             block.type = material
@@ -336,6 +322,41 @@ class CivsWorldTest : FunSpec({
             failure.values shouldBe mapOf("block" to material.name, "x" to "0", "y" to "64", "z" to "0",
                 "world" to s.world.uid.toString(), "world_name" to s.world.name)
             block.blockData.asString shouldBe original
+        }
+    }
+
+    for (material in listOf(Material.OAK_PLANKS, Material.STONE_BRICKS, Material.GLASS, Material.STRIPPED_JUNGLE_LOG,
+        Material.LAVA, Material.WHITE_CONCRETE)) test("a new site can clear $material and use it for the automatic control") {
+        worldScenario { s ->
+            val marker = CivPosition(1, 64, 0)
+            val building = worldBuilding(worldBox(0, 1)).copy(control = marker)
+            (0..1).forEach { s.world.getBlockAt(it, 64, 0).type = material }
+            val before = s.world.getBlockAt(0, 64, 0).blockData.asString
+            val site = s.subject.captureSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:air"), worldCell(1, 64, "minecraft:structure_void")), null)
+            s.scheduler.tick()
+            completed(site).blocks.single().before shouldBe before
+            (0..1).map { s.world.getBlockAt(it, 64, 0).type } shouldBe listOf(material, material)
+        }
+    }
+
+    test("bedrock stays protected inside an existing footprint and during revalidation") {
+        worldScenario { s ->
+            val site = worldBuilding(worldBox(0, 0)).copy(phase = BuildingPhase.SITE)
+            val city = worldCity(s.world.uid, site)
+            s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.BEDROCK
+            val building = site.copy(phase = BuildingPhase.CONSTRUCTING)
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, building, worldCells(building), site)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "protected-terrain"
+            val plan = CivPlacementPlan(UUID.randomUUID(), city.id, city.worldId, building,
+                listOf(CivPlanBlock(CivPosition(0, 64, 0), "minecraft:bedrock", "minecraft:air")))
+            s.cities.clear()
+            val validation = s.subject.revalidate(plan, city.owner)
+            s.scheduler.tick()
+            failureReason(validation) shouldBe "protected-terrain"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.BEDROCK
         }
     }
 
@@ -389,18 +410,41 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("an entrance outside the schematic still requires its real support and headroom") {
+    test("site capture and construction allow blocked unsupported and wet approaches without changing them") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 0))
-            s.world.getBlockAt(-1, 65, 0).type = Material.STONE
-            val blocked = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
+            val owner = UUID.randomUUID()
+            for ((support, feet, head) in listOf(
+                Triple(Material.STONE, Material.STONE, Material.OAK_FENCE),
+                Triple(Material.SHORT_GRASS, Material.AIR, Material.AIR),
+                Triple(Material.AIR, Material.AIR, Material.AIR),
+                Triple(Material.STONE, Material.WATER, Material.WATER),
+            )) {
+                val before = listOf(support, feet, head)
+                before.forEachIndexed { i, material -> s.world.getBlockAt(-1, 63 + i, 0).type = material }
+                val site = s.subject.captureSite(UUID.randomUUID(), owner, s.world.uid, building, worldCells(building), null)
+                s.scheduler.tick()
+                val plan = completed(site)
+                val construction = s.subject.capture(plan.cityId, owner, s.world.uid, building, worldCells(building), null)
+                s.scheduler.tick()
+                completed(construction).blocks shouldBe plan.blocks
+                val revalidation = s.subject.revalidate(plan, owner)
+                s.scheduler.tick()
+                completed(revalidation) shouldBe Unit
+                (63..65).map { s.world.getBlockAt(-1, it, 0).type } shouldBe before
+            }
+        }
+    }
+
+    test("an unloaded approach outside the footprint is neither scanned nor loaded") {
+        worldScenario { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(entrance = CivPosition(32, 64, 0))
+            s.world.isChunkLoaded(2, 0) shouldBe false
+            val captured = s.subject.captureSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                worldCells(building), null)
             s.scheduler.tick()
-            failureReason(blocked) shouldBe "entrance-blocked"
-            s.world.getBlockAt(-1, 65, 0).type = Material.AIR
-            s.world.getBlockAt(-1, 63, 0).type = Material.AIR
-            val unsupported = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
-            s.scheduler.tick()
-            failureReason(unsupported) shouldBe "entrance-blocked"
+            completed(captured).blocks.size shouldBe 1
+            s.world.isChunkLoaded(2, 0) shouldBe false
         }
     }
 
@@ -514,6 +558,22 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("a new footprint cannot cover another building's pending entrance preparation") {
+        worldScenario { s ->
+            val hall = worldBuilding(worldBox(10, 10)).copy(phase = BuildingPhase.SITE,
+                entrance = CivPosition(0, 65, 0), control = CivPosition(10, 64, 0))
+            val point = CivPosition(0, 64, 0)
+            val city = worldCity(s.world.uid, hall).copy(pendingControls = listOf(CivControlPlacement(
+                hall.id, requireNotNull(hall.control), "minecraft:air", listOf(CivPlanBlock(point, "minecraft:air", "minecraft:dirt")))))
+            s.cities += city
+            val building = worldBuilding(worldBox(0, 0)).copy(type = BuildingType.HOUSE)
+            val capture = s.subject.captureSite(city.id, city.owner, city.worldId, building, worldCells(building), null)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "building-overlap"
+            s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.AIR
+        }
+    }
+
     test("close cancels pending work and no future request can restart it") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 0))
@@ -521,7 +581,7 @@ class CivsWorldTest : FunSpec({
             s.subject.close()
             future.isCancelled shouldBe true
             s.scheduler.tick(2)
-            s.entranceObservations.isEmpty() shouldBe true
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
             failureReason(s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)) shouldBe "world-closed"
         }
     }
@@ -532,12 +592,7 @@ private class WorldScenario(val paper: MockBukkitTestRuntime) : AutoCloseable {
     val cities = mutableListOf<Settlement>()
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
-    val entranceObservations = mutableListOf<Material>()
-    val subject = CivsWorld(paper.createSimplePlugin("CivsWorldTest"), tasks, { cities }) { data, _, support ->
-        // Native BlockData shape queries are unsupported by this pinned MockBukkit version.
-        entranceObservations += data.material
-        if (support) data.material.isSolid else data.material.isAir
-    }
+    val subject = CivsWorld(paper.createSimplePlugin("CivsWorldTest"), tasks, { cities })
     init {
         for (x in -2..1) for (z in -1..1) world.loadChunk(x, z)
         world.getBlockAt(-1, 63, 0).type = Material.STONE

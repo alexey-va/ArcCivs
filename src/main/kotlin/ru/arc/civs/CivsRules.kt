@@ -146,6 +146,7 @@ object CivsRules {
         val essential = ESSENTIAL_BUILDINGS + BuildingType.BUILDER_HUT
         val missing = essential.count { type -> type != site.type && city.buildings.none { it.type == type } }
         check(MAX_BUILDINGS - city.buildings.size - 1 >= missing, "resources.bootstrap-slots")
+        check(!intersectsApproach(city, site), "building-overlap")
         check(validBuilding(city, site) && city.buildings.none { it.bounds.overlaps(site.bounds) } &&
             city.construction?.plannedBuilding?.bounds?.overlaps(site.bounds) != true, "invalid-building")
         check(workRouteWithinReach(city, site.entrance), "work-route-too-long")
@@ -237,6 +238,7 @@ object CivsRules {
                 existing.entrance == plan.entrance && existing.rotation == plan.rotation, "invalid-building")
             check(plan.level == existing.level + 1 && plan.level <= 3, "invalid-level")
         }
+        check(!intersectsApproach(city, plan), "building-overlap")
         check(validBuilding(city, plan) && city.buildings.none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
         check(workRouteWithinReach(city, plan.entrance), "work-route-too-long")
         check(city.stock.covers(reserved.cost), "not-enough-resources")
@@ -450,9 +452,25 @@ object CivsRules {
             }
             city.pendingControls?.let { pending ->
                 snapshot(pending.size <= MAX_BUILDINGS && pending.map { it.buildingId }.distinct().size == pending.size)
+                snapshot((city.buildings + listOfNotNull(city.construction?.plannedBuilding)).none { intersectsApproach(city, it) })
+                val approachPoints = pending.flatMap { it.approach.orEmpty() }.map { it.position }
+                snapshot(approachPoints.distinct().size == approachPoints.size)
                 snapshot(pending.all { present(it.buildingId, it.position) && city.building(it.buildingId)?.control == it.position &&
                     it.before.isNotEmpty() && it.before.length <= CivsStore.MAX_BLOCK_STATE_CHARS &&
                     it.before.startsWith("minecraft:") && it.before.none(Char::isISOControl) })
+                pending.forEach { receipt ->
+                    val building = requireNotNull(city.building(receipt.buildingId))
+                    val approach = receipt.approach.orEmpty()
+                    snapshot(approach.size <= 3 && approach.map { it.position }.distinct().size == approach.size)
+                    snapshot(approach.all { cell ->
+                        val point = cell.position
+                        present(point, cell.before, cell.after) && point.x == building.entrance.x && point.z == building.entrance.z &&
+                            point.y.toLong() in (building.entrance.y.toLong() - 1)..(building.entrance.y.toLong() + 1) &&
+                            point.y in -4_096..4_096 && point != receipt.position && !building.bounds.contains(point.x, point.y, point.z) &&
+                            validText(cell.before, CivsStore.MAX_BLOCK_STATE_CHARS) && cell.before.startsWith("minecraft:") &&
+                            cell.before != cell.after && cell.after == if (point.y < building.entrance.y) "minecraft:dirt" else "minecraft:air"
+                    })
+                }
             }
             return city
         } catch (error: CivsRejection) {
@@ -472,6 +490,12 @@ object CivsRules {
             (building.phase != BuildingPhase.SITE || building.level == 1) &&
             (building.control?.let { city.contains(it.x, it.z) } != false) &&
             (building.production?.let { it in CivsProduction.options(building.type) } != false)
+
+    private fun intersectsApproach(city: Settlement, building: CivBuilding): Boolean = city.pendingControls.orEmpty().any {
+        it.buildingId != building.id && it.approach.orEmpty().any { cell ->
+            building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) || building.control == cell.position
+        }
+    }
 
     private fun validConstructionPrice(order: CivConstruction, building: CivBuilding): Boolean {
         val batches = order.batches

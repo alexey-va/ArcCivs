@@ -77,6 +77,9 @@ class CivsProtection(
             val current = cities.flatMap { city ->
                 val editors = (city.members + city.owner).toSet()
                 buildList {
+                    city.pendingControls.orEmpty().flatMap { it.approach.orEmpty() }.forEach { cell ->
+                        add(Footprint(city.worldId, CivBox(cell.position, cell.position), emptySet()))
+                    }
                     city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors)) }
                     city.buildings.forEach { building ->
                         val locked = building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id

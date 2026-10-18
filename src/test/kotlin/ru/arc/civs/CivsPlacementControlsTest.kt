@@ -70,7 +70,7 @@ class CivsPlacementControlsTest : FunSpec({
             h.click(ground); h.paper.performTicks(2)
             val feedback = generateSequence { h.player.nextActionBar() }.first { it.color() == TextColor.color(0xFF6B61) }
             feedback.color() shouldBe TextColor.color(0xFF6B61)
-            plainText(feedback) shouldContain "solid ground"
+            plainText(feedback) shouldContain "nearby block"
             h.selection shouldBe selection
             every { h.host.selectGround(any(), any(), any()) } answers {
                 h.selection = null; h.preview = h.initialPreview
@@ -90,9 +90,9 @@ class CivsPlacementControlsTest : FunSpec({
             h.aimedBlock = ground
             h.startSelection()
             h.paper.performTicks(1)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground or barrel"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click a block"
             h.paper.performTicks(21)
-            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click ground or barrel"
+            plainText(requireNotNull(h.player.nextActionBar())) shouldContain "Right-click a block"
             verify(exactly = 12) { h.displays.spawnBlock(any(), any()) }
             every { h.host.cancelSelection(h.player, "player-cancelled") } answers { h.selection = null; Unit }
             h.player.isSneaking = true
@@ -108,11 +108,20 @@ class CivsPlacementControlsTest : FunSpec({
         controlsScenario { h ->
             h.preview = h.preview!!.copy(control = CivPosition(3, 66, -7))
             val initial = h.controls.frame(h.player)!!
-            (initial.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(3.5, 66.5, -6.5)
+            (initial.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(0.5, 63.5, 0.5)
             initial.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.MOVE,
                 CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.ROTATE_RIGHT, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
             h.controls.activate(h.player, initial.context, CivsPlacementAction.MOVE)
             val moving = h.controls.frame(h.player)!!
+            (moving.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(0.5, 63.5, 0.5)
+            for (frame in listOf(initial, moving)) {
+                val left = frame.layout.buttons[0].rect
+                val right = frame.layout.buttons[1].rect
+                val gap = right.center.x - right.width / 2 - left.center.x - left.width / 2
+                (gap in 0.09..0.11) shouldBe true
+                (right.center.x + right.width / 2 - left.center.x + left.width / 2 < 3.31) shouldBe true
+                frame.layout.labels.single().rect.center.x shouldBe 0.0
+            }
             // Entering move mode must discard the normal panel's retained distance.
             verify(exactly = 1) { h.panels.clear(h.player.uniqueId) }
             moving.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,
@@ -186,7 +195,7 @@ class CivsPlacementControlsTest : FunSpec({
             h.preview = h.preview!!.copy(level = 2, movable = false)
             val frame = h.controls.frame(h.player)!!
             frame.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
-            frame.layout.buttons.forEach { (kotlin.math.abs(it.rect.center.x) - it.rect.width / 2 >= 0.5) shouldBe true }
+            frame.layout.buttons.last().rect.center.x shouldBe 0.0
             every { h.host.confirmPreview(any()) } answers {
                 h.preview = null
                 CompletableFuture.completedFuture(Unit)
@@ -199,7 +208,7 @@ class CivsPlacementControlsTest : FunSpec({
         }
     }
 
-    test("the control shortcut follows the authored marker and leaves barrel and support placement alone") {
+    test("the movement shortcut follows the chosen place and preserves ordinary block placement") {
         controlsScenario { h ->
             val world = mockk<World>(relaxed = true) {
                 every { uid } returns h.player.world.uid
@@ -215,8 +224,8 @@ class CivsPlacementControlsTest : FunSpec({
                 every { eyeLocation } returns Location(world, 4.5, 65.5, 4.5, 180f, 0f)
             }
             every { h.host.selection(actor) } returns null
-            every { h.host.preview(actor) } returns h.preview!!.copy(anchor = CivPosition(40, 63, 40),
-                control = CivPosition(4, 65, 0), worldId = world.uid)
+            every { h.host.preview(actor) } returns h.preview!!.copy(anchor = CivPosition(4, 65, 0),
+                control = CivPosition(40, 63, 40), worldId = world.uid)
             every { h.ui.showingDialog(actor) } returns false
             fun click(material: Material?): PlayerInteractEvent = mockk<PlayerInteractEvent>(relaxed = true).also { event ->
                 every { event.player } returns actor

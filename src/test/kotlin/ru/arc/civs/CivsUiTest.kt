@@ -207,7 +207,7 @@ class CivsUiTest : FunSpec({
                 h.screen.body[0].text.decoration(TextDecoration.ITALIC) shouldBe TextDecoration.State.FALSE
                 plainText(h.screen.body[1].text) shouldBe "В мире world нельзя размещать городские постройки.\n" +
                     "Разрешённые миры: survival, vanilla.\nПерейдите в один из них и повторите выбор места."
-                h.screen.body[1].text.color() shouldBe CivsText.BODY
+                h.screen.body[1].text.color() shouldBe CivsText.ERROR
                 plainText(h.screen.buttons.single().label) shouldBe "Повторить выбор места ›"
             }
             verify(exactly = 0) { h.player.sendMessage(any<Component>()) }
@@ -348,7 +348,7 @@ class CivsUiTest : FunSpec({
     test("preview coordinates use the authored control position and separate entrance instead of the paste origin") {
         withUi { h ->
             h.open(); h.click("found"); h.click("style_0")
-            h.body() shouldContain "Right-click the ground"
+            h.body() shouldContain "right-click a block"
             h.preview = preview().copy(anchor = CivPosition(20, 60, 30), entrance = CivPosition(8, 66, 9), control = CivPosition(12, 68, 14))
             h.open()
             h.body() shouldContain "Control block"
@@ -980,6 +980,9 @@ class CivsUiTest : FunSpec({
             h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.deleteCity(h.player, city.id, city.name) }
             h.screen.id shouldBe "civs.welcome"
+            val message = requireNotNull(h.player.nextComponentMessage())
+            message.color() shouldBe CivsText.SUCCESS
+            plainText(message) shouldContain "deleted"
         }
     }
 

@@ -22,6 +22,21 @@ class CivsCommandTest : FunSpec({
         verify(exactly = 2) { ui.open(player) }
     }
 
+    test("command rejection and usage guidance have semantic feedback colors") {
+        val messages = mutableListOf<net.kyori.adventure.text.Component>()
+        val player = mockk<Player>(relaxed = true) {
+            every { locale() } returns java.util.Locale.ENGLISH
+            every { hasPermission("arccivs.use") } returns false
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val router = CivsCommand(mockk(), mockk(), CivsText.fromYaml(civsLocaleSource()), mockk())
+        router.onCommand(player, mockk(), "city", emptyArray())
+        messages.single().color() shouldBe CivsText.ERROR
+        every { player.hasPermission("arccivs.use") } returns true
+        router.onCommand(player, mockk(), "city", arrayOf("unknown"))
+        messages.last().color() shouldBe CivsText.INFO
+    }
+
     test("suggestions stay within exact syntax and never request Bukkit player fallback") {
         CivsCommand.completions(false, true, arrayOf("")) shouldBe emptyList()
         CivsCommand.completions(true, false, arrayOf("")) shouldBe listOf("preview")

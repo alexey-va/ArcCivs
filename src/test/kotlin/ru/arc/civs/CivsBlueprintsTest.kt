@@ -54,7 +54,7 @@ class CivsBlueprintsTest : FunSpec({
         CivsBlueprintGeometry.controlMarker(BlueprintGeometrySnapshot(origin, listOf(first))) shouldBe first.position
     }
 
-    test("all four player headings align the chosen barrel to the marker and derive a separate front entrance") {
+    test("all four player headings keep the selected ground pivot and rotate the offset control around it") {
         val wantedFronts = listOf(ArcSchematicPoint(0, 0, -1), ArcSchematicPoint(1, 0, 0),
             ArcSchematicPoint(0, 0, 1), ArcSchematicPoint(-1, 0, 0))
         val offsets = listOf(ArcSchematicPoint(-8, 1, -14), ArcSchematicPoint(14, 1, -8),
@@ -65,9 +65,9 @@ class CivsBlueprintsTest : FunSpec({
             val alignment = CivsBlueprintGeometry.alignment(snapshot, CivPosition(100, 64, -300), facing, null)
             alignment.quarterTurns shouldBe listOf(2, 3, 0, 1)[facing]
             val offset = offsets[alignment.quarterTurns]
-            alignment.anchor shouldBe CivPosition(100 - offset.x, 63, -300 - offset.z)
-            alignment.control shouldBe CivPosition(100, 64, -300)
-            alignment.entrance shouldBe CivPosition(100 - offset.x, 64, -300 - offset.z)
+            alignment.anchor shouldBe CivPosition(100, 64, -300)
+            alignment.control shouldBe CivPosition(100 + offset.x, 65, -300 + offset.z)
+            alignment.entrance shouldBe CivPosition(100, 65, -300)
             CivsBlueprintGeometry.rotate(ArcSchematicPoint(0, 0, 1), alignment.quarterTurns) shouldBe wantedFronts[facing]
         }
     }
@@ -76,10 +76,12 @@ class CivsBlueprintsTest : FunSpec({
         for (height in listOf(1, 2, 4)) for (rotation in listOf(0, 90, 180, 270)) {
             val snapshot = BlueprintGeometrySnapshot(ArcSchematicPoint(16, 1, 26),
                 listOf(blueprintMarker(ArcSchematicPoint(8, 1 + height, 12))))
-            val aligned = CivsBlueprintGeometry.alignment(snapshot, CivPosition(10, 64, 20), 0, rotation, groundLevel = true)
-            aligned.control shouldBe CivPosition(10, 64 + height, 20)
-            aligned.anchor.y shouldBe 64
-            aligned.entrance.y shouldBe 65
+            val aligned = CivsBlueprintGeometry.alignment(snapshot, CivPosition(10, 64, 20), 0, rotation)
+            val offset = listOf(CivPosition(-8, height, -14), CivPosition(14, height, -8),
+                CivPosition(8, height, 14), CivPosition(-14, height, 8))[rotation / 90]
+            aligned.control shouldBe CivPosition(10 + offset.x, 64 + height, 20 + offset.z)
+            aligned.anchor shouldBe CivPosition(10, 64, 20)
+            aligned.entrance shouldBe CivPosition(10, 65, 20)
         }
     }
 
@@ -90,7 +92,7 @@ class CivsBlueprintsTest : FunSpec({
             val snapshot = BlueprintGeometrySnapshot(ArcSchematicPoint(16, groundY, 26),
                 listOf(blueprintMarker(ArcSchematicPoint(8, groundY + 2, 12))))
             val aligned = CivsBlueprintGeometry.alignment(snapshot, CivPosition(-999, 12, -999), facing, rotation,
-                fixedEntrance = CivPosition(10, 70, 20), groundLevel = true)
+                fixedEntrance = CivPosition(10, 70, 20))
             aligned.anchor shouldBe CivPosition(10, 69, 20)
             aligned.quarterTurns shouldBe rotation / 90
             aligned.entrance shouldBe CivPosition(10, 70, 20)
@@ -113,7 +115,7 @@ class CivsBlueprintsTest : FunSpec({
         CivsBlueprintGeometry.rotate(point, 4) shouldBe point
     }
 
-    test("prepare keeps complete cells and exact captured bytes while moving the marker to the chosen ground center") {
+    test("prepare places the complete captured schematic at the selected ground pivot and derives its internal control") {
         val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(2, 2, 2), ArcSchematicPoint(1, 0, 3),
             mapOf(ArcSchematicPoint(1, 1, 1) to "minecraft:structure_void"))
         val transformed = BlueprintCellsSnapshot(ArcSchematicPoint(-1, 0, -3), ArcSchematicPoint(1, 2, -1), ArcSchematicPoint(0, 0, 0),
@@ -125,14 +127,52 @@ class CivsBlueprintsTest : FunSpec({
         every { libraries.source.transform(original, ArcSchematicTransform(0, false)) } returns CompletableFuture.completedFuture(transformed)
         libraries.subject.use { subject ->
             val prepared = subject.prepare("nordic", BuildingType.TOWN_HALL, 1, UUID.randomUUID(), UUID.randomUUID(),
-                CivPosition(100, 64, 200), 2, 0, groundLevel = true).join()
-            prepared.building.control shouldBe CivPosition(100, 65, 200)
-            prepared.building.anchor shouldBe CivPosition(100, 64, 202)
-            prepared.building.entrance shouldBe CivPosition(100, 65, 202)
+                CivPosition(100, 64, 200), 2, 0).join()
+            prepared.building.control shouldBe CivPosition(100, 65, 198)
+            prepared.building.anchor shouldBe CivPosition(100, 64, 200)
+            prepared.building.entrance shouldBe CivPosition(100, 65, 200)
             prepared.cells.size.toLong() shouldBe transformed.volume
-            prepared.cells.single { it.blockData == "minecraft:structure_void" }.position shouldBe ArcSchematicPoint(100, 65, 200)
+            prepared.cells.single { it.blockData == "minecraft:structure_void" }.position shouldBe ArcSchematicPoint(100, 65, 198)
             prepared.sourceBytes.toList() shouldBe bytes.toList()
             prepared.snapshot.fileSha256 shouldBe original.fileSha256
+        }
+    }
+
+    test("recovery preserves existing marker-aligned placements at all four rotations without realigning them") {
+        val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(4, 4, 2), ArcSchematicPoint(2, 1, 3),
+            mapOf(ArcSchematicPoint(1, 3, 1) to "minecraft:structure_void"))
+        val offsets = listOf(ArcSchematicPoint(-1, 2, -2), ArcSchematicPoint(2, 2, -1),
+            ArcSchematicPoint(1, 2, 2), ArcSchematicPoint(-2, 2, 1))
+        for (turns in 0..3) {
+            val corners = listOf(ArcSchematicPoint(-2, -1, -3), ArcSchematicPoint(2, 3, -1)).map {
+                CivsBlueprintGeometry.rotate(it, turns)
+            }
+            val marker = offsets[turns]
+            val transformed = BlueprintCellsSnapshot(
+                ArcSchematicPoint(corners.minOf { it.x }, -1, corners.minOf { it.z }),
+                ArcSchematicPoint(corners.maxOf { it.x }, 3, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
+                mapOf(marker to "minecraft:structure_void"))
+            val existingControl = CivPosition(120, 68, 210)
+            val existingAnchor = CivPosition(existingControl.x - marker.x, existingControl.y - marker.y, existingControl.z - marker.z)
+            val building = blueprintBuilding(transformed, existingAnchor, marker).copy(rotation = turns * 90,
+                entrance = existingAnchor.copy(y = existingAnchor.y + 1))
+            val cells = CivsBlueprints.worldCells(transformed, existingAnchor)
+            val plan = CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), building,
+                cells.filterNot { it.blockData == "minecraft:structure_void" }.map {
+                    CivPlanBlock(CivPosition(it.position.x, it.position.y, it.position.z), "minecraft:air", it.blockData)
+                }, original.fileSha256)
+            val libraries = BlueprintLibraries()
+            every { libraries.captured.loadVerified(plan.id.toString(), original.fileSha256,
+                ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(original)
+            every { libraries.captured.transform(original, ArcSchematicTransform(turns, false)) } returns CompletableFuture.completedFuture(transformed)
+            libraries.subject.use { subject ->
+                val recovered = subject.recover(plan).join()
+                recovered shouldBe transformed
+                CivsBlueprints.worldCells(recovered, plan.building.anchor) shouldBe cells
+                plan.building.anchor shouldBe existingAnchor
+                plan.building.control shouldBe existingControl
+                plan.building.bounds.min.y shouldBe existingAnchor.y - 1
+            }
         }
     }
 
@@ -250,7 +290,7 @@ private class BlueprintCellsSnapshot(
 
 private class BlueprintLibraries {
     val source = mockk<ArcSchematicLibrary>(relaxed = true)
-    private val captured = mockk<ArcSchematicLibrary>(relaxed = true)
+    val captured = mockk<ArcSchematicLibrary>(relaxed = true)
     private val service = mockk<ArcSchematicService>()
     val subject: CivsBlueprints
     init {

@@ -81,7 +81,7 @@ internal class CivsPlacementControls(
                     if (player == null || !player.isOnline || player.world.uid != session.worldId ||
                         !available(player) || host.selection(player) == null && eligible(player) == null) {
                         if (player?.isOnline == true && session.selecting && !ui.showingDialog(player) &&
-                            System.currentTimeMillis() >= session.expiresAt) player.sendActionBar(text.render(player, "selection.expired"))
+                            System.currentTimeMillis() >= session.expiresAt) player.sendActionBar(text.warning(player, "selection.expired"))
                         clear(id)
                     }
                     else refreshTarget(player, session)
@@ -135,15 +135,14 @@ internal class CivsPlacementControls(
         return ActionPanelFrame(
             CivsPlacementContext(preview.id, session.moving, session.pending),
             ActionPanelPlacement.FollowTarget(preview.worldId,
-                ActionPanelPoint(preview.control.x + 0.5, preview.control.y + 0.5, preview.control.z + 0.5),
+                ActionPanelPoint(preview.anchor.x + 0.5, preview.anchor.y + 0.5, preview.anchor.z + 0.5),
                 followingSettings(session.moving)),
-            layout(player, actions, status, session.moving), !busy,
+            layout(player, actions, status), !busy,
             ActionPanelOptions(ActionPanelInputProfile.ENTITY_BOTH, 4.0, false), null,
         )
     }
 
-    internal fun layout(player: Player, actions: List<CivsPlacementAction>, status: Component,
-        moving: Boolean): ActionPanelLayout<CivsPlacementAction> {
+    internal fun layout(player: Player, actions: List<CivsPlacementAction>, status: Component): ActionPanelLayout<CivsPlacementAction> {
         val buttons = actions.map { action ->
             ActionPanelAction(action, text.render(player, action.key).color(when (action) {
                 CivsPlacementAction.CONFIRM, CivsPlacementAction.DONE -> TextColor.color(0x9BD48D)
@@ -153,19 +152,9 @@ internal class CivsPlacementControls(
                 else -> TextColor.color(0xFFFFFF)
             }))
         }
-        // Leave the authored control visible and placeable between the two columns.
-        val grid = if (moving) ActionPanelGridSettings(0.26, 2.5, 1.4f, 0.23f, 0.75f)
-            else ActionPanelGridSettings(0.26, 2.75, 1.7f, 0.23f, 0.8f)
-        val layout = ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0, grid)
-        if (buttons.isEmpty()) return layout
-        return ActionPanelLayout(layout.buttons.mapIndexed { index, button ->
-            val center = button.rect.center.copy(x = (index % 2 - 0.5) * grid.columnSpacing)
-            ActionPanelButton(button.action, button.rect.copy(center = center), button.text, button.style, button.visible, button.enabled)
-        }, layout.labels.map { label ->
-            ActionPanelLabel(label.key, label.rect.copy(center = label.rect.center.copy(x = -grid.columnSpacing / 2),
-                width = grid.buttonWidth.toDouble()),
-                label.text, label.style, label.visible)
-        })
+        // The automatic barrel needs no empty center corridor. Keep both pages as one compact group.
+        val grid = ActionPanelGridSettings(0.26, 1.7, 1.6f, 0.23f, 0.75f)
+        return ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0, grid)
     }
 
     override fun activate(player: Player, context: CivsPlacementContext, action: CivsPlacementAction) {
@@ -183,7 +172,7 @@ internal class CivsPlacementControls(
             CivsPlacementAction.CANCEL -> {
                 host.cancelPreview(player)
                 clear(player.uniqueId)
-                player.sendMessage(text.render(player, "panel.cancelled"))
+                player.sendMessage(text.warning(player, "panel.cancelled"))
             }
             CivsPlacementAction.CONFIRM -> perform(player, session, confirming = true) { host.confirmPreview(player) }
             CivsPlacementAction.ROTATE_LEFT -> perform(player, session) { host.rotatePreview(player, -90) }
@@ -196,7 +185,7 @@ internal class CivsPlacementControls(
         session.moving = true
         // A new mode starts at its authored distance instead of inheriting the old distance hysteresis.
         panels.clear(player.uniqueId)
-        player.sendMessage(text.render(player, "panel.move-opened"))
+        player.sendMessage(text.info(player, "panel.move-opened"))
     }
 
     private fun perform(player: Player, session: Session, confirming: Boolean = false, finishMove: Boolean = false,
@@ -214,16 +203,16 @@ internal class CivsPlacementControls(
             session.pending = null
             session.confirming = false
             if (failure != null && session.selecting) {
-                session.feedback = text.failure(player, failure).color(TextColor.color(0xFF6B61))
+                session.feedback = text.failure(player, failure)
                 session.feedbackTicks = 80
                 session.hintTicks = 0
                 player.sendActionBar(requireNotNull(session.feedback))
             } else if (failure != null) player.sendMessage(text.failure(player, failure))
-            else if (confirming) player.sendMessage(text.render(player, if (upgrading) "panel.upgrade-confirmed" else "panel.confirmed"))
+            else if (confirming) player.sendMessage(text.success(player, if (upgrading) "panel.upgrade-confirmed" else "panel.confirmed"))
             else if (session.selecting) {
                 session.selecting = false
                 clearTarget(session)
-                player.sendActionBar(text.render(player, "selection.ready"))
+                player.sendActionBar(text.success(player, "selection.ready"))
             }
             else if (finishMove) session.moving = false
             val preview = eligible(player)
@@ -256,12 +245,12 @@ internal class CivsPlacementControls(
                 "cancel" -> {
                     host.cancelSelection(player, "player-cancelled")
                     clear(player.uniqueId)
-                    player.sendActionBar(text.render(player, "panel.cancelled"))
+                    player.sendActionBar(text.warning(player, "panel.cancelled"))
                 }
                 "selected" -> perform(player, session, selected = event.clickedBlock?.let(::civsGroundSupport)) {
                     host.selectGround(player, selection.id, requireNotNull(clicked))
                 }
-                "no-block" -> player.sendActionBar(text.render(player, "selection.hint"))
+                "no-block" -> player.sendActionBar(text.info(player, "selection.hint"))
             }
             return
         }
@@ -278,22 +267,22 @@ internal class CivsPlacementControls(
         if (session.moving) {
             event.isCancelled = true
             val clicked = event.clickedBlock
-            if (clicked == null) player.sendActionBar(text.render(player, "panel.pick-hint"))
+            if (clicked == null) player.sendActionBar(text.info(player, "panel.pick-hint"))
             else perform(player, session, finishMove = true) {
                 host.movePreview(player, CivsGroundTarget(clicked.world.uid, CivPosition(clicked.x, clicked.y, clicked.z)))
             }
         } else {
-            // Placing the required barrel (or its support) must remain an ordinary block interaction.
+            // Placing a block must remain an ordinary interaction.
             val mainHandBlock = event.item?.type?.let { !it.isAir && it.isBlock } == true
             val offHandBlock = player.inventory.itemInOffHand.type.let { !it.isAir && it.isBlock }
-            if (!mainHandBlock && !offHandBlock && aimsAtControl(player, preview.control)) {
+            if (!mainHandBlock && !offHandBlock && aimsAtPlacement(player, preview.anchor)) {
                 event.isCancelled = true
                 beginMove(player, session)
             }
         }
     }
 
-    private fun aimsAtControl(player: Player, point: CivPosition): Boolean {
+    private fun aimsAtPlacement(player: Player, point: CivPosition): Boolean {
         val eye = player.eyeLocation
         val hit = BoundingBox(point.x - 0.04, point.y - 0.04, point.z - 0.04,
             point.x + 1.04, point.y + 1.04, point.z + 1.04).rayTrace(eye.toVector(), eye.direction, 12.0) ?: return false
@@ -305,11 +294,8 @@ internal class CivsPlacementControls(
         if ((!session.selecting && !session.moving) || ui.showingDialog(player)) { clearTarget(session); return }
         if (session.feedbackTicks > 0) session.feedbackTicks-- else session.feedback = null
         if (session.hintTicks-- <= 0) {
-            player.sendActionBar(session.feedback ?: text.render(player, when {
-                session.pending != null -> "selection.loading"
-                session.selecting -> "selection.hint"
-                else -> "panel.pick-hint"
-            }))
+            player.sendActionBar(session.feedback ?: if (session.pending != null) text.warning(player, "selection.loading")
+                else text.info(player, if (session.selecting) "selection.hint" else "panel.pick-hint"))
             session.hintTicks = 20
         }
         if (session.pending != null) return // Keep the explicitly clicked block lit until its preview arrives.
@@ -365,9 +351,9 @@ internal class CivsPlacementControls(
     }
 
     companion object {
-        /** Symmetric columns leave the control ray clear; move controls also leave terrain visible below. */
+        /** Follow the selected place before the building; movement leaves terrain visible below. */
         internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings =
-            ActionPanelFollowSettings(if (moving) 3.0 else 2.8, 0.0, if (moving) 0.3 else 0.0, 1.25, 0.03)
+            ActionPanelFollowSettings(if (moving) 3.0 else 2.6, 0.0, if (moving) 0.3 else -0.1, 1.25, 0.03)
 
         internal fun actions(preview: CivsPreviewView, moving: Boolean): List<CivsPlacementAction> = when {
             moving && preview.movable -> listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,

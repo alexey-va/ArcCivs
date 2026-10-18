@@ -50,15 +50,19 @@ Seven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
 QUARRY, FARM; levels1..3. The curated catalog remains63 assets across21
 style/type families. Each schematic has one `minecraft:structure_void` primary-hut
 marker inside the building; it is the physical control position, not the authored
-origin or visual entrance. The primary ground-click flow aligns marker X/Z with the
-selected ground X/Z, leaves the schematic anchor at ground Y and places the control
-at ground Y plus the marker's authored Y-minus-origin offset. Clicking an existing
-BARREL at the exact control XYZ is an alternate selection path. The visible entrance
-is independent. Confirming a SITE grants one BARREL at that authored marker for free,
+anchor or visual entrance. A selected block's X/Y/Z is the schematic anchor without
+an added height offset. The authored marker is transformed independently from that
+anchor and rotation. Clicking a BARREL uses the same selected-block contract as any
+other material; it does not align the internal marker to the clicked barrel.
+The visible entrance is independent. Confirming a SITE grants one BARREL at that authored marker for free,
 without pasting the completed building or charging a barrel as construction material.
 The same city commit records its expected prior block in `pendingControls` and protects
 the marker before native installation. Recovery accepts that prior block or an existing
-BARREL, preserves its inventory, then retires the receipt. Completed grants never regenerate
+BARREL, preserves its inventory, then retires the receipt. The same durable receipt can
+prepare up to three entrance cells once: at most one free DIRT support and two AIR
+cells. Ordinary terrain and crafted blocks, including lava, may be replaced; bedrock,
+TileState/container contents and external protection remain guarded. This preparation
+is not a periodic repair. Completed grants never regenerate
 on a timer; normal block protection prevents harvesting controls, while external deletion
 requires restoring the missing barrel. A conflicting block is retained and reported.
 The first pioneer arrives after30s,
@@ -188,11 +192,10 @@ Founding and new-building forms start a service-owned ground selection and close
 the dialog before reading any aim target. A persistent action-bar instruction
 refreshes every 20 ticks. The primary-hut marker is the unique inside-building
 `structure_void` cell in the curated schematic; it is separate from the visible
-entrance and authored origin. Right-clicking ground starts the preview and selects
-ground X/Z. The schematic anchor remains at ground Y; the control coordinate Y is
-ground Y plus the marker's authored Y-minus-origin offset. Confirmation installs a free
-BARREL at that control coordinate; an already placed BARREL can instead be right-clicked
-at its exact control XYZ. There is no second aiming ray after the click. Shift +
+entrance and authored anchor. Right-clicking a block starts the preview and sets the
+schematic anchor to that block's X/Y/Z. The internal control is calculated independently
+from the transformed marker. Confirmation installs a free BARREL there; selecting an
+already placed BARREL has no special coordinate semantics. There is no second aiming ray after the click. Shift +
 right-click, menu reopen, logout, world change, expiry,
 reload and shutdown retire the selection. Its identity fences asynchronous
 blueprint completion; a rejected location preserves the draft for the next click.
@@ -205,11 +208,13 @@ page of six one-block nudges, Done and Cancel; a ground right-click relocates th
 whole preview. The green marker identifies the inside-building control coordinate;
 cyan marks the separate visual entrance and the light-blue frame shows the ground
 destination. Upgrades preserve the existing entrance and rotation.
-Both control pages face the authored control point: normal controls from 2.8 blocks,
-move controls from three. Their
-two columns and left-aligned status leave a clear central corridor for seeing and
-placing the barrel; move controls also sit slightly higher to keep terrain picking
-clear below them. Core still owns obstacle avoidance, reach checks and hit testing.
+Both control pages face the selected anchor, not the internal control: normal controls
+from 2.6 blocks and 0.1 blocks below eye level, move controls from three. A compact two-column grid uses 1.6-block
+buttons, 1.7-block column spacing, 0.75 label scale and one centered status. Movement
+controls sit slightly higher to keep terrain picking clear below them. Core still owns
+obstacle avoidance, reach checks and hit testing; no separate positioning engine is used.
+Chat feedback is colored by outcome (green success, yellow warning, red rejection,
+blue guidance); ordinary dialog prose retains its existing palette.
 
 `CivsService` keeps the last valid preview until an asynchronous replacement is
 ready, blocks confirmation during that load and fences obsolete completions.

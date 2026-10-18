@@ -7,11 +7,8 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
-import org.bukkit.block.BlockFace
-import org.bukkit.block.BlockSupport
 import org.bukkit.block.TileState
 import org.bukkit.block.data.BlockData
-import org.bukkit.block.data.Waterlogged
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
@@ -24,15 +21,11 @@ import java.util.concurrent.CompletableFuture
  * sharing 256 cells/tick across at most four scans. No scan loads a chunk or changes a block.
  * Final revalidation must follow publication of the durable, protected construction footprint.
  */
-class CivsWorld internal constructor(
+class CivsWorld(
     private val plugin: Plugin,
     tasks: LifecycleTaskScope,
     private val cities: () -> Collection<Settlement>,
-    private val entranceSafety: (BlockData, Block, Boolean) -> Boolean,
 ) : AutoCloseable {
-    constructor(plugin: Plugin, tasks: LifecycleTaskScope, cities: () -> Collection<Settlement>) :
-        this(plugin, tasks, cities, ::civsNativeEntranceSafe)
-
     private val monitor = Any()
     private val pending = LinkedHashSet<Scan<*>>()
     private var closed = false
@@ -120,15 +113,7 @@ class CivsWorld internal constructor(
         protected lateinit var world: World
         protected val seen = HashSet<CivPosition>()
         private val palette = HashMap<String, BlockData>()
-        private val entranceCells = listOf(
-            building.entrance.copy(y = building.entrance.y - 1),
-            building.entrance,
-            building.entrance.copy(y = building.entrance.y + 1),
-        )
-        private val predictedEntrance = HashMap<CivPosition, BlockData>()
         private val authoredControl = building.control.takeIf { CivsBlueprints.hasAuthoredControl(building) }
-        private var controlChecked = false
-        private var entranceIndex = 0
         protected var index = 0
 
         init {
@@ -140,7 +125,7 @@ class CivsWorld internal constructor(
         fun validateContext() {
             world = plugin.server.getWorld(worldId) ?: throw CivsRejection("world-unavailable")
             requireCivs(building.bounds.min.y >= world.minHeight && building.bounds.max.y < world.maxHeight &&
-                entranceCells.all { it.y in world.minHeight until world.maxHeight } &&
+                building.entrance.y in world.minHeight until world.maxHeight &&
                 (authoredControl?.y?.let { it in world.minHeight until world.maxHeight } != false), "outside-world")
             val border = world.worldBorder
             val min = building.bounds.min
@@ -164,6 +149,10 @@ class CivsWorld internal constructor(
                     (other.id != cityId || it.id != building.id) && (it.bounds.overlaps(building.bounds) ||
                         it.control?.let { p -> building.bounds.contains(p.x, p.y, p.z) || p == building.control } == true ||
                         building.control?.let { p -> it.bounds.contains(p.x, p.y, p.z) } == true)
+                } || other.pendingControls.orEmpty().any { receipt ->
+                    (other.id != cityId || receipt.buildingId != building.id) && receipt.approach.orEmpty().any { cell ->
+                        building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) || cell.position == building.control
+                    }
                 }
             }, "building-overlap")
             validateIdentity(city)
@@ -193,42 +182,20 @@ class CivsWorld internal constructor(
             try { Bukkit.createBlockData(text) } catch (_: IllegalArgumentException) { throw CivsRejection("invalid-plan") }
         }
 
-        protected fun predict(position: CivPosition, after: BlockData) {
-            if (position in entranceCells) predictedEntrance[position] = after
-        }
-
         protected open fun checkControl(block: Block) {
             if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
             if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
         }
 
-        /** The preserved marker barrel has its own bounded check, including for batches away from its chunk. */
-        protected fun checkApproach(): Boolean {
-            if (!controlChecked && authoredControl != null) {
-                checkControl(read(authoredControl))
-                controlChecked = true
-                return false
-            }
-            return checkEntrance()
-        }
-
-        /** One additional world cell per step, including an entrance outside the schematic box. */
-        protected fun checkEntrance(): Boolean {
-            val position = entranceCells[entranceIndex]
-            // Paper's predicted collision-shape query may read neighbors; never let it reach an unloaded chunk.
-            val chunkX = position.x shr 4
-            val chunkZ = position.z shr 4
-            requireCivs((-1..1).all { dx -> (-1..1).all { dz -> world.isChunkLoaded(chunkX + dx, chunkZ + dz) } }, "chunks-unloaded")
+        /** Only the preserved control needs a separate read; approach terrain is not part of construction. */
+        protected fun checkPreservedControl() {
+            val position = building.control ?: return
             val block = read(position)
-            val data = predictedEntrance[position] ?: block.blockData
-            if (position == building.control) {
-                if (block.type != Material.BARREL && (block.state is TileState || block.type in setOf(Material.BEDROCK, Material.LAVA)))
-                    rejectAt("control-obstructed", block)
-                if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
-            }
-            if (!entranceSafety(data, block, entranceIndex == 0)) rejectAt("entrance-blocked", block)
-            entranceIndex++
-            return entranceIndex == entranceCells.size
+            if (authoredControl != null) return checkControl(block)
+            // Legacy controls can lie outside the old footprint and still must not replace player data.
+            if (block.type != Material.BARREL && (block.state is TileState || block.type == Material.BEDROCK))
+                rejectAt("control-obstructed", block)
+            if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
         }
 
         protected fun finish(value: T) {
@@ -260,7 +227,7 @@ class CivsWorld internal constructor(
 
         override fun checkControl(block: Block) {
             if (!allowControlPlacement || block.type == Material.BARREL) return super.checkControl(block)
-            if (!civsNaturalTerrain(block.type) || block.state is TileState) rejectAt("control-obstructed", block)
+            if (block.type == Material.BEDROCK || block.state is TileState) rejectAt("control-obstructed", block)
             if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
         }
 
@@ -275,10 +242,9 @@ class CivsWorld internal constructor(
 
         override fun step() {
             if (index == cells.size) {
-                if (checkApproach()) {
-                    requireCivs(blocks.isNotEmpty(), "invalid-plan")
-                    finish(CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList()))
-                }
+                checkPreservedControl()
+                requireCivs(blocks.isNotEmpty(), "invalid-plan")
+                finish(CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList()))
                 return
             }
             val cell = cells[index++]
@@ -296,8 +262,8 @@ class CivsWorld internal constructor(
                 checkControl(block)
                 return
             }
-            if (previous?.bounds?.contains(position.x, position.y, position.z) != true &&
-                (!civsNaturalTerrain(block.type) || block.state is TileState)) rejectAt("protected-terrain", block)
+            if (block.type == Material.BEDROCK || previous?.bounds?.contains(position.x, position.y, position.z) != true &&
+                block.state is TileState) rejectAt("protected-terrain", block)
             // Never replace a player's inventory, including chests installed while a SITE was waiting.
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             if (cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
@@ -306,7 +272,6 @@ class CivsWorld internal constructor(
             requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")
             if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
             blocks += CivPlanBlock(position, block.blockData.asString, after.asString)
-            predict(position, after)
         }
     }
 
@@ -328,19 +293,20 @@ class CivsWorld internal constructor(
 
         override fun step() {
             if (index == plan.blocks.size) {
-                if (checkApproach()) finish(Unit)
+                checkPreservedControl()
+                finish(Unit)
                 return
             }
             val cell = plan.blocks[index++]
             checkCell(cell.position)
             val block = read(cell.position)
+            if (block.type == Material.BEDROCK) rejectAt("protected-terrain", block)
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             val current = block.blockData.asString
             if (current != cell.before && current != cell.after) rejectAt("world-changed", block)
             val after = parse(cell.after)
             requireCivs(after.material != Material.BARRIER, "invalid-plan")
             if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
-            predict(cell.position, after)
         }
     }
 
@@ -349,12 +315,6 @@ class CivsWorld internal constructor(
         const val MAX_SCANS = 4
     }
 }
-
-/** Native shape queries are intentionally kept at a narrow seam: MockBukkit does not implement them. */
-private fun civsNativeEntranceSafe(data: BlockData, block: Block, support: Boolean): Boolean =
-    if (support) data.isFaceSturdy(BlockFace.UP, BlockSupport.CENTER)
-    else data.material != Material.WATER && data.material != Material.LAVA &&
-        (data !is Waterlogged || !data.isWaterlogged) && data.getCollisionShape(block.location).boundingBoxes.isEmpty()
 
 /** Loaded only when the optional Lands provider is present; no reflective integration. */
 private class CivsLandsAccess(plugin: Plugin) {
@@ -387,29 +347,5 @@ internal fun civsProtectedBuildings(city: Settlement): Sequence<CivBuilding> = s
     yieldAll(city.buildings)
     city.construction?.plannedBuilding?.let { yield(it) }
 }
-
-/** Material policy only: placed terrain and unstripped logs have no reliable natural-provenance marker. */
-internal fun civsNaturalTerrain(material: Material): Boolean = material.isAir || material.name in NATURAL_TERRAIN ||
-    material.name.endsWith("_LEAVES") || material.name.endsWith("_SAPLING") || material.name.endsWith("_ORE") ||
-    material.name.endsWith("_LOG") && !material.name.startsWith("STRIPPED_")
-
-private val NATURAL_TERRAIN = setOf(
-    "STONE", "GRANITE", "DIORITE", "ANDESITE", "DEEPSLATE", "TUFF", "CALCITE", "DIRT", "GRASS_BLOCK",
-    "COARSE_DIRT", "ROOTED_DIRT", "PODZOL", "MYCELIUM", "MUD", "CLAY", "SAND", "RED_SAND", "GRAVEL",
-    "MOSS_BLOCK", "PALE_MOSS_BLOCK", "MOSS_CARPET", "PALE_MOSS_CARPET", "SNOW", "SNOW_BLOCK",
-    "WATER", "ICE", "PACKED_ICE", "BLUE_ICE", "POWDER_SNOW", "SEAGRASS", "TALL_SEAGRASS", "KELP", "KELP_PLANT", "LILY_PAD",
-    "CRIMSON_STEM", "WARPED_STEM", "MANGROVE_ROOTS", "MUDDY_MANGROVE_ROOTS", "COCOA", "MELON", "PUMPKIN", "SWEET_BERRY_BUSH",
-    "NETHERRACK", "SOUL_SAND", "SOUL_SOIL", "BASALT", "BLACKSTONE", "END_STONE",
-    "SHORT_GRASS", "TALL_GRASS", "FERN", "LARGE_FERN", "DEAD_BUSH", "BUSH", "FIREFLY_BUSH",
-    "SHORT_DRY_GRASS", "TALL_DRY_GRASS", "VINE", "CAVE_VINES", "CAVE_VINES_PLANT", "GLOW_LICHEN",
-    "HANGING_ROOTS", "PALE_HANGING_MOSS", "SPORE_BLOSSOM", "BAMBOO", "BAMBOO_SAPLING", "SUGAR_CANE",
-    "CACTUS", "CACTUS_FLOWER", "DANDELION", "POPPY", "BLUE_ORCHID", "ALLIUM", "AZURE_BLUET",
-    "RED_TULIP", "ORANGE_TULIP", "WHITE_TULIP", "PINK_TULIP", "OXEYE_DAISY", "CORNFLOWER",
-    "LILY_OF_THE_VALLEY", "SUNFLOWER", "LILAC", "ROSE_BUSH", "PEONY", "PINK_PETALS", "WILDFLOWERS",
-    "LEAF_LITTER", "BROWN_MUSHROOM", "RED_MUSHROOM", "BROWN_MUSHROOM_BLOCK", "RED_MUSHROOM_BLOCK",
-    "MUSHROOM_STEM", "AZALEA", "FLOWERING_AZALEA", "SMALL_DRIPLEAF", "BIG_DRIPLEAF", "BIG_DRIPLEAF_STEM",
-    "CRIMSON_FUNGUS", "WARPED_FUNGUS", "CRIMSON_ROOTS", "WARPED_ROOTS", "NETHER_SPROUTS",
-    "WEEPING_VINES", "WEEPING_VINES_PLANT", "TWISTING_VINES", "TWISTING_VINES_PLANT",
-)
 
 private fun requireCivs(condition: Boolean, reason: String) { if (!condition) throw CivsRejection(reason) }

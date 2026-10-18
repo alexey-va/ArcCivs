@@ -55,6 +55,41 @@ class CivsDevelopmentRulesTest : FunSpec({
         CivsRules.beginPlacement(trip(prepaid), city.owner, order.id).construction!!.phase shouldBe ConstructionPhase.PLACING
     }
 
+    test("one-time approach receipts allow only the exact support and two headroom cells and preserve legacy null") {
+        val fresh = newCity()
+        val hall = fresh.buildings.single().copy(control = CivPosition(0, 65, 0))
+        val city = fresh.copy(buildings = listOf(hall))
+        val cells = listOf(
+            CivPlanBlock(CivPosition(0, 64, 2), "minecraft:air", "minecraft:dirt"),
+            CivPlanBlock(CivPosition(0, 65, 2), "minecraft:oak_planks", "minecraft:air"),
+            CivPlanBlock(CivPosition(0, 66, 2), "minecraft:glass", "minecraft:air"))
+        val receipt = CivControlPlacement(hall.id, hall.control!!, "minecraft:air", cells)
+        roundTrip(city.copy(pendingControls = listOf(receipt))).pendingControls shouldBe listOf(receipt)
+        for (invalid in listOf(cells + cells.first(), listOf(cells.first().copy(position = CivPosition(1, 64, 2))),
+            listOf(cells.first().copy(after = "minecraft:diamond_block")), listOf(cells[1].copy(after = "minecraft:dirt")),
+            listOf(cells.first().copy(before = "minecraft:dirt")))) {
+            denied("invalid-state") { roundTrip(city.copy(pendingControls = listOf(receipt.copy(approach = invalid)))) }
+        }
+        val json = Gson().toJsonTree(city.copy(pendingControls = listOf(receipt))).asJsonObject
+        json.getAsJsonArray("pendingControls")[0].asJsonObject.remove("approach")
+        CivsRules.validate(Gson().fromJson(json, Settlement::class.java)).pendingControls!!.single().approach shouldBe null
+    }
+
+    test("new site and construction footprints or controls cannot occupy another pending approach") {
+        val fresh = newCity()
+        val hall = fresh.buildings.single().copy(control = CivPosition(0, 65, 0))
+        val point = hall.entrance
+        val receipt = CivControlPlacement(hall.id, hall.control!!, "minecraft:barrel",
+            listOf(CivPlanBlock(point, "minecraft:oak_planks", "minecraft:air")))
+        val city = roundTrip(fresh.copy(buildings = listOf(hall), pendingControls = listOf(receipt)))
+        val base = building(2, BuildingType.HOUSE, 10)
+        for (candidate in listOf(base.copy(bounds = CivBox(point, point.copy(x = 1, y = 68, z = 3))), base.copy(control = point))) {
+            denied("building-overlap") { CivsRules.placeSite(city, city.owner, candidate) }
+            denied("building-overlap") { CivsRules.reserveBuild(city, city.owner, candidate, batches(candidate, 1)) }
+            denied("invalid-state") { roundTrip(city.copy(buildings = city.buildings + candidate)) }
+        }
+    }
+
     test("founding reserves a town hall site and a single item grant without a construction or residents") {
         val city = newCity()
         city.buildings.single().phase shouldBe BuildingPhase.SITE

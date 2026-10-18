@@ -94,8 +94,8 @@ class CivsUi internal constructor(
         visits.remove(player.uniqueId)
         roots.remove(player.uniqueId)
         runtime.close(player)
-        if (host.selection(player) != null) player.sendActionBar(tr(player, "selection.hint"))
-        else if (host.preview(player) != null) player.sendMessage(tr(player, "panel.opened"))
+        if (host.selection(player) != null) player.sendActionBar(text.info(player, "selection.hint"))
+        else if (host.preview(player) != null) player.sendMessage(text.info(player, "panel.opened"))
     }
 
     fun openWorker(player: Player, cityId: UUID, workerId: UUID) {
@@ -325,7 +325,7 @@ class CivsUi internal constructor(
                     success = {
                         runtime.beginFlow(player)
                         openEntry(player)
-                        player.sendMessage(tr(player, "delete.success", "name" to city.name))
+                        player.sendMessage(text.success(player, "delete.success", "name" to city.name))
                     }, failure = { showDeleteCity(player, expectedCityId, name, it) })
             })
         }, inputs = listOf(

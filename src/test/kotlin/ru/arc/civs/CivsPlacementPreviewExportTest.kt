@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.GsonBuilder
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
@@ -45,10 +46,10 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         building.bounds, true, false, control = requireNotNull(building.control))
                     val status = if (moving) text.render(player, "panel.moving") else text.render(player, "panel.status",
                         "building" to text.building(player, building.type), "rotation" to building.rotation)
-                    val layout = controls.layout(player, CivsPlacementControls.actions(preview, moving), status, moving)
+                    val layout = controls.layout(player, CivsPlacementControls.actions(preview, moving), status)
                     val rects = layout.buttons.map { it.rect } + layout.labels.filter { it.visible }.map { it.rect }
-                    val control = requireNotNull(building.control)
-                    val target = ActionPanelPoint(control.x + 0.5, control.y + 0.5, control.z + 0.5)
+                    val reference = building.anchor
+                    val target = ActionPanelPoint(reference.x + 0.5, reference.y + 0.5, reference.z + 0.5)
                     val settings = CivsPlacementControls.followingSettings(moving)
                     val yaw = Math.toDegrees(atan2(target.x - eye.x, eye.z - target.z)).toFloat()
                     fun anchor(distance: Double, shift: ActionPanelShift) =
@@ -78,17 +79,23 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     })
                     val placed = anchor(distance, chosenShift)
                     safe(distance, chosenShift, 0.0) shouldBe true
-                    // The complete green block remains outside all control and status rectangles.
-                    // The same rays must reach a barrel or its support when the player holds a block.
+                    val footprint = ActionPanelBounds(building.bounds.min.x.toDouble(), building.bounds.min.y.toDouble(),
+                        building.bounds.min.z.toDouble(), building.bounds.max.x + 1.0, building.bounds.max.y + 1.0, building.bounds.max.z + 1.0)
+                    val panelVolume = ActionPanelGeometry.volume(placed, rects, ActionPanelGeometry.SURFACE_CLEARANCE)
+                    ActionPanelGeometry.overlaps(panelVolume, footprint) shouldBe false
+                    // The selected block remains reachable below the compact panel. The automatic
+                    // internal barrel does not require a wide empty corridor between the buttons.
                     val occupiedPlanes = rects.map { ActionPanelPlane(Unit,
                         ActionPanelGeometry.localToWorld(placed, it.center), placed.yaw, it.width, it.height, true) }
-                    val controlRays = listOf(-0.04, 0.5, 1.04).flatMap { x ->
+                    val selectionRays = listOf(-0.04, 0.5, 1.04).flatMap { x ->
                         listOf(-0.04, 0.5, 1.04).flatMap { y -> listOf(-0.04, 0.5, 1.04).map { z ->
-                            ActionPanelPoint(control.x + x - eye.x, control.y + y - eye.y, control.z + z - eye.z)
+                            ActionPanelPoint(reference.x + x - eye.x, reference.y + y - eye.y, reference.z + z - eye.z)
                         } }
                     }
-                    controlRays.forEach { ray ->
-                        ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, 4.0, null) shouldBe null
+                    selectionRays.forEach { ray ->
+                        withClue("scene=$name distance=$distance shift=$chosenShift selected-block ray=$ray") {
+                            ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, 4.0, null) shouldBe null
+                        }
                     }
                     fun label(key: String, rect: ActionPanelRect, component: net.kyori.adventure.text.Component, style: ActionPanelTextStyle) =
                         mapOf("key" to key, "center" to ActionPanelGeometry.localToWorld(placed, rect.center), "width" to rect.width,
@@ -98,7 +105,8 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         layout.labels.filter { it.visible }.map { label(it.key, it.rect, it.text, it.style) }
                     // In move mode the player looks at the sampled terrain destination while the panel
                     // retains its target-facing orientation, exactly as a head turn does at runtime.
-                    val cameraTarget = if (moving) ActionPanelPoint(7.5, 64.0, 5.5) else target
+                    val cameraTarget = if (moving) ActionPanelPoint(7.5, 64.0, 5.5)
+                        else ActionPanelPoint(target.x, building.entrance.y + 1.0, target.z)
                     val viewport = if (!moving) {
                         val forward = Vector(cameraTarget.x - eye.x, cameraTarget.y - eye.y, cameraTarget.z - eye.z).normalize()
                         val right = forward.clone().crossProduct(Vector(0.0, 1.0, 0.0)).normalize()
@@ -136,11 +144,11 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     } else emptyMap<String, Any>()
                     return mapOf("id" to name, "eye" to eye, "target" to target, "cameraTarget" to cameraTarget, "anchor" to placed,
                         "distance" to distance, "shift" to chosenShift, "labels" to labels, "obstacles" to obstacles,
-                        "controlCorridor" to mapOf("sampledRays" to controlRays.size, "interceptedRays" to 0),
-                        "viewport" to viewport,
+                        "selectionCorridor" to mapOf("sampledRays" to selectionRays.size, "interceptedRays" to 0),
+                        "viewport" to viewport, "outsideBuildingFootprint" to true,
                         "terrainCorridor" to corridor, "cues" to (civsPreviewCues(building) + candidate),
                         "bounds" to building.bounds, "control" to requireNotNull(building.control),
-                        "entrance" to building.entrance, "pasteOrigin" to building.anchor, "groundY" to 63)
+                        "entrance" to building.entrance, "placementReference" to building.anchor, "groundY" to 63)
                 }
                 val selection = CivsSelectionView(UUID(0, 3), player.world.uid, BuildingType.TOWN_HALL,
                     System.currentTimeMillis() + 120_000, false)
@@ -152,9 +160,11 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     "cameraTarget" to ActionPanelPoint(0.5, 64.0, 0.5), "distance" to 0.0,
                     "shift" to ActionPanelShift(0.0, 0.0), "labels" to emptyList<Any>(), "obstacles" to emptyList<Any>(),
                     "cues" to civsAnchorCues(CivPosition(0, 63, 0), Material.LIGHT_BLUE_CONCRETE), "groundY" to 63,
-                    "actionBar" to plainText(text.render(player, "selection.hint")))
+                    "actionBar" to plainText(text.info(player, "selection.hint")),
+                    "actionBarColor" to text.info(player, "selection.hint").color()!!.asHexString())
                 val scenes = listOf(groundSelection, scene("open", base, ActionPanelPoint(0.5, 65.62, 5.5), false, false),
                     scene("obstructed", base, ActionPanelPoint(0.5, 65.62, 5.5), false, true),
+                    scene("approach", base, ActionPanelPoint(0.5, 65.62, 3.5), false, false),
                     scene("moved-rotated", base.copy(anchor = CivPosition(3, 63, 2), entrance = CivPosition(3, 64, 2), rotation = 90,
                         control = CivPosition(10, 65, 2),
                         bounds = CivBox(CivPosition(4, 63, -4), CivPosition(15, 72, 7))), ActionPanelPoint(6.5, 65.62, 11.5), true, false),
@@ -165,7 +175,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                 if (out != null) {
                     Files.createDirectories(out)
                     val sources = listOf("src/main/kotlin/ru/arc/civs/CivsPlacementControls.kt", "src/main/kotlin/ru/arc/civs/CivsPreviewRenderer.kt",
-                        "src/main/resources/locales.yml", "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelGeometry.kt",
+                        "src/main/resources/locales.yml", "src/main/kotlin/ru/arc/civs/CivsText.kt", "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelGeometry.kt",
                         "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelSpec.kt").associateWith { name ->
                         MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(name))).joinToString("") { "%02x".format(it) }
                     }

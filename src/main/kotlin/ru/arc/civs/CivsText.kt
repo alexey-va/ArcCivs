@@ -57,6 +57,21 @@ class CivsText private constructor(
 
     fun literal(value: Any?): Component = renderer.literal(value).color(BODY).decoration(TextDecoration.ITALIC, false)
 
+    fun success(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
+        feedback(render(player, key, *values), SUCCESS)
+
+    fun info(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
+        feedback(render(player, key, *values), INFO)
+
+    fun warning(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
+        feedback(render(player, key, *values), WARNING)
+
+    fun error(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
+        feedback(render(player, key, *values), ERROR)
+
+    private fun feedback(component: Component, color: TextColor): Component =
+        component.color(color).children(component.children().map { feedback(it, color) })
+
     fun building(player: Player, type: BuildingType): Component = render(player, "building.${type.name.lowercase(Locale.ROOT)}")
 
     /** A saved building state and assignment count, not an assertion that its Citizens actor is moving. */
@@ -103,13 +118,17 @@ class CivsText private constructor(
         val reasonKey = rejection?.reason
             ?: causes.filterIsInstance<ArcSchematicException>().firstOrNull()
                 ?.takeIf { it.reason == ArcSchematicFailure.PROTECTED_AREA }?.let { "protected-area" }
-        return reason(player, reasonKey, rejection?.values.orEmpty())
+        return feedback(reason(player, reasonKey, rejection?.values.orEmpty()), ERROR)
     }
 
     internal fun keys(locale: String): Set<String> = messages.getValue(locale).keys
 
     companion object {
         val BODY: TextColor = TextColor.color(0xE8DFD2)
+        val SUCCESS: TextColor = TextColor.color(0x9BD48D)
+        val INFO: TextColor = TextColor.color(0x92BED8)
+        val WARNING: TextColor = TextColor.color(0xE4BB75)
+        val ERROR: TextColor = TextColor.color(0xFF6B61)
         private val materialLabels = listOf("ru", "en").associateWith { locale ->
             requireNotNull(CivsText::class.java.getResourceAsStream("/materials/$locale.json")) {
                 "Bundled Minecraft material labels are missing: $locale"

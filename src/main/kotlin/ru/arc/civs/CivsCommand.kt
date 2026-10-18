@@ -19,7 +19,7 @@ class CivsCommand(
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (!sender.hasPermission("arccivs.use")) {
-            sender.sendMessage(text.render(sender as? Player, "reason.not-authorized"))
+            sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
             return true
         }
         if (args.firstOrNull() == "status" && args.size <= 2 && sender.hasPermission("arccivs.admin")) {
@@ -30,7 +30,7 @@ class CivsCommand(
         }
         val player = sender as? Player
         if (player == null) {
-            sender.sendMessage(text.render(null as Player?, "common.player-only"))
+            sender.sendMessage(text.warning(null as Player?, "common.player-only"))
             return true
         }
         when {
@@ -44,7 +44,7 @@ class CivsCommand(
                     if (!player.isOnline) return@whenCompleteSync
                     if (failure != null) player.sendMessage(text.failure(player, failure)) else ui.open(player)
                 }
-            else -> player.sendMessage(text.render(player, "common.command-help"))
+            else -> player.sendMessage(text.info(player, "common.command-help"))
         }
         return true
     }

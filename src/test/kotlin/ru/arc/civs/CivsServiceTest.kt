@@ -77,10 +77,10 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("a builder may start its site with no physical resources and without an inventory debit") {
+    test("a builder may start its site with no resources and a separately journalled free approach") {
         serviceScenario { h ->
             val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
-                control = CivPosition(10, 63, 0))
+                control = CivPosition(10, 63, 0), entrance = CivPosition(10, 64, 3))
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
             val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = listOf(h.city.buildings.first(), hut), workers = h.city.workers.mapIndexed { index, worker ->
@@ -105,8 +105,152 @@ class CivsServiceTest : FunSpec({
                 it.batches!!.size shouldBe 16
             }
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            h.saves.single().first.pendingControls!!.single().approach shouldBe listOf(
+                CivPlanBlock(CivPosition(10, 63, 3), "minecraft:air", "minecraft:dirt"))
+            h.world.getBlockAt(10, 63, 3).type shouldBe Material.AIR
+            h.commit(); started.isDone shouldBe false
+            h.world.getBlockAt(10, 63, 3).type shouldBe Material.DIRT
             h.commit(); started.join() shouldBe Unit
             h.service.city(h.player)!!.inventory shouldBe city.inventory
+        }
+    }
+
+    test("site approach is protected and journalled before free changes and never regenerated after retirement") {
+        val storage = mockk<CivsStorage>(relaxed = true)
+        every { storage.hasViewers(any()) } returns true // Keep unrelated automatic starter-item materialization outside this test.
+        serviceScenario(empty = true, storageFactory = { storage }) { h ->
+            val viewer = h.paper.addPlayer("ApproachOwner")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            every { h.player.uniqueId } returns viewer.uniqueId
+            val blueprint = h.sitePreview()
+            val entrance = blueprint.building.entrance
+            val support = h.world.getBlockAt(entrance.x, entrance.y - 1, entrance.z)
+            val feet = h.world.getBlockAt(entrance.x, entrance.y, entrance.z).also { it.type = Material.OAK_PLANKS }
+            val head = h.world.getBlockAt(entrance.x, entrance.y + 1, entrance.z).also { it.type = Material.GLASS }
+            h.start()
+            val preview = h.prepareFounding("Approach town", "nordic"); h.tick(); preview.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            val receipt = h.saves.single().first.pendingControls!!.single()
+            receipt.approach!!.map { it.after } shouldBe listOf("minecraft:dirt", "minecraft:air", "minecraft:air")
+            CivPosition(support.x, support.y, support.z) shouldBe receipt.approach.first().position
+            support.type shouldBe Material.AIR
+            feet.type shouldBe Material.OAK_PLANKS
+            head.type shouldBe Material.GLASS
+            h.commit()
+            support.type shouldBe Material.DIRT
+            feet.type shouldBe Material.AIR
+            head.type shouldBe Material.AIR
+            val committed = h.service.city(h.player)!!
+            committed.pendingControls shouldBe listOf(receipt)
+            h.saves.size shouldBe 2
+            h.saves.last().second.isDone shouldBe false
+            CivPosition(support.x, support.y, support.z) shouldBe receipt.approach.first().position
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            protection.isProtected(h.world.uid, support.x, support.y, support.z) shouldBe true
+            h.commit(); confirmed.join()
+            protection.isProtected(h.world.uid, support.x, support.y, support.z) shouldBe false
+            h.service.city(h.player)!!.pendingControls shouldBe emptyList()
+            support.type = Material.AIR
+            feet.type = Material.STONE
+            h.paper.performTicks(60)
+            support.type shouldBe Material.AIR
+            feet.type shouldBe Material.STONE
+            h.saves.size shouldBe 2
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    for (applied in 0..3) test("restart resumes $applied applied approach cells without replacing the existing barrel contents") {
+        serviceScenario { h ->
+            val viewer = h.paper.addPlayer("ApproachRecovery")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            val entrance = CivPosition(0, 64, 5)
+            val point = CivPosition(1, 65, 1)
+            val hall = h.city.buildings.first().copy(control = point, entrance = entrance)
+            val cells = listOf(CivPlanBlock(entrance.copy(y = 63), "minecraft:air", "minecraft:dirt"),
+                CivPlanBlock(entrance, "minecraft:oak_planks", "minecraft:air"),
+                CivPlanBlock(entrance.copy(y = 65), "minecraft:glass", "minecraft:air"))
+            cells.forEachIndexed { index, cell -> h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                .setBlockData(org.bukkit.Bukkit.createBlockData(if (index < applied) cell.after else cell.before), false) }
+            val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            val barrel = (block.state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(hall) + h.city.buildings.drop(1), members = setOf(viewer.uniqueId),
+                pendingControls = listOf(CivControlPlacement(hall.id, point, "minecraft:air", cells)))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start(); h.paper.performTicks(20)
+            cells.forEach { cell -> h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after }
+            barrel.getItem(0)!!.amount shouldBe 7
+            h.saves.single().first.pendingControls shouldBe emptyList()
+            h.commit(); h.paper.performTicks(40)
+            h.saves.size shouldBe 1
+        }
+    }
+
+    test("approach drift after journal commit rejects all writes including the new barrel") {
+        serviceScenario(empty = true) { h ->
+            val blueprint = h.sitePreview()
+            val entrance = blueprint.building.entrance
+            val feet = h.world.getBlockAt(entrance.x, entrance.y, entrance.z).also { it.type = Material.OAK_PLANKS }
+            h.start()
+            val preview = h.prepareFounding("Changed approach", "nordic"); h.tick(); preview.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            feet.type = Material.BEDROCK
+            h.commit()
+            (shouldThrow<CompletionException> { confirmed.join() }.cause as CivsRejection).reason shouldBe "world-changed"
+            val control = blueprint.building.control!!
+            h.world.getBlockAt(control.x, control.y, control.z).type shouldBe Material.AIR
+            h.world.getBlockAt(entrance.x, entrance.y - 1, entrance.z).type shouldBe Material.AIR
+            feet.type shouldBe Material.BEDROCK
+            h.service.city(h.player)!!.pendingControls!!.size shouldBe 1
+            h.saves.size shouldBe 1
+        }
+    }
+
+    for (obstacle in listOf("bedrock", "inventory", "lands")) test("$obstacle blocks approach preparation without native changes or a city journal") {
+        serviceScenario(empty = true) { h ->
+            val blueprint = h.sitePreview()
+            val entrance = blueprint.building.entrance
+            val feet = h.world.getBlockAt(entrance.x, entrance.y, entrance.z)
+            feet.type = when (obstacle) { "bedrock" -> Material.BEDROCK; "inventory" -> Material.CHEST; else -> Material.STONE }
+            val chest = (feet.state as? org.bukkit.block.Chest)?.blockInventory
+            chest?.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
+            if (obstacle == "lands") every { h.worldAdapter.canModify(any(), feet, Material.AIR) } returns false
+            h.start()
+            val preview = h.prepareFounding("Protected approach", "nordic"); h.tick(); preview.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            (shouldThrow<CompletionException> { confirmed.join() }.cause as CivsRejection).reason shouldBe
+                if (obstacle == "lands") "lands-denied" else "protected-terrain"
+            h.saves shouldBe emptyList()
+            h.world.getBlockAt(entrance.x, entrance.y - 1, entrance.z).type shouldBe Material.AIR
+            if (chest != null) chest.getItem(0)!!.amount shouldBe 3
+        }
+    }
+
+    test("approach preparation keeps a solid support barrel and never clears a neighbouring building") {
+        serviceScenario { h ->
+            val entrance = CivPosition(0, 64, 10)
+            val neighbour = h.city.buildings.last().copy(bounds = CivBox(entrance, entrance.copy(y = 65)),
+                anchor = entrance, entrance = entrance.copy(z = 11))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(
+                buildings = listOf(h.city.buildings.first(), neighbour))))
+            val base = h.previewBlueprint(CivPosition(0, 63, 10))
+            h.sitePreview(base.copy(building = base.building.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)))
+            val support = h.world.getBlockAt(0, 63, 10).also { it.type = Material.BARREL }
+            val inventory = (support.state as org.bukkit.block.Barrel).inventory
+            inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 4))
+            h.world.getBlockAt(0, 64, 10).type = Material.OAK_PLANKS
+            h.start()
+            h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
+            val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(0, 63, 10))); h.tick(); selected.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            (shouldThrow<CompletionException> { confirmed.join() }.cause as CivsRejection).reason shouldBe "building-overlap"
+            h.saves shouldBe emptyList()
+            support.type shouldBe Material.BARREL
+            inventory.getItem(0)!!.amount shouldBe 4
+            h.world.getBlockAt(0, 64, 10).type shouldBe Material.OAK_PLANKS
         }
     }
 
@@ -300,7 +444,8 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val upgraded = CivBlueprint(hall.copy(level = 3, control = target), h.world.uid,
                 mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1))
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                arg<CivPosition>(5) shouldBe hall.anchor
                 arg<CivPosition>(8) shouldBe hall.entrance
                 CompletableFuture.completedFuture(if (arg<Int>(2) == 3) upgraded else upgraded.copy(building = hall.copy(control = target)))
             }
@@ -327,21 +472,29 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("clicking an existing barrel uses its exact block position without adding the authored ground height") {
+    test("clicking a barrel and ground uses the same placement point while preserving the barrel contents") {
         serviceScenario(empty = true) { h ->
             val point = CivPosition(0, 63, 0)
             val barrel = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
             val inventory = (barrel.state as org.bukkit.block.Barrel).inventory
             inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
                 arg<CivPosition>(5) shouldBe point
-                arg<Boolean>(9) shouldBe false
                 CompletableFuture.completedFuture(h.previewBlueprint(point))
             }
             h.start()
             val prepared = h.prepareFounding("Exact barrel", "caledonia"); h.tick(); prepared.join()
-            h.service.preview(h.player)!!.control shouldBe point
+            h.service.preview(h.player)!!.let {
+                it.anchor shouldBe point
+                it.entrance shouldBe point.copy(y = point.y + 1)
+                it.control shouldBe CivPosition(0, 64, -5)
+            }
             inventory.getItem(0)!!.amount shouldBe 3
+            h.service.cancelPreview(h.player)
+            barrel.type = Material.GRASS_BLOCK
+            val onGround = h.prepareFounding("Same ground", "caledonia"); h.tick(); onGround.join()
+            h.service.preview(h.player)!!.anchor shouldBe point
+            h.service.preview(h.player)!!.control shouldBe CivPosition(0, 64, -5)
             verify(exactly = 0) { h.store.save(any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
         }
     }
@@ -360,7 +513,7 @@ class CivsServiceTest : FunSpec({
                 buildings = listOf(hall) + h.city.buildings.drop(1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.worldAdapter.canModify(any(), any(), any()) } returns true
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(CivBlueprint(hall.copy(control = target), h.world.uid,
                     mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1)))
             h.start()
@@ -388,7 +541,7 @@ class CivsServiceTest : FunSpec({
             val target = CivPosition(1, 65, 1)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(
                 stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = listOf(hall) + h.city.buildings.drop(1))))
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(CivBlueprint(hall.copy(control = target), h.world.uid,
                     mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1)))
             h.start()
@@ -419,7 +572,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             val blueprint = h.previewBlueprint()
             every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
             val prepared = h.prepareFounding("Barrel town", "nordic"); h.tick(); prepared.join()
             val point = blueprint.building.control!!
             val block = h.world.getBlockAt(point.x, point.y, point.z)
@@ -448,7 +601,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             val blueprint = h.previewBlueprint()
             every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
             every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
                 CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), h.world.uid, blueprint.building, emptyList()))
             }
@@ -631,7 +784,7 @@ class CivsServiceTest : FunSpec({
             h.service.preview(h.player) shouldBe null
             verify(exactly = 0) {
                 h.player.rayTraceBlocks(any(), any())
-                h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any())
+                h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any())
                 h.worldAdapter.capture(any(), any(), any(), any(), any(), any())
                 h.store.save(any())
             }
@@ -647,8 +800,8 @@ class CivsServiceTest : FunSpec({
                 val clicked = if (plant == Material.LARGE_FERN) h.world.getBlockAt(3, 65, 4).also { it.type = plant }
                     else h.world.getBlockAt(3, 64, 4)
                 civsGroundSupport(clicked) shouldBe CivPosition(3, 63, 4)
-                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
-                    CompletableFuture.completedFuture(h.previewBlueprint(arg<CivPosition>(5).let { if (arg<Boolean>(9)) it.copy(y = it.y + 1) else it }))
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                    CompletableFuture.completedFuture(h.previewBlueprint(arg<CivPosition>(5)))
                 }
                 h.service.beginFoundingSelection(h.player, "123123", "nordic").join()
                 val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
@@ -657,9 +810,9 @@ class CivsServiceTest : FunSpec({
                 h.service.selection(h.player) shouldBe null
                 val preview = h.service.preview(h.player)!!
                 preview.cityName shouldBe "123123"
-                preview.control shouldBe CivPosition(3, 64, 4)
-                preview.entrance shouldBe CivPosition(3, 64, 9)
-                preview.anchor shouldBe CivPosition(3, 63, 9)
+                preview.control shouldBe CivPosition(3, 64, -1)
+                preview.entrance shouldBe CivPosition(3, 64, 4)
+                preview.anchor shouldBe CivPosition(3, 63, 4)
                 support.type shouldBe Material.GRASS_BLOCK
                 clicked.type shouldBe plant
                 verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.store.save(any()) }
@@ -674,7 +827,7 @@ class CivsServiceTest : FunSpec({
             val invalid = h.service.selectGround(h.player, selection.id, CivsGroundTarget(h.world.uid, CivPosition(2, 80, 2)))
             (shouldThrow<CompletionException> { invalid.join() }.cause as CivsRejection).reason shouldBe "too-far"
             h.service.selection(h.player) shouldBe selection
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(h.previewBlueprint())
             val retry = h.service.selectGround(h.player, selection.id, CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0)))
             h.tick(); retry.join()
@@ -688,7 +841,7 @@ class CivsServiceTest : FunSpec({
             serviceScenario(empty = true) { h ->
                 h.start()
                 val pending = CompletableFuture<CivBlueprint>()
-                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
                 h.service.beginFoundingSelection(h.player, "First", "nordic").join()
                 val id = h.service.selection(h.player)!!.id
                 val loading = h.service.selectGround(h.player, id, CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0)))
@@ -716,11 +869,11 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
             h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
-            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             val position = CivPosition(6, 63, 6)
             h.world.getBlockAt(position.x, position.y, position.z).type = Material.GRASS_BLOCK
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
-                val blueprint = h.previewBlueprint(arg<CivPosition>(5).let { if (arg<Boolean>(9)) it.copy(y = it.y + 1) else it })
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                val blueprint = h.previewBlueprint(arg<CivPosition>(5))
                 CompletableFuture.completedFuture(blueprint.copy(building = blueprint.building.copy(type = BuildingType.WAREHOUSE)))
             }
             val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id, CivsGroundTarget(h.world.uid, position))
@@ -742,7 +895,7 @@ class CivsServiceTest : FunSpec({
             }
             h.plugin.logger.addHandler(handler)
             try {
-                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                     CompletableFuture.completedFuture(h.previewBlueprint())
                 val cause = IllegalStateException("preview transport unavailable")
                 every { h.renderer.show(any(), any(), any()) } throws cause
@@ -812,7 +965,7 @@ class CivsServiceTest : FunSpec({
             h.service.foundingAllowed() shouldBe false
             val reason = shouldThrow<CompletionException> { h.prepareFounding("Test", "nordic").join() }.cause as CivsRejection
             reason.reason shouldBe "founding-disabled"
-            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
         }
     }
 
@@ -843,9 +996,9 @@ class CivsServiceTest : FunSpec({
             reason.reason shouldBe "wrong-world"
             reason.values shouldBe mapOf("world" to "world", "worlds" to "survival, vanilla")
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()) }
-            verify(exactly = 0) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             every { h.player.world } returns h.world
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(h.previewBlueprint())
             val retry = h.prepareFounding("123123", "nordic")
             h.tick()
@@ -868,13 +1021,13 @@ class CivsServiceTest : FunSpec({
         serviceScenario(empty = true) { h ->
             h.start()
             val firstBlueprint = h.previewBlueprint()
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(firstBlueprint)
             val first = h.prepareFounding("Oak Town", "nordic")
             h.tick(); first.join()
             val original = h.service.preview(h.player)!!
             val pending = CompletableFuture<CivBlueprint>()
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
             val rotated = h.service.rotatePreview(h.player, -90)
             h.service.preview(h.player) shouldBe original.copy(busy = true)
             h.service.confirmPreview(h.player).isCompletedExceptionally shouldBe true
@@ -888,23 +1041,72 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("move and both rotations retain the selected control pivot and replace the context") {
+    test("four rotations keep the selected placement pivot while the internal control rotates around it") {
         serviceScenario(empty = true) { h ->
             h.start()
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
-                CompletableFuture.completedFuture(h.previewBlueprint(arg<CivPosition>(5).let { if (arg<Boolean>(9)) it.copy(y = it.y + 1) else it }, arg<Int?>(7) ?: 0))
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                CompletableFuture.completedFuture(h.previewBlueprint(arg<CivPosition>(5), arg<Int?>(7) ?: 0))
             }
             val first = h.prepareFounding("Oak Town", "nordic"); h.tick(); first.join()
             val before = h.service.preview(h.player)!!
+            before.anchor shouldBe CivPosition(0, 63, 0)
+            before.control shouldBe CivPosition(0, 64, -5)
+            val controls = listOf(CivPosition(5, 64, 0), CivPosition(0, 64, 5),
+                CivPosition(-5, 64, 0), CivPosition(0, 64, -5))
+            for ((index, control) in controls.withIndex()) {
+                val rotated = h.service.rotatePreview(h.player, 90); h.tick(); rotated.join()
+                h.service.preview(h.player)!!.let {
+                    it.anchor shouldBe before.anchor
+                    it.entrance shouldBe before.entrance
+                    it.rotation shouldBe (index + 1) * 90 % 360
+                    it.control shouldBe control
+                    (it.id != before.id) shouldBe true
+                }
+            }
             val left = h.service.rotatePreview(h.player, -90); h.tick(); left.join()
-            h.service.preview(h.player)!!.rotation shouldBe 270
             val nudged = h.service.nudgePreview(h.player, CivsPreviewMove.RIGHT); h.tick(); nudged.join()
             val after = h.service.preview(h.player)!!
-            after.control shouldBe CivPosition(before.control.x - 1, before.control.y, before.control.z)
-            after.anchor shouldBe after.entrance.copy(y = after.entrance.y - 1)
-            (after.id != before.id) shouldBe true
+            after.anchor shouldBe CivPosition(-1, 63, 0)
+            after.control shouldBe CivPosition(-6, 64, 0)
+            after.entrance shouldBe CivPosition(-1, 64, 0)
             val right = h.service.rotatePreview(h.player, 90); h.tick(); right.join()
-            h.service.preview(h.player)!!.rotation shouldBe 0
+            h.service.preview(h.player)!!.let {
+                it.rotation shouldBe 0
+                it.anchor shouldBe after.anchor
+                it.control shouldBe CivPosition(-1, 64, -5)
+            }
+        }
+    }
+
+    test("explicit and aimed moves replace the placement point without using the internal control as a pivot") {
+        serviceScenario(empty = true) { h ->
+            h.start()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                CompletableFuture.completedFuture(h.previewBlueprint(arg(5), arg<Int?>(7) ?: 0))
+            }
+            val first = h.prepareFounding("Oak Town", "nordic"); h.tick(); first.join()
+            val rotation = h.service.rotatePreview(h.player, 90); h.tick(); rotation.join()
+            val point = CivPosition(4, 62, 3)
+            h.world.getBlockAt(point.x, point.y, point.z).type = Material.GRASS_BLOCK
+            val moved = h.service.movePreview(h.player, CivsGroundTarget(h.world.uid, point)); h.tick(); moved.join()
+            h.service.preview(h.player)!!.let {
+                it.anchor shouldBe point
+                it.entrance shouldBe CivPosition(4, 63, 3)
+                it.control shouldBe CivPosition(9, 63, 3)
+                it.rotation shouldBe 90
+            }
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()) }
+            val up = h.service.nudgePreview(h.player, CivsPreviewMove.UP); h.tick(); up.join()
+            h.service.preview(h.player)!!.anchor shouldBe CivPosition(4, 63, 3)
+            h.service.preview(h.player)!!.control shouldBe CivPosition(9, 64, 3)
+            val aimed = h.service.movePreview(h.player); h.tick(); aimed.join()
+            h.service.preview(h.player)!!.let {
+                it.anchor shouldBe CivPosition(0, 63, 0)
+                it.control shouldBe CivPosition(5, 64, 0)
+                it.rotation shouldBe 90
+            }
+            verify(exactly = 1) { h.player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER) }
+            verify(exactly = 0) { h.store.save(any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
         }
     }
 
@@ -912,16 +1114,16 @@ class CivsServiceTest : FunSpec({
         serviceScenario(empty = true) { h ->
             h.start()
             val pending = CompletableFuture<CivBlueprint>()
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns pending
             val preparing = h.prepareFounding("Oak Town", "nordic")
             h.service.cancelPreview(h.player)
             h.prepareFounding("Another Town", "nordic").isCompletedExceptionally shouldBe true
-            verify(exactly = 1) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 1) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             pending.complete(h.previewBlueprint()); h.tick()
             preparing.isCompletedExceptionally shouldBe true
             h.service.preview(h.player) shouldBe null
             verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
                 CompletableFuture.completedFuture(h.previewBlueprint())
             val next = h.prepareFounding("Another Town", "nordic"); h.tick()
             next.join() shouldBe Unit
@@ -1046,7 +1248,7 @@ class CivsServiceTest : FunSpec({
             h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
             val hall = h.city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, control = control)
             val blueprint = CivBlueprint(hall, h.world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
             every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
                 CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), h.world.uid, hall, emptyList()))
             }
@@ -1375,13 +1577,28 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
-    fun previewBlueprint(control: CivPosition = CivPosition(0, 64, 0), rotation: Int = 0): CivBlueprint {
+    fun sitePreview(blueprint: CivBlueprint = previewBlueprint()): CivBlueprint {
+        every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
+        every { blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
+        every { worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
+            CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), world.uid, blueprint.building, emptyList()))
+        }
+        every { store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        return blueprint
+    }
+    fun previewBlueprint(anchor: CivPosition = CivPosition(0, 63, 5), rotation: Int = 0): CivBlueprint {
         val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
-        val anchor = control.copy(y = control.y - 1, z = control.z + 5)
         val entrance = anchor.copy(y = anchor.y + 1)
+        val offset = listOf(CivPosition(0, 1, -5), CivPosition(5, 1, 0), CivPosition(0, 1, 5), CivPosition(-5, 1, 0))[rotation / 90]
+        val control = CivPosition(anchor.x + offset.x, anchor.y + offset.y, anchor.z + offset.z)
+        val corners = listOf(CivPosition(-2, 0, -5), CivPosition(2, 5, -1)).map {
+            CivsBlueprintGeometry.rotate(ArcSchematicPoint(it.x, it.y, it.z), rotation / 90)
+        }
         val hall = city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, anchor = anchor,
             entrance = entrance, rotation = rotation, control = control,
-            bounds = CivBox(CivPosition(anchor.x - 2, anchor.y, anchor.z - 5), CivPosition(anchor.x + 2, anchor.y + 5, anchor.z - 1)))
+            bounds = CivBox(CivPosition(anchor.x + corners.minOf { it.x }, anchor.y, anchor.z + corners.minOf { it.z }),
+                CivPosition(anchor.x + corners.maxOf { it.x }, anchor.y + 5, anchor.z + corners.maxOf { it.z })))
         return CivBlueprint(hall, world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
     }
     fun commit() { saves.last().let { it.second.complete(it.first) }; tick() }

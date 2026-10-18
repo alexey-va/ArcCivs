@@ -168,7 +168,7 @@ def main():
                                       "hitWidth": label["width"], "withinHitWidth": width <= label["width"]})
             image = view.image()
             if scene.get("actionBar") and camera_name == "player":
-                glyph_image = font_core.render_text_line("#FFFFFF" + scene["actionBar"], stack)
+                glyph_image = font_core.render_text_line(scene.get("actionBarColor", "#FFFFFF") + scene["actionBar"], stack)
                 image.paste(glyph_image, ((view.width - glyph_image.width) // 2, view.height - 155), glyph_image)
             draw = ImageDraw.Draw(image)
             if camera_name == "player":

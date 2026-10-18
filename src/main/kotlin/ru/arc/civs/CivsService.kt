@@ -53,7 +53,6 @@ class CivsService(
         val id: UUID, val worldId: UUID, val cityId: UUID?, val name: String, val style: String,
         val type: BuildingType, val expires: Long,
     )
-    private data class PlacementTarget(val position: CivPosition, val groundLevel: Boolean)
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>, val containersChanged: Boolean) {
         var repairing = false
     }
@@ -236,8 +235,7 @@ class CivsService(
                 ?: throw CivsRejection("selection-expired")
             rejectIf(selection.worldId != player.world.uid, "selection-expired")
             rejectIf(player.uniqueId in previewLoads, "city-busy")
-            val placement = clickedPlacement(player, target)
-            val point = placement.position
+            val point = clickedPlacement(player, target)
             if (selection.cityId == null) {
                 requireFounder(player)
                 checkSettlementSpace(player.world.uid, point)
@@ -248,9 +246,9 @@ class CivsService(
                 rejectIf(!city.contains(point.x, point.z), "outside-city")
             }
             CivsDiagnostics.event("selection_selected", *CivsDiagnostics.actor(player), "selection" to selection.id,
-                "block" to target.block, "placement" to point, "ground_level" to placement.groundLevel, "type" to selection.type)
+                "block" to target.block, "placement" to point, "type" to selection.type)
             prepare(player, selection.cityId, selection.name, selection.style, selection.type, 1, UUID.randomUUID(),
-                point, false, selectionId = selection.id, groundLevel = placement.groundLevel)
+                point, false, selectionId = selection.id)
         }.whenComplete { _, failure ->
             if (failure != null) CivsDiagnostics.event("selection_rejected", "player" to player.uniqueId,
                 "selection" to selectionId, "block" to target.block, "reason" to CivsDiagnostics.rejection(failure)?.reason,
@@ -279,7 +277,7 @@ class CivsService(
         rejectIf(building.type != BuildingType.TOWN_HALL && building.level >= city.level(), "town-hall-level-required")
         near(player, city.worldId, building.entrance)
         prepare(player, city.id, city.name, city.style, building.type, building.level + 1, building.id,
-            building.control ?: building.anchor, true, building.rotation, fixedEntrance = building.entrance)
+            building.anchor, true, building.rotation, fixedEntrance = building.entrance)
     }
 
     override fun rotatePreview(player: Player, degrees: Int): CompletableFuture<Unit> = action("rotate_preview", player, "degrees" to degrees) {
@@ -287,7 +285,7 @@ class CivsService(
         rejectIf(old.upgrading, "upgrade-position-fixed")
         require(degrees == -90 || degrees == 90)
         val b = old.blueprint.building
-        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, b.control ?: b.anchor, false,
+        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, b.anchor, false,
             Math.floorMod(b.rotation + degrees, 360), old.movementOrigin)
     }
 
@@ -304,30 +302,29 @@ class CivsService(
             movePreviewTo(player, old, clickedPlacement(player, target))
         }
 
-    private fun movePreviewTo(player: Player, old: Preview, placement: PlacementTarget): CompletableFuture<Unit> {
+    private fun movePreviewTo(player: Player, old: Preview, placement: CivPosition): CompletableFuture<Unit> {
         val b = old.blueprint.building
-        if (old.cityId == null) checkSettlementSpace(player.world.uid, placement.position)
-        return prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, placement.position, false, b.rotation,
-            groundLevel = placement.groundLevel)
+        if (old.cityId == null) checkSettlementSpace(player.world.uid, placement)
+        return prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, placement, false, b.rotation)
     }
 
     override fun nudgePreview(player: Player, direction: CivsPreviewMove): CompletableFuture<Unit> = action("nudge_preview", player, "direction" to direction) {
         val old = currentPreview(player)
         rejectIf(old.upgrading, "upgrade-position-fixed")
         val b = old.blueprint.building
-        val control = civsMovedEntrance(b.control ?: b.anchor, direction, facing(player))
-        rejectIf(listOf(control.x.toLong() - old.movementOrigin.x, control.y.toLong() - old.movementOrigin.y,
-            control.z.toLong() - old.movementOrigin.z).any { kotlin.math.abs(it) > 64 }, "placement-offset-limit")
-        near(player, old.blueprint.worldId, control)
-        rejectIf(control.y <= player.world.minHeight || control.y + 1 >= player.world.maxHeight, "outside-world")
-        if (old.cityId == null) checkSettlementSpace(player.world.uid, control)
-        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, control, false, b.rotation, old.movementOrigin)
+        val anchor = civsMovedEntrance(b.anchor, direction, facing(player))
+        rejectIf(listOf(anchor.x.toLong() - old.movementOrigin.x, anchor.y.toLong() - old.movementOrigin.y,
+            anchor.z.toLong() - old.movementOrigin.z).any { kotlin.math.abs(it) > 64 }, "placement-offset-limit")
+        near(player, old.blueprint.worldId, anchor)
+        rejectIf(anchor.y <= player.world.minHeight || anchor.y + 1 >= player.world.maxHeight, "outside-world")
+        if (old.cityId == null) checkSettlementSpace(player.world.uid, anchor)
+        prepare(player, old.cityId, old.cityName, old.style, b.type, b.level, b.id, anchor, false, b.rotation, old.movementOrigin)
     }
 
     private fun prepare(
         player: Player, cityId: UUID?, name: String, style: String, type: BuildingType, level: Int,
         buildingId: UUID, placement: CivPosition, upgrading: Boolean, rotation: Int? = null, movementOrigin: CivPosition? = null,
-        selectionId: UUID? = null, fixedEntrance: CivPosition? = null, groundLevel: Boolean = false,
+        selectionId: UUID? = null, fixedEntrance: CivPosition? = null,
     ): CompletableFuture<Unit> {
         requireReady(player)
         rejectIf(style !in styles(), "invalid-style")
@@ -338,11 +335,11 @@ class CivsService(
         requests[player.uniqueId] = request
         CivsDiagnostics.event("preview_load", *CivsDiagnostics.actor(player), "request" to request,
             "city" to cityId, "city_name" to name, "style" to style, "type" to type,
-            "placement" to placement, "ground_level" to groundLevel, "fixed_entrance" to fixedEntrance, "rotation" to rotation)
+            "placement" to placement, "fixed_entrance" to fixedEntrance, "rotation" to rotation)
         previewLoads += player.uniqueId
         // Keep the last usable position visible until the replacement is ready.
         val result = tracked<Unit>()
-        blueprints.prepare(style, type, level, buildingId, worldId, placement, facing(player), rotation, fixedEntrance, groundLevel)
+        blueprints.prepare(style, type, level, buildingId, worldId, placement, facing(player), rotation, fixedEntrance)
             .whenCompleteSync(tasks) { blueprint, failure ->
                 previewLoads -= player.uniqueId
                 if (requests[player.uniqueId] != request || !player.isOnline || player.world.uid != worldId ||
@@ -360,7 +357,7 @@ class CivsService(
                         !city.contains(prepared.building.bounds.max.x, prepared.building.bounds.max.z), "outside-city")
                     renderer.show(player, prepared.building, prepared.surface)
                     previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
-                        now() + settings.previewSeconds * 1_000L, movementOrigin ?: prepared.building.control ?: prepared.building.anchor)
+                        now() + settings.previewSeconds * 1_000L, movementOrigin ?: prepared.building.anchor)
                     if (selectionId != null) selections.remove(player.uniqueId)
                     CivsDiagnostics.event("preview_ready", "player" to player.uniqueId, "request" to request,
                         "selection" to selectionId, "world" to worldId, "bounds" to prepared.building.bounds,
@@ -416,7 +413,7 @@ class CivsService(
                         finishReservation(cityId, player.uniqueId, result, failure)
                     }
                 } else {
-                    val control = prepareControl(blueprint.worldId, previousCity?.owner ?: player.uniqueId, blueprint.building)
+                    val control = prepareControl(cityId, blueprint.worldId, previousCity?.owner ?: player.uniqueId, blueprint.building)
                     // The immutable design belongs to the SITE until the player orders construction.
                     val plan = capturedPlan.copy(id = blueprint.building.id)
                     val placed = if (previousCity == null) {
@@ -528,6 +525,8 @@ class CivsService(
             rejectIf(cities.values.any { it.id != city.id && it.worldId == city.worldId &&
                 areasOverlap(city.center, city.radius + 32, it.center, it.radius) }, "city-overlap")
         }
+        rejectIf(city.pendingControls.orEmpty().any { it.buildingId == building.id }, "city-busy")
+        val approach = prepareControl(city.id, city.worldId, city.owner, building).takeIf { !it.approach.isNullOrEmpty() }
         val result = tracked<Settlement>()
         CompletableFuture.supplyAsync({
             val materials = CivsMaterials.required(plan)
@@ -544,13 +543,22 @@ class CivsService(
                 val materials = requireNotNull(order.materials)
                 val batches = requireNotNull(order.batches)
                 busy -= city.id
-                mutate(city.id) { before -> CivsRules.reserveBuild(before, player.uniqueId, building, order) }
+                mutate(city.id) { before ->
+                    val reserved = CivsRules.reserveBuild(before, player.uniqueId, building, order)
+                    if (approach == null) reserved else CivsRules.validate(reserved.copy(
+                        pendingControls = reserved.pendingControls.orEmpty() + approach))
+                }
                     .whenCompleteSync(tasks) { saved, reserveFailure ->
                     if (reserveFailure != null) result.completeExceptionally(reserveFailure)
                     else {
                         CivsDiagnostics.event("construction_reserved", "city" to city.id, "order" to order.id,
                             "building" to building.id, "batches" to batches.total, "materials" to materials, "payment" to "per_batch")
-                        result.complete(saved)
+                        if (approach == null) result.complete(saved)
+                        else runCatching { installControl(city.id, building.id) }.onSuccess { installed ->
+                            installed.whenCompleteSync(tasks) { applied, installFailure ->
+                                if (installFailure == null) result.complete(applied) else result.completeExceptionally(installFailure)
+                            }
+                        }.onFailure(result::completeExceptionally)
                     }
                 }
             }.onFailure { result.completeExceptionally(it) }
@@ -786,7 +794,7 @@ class CivsService(
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         val result = tracked<CivPosition>()
         blueprints.prepare(city.style, building.type, building.level, building.id, city.worldId,
-            building.control ?: building.anchor, building.rotation / 90, building.rotation, building.entrance)
+            building.anchor, building.rotation / 90, building.rotation, building.entrance)
             .whenCompleteSync(tasks) { blueprint, failure ->
                 if (failure != null) result.completeExceptionally(failure)
                 else runCatching {
@@ -823,7 +831,7 @@ class CivsService(
                     rejectIf(current.id in inventoryRecovery, "inventory-recovery")
                     near(player, current.worldId, point)
                     if (point == building.control) requireControlBarrel(current.worldId, building)
-                    val placement = prepareControl(current.worldId, current.owner, building.copy(control = point))
+                    val placement = prepareControl(current.id, current.worldId, current.owner, building.copy(control = point))
                     val nativeWorld = requireNotNull(plugin.server.getWorld(current.worldId))
                     rejectIf(!world.canModify(current.owner, nativeWorld.getBlockAt(point.x, point.y, point.z), Material.BARREL), "lands-denied")
                     rejectIf(civsProtectedBuildings(current).any { it.id != building.id &&
@@ -1051,7 +1059,7 @@ class CivsService(
         if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
         val previous = cities[cityId]
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
-            previous.inventory?.containers == city.inventory?.containers) {
+            previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls) {
             cities[city.id] = city
             return CompletableFuture.completedFuture(Unit)
         }
@@ -1117,15 +1125,50 @@ class CivsService(
             mapOf("x" to point.x.toString(), "y" to point.y.toString(), "z" to point.z.toString()))
     }
 
-    private fun prepareControl(worldId: UUID, owner: UUID, building: CivBuilding): CivControlPlacement {
+    private fun prepareControl(cityId: UUID, worldId: UUID, owner: UUID, building: CivBuilding): CivControlPlacement {
         val point = building.control ?: throw CivsRejection("control-missing")
         val target = plugin.server.getWorld(worldId) ?: throw CivsRejection("world-unavailable")
         rejectIf(point.y !in target.minHeight until target.maxHeight, "outside-world")
         rejectIf(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
         val block = target.getBlockAt(point.x, point.y, point.z)
-        rejectIf(block.type != Material.BARREL && (!civsNaturalTerrain(block.type) || block.state is org.bukkit.block.TileState), "control-obstructed")
+        rejectIf(block.type != Material.BARREL && (block.type == Material.BEDROCK || block.state is org.bukkit.block.TileState), "control-obstructed")
         rejectIf(!world.canModify(owner, block, Material.BARREL), "lands-denied")
-        return CivControlPlacement(building.id, point, block.blockData.asString)
+        val approach = (-1..1).mapNotNull { dy ->
+            val position = building.entrance.copy(y = Math.addExact(building.entrance.y, dy))
+            // Old non-curated layouts may use an approach inside their paste; never rewrite captured design cells.
+            if (position == point || building.bounds.contains(position.x, position.y, position.z)) return@mapNotNull null
+            rejectIf(position.y !in target.minHeight until target.maxHeight, "outside-world")
+            rejectIf(!target.isChunkLoaded(position.x shr 4, position.z shr 4), "chunk-unloaded")
+            val cell = target.getBlockAt(position.x, position.y, position.z)
+            if (if (dy == -1) cell.type.isSolid else cell.isPassable && !cell.isLiquid) return@mapNotNull null
+            val after = if (dy == -1) Material.DIRT else Material.AIR
+            checkApproachCell(cityId, owner, building, cell, after)
+            CivPlanBlock(position, cell.blockData.asString, after.createBlockData().asString)
+        }.takeIf { it.isNotEmpty() }
+        if (approach != null) CivsDiagnostics.event("approach_prepared", "city" to cityId, "building" to building.id,
+            "world" to worldId, "count" to approach.size, "positions" to approach.map { it.position })
+        return CivControlPlacement(building.id, point, block.blockData.asString, approach)
+    }
+
+    private fun checkApproachCell(cityId: UUID, owner: UUID, building: CivBuilding, block: org.bukkit.block.Block, after: Material) {
+        val point = CivPosition(block.x, block.y, block.z)
+        val values = mapOf("block" to block.type.name, "x" to block.x.toString(), "y" to block.y.toString(),
+            "z" to block.z.toString(), "world" to block.world.uid.toString(), "world_name" to block.world.name)
+        fun reject(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason, values) }
+        reject(!block.world.worldBorder.isInside(org.bukkit.Location(block.world, point.x + .5, point.y + .5, point.z + .5)), "outside-border")
+        val city = cities[cityId]
+        reject(city != null && (city.owner != owner || city.worldId != block.world.uid), "not-authorized")
+        reject(city != null && !city.contains(point.x, point.z), "outside-city")
+        reject(cities.values.any { it.id != cityId && it.worldId == block.world.uid && it.contains(point.x, point.z) }, "city-overlap")
+        reject(cities.values.filter { it.worldId == block.world.uid }.any { other ->
+            civsProtectedBuildings(other).any { (other.id != cityId || it.id != building.id) &&
+                (it.bounds.contains(point.x, point.y, point.z) || it.control == point) } ||
+                other.pendingControls.orEmpty().any { (other.id != cityId || it.buildingId != building.id) &&
+                    it.approach.orEmpty().any { cell -> cell.position == point } }
+        }, "building-overlap")
+        reject(block.type == Material.BEDROCK || block.state is org.bukkit.block.TileState, "protected-terrain")
+        reject(cities.values.any { it.worldId == block.world.uid && point in it.inventory?.containers.orEmpty() }, "registered-container")
+        reject(!world.canModify(owner, block, after), "lands-denied")
     }
 
     private fun installControl(cityId: UUID, buildingId: UUID): CompletableFuture<Settlement> {
@@ -1142,9 +1185,27 @@ class CivsService(
         rejectIf(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
         val block = target.getBlockAt(point.x, point.y, point.z)
         rejectIf(block.type != Material.BARREL && block.blockData.asString != receipt.before, "control-obstructed")
-        prepareControl(city.worldId, city.owner, building)
+        rejectIf(block.type != Material.BARREL && (block.type == Material.BEDROCK || block.state is org.bukkit.block.TileState), "control-obstructed")
+        rejectIf(!world.canModify(city.owner, block, Material.BARREL), "lands-denied")
+        // Validate every before/after image before the first native write, including the barrel grant.
+        val approach = receipt.approach.orEmpty().map { cell ->
+            val position = cell.position
+            rejectIf(position.y !in target.minHeight until target.maxHeight, "outside-world")
+            rejectIf(!target.isChunkLoaded(position.x shr 4, position.z shr 4), "chunk-unloaded")
+            val native = target.getBlockAt(position.x, position.y, position.z)
+            val current = native.blockData.asString
+            if (current != cell.before && current != cell.after) throw CivsRejection("world-changed", mapOf(
+                "block" to native.type.name, "x" to position.x.toString(), "y" to position.y.toString(),
+                "z" to position.z.toString(), "world" to city.worldId.toString(), "world_name" to target.name))
+            val after = Bukkit.createBlockData(cell.after)
+            checkApproachCell(city.id, city.owner, building, native, after.material)
+            native to after
+        }
         val reused = block.type == Material.BARREL
         if (!reused) block.setType(Material.BARREL, false)
+        approach.forEach { (native, after) -> if (native.blockData.asString != after.asString) native.setBlockData(after, false) }
+        if (approach.isNotEmpty()) CivsDiagnostics.event("approach_applied", "city" to city.id, "building" to building.id,
+            "world" to city.worldId, "count" to approach.size, "positions" to receipt.approach!!.map { it.position })
         storage.refreshBuilding(city, building)
         CivsDiagnostics.event("control_installed", "city" to city.id, "building" to building.id, "world" to city.worldId,
             "block" to point, "reused" to reused)
@@ -1165,7 +1226,7 @@ class CivsService(
             runCatching { mutate(old.id) { city ->
                 val buildings = city.buildings.map { it.copy(control = it.control ?: it.anchor) }
                 val controls = buildings.filter { city.building(it.id)?.control == null }.map {
-                    prepareControl(city.worldId, city.owner, it)
+                    prepareControl(city.id, city.worldId, city.owner, it)
                 }
                 CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory.starting(city.stock),
                     buildings = buildings, pendingControls = city.pendingControls.orEmpty() + controls, revision = city.revision + 1))
@@ -1224,7 +1285,8 @@ class CivsService(
             nextMaterialCheckAt = now() + 5_000L
             val waiting = cities.values.filter { city ->
                 city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && city.id !in busy && city.id !in unhealthy &&
-                    city.id !in placing && plugin.server.getWorld(city.worldId)?.let { target ->
+                    city.id !in placing && city.pendingControls.orEmpty().none { it.buildingId == city.construction.buildingId } &&
+                    plugin.server.getWorld(city.worldId)?.let { target ->
                         city.construction.plannedBuilding?.entrance?.let { target.isChunkLoaded(it.x shr 4, it.z shr 4) }
                     } == true
             }
@@ -1244,6 +1306,7 @@ class CivsService(
             if (placing.size >= 2) break
             val order = city.construction ?: continue
             if (city.id in busy || city.id in unhealthy || city.id in placing) continue
+            if (city.pendingControls.orEmpty().any { it.buildingId == order.buildingId }) continue
             if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
             // A reloaded city sleeps until its destination chunks are already available.
             val b = order.plannedBuilding ?: continue
@@ -1454,12 +1517,12 @@ class CivsService(
         ))
     }
     /** Only the legacy command uses the current aim; world interactions pass their actual clicked block. */
-    private fun target(player: Player): PlacementTarget {
+    private fun target(player: Player): CivPosition {
         requirePlacementWorld(player)
         val hit = player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER)?.hitBlock ?: throw CivsRejection("look-at-ground")
         return clickedPlacement(player, CivsGroundTarget(hit.world.uid, CivPosition(hit.x, hit.y, hit.z)))
     }
-    private fun clickedPlacement(player: Player, target: CivsGroundTarget): PlacementTarget {
+    private fun clickedPlacement(player: Player, target: CivsGroundTarget): CivPosition {
         requirePlacementWorld(player)
         rejectIf(target.worldId != player.world.uid, "selection-expired")
         val point = target.block
@@ -1469,8 +1532,7 @@ class CivsService(
         val eye = player.eyeLocation
         rejectIf(eye.toVector().distanceSquared(org.bukkit.util.Vector(point.x + 0.5, point.y + 0.5, point.z + 0.5)) > 12.0 * 12.0, "too-far")
         val block = world.getBlockAt(point.x, point.y, point.z)
-        val support = civsGroundSupport(block) ?: throw CivsRejection("look-at-ground")
-        return PlacementTarget(support, world.getBlockAt(support.x, support.y, support.z).type != Material.BARREL)
+        return civsGroundSupport(block) ?: throw CivsRejection("look-at-ground")
     }
     private fun near(player: Player, worldId: UUID, point: CivPosition) {
         rejectIf(player.world.uid != worldId || player.location.toVector().distanceSquared(org.bukkit.util.Vector(point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) > 96.0 * 96.0, "too-far")

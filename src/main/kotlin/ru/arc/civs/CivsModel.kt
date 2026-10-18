@@ -71,7 +71,8 @@ data class CivConstruction(
 data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)
 
 /** The city commit protects the target before this one-time native block grant is applied. */
-data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, val before: String)
+data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, val before: String,
+    val approach: List<CivPlanBlock>? = null)
 
 /** A durable remaining grant. Null in legacy snapshots means the pioneers already arrived. */
 data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)

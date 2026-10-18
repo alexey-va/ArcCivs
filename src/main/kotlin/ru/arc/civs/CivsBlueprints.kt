@@ -34,16 +34,16 @@ internal object CivsBlueprintGeometry {
 
     fun entrance(snapshot: ArcSchematicSnapshot): Entry {
         val origin = snapshot.origin
-        // The support, feet and head column stays outside every level's paste.
-        // CivsWorld validates the unchanged terrain there before committing.
+        // The approach stays outside every level's paste and supplies a stable ground pivot.
+        // Existing terrain there does not determine the schematic's placement.
         if (origin.x !in snapshot.minimum.x..snapshot.maximum.x ||
             origin.y.toLong() < snapshot.minimum.y || origin.y.toLong() + 2 > snapshot.maximum.y ||
             origin.z.toLong() != snapshot.maximum.z.toLong() + 1) throw CivsRejection("entrance-missing")
         return Entry(ArcSchematicPoint(origin.x, origin.y + 1, origin.z), 2)
     }
 
-    fun alignment(snapshot: ArcSchematicSnapshot, worldControl: CivPosition, facing: Int, exactRotation: Int?,
-        fixedEntrance: CivPosition? = null, groundLevel: Boolean = false): Alignment {
+    fun alignment(snapshot: ArcSchematicSnapshot, placement: CivPosition, facing: Int, exactRotation: Int?,
+        fixedEntrance: CivPosition? = null): Alignment {
         require(facing in 0..3)
         require(exactRotation == null || exactRotation in listOf(0, 90, 180, 270))
         val entry = entrance(snapshot)
@@ -53,10 +53,9 @@ internal object CivsBlueprintGeometry {
             entry.position.y - snapshot.origin.y, entry.position.z - snapshot.origin.z), turns)
         val markerOffset = rotate(ArcSchematicPoint(marker.x - snapshot.origin.x,
             marker.y - snapshot.origin.y, marker.z - snapshot.origin.z), turns)
-        val desired = if (fixedEntrance != null) fixedEntrance else worldControl.copy(
-            y = worldControl.y + if (groundLevel) marker.y - snapshot.origin.y else 0)
-        val offset = if (fixedEntrance != null) entryOffset else markerOffset
-        val anchor = CivPosition(desired.x - offset.x, desired.y - offset.y, desired.z - offset.z)
+        // The selected support block is the ground pivot; marker height must not lift the whole building.
+        val anchor = fixedEntrance?.let { CivPosition(it.x - entryOffset.x, it.y - entryOffset.y, it.z - entryOffset.z) }
+            ?: placement
         return Alignment(anchor, turns,
             CivPosition(anchor.x + entryOffset.x, anchor.y + entryOffset.y, anchor.z + entryOffset.z),
             CivPosition(anchor.x + markerOffset.x, anchor.y + markerOffset.y, anchor.z + markerOffset.z))
@@ -83,13 +82,13 @@ class CivsBlueprints(
 
     fun prepare(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
-        control: CivPosition, facing: Int, exactRotation: Int? = null,
-        fixedEntrance: CivPosition? = null, groundLevel: Boolean = false,
+        placement: CivPosition, facing: Int, exactRotation: Int? = null,
+        fixedEntrance: CivPosition? = null,
     ): CompletableFuture<CivBlueprint> {
         val id = schematicId(style, type, level)
         return source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenComposeAsync({ original ->
             requireVolume(original)
-            val (anchor, turns, entrance, worldControl) = CivsBlueprintGeometry.alignment(original, control, facing, exactRotation, fixedEntrance, groundLevel)
+            val (anchor, turns, entrance, worldControl) = CivsBlueprintGeometry.alignment(original, placement, facing, exactRotation, fixedEntrance)
             source.captureSource(id, original.fileSha256).thenComposeAsync({ bytes ->
                 source.transform(original, ArcSchematicTransform(turns, false)).thenApplyAsync({ transformed ->
                     val bounds = CivBox(

@@ -402,7 +402,7 @@ class CivsStore(
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
-        pendingControls = city.pendingControls?.toList(),
+        pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {
