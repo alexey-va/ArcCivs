@@ -47,6 +47,13 @@ class CivsWorld internal constructor(
         Capture(cityId, owner, worldId, building, cells.toList(), previous)
     }
 
+    /** A new site reserves its marker before the one-time control barrel is installed. */
+    fun captureSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+        cells: List<ArcSchematicBlock>, previous: CivBuilding?): CompletableFuture<CivPlacementPlan> = admit {
+        requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
+        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true)
+    }
+
     fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit {
         requireCivs(plan.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Revalidation(plan.copy(blocks = plan.blocks.toList()), owner)
@@ -190,7 +197,7 @@ class CivsWorld internal constructor(
             if (position in entranceCells) predictedEntrance[position] = after
         }
 
-        protected fun checkControl(block: Block) {
+        protected open fun checkControl(block: Block) {
             if (block.type != Material.BARREL) rejectAt("control-position-missing", block)
             if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
         }
@@ -245,10 +252,17 @@ class CivsWorld internal constructor(
     private inner class Capture(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         private val cells: List<ArcSchematicBlock>, private val previous: CivBuilding?,
+        private val allowControlPlacement: Boolean = false,
     ) : Scan<CivPlacementPlan>(cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
 
         init { requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan") }
+
+        override fun checkControl(block: Block) {
+            if (!allowControlPlacement || block.type == Material.BARREL) return super.checkControl(block)
+            if (!civsNaturalTerrain(block.type) || block.state is TileState) rejectAt("control-obstructed", block)
+            if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+        }
 
         override fun validateIdentity(city: Settlement?) {
             requireCivs(city?.building(building.id) == previous, "invalid-building")

@@ -72,7 +72,7 @@ class CivsUi internal constructor(
             roots[player.uniqueId] = "civs.network-error"
             present(player, "civs.network-error", "common.title", listOf(
                 body(tr(player, "network.lookup-failed").color(DANGER)), body(error)),
-                listOf(button(player, "refresh", "common.refresh") { open(player) }), reopen = { open(player) })
+                emptyList(), reopen = { open(player) })
         }, workingKey = "network.loading")
     }
 
@@ -126,7 +126,6 @@ class CivsUi internal constructor(
             !host.ready() -> present(player, "civs.loading", "common.title",
                 host.unavailableReason()?.let { listOf(body(tr(player, "network.lookup-failed").color(DANGER)),
                     body(text.reason(player, it))) } ?: listOf(body(player, "common.starting")), buildList {
-                    add(button(player, "refresh", "common.refresh") { open(player) })
                     if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
                 }, reopen = { showEntry(player) })
             host.preview(player) != null -> showPreview(player)
@@ -140,7 +139,6 @@ class CivsUi internal constructor(
         listOfNotNull(body(player, if (host.foundingAllowed()) "founding.intro" else "network.view-only"), body(player, "city.sleep-rule"),
             if (host.styles().isEmpty()) body(player, "founding.unavailable") else null), buildList {
             if (host.foundingAllowed() && host.styles().isNotEmpty()) add(button(player, "found", "founding.begin", PERSONAL) { showStyles(player) })
-            else add(button(player, "refresh", "common.refresh") { open(player) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
         }, reopen = { showEntry(player) }) }
 
@@ -170,7 +168,6 @@ class CivsUi internal constructor(
                     success = { showRemote(player, tr(player, "network.transfer-requested", "server" to remote.server.value)) },
                     failure = { showRemote(player, it) }, workingKey = "network.connecting")
             },
-            button(player, "refresh", "common.refresh") { open(player) },
         ), reopen = { showRemote(player) })
     }
 
@@ -331,9 +328,6 @@ class CivsUi internal constructor(
                         player.sendMessage(tr(player, "delete.success", "name" to city.name))
                     }, failure = { showDeleteCity(player, expectedCityId, name, it) })
             })
-            add(button(player, "refresh", "common.refresh") { context ->
-                showDeleteCity(player, expectedCityId, context.text(DELETE_NAME) ?: draft)
-            })
         }, inputs = listOf(
             PaperDialogTextInput(DELETE_NAME, tr(player, "delete.name-label"), initial = initial.take(32), width = 320, maxLength = 32),
         ), reopen = { showDeleteCity(player, expectedCityId, draft) })
@@ -372,7 +366,6 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, city.buildings.size) { showStock(player, it) }
-            add(button(player, "refresh", "common.refresh") { showStock(player, current) })
         }, reopen = { showStock(player, current) })
     }
 
@@ -390,7 +383,6 @@ class CivsUi internal constructor(
             result.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player),
         ), buildList {
             pages(player, current, materials.size) { showAvailableMaterials(player, it) }
-            add(button(player, "refresh", "common.refresh") { showAvailableMaterials(player, current) })
         }, reopen = { showAvailableMaterials(player, current) })
     }
 
@@ -409,7 +401,6 @@ class CivsUi internal constructor(
                         success = { showStorageMode(player) }, failure = { showStorageMode(player, it) })
                 })
             }
-            add(button(player, "refresh", "common.refresh") { showStorageMode(player) })
         }, reopen = { showStorageMode(player) })
     }
 
@@ -432,7 +423,6 @@ class CivsUi internal constructor(
                     success = { showContainers(player, current) }, failure = { showContainers(player, current, it) })
             })
             pages(player, current, inventory.containers.size) { showContainers(player, it) }
-            add(button(player, "refresh", "common.refresh") { showContainers(player, current) })
         }, reopen = { showContainers(player, current) })
     }
 
@@ -447,7 +437,6 @@ class CivsUi internal constructor(
                 perform(player, "civs.container", "stock.container-title", { host.unregisterContainer(player, position) },
                     success = { showContainers(player) }, failure = { showContainer(player, position, it) })
             })
-            add(button(player, "refresh", "common.refresh") { showContainer(player, position) })
         }, reopen = { showContainer(player, position) })
     }
 
@@ -489,7 +478,6 @@ class CivsUi internal constructor(
                 if (materials.isNotEmpty()) add(button(player, "withdraw", "warehouse.withdraw", STOCK) { showWithdraw(player, buildingId) })
             }
             pages(player, current, materials.size) { showWarehouse(player, buildingId, it) }
-            add(button(player, "refresh", "common.refresh") { showWarehouse(player, buildingId, current) })
         }, reopen = { showWarehouse(player, buildingId, current) })
     }
 
@@ -517,7 +505,6 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, materials.size) { showWithdraw(player, buildingId, it) }
-            add(button(player, "refresh", "common.refresh") { showWithdraw(player, buildingId, current) })
         }, reopen = { showWithdraw(player, buildingId, current) })
     }
 
@@ -577,7 +564,6 @@ class CivsUi internal constructor(
             if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT) {
                 beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
             })
-            if (host.cityBusy(player)) add(button(player, "refresh", "common.refresh") { showOffer(player, type) })
         }, reopen = { showOffer(player, type) })
     }
 
@@ -606,14 +592,15 @@ class CivsUi internal constructor(
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
             }
-            if (building.phase == BuildingPhase.SITE) add(button(player, "materials", "materials.open", COMMIT) { loadBuildingMaterials(player, buildingId) })
+            if (building.phase == BuildingPhase.SITE || city.construction?.buildingId == buildingId) {
+                add(button(player, "materials", "materials.open", COMMIT) { loadBuildingMaterials(player, buildingId) })
+            }
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (CivsProduction.options(building.type).isNotEmpty()) add(button(player, "production", "production.open", PERSONAL) { showProduction(player, buildingId) })
             if (building.level < 3 && building.phase == BuildingPhase.ACTIVE) add(button(player, "upgrade", "upgrades.open", PERSONAL) { showUpgrade(player, building.id) })
             if (legacyControl && !host.cityBusy(player) && city.construction == null) {
                 add(button(player, "relocate_control", "control.open", NAVIGATION) { loadControlRelocation(player, buildingId) })
             }
-            add(button(player, "refresh", "common.refresh") { showBuilding(player, buildingId) })
         }, reopen = { showBuilding(player, buildingId) })
     }
 
@@ -650,11 +637,14 @@ class CivsUi internal constructor(
                     success = { showBuilding(player, buildingId, tr(player, "control.success").color(COMMIT)) },
                     failure = { loadControlRelocation(player, buildingId, it) })
             })
-            add(button(player, "refresh", "common.refresh") { loadControlRelocation(player, buildingId) })
         }, reopen = { loadControlRelocation(player, buildingId) })
     }
 
     private fun loadBuildingMaterials(player: Player, buildingId: UUID) {
+        val city = city(player) ?: return
+        city.construction?.takeIf { it.buildingId == buildingId }?.let {
+            return showBuildingMaterials(player, buildingId, it.materials.orEmpty())
+        }
         val visit = present(player, "civs.building-materials", "materials.title", listOf(body(player, "materials.loading")), emptyList()) ?: return
         val future = try { host.buildingMaterials(player, buildingId) } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { materials, error ->
@@ -667,17 +657,24 @@ class CivsUi internal constructor(
     private fun showBuildingMaterials(player: Player, buildingId: UUID, estimate: Map<String, Long>, page: Int = 0, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
-        if (building.phase != BuildingPhase.SITE) return showBuilding(player, buildingId)
+        val order = city.construction?.takeIf { it.buildingId == buildingId }
+        if (building.phase != BuildingPhase.SITE && order == null) return showBuilding(player, buildingId)
         val available = runCatching { host.availableMaterials(player) }
-        val entries = estimate.toSortedMap().entries.toList()
+        val entries = (order?.materials ?: estimate).toSortedMap().entries.toList()
+        val incremental = order?.payment != null
         val current = page.coerceIn(0, lastPage(entries.size))
         present(player, "civs.building-materials", "materials.title", listOfNotNull(
-            body(buildingName(player, building.type, building.level)), body(player, "materials.estimate-help"),
-            if (entries.isNotEmpty()) table(entries.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
-                materialName(player, material) to tr(player, "materials.available-needed", "have" to (available.getOrNull()?.get(material) ?: 0), "need" to count)
-            }) else body(player, "materials.no-cost"),
-            body(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help"),
-            if (city.construction != null) body(player, "reason.construction-busy") else null,
+            body(buildingName(player, building.type, order?.targetLevel ?: building.level)),
+            body(player, when { incremental -> "materials.remaining-help"; order != null -> "materials.prepaid-help"; else -> "materials.estimate-help" }),
+            order?.let { body(constructionText(player, city)) },
+            if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
+                materialName(player, material) to tr(player, if (incremental) "materials.available-remaining" else "materials.available-needed",
+                    "have" to (available.getOrNull()?.get(material) ?: 0), "need" to count)
+            }, tr(player, "materials.item") to tr(player, "materials.stock-needed"),
+                DialogTables.Frame.EPIC, 320, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
+            if (order == null) body(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help") else null,
+            if (order?.phase == ConstructionPhase.WAITING_MATERIALS) body(player, "materials.waiting-help") else null,
+            if (city.construction != null && order == null) body(player, "reason.construction-busy") else null,
             available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player), error?.let(::body),
         ), buildList {
             if (city.construction == null && !host.cityBusy(player) && available.isSuccess) add(button(player, "start", "materials.start", COMMIT) {
@@ -685,7 +682,6 @@ class CivsUi internal constructor(
                     success = { showBuilding(player, buildingId) }, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) })
             })
             pages(player, current, entries.size) { showBuildingMaterials(player, buildingId, estimate, it) }
-            add(button(player, "refresh", "common.refresh") { loadBuildingMaterials(player, buildingId) })
         }, reopen = { showBuildingMaterials(player, buildingId, estimate, current) })
     }
 
@@ -714,7 +710,6 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, workers.size) { showBuildingWorkers(player, buildingId, it) }
-            add(button(player, "refresh", "common.refresh") { showBuildingWorkers(player, buildingId, current) })
         }, reopen = { showBuildingWorkers(player, buildingId, current) })
     }
 
@@ -738,7 +733,6 @@ class CivsUi internal constructor(
                         success = { showProduction(player, buildingId) }, failure = { showProduction(player, buildingId, it) })
                 })
             }
-            add(button(player, "refresh", "common.refresh") { showProduction(player, buildingId) })
         }, reopen = { showProduction(player, buildingId) })
     }
 
@@ -784,7 +778,6 @@ class CivsUi internal constructor(
                     success = { resumePlacement(player) }, failure = { showUpgrade(player, buildingId, it) },
                     cancelPending = { host.cancelPreview(player) })
             })
-            if (host.cityBusy(player)) add(button(player, "refresh", "common.refresh") { showUpgrade(player, buildingId) })
         }, reopen = { showUpgrade(player, buildingId) })
     }
 
@@ -825,7 +818,6 @@ class CivsUi internal constructor(
                 perform(player, "civs.worker", "workers.detail-title", { host.assign(player, workerId, null) },
                     success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
             })
-            if (host.cityBusy(player)) add(button(player, "refresh", "common.refresh") { showWorker(player, workerId) })
         }, reopen = { showWorker(player, workerId) })
     }
 
@@ -848,7 +840,6 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, places.size) { showAssignments(player, workerId, it) }
-            if (host.cityBusy(player)) add(button(player, "refresh", "common.refresh") { showAssignments(player, workerId, current) })
         }, reopen = { showAssignments(player, workerId, current) })
     }
 
@@ -872,7 +863,6 @@ class CivsUi internal constructor(
                 perform(player, "civs.recruit", "workers.recruit-title", { host.recruit(player) },
                     success = { showWorkers(player) }, failure = { showRecruit(player, it) })
             })
-            if (!eligible) add(button(player, "refresh", "common.refresh") { showRecruit(player) })
         }, reopen = { showRecruit(player) })
     }
 
@@ -927,7 +917,6 @@ class CivsUi internal constructor(
                 add(valueButton(player, "city_$index", "common.destination", text.literal(city.name)) { showAdminCity(player, city.id) })
             }
             add(button(player, "reload", "admin.reload", PERSONAL) { showReload(player) })
-            add(button(player, "refresh", "common.refresh") { showAdmin(player, current) })
             pages(player, current, cities.size) { showAdmin(player, it) }
         }, reopen = { showAdmin(player, current) })
     }
@@ -946,7 +935,6 @@ class CivsUi internal constructor(
                 perform(player, "civs.admin-city", "admin.city-title", { host.retryConstruction(player, cityId) },
                     success = { showAdminCity(player, cityId) }, failure = { showAdminCity(player, cityId, it) })
             })
-            add(button(player, "refresh", "common.refresh") { showAdminCity(player, cityId) })
         }, reopen = { showAdminCity(player, cityId) })
     }
 
@@ -962,6 +950,7 @@ class CivsUi internal constructor(
     private fun nextStep(player: Player, city: Settlement): Component {
         val key = when {
             city.construction?.phase == ConstructionPhase.PAUSED -> "city.next-paused"
+            city.construction?.phase == ConstructionPhase.WAITING_MATERIALS -> "city.next-materials"
             city.construction != null && city.workers.none { worker -> worker.assignment?.let(city::building)?.let(CivsRules::isBuilder) == true } ->
                 if (CivsRules.legacyHallBuilder(city)) "city.next-legacy-builder" else "city.next-builder"
             city.construction != null -> "city.next-building"

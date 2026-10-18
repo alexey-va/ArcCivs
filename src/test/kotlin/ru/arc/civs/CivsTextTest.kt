@@ -15,6 +15,7 @@ import org.bukkit.plugin.Plugin
 import ru.arc.paper.api.ArcSchematicException
 import ru.arc.paper.api.ArcSchematicFailure
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.CompletionException
 import java.io.ByteArrayInputStream
 
@@ -42,6 +43,8 @@ class CivsTextTest : FunSpec({
             val player = mockk<Player> { every { locale() } returns Locale.ENGLISH }
             val text = CivsText.load(plugin)
             plainText(text.render(player, "common.title")) shouldBe "Города"
+            plainText(text.material(player, "COBBLESTONE")) shouldBe "Булыжник"
+            plainText(text.material(player, "SPRUCE_FENCE")) shouldBe "Еловый забор"
             plainText(text.render("common.title", "en")) shouldBe "Settlements"
             config.set("force-language", "ru")
             plainText(text.render(player, "common.title")) shouldBe "Города"
@@ -82,14 +85,20 @@ class CivsTextTest : FunSpec({
             "Разрешённые миры: $worlds.\nПерейдите в один из них и повторите выбор места."
     }
 
-    test("material failures keep native item translation and literal quantities without technical fallbacks") {
+    test("material names resolve before table layout and failures retain literal quantities") {
         val text = CivsText.fromYaml(civsLocaleSource())
         val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
         val failure = text.failure(player, CivsRejection("materials-missing", mapOf("material" to "OAK_LOG", "count" to "7")))
         fun translations(component: Component): List<String> =
             listOfNotNull((component as? TranslatableComponent)?.key()) + component.children().flatMap(::translations)
-        translations(failure) shouldBe listOf("block.minecraft.oak_log")
+        translations(failure) shouldBe emptyList()
+        plainText(failure) shouldContain "Дубовое бревно × 7"
         plainText(failure) shouldContain "× 7"
+        plainText(text.material(player, "COBBLESTONE_STAIRS")) shouldBe "Булыжные ступеньки"
+        every { player.locale() } returns Locale.ENGLISH
+        plainText(text.material(player, "COBBLESTONE_STAIRS")) shouldBe "Cobblestone Stairs"
+        every { player.locale() } returns Locale.JAPANESE
+        plainText(text.material(player, "COBBLESTONE_STAIRS")) shouldBe "Булыжные ступеньки"
         plainText(text.reason(player, "unsupported-material", mapOf("material" to "PRIVATE_INTERNAL_ID"))) shouldBe
             "Этот материал нельзя использовать: неизвестный материал."
     }
@@ -107,12 +116,13 @@ class CivsTextTest : FunSpec({
                 (plainText(text.reason(player, reason)) != plainText(text.render(player, "common.error"))) shouldBe true
             }
             plainText(text.render(player, "building-phase.site")).isNotBlank() shouldBe true
+            plainText(text.render(player, "construction-phase.waiting_materials")).isNotBlank() shouldBe true
             plainText(text.render(player, "guide.open")) shouldBe if (locale == "ru") "Гайд ›" else "Guide ›"
             plainText(text.render(player, "delete.stock-help")) shouldContain if (locale == "ru") "будут потеряны" else "will be lost"
             plainText(text.building(player, BuildingType.BUILDER_HUT)).isNotBlank() shouldBe true
             plainText(text.render(player, "selection.hint")) shouldContain if (locale == "ru") "ПКМ по земле или бочке" else "Right-click ground or barrel"
             plainText(text.reason(player, "control-missing")) shouldContain if (locale == "ru") "координаты блока управления" else "coordinates in the building menu"
-            plainText(text.reason(player, "control-relocation-required")) shouldContain if (locale == "ru") "зелёную рамку предпросмотра" else "green preview frame"
+            plainText(text.reason(player, "control-relocation-required")) shouldContain if (locale == "ru") "Перенести блок управления" else "Relocate control block"
             plainText(text.reason(player, "control-position-missing", mapOf("x" to "-15", "y" to "68", "z" to "42"))) shouldContain "-15, 68, 42"
         }
     }
@@ -122,6 +132,27 @@ class CivsTextTest : FunSpec({
         val value = text.render("city.construction", "en", "building" to "Farm", "done" to 2,
             "total" to 3, "state" to text.render("construction-phase.paused", "en"))
         plainText(value) shouldBe "Farm · 2/3\nPaused"
+    }
+
+    test("control labels use three localized lines and distinguish saved work assignments from construction") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
+        val building = CivBuilding(UUID(0, 1), BuildingType.FARM, 2, CivPosition(0, 64, 0), 0, "fixture/farm",
+            CivBox(CivPosition(0, 64, 0), CivPosition(4, 70, 4)), CivPosition(2, 64, -1), BuildingPhase.ACTIVE)
+        val city = Settlement(UUID(0, 2), UUID(0, 3), "City", UUID(0, 4), CivPosition(0, 64, 0), 96,
+            "fixture", Stock(), listOf(building), emptyList())
+        plainText(text.buildingHologram(player, city, building)) shouldBe "Ферма\nУр. 2\nНет работников"
+        val assigned = city.copy(workers = listOf(CivWorker(UUID(0, 5), "Worker", building.id)))
+        plainText(text.buildingHologram(player, assigned, building)) shouldBe "Ферма\nУр. 2\nРаботников: 1"
+        plainText(text.buildingHologram(player, city, building.copy(phase = BuildingPhase.SITE))) shouldBe "Ферма\nУр. 2\nНе начато"
+        val order = CivConstruction(UUID(0, 6), building.id, 3, 100, 40, ConstructionPhase.CONSTRUCTING, Stock())
+        plainText(text.buildingHologram(player, city.copy(construction = order), building)) shouldBe "Ферма\nУр. 2\nСтройка"
+        plainText(text.buildingHologram(player, city.copy(construction = order.copy(phase = ConstructionPhase.PAUSED)), building)) shouldBe
+            "Ферма\nУр. 2\nОстановлено"
+        every { player.locale() } returns Locale.ENGLISH
+        plainText(text.buildingHologram(player, assigned, building)) shouldBe "Farm\nLevel 2\nWorkers: 1"
+        plainText(text.buildingHologram(player, city.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS)), building)) shouldBe
+            "Farm\nLevel 2\nWaiting for materials"
     }
 })
 

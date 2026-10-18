@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.google.gson.JsonParser
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.format.TextDecoration
@@ -18,7 +19,7 @@ import java.util.Locale
 /** One localized renderer; names and host values are always literal components. */
 class CivsText private constructor(
     private val messages: Map<String, Map<String, String>>,
-    defaultLocale: () -> String,
+    private val defaultLocale: () -> String,
     private val useClientLocale: () -> Boolean,
     private val forcedLocale: () -> String?,
 ) {
@@ -37,8 +38,15 @@ class CivsText private constructor(
     }
 
     fun render(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
-        render(key, forcedLocale()?.takeIf(String::isNotBlank)
-            ?: if (player != null && useClientLocale()) player.locale().toLanguageTag() else null, *values)
+        render(key, language(player), *values)
+
+    private fun language(player: Player?): String {
+        val requested = forcedLocale()?.takeIf(String::isNotBlank)
+            ?: if (player != null && useClientLocale()) player.locale().toLanguageTag() else defaultLocale()
+        val language = Locale.forLanguageTag(requested.replace('_', '-')).language
+        return language.takeIf { it in messages }
+            ?: Locale.forLanguageTag(defaultLocale().replace('_', '-')).language
+    }
 
     fun render(key: String, locale: String? = null, vararg values: Pair<String, Any?>): Component {
         require(key in messages.getValue("ru")) { "Unknown ArcCivs locale key: $key" }
@@ -51,6 +59,25 @@ class CivsText private constructor(
 
     fun building(player: Player, type: BuildingType): Component = render(player, "building.${type.name.lowercase(Locale.ROOT)}")
 
+    /** A saved building state and assignment count, not an assertion that its Citizens actor is moving. */
+    fun buildingHologram(player: Player, city: Settlement, building: CivBuilding): Component {
+        val order = city.construction?.takeIf { it.buildingId == building.id }
+        val workers = city.workers.count { it.assignment == building.id }
+        val state = when {
+            order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting"
+            order?.phase == ConstructionPhase.PAUSED -> "paused"
+            order != null || building.phase == BuildingPhase.CONSTRUCTING -> "building"
+            building.phase == BuildingPhase.SITE -> "site"
+            CivsRules.slots(city, building) > 0 -> if (workers > 0) "workers" else "vacant"
+            else -> "ready"
+        }
+        return render(player, "hologram.label",
+            "name" to this.building(player, building.type).color(TextColor.color(0x9BD48D)),
+            "level" to render(player, "hologram.level", "level" to building.level),
+            "state" to render(player, "hologram.$state", "count" to workers).color(TextColor.color(
+                if (state in setOf("waiting", "paused", "vacant")) 0xE4BB75 else 0x92BED8)))
+    }
+
     fun resource(player: Player, resource: Resource): Component = render(player, "resource.${resource.name.lowercase(Locale.ROOT)}")
 
     fun style(player: Player, style: String): Component =
@@ -60,9 +87,9 @@ class CivsText private constructor(
         (if (status.startsWith("workers.status.")) status else "workers.status.$status")
             .takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable")
 
-    /** Vanilla names follow the client language; all other host values remain literal. */
+    /** Resolve names before measured layout, using the same language policy as the surrounding menu. */
     fun material(player: Player, material: String): Component = Material.matchMaterial(material)?.let {
-        Component.translatable(it.translationKey())
+        materialLabels[language(player)]?.get(it.translationKey())?.let(::literal)
     } ?: render(player, "materials.unknown")
 
     fun reason(player: Player, reason: String?, values: Map<String, String> = emptyMap()): Component = render(player,
@@ -83,6 +110,13 @@ class CivsText private constructor(
 
     companion object {
         val BODY: TextColor = TextColor.color(0xE8DFD2)
+        private val materialLabels = listOf("ru", "en").associateWith { locale ->
+            requireNotNull(CivsText::class.java.getResourceAsStream("/materials/$locale.json")) {
+                "Bundled Minecraft material labels are missing: $locale"
+            }.bufferedReader(Charsets.UTF_8).use { reader ->
+                JsonParser.parseReader(reader).asJsonObject.entrySet().associate { (key, value) -> key to value.asString }
+            }
+        }
 
         fun load(plugin: Plugin, config: org.bukkit.configuration.file.FileConfiguration = plugin.config): CivsText {
             val bundled = requireNotNull(plugin.getResource("locales.yml")) { "ArcCivs locales.yml is missing" }

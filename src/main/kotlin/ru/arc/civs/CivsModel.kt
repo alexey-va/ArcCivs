@@ -5,7 +5,7 @@ import java.util.UUID
 enum class Resource { WOOD, STONE, FOOD }
 enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
-enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, PLACING, PAUSED }
+enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }
 
 data class Stock(val wood: Long = 0, val stone: Long = 0, val food: Long = 0) {
     operator fun get(resource: Resource): Long = when (resource) {
@@ -64,7 +64,14 @@ data class CivConstruction(
     val plannedBuilding: CivBuilding? = null,
     val batches: CivConstructionBatches? = null,
     val materials: Map<String, Long>? = null,
+    /** Null identifies an old order whose complete price was already paid. */
+    val payment: CivConstructionPayment? = null,
 )
+
+data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)
+
+/** The city commit protects the target before this one-time native block grant is applied. */
+data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, val before: String)
 
 /** A durable remaining grant. Null in legacy snapshots means the pioneers already arrived. */
 data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
@@ -86,6 +93,7 @@ data class Settlement(
     val createdAt: Long = 0,
     val inventory: CivInventory? = null,
     val immigration: CivImmigration? = null,
+    val pendingControls: List<CivControlPlacement>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

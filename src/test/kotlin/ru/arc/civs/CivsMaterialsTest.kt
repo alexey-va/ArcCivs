@@ -47,4 +47,28 @@ class CivsMaterialsTest : FunSpec({
         seen.all { box.contains(it.x, it.y, it.z) } shouldBe true
         batches.map { it.minimum.y }.sorted() shouldBe batches.map { it.minimum.y }
     }
+
+    test("incremental rows are deterministic homogeneous and require at most sixteen adjacent block costs") {
+        val building = CivBuilding(java.util.UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(0, 0, 0), 0, "test",
+            CivBox(CivPosition(-20, 64, 0), CivPosition(20, 65, 1)), CivPosition(0, 64, 2), BuildingPhase.CONSTRUCTING)
+        val cells = (-20..20).map { x -> CivPlanBlock(CivPosition(x, 64, 0), "minecraft:air",
+            if (x < 0) "minecraft:stone" else "minecraft:oak_planks") } +
+            CivPlanBlock(CivPosition(0, 65, 0), "minecraft:air", "minecraft:oak_slab[type=double,waterlogged=false]") +
+            CivPlanBlock(CivPosition(2, 65, 0), "minecraft:stone", "minecraft:stone")
+        val plan = CivPlacementPlan(java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), building, cells)
+        val batches = civsMaterialBatches(plan)
+        civsMaterialBatches(plan.copy(blocks = cells.reversed())) shouldBe batches
+        val included = batches.flatMap { batch ->
+            batch.minimum.y shouldBe batch.maximum.y
+            batch.minimum.z shouldBe batch.maximum.z
+            (batch.maximum.x - batch.minimum.x + 1 <= 16) shouldBe true
+            val row = cells.filter { it.position.y == batch.minimum.y && it.position.z == batch.minimum.z && it.position.x in batch.minimum.x..batch.maximum.x }
+            row.map { CivsMaterials.requirements(it.after) }.distinct().size shouldBe 1
+            row.map { it.position }
+        }
+        included.distinct().size shouldBe included.size
+        included.toSet() shouldBe cells.filter { it.before != it.after }.map { it.position }.toSet()
+        batches.flatMap { batch -> cells.filter { it.position.y == batch.minimum.y && it.position.z == batch.minimum.z && it.position.x in batch.minimum.x..batch.maximum.x } }
+            .let { CivsMaterials.required(plan.copy(blocks = it)) } shouldBe CivsMaterials.required(plan)
+    }
 })

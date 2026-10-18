@@ -18,6 +18,42 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
 class CivsWorldTest : FunSpec({
+    test("site capture reserves an empty authored marker without placing a barrel and construction still requires it") {
+        worldScenario { s ->
+            val marker = CivPosition(1, 64, 0)
+            val building = worldBuilding(worldBox(0, 1)).copy(control = marker)
+            val cells = listOf(worldCell(0, 64, "minecraft:stone"), worldCell(1, 64, "minecraft:structure_void"))
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            plan.blocks.map { it.position } shouldBe listOf(CivPosition(0, 64, 0))
+            CivsMaterials.required(plan) shouldBe mapOf("STONE" to 1L)
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+            val missing = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            failureReason(missing) shouldBe "control-position-missing"
+            s.world.getBlockAt(1, 64, 0).type = Material.BARREL
+            val accepted = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(accepted) shouldBe Unit
+        }
+    }
+
+    for (material in listOf(Material.CHEST, Material.BEDROCK, Material.OAK_PLANKS)) test("automatic site control cannot replace $material") {
+        worldScenario { s ->
+            val marker = CivPosition(1, 64, 0)
+            s.world.getBlockAt(1, 64, 0).type = material
+            val building = worldBuilding(worldBox(0, 1)).copy(control = marker)
+            val capture = s.subject.captureSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                listOf(worldCell(0, 64, "minecraft:stone"), worldCell(1, 64, "minecraft:structure_void")), null)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "control-obstructed"
+            s.world.getBlockAt(1, 64, 0).type shouldBe material
+        }
+    }
+
     test("geometry uses inclusive boxes and long arithmetic while city separation ignores height") {
         civsBoxVolume(worldBox(0, 0)) shouldBe 1
         civsBoxVolume(CivBox(CivPosition(-2, 3, -4), CivPosition(2, 4, 0))) shouldBe 50

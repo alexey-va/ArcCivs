@@ -79,13 +79,12 @@ class CivsUiTest : FunSpec({
             h.open()
             h.screen.id shouldBe "civs.remote"
             h.body() shouldContain "Ваш город находится на сервере survival"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("transfer", "refresh")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("transfer")
             plainText(h.screen.buttons.first().label) shouldBe "На сервер survival ›"
             h.click("transfer")
             h.paper.performTicks(2)
             h.body() shouldContain "Запрос перехода на survival отправлен"
-            h.click("refresh")
-            h.paper.performTicks(2)
+            h.open()
             verify(exactly = 2) { h.host.refreshCity(h.player) }
             verify(exactly = 1) { h.host.transferHome(h.player) }
             verify(exactly = 0) { h.host.beginFoundingSelection(any(), any(), any()); h.host.recruit(any()) }
@@ -101,10 +100,9 @@ class CivsUiTest : FunSpec({
             plainText(h.screen.body.first().text) shouldBe "Не удалось загрузить город"
             h.screen.body.first().text.color() shouldBe TextColor.color(0xFF6B61)
             h.body() shouldContain "Не удалось получить данные города из сети"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
             every { h.host.refreshCity(any()) } returns CompletableFuture.completedFuture(Unit)
-            h.click("refresh")
-            h.paper.performTicks(2)
+            h.open()
             h.screen.id shouldBe "civs.welcome"
         }
     }
@@ -126,10 +124,10 @@ class CivsUiTest : FunSpec({
         withUi { h ->
             every { h.host.foundingAllowed() } returns false
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
             val pending = CompletableFuture<Unit>()
             every { h.host.refreshCity(any()) } returns pending
-            h.click("refresh")
+            h.open()
             val count = h.screens.size
             h.dismiss()
             pending.complete(Unit)
@@ -339,10 +337,10 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Each building has its own warehouse"
             h.click("warehouse_0")
             h.body() shouldContain "Nothing stored yet"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit", "refresh")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit")
             h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
             h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
-            h.body() shouldContain "place a normal barrel inside the green preview frame"
+            h.body() shouldContain "create a control barrel and temporary fence"
             verify(exactly = 0) { h.host.startBuilding(any(), any()); h.host.availableMaterials(any()) }
         }
     }
@@ -357,7 +355,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "12, 68, 14"
             h.body() shouldContain "Entrance"
             h.body() shouldContain "8, 66, 9"
-            h.body() shouldContain "it may be above the ground"
+            h.body() shouldContain "green frame marks the future control barrel"
             h.body().contains("20, 60, 30") shouldBe false
             h.preview = h.preview!!.copy(movable = false)
             h.open()
@@ -383,7 +381,7 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.control-relocation"
             h.body() shouldContain "20, 64, 0"
             h.body() shouldContain "22, 66, 2"
-            h.body() shouldContain "Place a normal barrel at the new coordinates"
+            h.body() shouldContain "create a barrel at the new coordinates"
             h.body() shouldContain "remains a linked storage container"
             val page = h.screen
             h.click("relocate"); h.click("relocate", screen = page); h.paper.performTicks(2)
@@ -410,15 +408,21 @@ class CivsUiTest : FunSpec({
             h.click("relocate"); h.paper.performTicks(2)
             h.screen.id shouldBe "civs.control-relocation"
             h.body() shouldContain "Place a normal barrel at the control block location: 22, 66, 2"
+            val busyLookup = CompletableFuture<CivPosition>()
+            every { h.host.buildingControl(h.player, old.id) } returns busyLookup
+            h.ui.openBuilding(h.player, base.id, old.id); h.click("relocate_control")
             every { h.host.cityBusy(h.player) } returns true
-            h.click("refresh"); h.paper.performTicks(2)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            busyLookup.complete(target); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
             h.body() shouldContain "Another settlement action"
             every { h.host.cityBusy(h.player) } returns false
+            val constructionLookup = CompletableFuture<CivPosition>()
+            every { h.host.buildingControl(h.player, old.id) } returns constructionLookup
+            h.ui.openBuilding(h.player, base.id, old.id); h.click("relocate_control")
             h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), base.buildings.first().id,
                 3, 100, 20, ConstructionPhase.CONSTRUCTING, Stock()))
-            h.click("refresh"); h.paper.performTicks(2)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            constructionLookup.complete(target); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
             h.body() shouldContain "Construction is already in progress"
             h.ui.openBuilding(h.player, base.id, old.id)
             h.screen.buttons.map { it.id.value } shouldNotContain "relocate_control"
@@ -464,6 +468,70 @@ class CivsUiTest : FunSpec({
             h.click("start"); h.click("start", screen = before)
             h.paper.performTicks(2)
             verify(exactly = 1) { h.host.startBuilding(h.player, site.id) }
+        }
+    }
+
+    test("active construction shows remaining materials and waiting resumes without a retry control") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.first()
+            val order = CivConstruction(UUID.randomUUID(), building.id, 3, 100, 40,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), materials = mapOf("COBBLESTONE" to 19L),
+                payment = CivConstructionPayment(awaiting = mapOf("COBBLESTONE" to 3L)))
+            h.city = base.copy(construction = order)
+            every { h.host.availableMaterials(h.player) } returns mapOf("COBBLESTONE" to 2L)
+            h.open()
+            h.body() shouldContain "refill storage so the builder can continue"
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.body() shouldContain "Waiting for materials"
+            h.body() shouldContain "2 / 19"
+            h.body() shouldContain "continue automatically"
+            h.body().contains("up to") shouldBe false
+            h.screen.buttons shouldBe emptyList()
+            h.city = h.city!!.copy(construction = order.copy(phase = ConstructionPhase.CONSTRUCTING,
+                materials = mapOf("COBBLESTONE" to 3L)))
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.body() shouldContain "2 / 3"
+            h.body().contains("Waiting for materials") shouldBe false
+            h.city = h.city!!.copy(construction = order.copy(payment = null))
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            h.body() shouldContain "already paid"
+            verify(exactly = 0) { h.host.buildingMaterials(any(), any()); h.host.startBuilding(any(), any()); h.host.retryConstruction(any(), any()) }
+        }
+    }
+
+    test("construction materials use a framed localized table and preserve exact counts across pages") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val site = base.buildings.first().copy(phase = BuildingPhase.SITE)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
+            every { h.host.buildingMaterials(h.player, site.id) } returns CompletableFuture.completedFuture(materialEstimate())
+            every { h.host.availableMaterials(h.player) } returns mapOf("COBBLESTONE" to 5L, "SPRUCE_PLANKS" to 9_000_001L)
+            h.ui.openBuilding(h.player, base.id, site.id)
+            plainText(h.screen.buttons.single { it.id.value == "materials" }.label) shouldBe "Строительство ›"
+            plainText(h.screen.buttons.single { it.id.value == "warehouse" }.label) shouldBe "Склад ›"
+            h.click("materials"); h.paper.performTicks(2)
+            plainText(h.screen.title) shouldBe "Строительство"
+            h.body() shouldContain "Предмет"
+            h.body() shouldContain "Нужно"
+            h.body() shouldContain "Булыжные ступеньки"
+            h.body() shouldContain "5 / до 73"
+            h.body() shouldContain "0 / до 516"
+            h.body() shouldContain "\uE570"
+            h.body().contains("Cobblestone") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("start", "next")
+            h.click("next")
+            h.body() shouldContain "Еловые доски"
+            h.body() shouldContain "9000001"
+            h.body() shouldContain "2000003"
+            h.body() shouldContain "до"
+            h.body().contains("Булыжник") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("start", "previous")
+            h.click("previous")
+            h.body() shouldContain "5 / до 73"
+            verify(exactly = 1) { h.host.buildingMaterials(h.player, site.id) }
+            verify(exactly = 0) { h.host.startBuilding(any(), any()) }
         }
     }
 
@@ -522,7 +590,7 @@ class CivsUiTest : FunSpec({
             every { h.host.cityBusy(h.player) } returns true
             h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse")
             h.body() shouldContain "Another settlement action"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
         }
     }
 
@@ -581,11 +649,11 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "4 items"
             h.body() shouldContain "Remaining stock is preserved"
             every { h.host.cityBusy(h.player) } returns true
-            h.click("refresh")
+            h.open(); h.click("management"); h.click("stock")
             h.screen.buttons.map { it.id.value } shouldNotContain "materialize"
             every { h.host.cityBusy(h.player) } returns false
             h.city = h.city!!.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
-            h.click("refresh")
+            h.open(); h.click("management"); h.click("stock")
             h.body().contains("Remaining stock is preserved") shouldBe false
             h.body().contains("4 items") shouldBe false
             h.screen.buttons.map { it.id.value } shouldNotContain "materialize"
@@ -767,8 +835,8 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.guide"
             h.body() shouldContain "Cyan markers appear"
             h.body() shouldContain "Without nearby players"
-            h.body() shouldContain "green preview frame"
-            h.body() shouldContain "Building warehouse opens the central barrel"
+            h.body() shouldContain "create a control barrel and temporary fence"
+            h.body() shouldContain "Storage opens the central barrel"
             h.click("history")
             h.screen.id shouldBe "civs.overview"
             h.body().contains("Without nearby players") shouldBe false
@@ -855,10 +923,10 @@ class CivsUiTest : FunSpec({
             h.city = city
             every { h.host.cityBusy(h.player) } returns true
             h.open(); h.click("management"); h.click("delete_city")
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.screen.buttons.map { it.id.value } shouldBe emptyList()
             h.body() shouldContain "Another settlement action"
             every { h.host.cityBusy(h.player) } returns false
-            h.click("refresh", mapOf("delete_city_name" to city.name))
+            h.open(); h.click("management"); h.click("delete_city")
             every { h.host.deleteCity(any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("city-busy"))
             h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
             h.screen.inputs.single().initial shouldBe city.name
@@ -966,7 +1034,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "No accessible route"
             val text = CivsText.fromYaml(civsLocaleSource())
             plainText(text.failure(h.player, IllegalStateException("private/internal/path"))) shouldBe
-                "The action did not complete. Refresh this screen and try again."
+                "The action did not complete. Reopen this menu and try again."
         }
     }
 
@@ -1056,9 +1124,31 @@ class CivsUiTest : FunSpec({
                 CivsRejection("control-position-missing", mapOf("x" to "22", "y" to "66", "z" to "2")))
             h.click("relocate"); h.paper.performTicks(2)
             exportUiScreen(directory, "control-relocate-missing", h.screen)
+            val busyLookup = CompletableFuture<CivPosition>()
+            every { h.host.buildingControl(h.player, legacy.id) } returns busyLookup
+            h.ui.openBuilding(h.player, base.id, legacy.id); h.click("relocate_control")
             every { h.host.cityBusy(h.player) } returns true
-            h.click("refresh"); h.paper.performTicks(2)
+            busyLookup.complete(target); h.paper.performTicks(2)
             exportUiScreen(directory, "control-relocate-busy", h.screen)
+            every { h.host.cityBusy(h.player) } returns false
+            val site = base.buildings.first().copy(phase = BuildingPhase.SITE, level = 1)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
+            every { h.host.buildingMaterials(h.player, site.id) } returns CompletableFuture.completedFuture(materialEstimate())
+            every { h.host.availableMaterials(h.player) } returns mapOf("COBBLESTONE" to 5L, "SPRUCE_PLANKS" to 9_000_001L)
+            h.ui.openBuilding(h.player, base.id, site.id); h.click("materials"); h.paper.performTicks(2)
+            exportUiScreen(directory, "materials-site-ru", h.screen)
+            h.click("next")
+            exportUiScreen(directory, "materials-site-page-2-ru", h.screen)
+            h.player.setLocale(Locale.US)
+            h.ui.openBuilding(h.player, base.id, site.id); h.click("materials"); h.paper.performTicks(2)
+            exportUiScreen(directory, "materials-site-en", h.screen)
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), site.id, 2, 100, 40,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), materials = mapOf("COBBLESTONE" to 19L, "SPRUCE_PLANKS" to 12L),
+                payment = CivConstructionPayment(awaiting = mapOf("COBBLESTONE" to 3L))))
+            h.ui.openBuilding(h.player, base.id, site.id); h.click("materials")
+            exportUiScreen(directory, "materials-waiting-ru", h.screen)
+            h.screens.any { screen -> screen.buttons.any { it.id.value == "refresh" } } shouldBe false
         }
     }
 
@@ -1278,6 +1368,10 @@ private fun preview() = CivsPreviewView(BuildingType.TOWN_HALL, 1, "medieval-oak
     CivPosition(0, 65, 0), CivBox(CivPosition(-6, 64, -12), CivPosition(5, 73, -1)), true, false,
     control = CivPosition(0, 66, -6))
 
+private fun materialEstimate() = mapOf("COBBLESTONE" to 73L, "COBBLESTONE_STAIRS" to 22L,
+    "COBBLESTONE_WALL" to 28L, "DIRT" to 516L, "OAK_PLANKS" to 48L, "RED_BED" to 1L,
+    "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 90L, "SPRUCE_PLANKS" to 2_000_003L)
+
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,
         CivPosition(x, 64, 0), 0, "medieval-oak/${type.name.lowercase()}",
@@ -1323,7 +1417,7 @@ private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScr
     Files.createDirectories(out)
     Files.writeString(out.resolve("$id.json"), GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create().toJson(
         mapOf("content" to content, "dialog" to dialog, "sourceSha256" to uiSourceHashes(),
-            "evidence" to "Actual native dialog presenter components with fixture town state; native translations require Minecraft language assets. No native-client acceptance.")))
+            "evidence" to "Actual native dialog presenter components with fixture town state and server-resolved material names. No native-client acceptance.")))
 }
 
 private fun exportUiActionBar(directory: String, id: String, component: Component) {
@@ -1340,6 +1434,7 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
 
 private fun uiSourceHashes(): Map<String, String> = listOf(
     "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
+    "src/main/resources/materials/ru.json", "src/main/resources/materials/en.json",
 ).associateWith { source ->
     MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(source))).joinToString("") { "%02x".format(it) }
 }

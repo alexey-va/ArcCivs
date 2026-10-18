@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.16 to 0.1.17 automatic controls and staged construction",
+  "assumptions": [
+    "Baseline is storage-economy-assessment.json for0.1.16, not the older0.1.13 artifact. Direct Vault, tokens and XP remain independently zero; production rates, recruitment12bread, worker/building limits and first-founder96logs96cobble24bread grant are unchanged.",
+    "New SITE and one-time legacy rebind may place one free27-slot BARREL at the authored control marker, unless an existing eligible barrel is reused. Before the player supplied that barrel; after the plugin supplies it. This is physical container/block issuance, not a currency payout. Existing contents are retained.",
+    "Low/base/high assumptions:1/2/4 active hours per owner-day and1/2/4 new eligible placements per hour, resulting1/4/16 controls per day; participating owners1/10/16. These are explicit scenarios, not telemetry or hard caps. One-time legacy rebinds can substitute for new placements in these counts; do not count the same event twice.",
+    "One city has at most16 concurrent buildings; this is not a lifetime issuance cap. If a settlement is deleted and founded elsewhere, it can create a new free control while the old physical barrel remains. No claim of zero barrel issuance or fixed daily upper bound is made. Ordinary break/drop on a claimed control remains protected; a completed control receipt never regenerates a broken barrel on each tick. Restart retries reuse an existing barrel without clearing inventory.",
+    "Estimated scenario issuance is1/4/16 placed barrels per owner-day and7/280/1792 per network-week. A full new16-building city supplies at most16 new control barrels if none are reused. Issuance speed depends on successful placement/capture and user actions; no measured technical upper rate is available. User explicitly requests free automatic centers, and no new economic gate is introduced.",
+    "Exact construction cost vector remains schematic changed-material requirements, excluding its structure_void control marker. Previously all required items were debited before work; new orders debit only the next small homogeneous run, up to16 cells, using the durable inventory receipt and persisted paid state. Incomplete orders retain unneeded materials on storage; completed builds consume the same total vector. Old prepaid orders never pay again.",
+    "Builder trip interval stays10seconds, but smaller visible batches can lengthen completion time. Production begins only after completion, so earlier ability to order does not itself mint production items. No offline construction catch-up. This is a timing/access change, not a new discount or income multiplier.",
+    "Construction fence is client-only with no world blocks or drops, therefore contributes0items. Physical and virtual storage transfers remain1:1. Confirmed deletion still leaves native blocks/items and discards warned virtual balances; paid construction batches are not refunded.",
+    "Existing shop SELL is still modeled active; SELL-to-contract remains a future scenario. Barrel SELL availability/current price is not verified, so no invented redemption value or coins-to-items exchange rate is used. Indirect resale potential is explicitly unmeasured. Other ArcCivs production exposure is unchanged from the0.1.16 assessment.",
+    "Decision: implement requested free centers and gradual construction with immutable plans, backward-compatible prepaid orders and exactly-once inventory receipts. Verify missing-material auto-resume, crash/retry payment, marker placement, existing contents and no tick regeneration. Source tests, delivery, activation and native client acceptance are separate evidence."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "placed_barrel": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "automatic_control",
+          "kind": "item",
+          "source": "CivsService pending control placement receipt",
+          "basis": "One free placed control barrel at a new SITE or one-time legacy rebind; existing barrel reuse reduces actual issuance. Explicit1/4/16 placements per owner-day scenarios.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              16
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              16
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

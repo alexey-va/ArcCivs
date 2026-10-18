@@ -77,6 +77,29 @@ internal fun civsBuildBatches(plan: CivPlacementPlan, size: Int = 256): List<Civ
     return tiles.filter { key(it.minimum) in changed }.ifEmpty { listOf(tiles.first()) }
 }
 
+/** New orders pay short, homogeneous rows instead of requiring a mixed 256-cell tile. */
+internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16): List<CivBuildBatch> {
+    require(size in 1..16)
+    val changed = plan.blocks.filter { it.before != it.after }.sortedWith(compareBy({ it.position.y }, { it.position.z }, { it.position.x }))
+    val result = mutableListOf<CivBuildBatch>()
+    var cost: Map<String, Long>? = null
+    for (cell in changed) {
+        val required = CivsMaterials.requirements(cell.after)
+        val previous = result.lastOrNull()
+        if (previous != null && required == cost && cell.position.y == previous.maximum.y &&
+            cell.position.z == previous.maximum.z && cell.position.x == previous.maximum.x + 1 &&
+            cell.position.x - previous.minimum.x < size) {
+            result[result.lastIndex] = previous.copy(maximum = cell.position)
+        } else result += CivBuildBatch(cell.position, cell.position)
+        cost = required
+    }
+    return result.ifEmpty { listOf(CivBuildBatch(plan.blocks.first().position, plan.blocks.first().position)) }
+}
+
+internal fun civsConstructionBatches(plan: CivPlacementPlan, order: CivConstruction): List<CivBuildBatch> =
+    if (order.payment == null) civsBuildBatches(plan, requireNotNull(order.batches).size)
+    else civsMaterialBatches(plan, requireNotNull(order.batches).size)
+
 /** Vanilla obtainability rules, shared by estimates and the final reservation. No creative/OP bypass. */
 internal object CivsMaterials {
     fun required(plan: CivPlacementPlan): Map<String, Long> {

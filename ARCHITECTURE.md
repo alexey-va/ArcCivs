@@ -54,9 +54,13 @@ origin or visual entrance. The primary ground-click flow aligns marker X/Z with 
 selected ground X/Z, leaves the schematic anchor at ground Y and places the control
 at ground Y plus the marker's authored Y-minus-origin offset. Clicking an existing
 BARREL at the exact control XYZ is an alternate selection path. The visible entrance
-is independent. The player supplies the BARREL; no control item is minted, and new
-ACTIVE controls are never auto-recreated. A newly
-placed SITE creates a control at the marker without pasting the completed building.
+is independent. Confirming a SITE grants one BARREL at that authored marker for free,
+without pasting the completed building or charging a barrel as construction material.
+The same city commit records its expected prior block in `pendingControls` and protects
+the marker before native installation. Recovery accepts that prior block or an existing
+BARREL, preserves its inventory, then retires the receipt. Completed grants never regenerate
+on a timer; normal block protection prevents harvesting controls, while external deletion
+requires restoring the missing barrel. A conflicting block is retained and reported.
 The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
@@ -88,8 +92,9 @@ blocks or chunk tile entities. Unloaded chunks are not loaded for storage.
 VIRTUAL is an explicit opt-in with paginated warehouses of1728/3456/5184items by
 building level. The control barrel remains the visible input/output for transfers.
 An owner or city member with management access may explicitly rebind only a legacy
-ACTIVE building's control through its building menu after placing a new player-owned
-BARREL at the target coordinates. The old barrel and its inventory are never moved
+ACTIVE building's control through its building menu. The authored marker barrel is
+installed automatically through the same one-time receipt; upgrade confirmation also
+performs this rebind when needed. The old barrel and its inventory are never moved
 or cleared; the old container is
 automatically registered as an additional warehouse within the 16-container limit.
 The city UUID and stocks remain unchanged. SITE buildings and buildings with an
@@ -124,8 +129,18 @@ persistence and SQL are separate systems: this is guarded replay, not a distribu
 atomic transaction; a power-loss rollback of already-acknowledged chunk data remains
 a platform persistence boundary. No blind repeat after an unknown result.
 
-Construction reserves exact obtainable materials for the immutable captured
-before/after plan once. The unique marker cell is omitted from new paste plans;
+Construction starts without requiring the complete material list. New orders split the
+immutable captured before/after plan into deterministic horizontal rows of at most16
+adjacent cells with identical per-cell material requirements. Each observed builder trip
+authorizes one row. Only that row's exact obtainable items are debited, in the existing
+durable inventory receipt together with the READY→PLACING transition and `reservedBatch`.
+Missing items persist WAITING_MATERIALS without any debit; one waiting city is retried
+per5s in round-robin order, while open warehouse viewers defer that city's retry. Adding
+the required items resumes automatically. `materials` holds the unpaid remainder.
+Paid rows retain their reservation across pause, retry and restart, so replay cannot charge
+twice. Completing the row clears its reservation before the next builder trip. Legacy
+orders with null payment state retain their already-paid 256-cell tile algorithm.
+The unique marker cell is omitted from new paste plans;
 matching existing target blocks need no replacement. Core's provider-owned paste
 splits new placement around the control into at most six crops, applied sequentially
 in one batch while preserving the barrel and its inventory. Durable completion
@@ -143,6 +158,12 @@ and other-plugin schematic guards retain protection, so strangers cannot bypass 
 with explosions or pistons. Native control inventory remains accessible to members.
 Personal cyan boundary cues use Core packet displays within24blocks of an edge,
 with at most60parts per viewer and no perimeter/world scans.
+The same owner and settlement pulse maintain three-line RU/EN holograms above the
+saved control barrels: building name, current level and construction state or
+assigned worker count. Only the nearest four controls within16blocks are shown;
+labels respect terrain occlusion and never use the paste origin or a future upgrade
+marker. State changes update existing packet handles. Leaving, deletion, reload and
+shutdown retire them with the existing scene; no physical entities or world scan.
 
 ## UI
 
@@ -169,8 +190,8 @@ refreshes every 20 ticks. The primary-hut marker is the unique inside-building
 `structure_void` cell in the curated schematic; it is separate from the visible
 entrance and authored origin. Right-clicking ground starts the preview and selects
 ground X/Z. The schematic anchor remains at ground Y; the control coordinate Y is
-ground Y plus the marker's authored Y-minus-origin offset. The player places a BARREL
-at that control coordinate; an already placed BARREL can instead be right-clicked
+ground Y plus the marker's authored Y-minus-origin offset. Confirmation installs a free
+BARREL at that control coordinate; an already placed BARREL can instead be right-clicked
 at its exact control XYZ. There is no second aiming ray after the click. Shift +
 right-click, menu reopen, logout, world change, expiry,
 reload and shutdown retire the selection. Its identity fences asynchronous

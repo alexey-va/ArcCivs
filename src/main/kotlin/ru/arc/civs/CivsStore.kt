@@ -400,7 +400,9 @@ class CivsStore(
         buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet(),
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
-        construction = city.construction?.let { it.copy(materials = it.materials?.toMap()) },
+        construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
+            payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
+        pendingControls = city.pendingControls?.toList(),
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {

@@ -29,6 +29,196 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("the first ready row uses bounded debit and remains waiting without a partial journal or paste") {
+        val storage = mockk<CivsStorage>(relaxed = true)
+        every { storage.prepareDebitBackground(any(), any()) } returns null
+        every { storage.prepareDebit(any(), any()) } throws AssertionError("Construction must use bounded debit")
+        every { storage.hasViewers(any()) } returns false
+        serviceScenario(storageFactory = { storage }) { h ->
+            h.incrementalPlacement()
+            h.start()
+            verify(exactly = 1) { storage.prepareDebitBackground(any(), mapOf("STONE" to 1L)) }
+            verify(exactly = 1) { storage.unlock(any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+            h.commit()
+            h.time += 5_000; h.paper.performTicks(20)
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+            h.saves.size shouldBe 1
+            verify(exactly = 2) { storage.prepareDebitBackground(any(), mapOf("STONE" to 1L)) }
+            verify(exactly = 0) { storage.prepareDebit(any(), any()); h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    for (alreadyPlaced in listOf(false, true)) test("pending control restart reconciles alreadyPlaced=$alreadyPlaced without clearing inventory or repeating a completed grant") {
+        serviceScenario { h ->
+            val viewer = h.paper.addPlayer("ControlOwner")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            val point = CivPosition(1, 65, 1)
+            val hall = h.city.buildings.first().copy(control = point)
+            val receipt = CivControlPlacement(hall.id, point, "minecraft:air")
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                members = setOf(viewer.uniqueId), buildings = listOf(hall) + h.city.buildings.drop(1), pendingControls = listOf(receipt))
+            val block = h.world.getBlockAt(point.x, point.y, point.z)
+            if (alreadyPlaced) {
+                block.type = Material.BARREL
+                (block.state as org.bukkit.block.Barrel).inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
+            }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start(); h.paper.performTicks(20)
+            block.type shouldBe Material.BARREL
+            if (alreadyPlaced) (block.state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
+            h.saves.single().first.pendingControls shouldBe emptyList()
+            h.commit()
+            block.type = Material.AIR // Simulate an external world edit, outside the normal protected break flow.
+            h.paper.performTicks(60)
+            block.type shouldBe Material.AIR
+            h.saves.size shouldBe 1
+        }
+    }
+
+    test("a builder may start its site with no physical resources and without an inventory debit") {
+        serviceScenario { h ->
+            val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
+                control = CivPosition(10, 63, 0))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), hut), workers = h.city.workers.mapIndexed { index, worker ->
+                    if (index == 0) worker.copy(assignment = hut.id, nextDeliveryAt = h.time + 10_000) else worker
+                })
+            val plan = CivPlacementPlan(hut.id, city.id, city.worldId, hut.copy(phase = BuildingPhase.CONSTRUCTING),
+                listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:air", "minecraft:stone")), "a".repeat(64))
+            val snapshot = mockk<ArcSchematicSnapshot>()
+            every { snapshot.blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.loadPlan(hut.id) } returns CompletableFuture.completedFuture(plan)
+            every { h.store.loadSchematic(hut.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
+            every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(plan.copy(id = UUID.randomUUID()))
+            every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+            every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            h.start()
+            val started = h.service.startBuilding(h.player, hut.id); h.tick()
+            h.saves.single().first.construction!!.let {
+                it.payment shouldBe CivConstructionPayment()
+                it.materials shouldBe mapOf("STONE" to 1L)
+                it.batches!!.size shouldBe 16
+            }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            h.commit(); started.join() shouldBe Unit
+            h.service.city(h.player)!!.inventory shouldBe city.inventory
+        }
+    }
+
+    test("missing row waits without debit and replenishment resumes only after the paid receipt commits") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement()
+            var receipt: CivInventoryTransaction? = null
+            val durable = CompletableFuture<CivInventoryTransaction>()
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); durable }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start(); h.commit()
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            val barrel = (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
+            h.time += 5_000; h.paper.performTicks(20)
+            barrel.getItem(0)!!.amount shouldBe 1
+            receipt!!.after.construction!!.phase shouldBe ConstructionPhase.PLACING
+            receipt!!.after.construction!!.payment!!.reservedBatch shouldBe 0
+            durable.complete(receipt!!); h.tick()
+            barrel.getItem(0) shouldBe null
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            h.commit(); h.paper.performTicks(20)
+            h.service.city(h.player)!!.construction!!.materials shouldBe mapOf("OAK_PLANKS" to 1L)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            placement.pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick(); h.commit()
+            h.service.city(h.player)!!.construction!!.workDone shouldBe 1
+            h.service.city(h.player)!!.construction!!.payment shouldBe CivConstructionPayment()
+        }
+    }
+
+    test("a paid row survives placement failure and retry without a second inventory charge") {
+        serviceScenario { h ->
+            h.incrementalPlacement(phase = ConstructionPhase.PAUSED, paid = true, stock = 7)
+            h.start()
+            val city = h.service.city(h.player)!!
+            val retried = h.service.retryConstruction(h.player, city.id); h.tick(); h.commit(); retried.join()
+            h.paper.performTicks(20)
+            // Retry preserves the paid receipt, but placement still waits for its durable phase transition.
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            h.saves.filter { !it.second.isDone }.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.commit()
+            h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
+            (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("an unfunded waiting city does not starve the next city's funded row") {
+        serviceScenario { h ->
+            val base = h.incrementalPlacement().city
+            val order = base.construction!!
+            val first = CivsRules.awaitMaterials(base, base.owner, order.id, 0, mapOf("STONE" to 1L))
+            fun shiftedPoint(point: CivPosition) = point.copy(x = point.x + 256)
+            fun shiftedBuilding(building: CivBuilding) = building.copy(anchor = shiftedPoint(building.anchor), entrance = shiftedPoint(building.entrance),
+                control = building.control?.let(::shiftedPoint), bounds = CivBox(shiftedPoint(building.bounds.min), shiftedPoint(building.bounds.max)))
+            val secondOrder = first.construction!!.copy(id = UUID.randomUUID(), plannedBuilding = shiftedBuilding(order.plannedBuilding!!))
+            val second = CivsRules.validate(first.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), center = shiftedPoint(first.center),
+                buildings = first.buildings.map(::shiftedBuilding), construction = secondOrder))
+            h.world.loadChunk(16, 0); h.world.loadChunk(17, 0)
+            h.world.getBlockAt(256, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(256, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.store.loadPlan(secondOrder.id) } returns CompletableFuture()
+            h.start()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            h.time += 5_000; h.paper.performTicks(20)
+            h.saves.single().first.id shouldBe second.id
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            barrel.getItem(0) shouldBe null
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+        }
+    }
+
+    test("a late paid receipt after close leaves native inventory untouched for restart recovery") {
+        serviceScenario { h ->
+            h.incrementalPlacement(stock = 1)
+            val durable = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); durable }
+            h.start()
+            receipt!!.after.construction!!.payment!!.reservedBatch shouldBe 0
+            h.service.close()
+            durable.complete(receipt!!); h.tick()
+            (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 1
+            verify(exactly = 0) { h.store.save(any()); h.blueprints.paste(any(), any(), any()) }
+        }
+    }
+
+    for (nativeApplied in listOf(false, true)) test("recovered batch receipt nativeApplied=$nativeApplied reconciles the debit once then resumes the same row") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(stock = if (nativeApplied) 0 else 1)
+            val before = placement.city
+            val order = before.construction!!
+            val after = CivsRules.payBatch(before, before.owner, order.id, 0, mapOf("STONE" to 1L))
+            val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
+                listOf(CivInventorySlotChange(CivPosition(0, 63, 0), "BARREL", 0, CivPlainItem("STONE", 1), null)))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+            every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+            h.start(); h.paper.performTicks(20)
+            (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0) shouldBe null
+            h.commit(); h.paper.performTicks(20)
+            h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+        }
+    }
+
     test("physical mode materializes existing reserves only after its journal and does not repeat the transfer") {
         serviceScenario { h ->
             val control = CivPosition(0, 63, 0)
@@ -101,18 +291,18 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("legacy control permits upgrade preview but requires rebinding before capture or debit") {
+    test("legacy upgrade confirmation reserves the authored control before capture without requiring a player barrel") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().let { it.copy(control = it.anchor) }
             val target = CivPosition(1, 65, 1)
-            val city = h.city.copy(buildings = listOf(hall) + h.city.buildings.drop(1))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(hall) + h.city.buildings.drop(1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val upgraded = CivBlueprint(hall.copy(level = 3, control = target), h.world.uid,
                 mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1))
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
-                arg<Int>(2) shouldBe 3
                 arg<CivPosition>(8) shouldBe hall.entrance
-                CompletableFuture.completedFuture(upgraded)
+                CompletableFuture.completedFuture(if (arg<Int>(2) == 3) upgraded else upgraded.copy(building = hall.copy(control = target)))
             }
             h.start()
             val preview = h.service.prepareUpgrade(h.player, hall.id); h.tick(); preview.join() shouldBe Unit
@@ -123,9 +313,17 @@ class CivsServiceTest : FunSpec({
                 it.movable shouldBe false
             }
             verify(exactly = 1) { h.renderer.show(h.player, upgraded.building, upgraded.surface) }
-            val rejected = shouldThrow<CompletionException> { h.service.confirmPreview(h.player).join() }.cause as CivsRejection
-            rejected.reason shouldBe "control-relocation-required"
-            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.save(any()); h.store.saveInventoryTransaction(any()) }
+            val confirmation = h.service.confirmPreview(h.player); h.tick()
+            confirmation.isDone shouldBe false
+            h.saves.single().first.pendingControls!!.single().position shouldBe target
+            h.world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.AIR
+            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.saveInventoryTransaction(any()) }
+            h.commit()
+            h.world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.BARREL
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.failedFuture(CivsRejection("outside-city"))
+            h.commit()
+            (shouldThrow<CompletionException> { confirmation.join() }.cause as CivsRejection).reason shouldBe "outside-city"
+            h.service.city(h.player)!!.building(hall.id)!!.control shouldBe target
         }
     }
 
@@ -173,6 +371,7 @@ class CivsServiceTest : FunSpec({
             relocating.isDone shouldBe false
             h.service.city(h.player)!!.building(hall.id)!!.control shouldBe hall.anchor
             h.saves.single().first.inventory!!.containers shouldBe listOf(hall.anchor)
+            h.commit(); relocating.isDone shouldBe false
             h.commit(); relocating.join() shouldBe Unit
             h.service.city(h.player)!!.building(hall.id)!!.control shouldBe target
             h.service.city(h.player)!!.inventory!!.materials shouldBe city.inventory!!.materials
@@ -183,7 +382,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("legacy control relocation reports exact missing barrel coordinates without saving or creating it") {
+    test("legacy control relocation creates its free marker barrel only after the durable reservation") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().let { it.copy(control = it.anchor) }
             val target = CivPosition(1, 65, 1)
@@ -194,11 +393,13 @@ class CivsServiceTest : FunSpec({
                     mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1)))
             h.start()
             val relocating = h.service.relocateControl(h.player, hall.id, target); h.tick()
-            val rejection = shouldThrow<CompletionException> { relocating.join() }.cause as CivsRejection
-            rejection.reason shouldBe "control-position-missing"
-            rejection.values shouldBe mapOf("x" to "1", "y" to "65", "z" to "1")
             h.world.getBlockAt(1, 65, 1).type shouldBe Material.AIR
-            h.saves.size shouldBe 0
+            h.saves.single().first.pendingControls!!.single() shouldBe CivControlPlacement(hall.id, target, "minecraft:air")
+            h.commit()
+            h.world.getBlockAt(1, 65, 1).type shouldBe Material.BARREL
+            relocating.isDone shouldBe false
+            h.commit(); relocating.join() shouldBe Unit
+            h.service.city(h.player)!!.pendingControls shouldBe emptyList()
         }
     }
 
@@ -213,33 +414,36 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("new town sites require a player barrel and recheck it after asynchronous capture") {
+    test("new town sites create a free authored barrel after commit and retain it as a protected control") {
         serviceScenario(empty = true) { h ->
             h.start()
             val blueprint = h.previewBlueprint()
             every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
             val prepared = h.prepareFounding("Barrel town", "nordic"); h.tick(); prepared.join()
-            val missing = h.service.confirmPreview(h.player)
-            (shouldThrow<CompletionException> { missing.join() }.cause as CivsRejection).reason shouldBe "control-position-missing"
-            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.save(any()) }
             val point = blueprint.building.control!!
-            val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            val block = h.world.getBlockAt(point.x, point.y, point.z)
             val capture = CompletableFuture<CivPlacementPlan>()
             var cityId: UUID? = null
             every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers { cityId = firstArg(); capture }
+            every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+            every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             val confirming = h.service.confirmPreview(h.player)
-            block.type = Material.AIR
             capture.complete(CivPlacementPlan(UUID.randomUUID(), cityId!!, h.world.uid, blueprint.building, emptyList()))
             h.tick()
-            (shouldThrow<CompletionException> { confirming.join() }.cause as CivsRejection).reason shouldBe "control-position-missing"
             block.type shouldBe Material.AIR
             h.service.city(h.player) shouldBe null
-            verify(exactly = 0) { h.store.save(any()) }
+            h.saves.single().first.pendingControls!!.single().position shouldBe point
+            h.commit()
+            block.type shouldBe Material.BARREL
+            h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!.isProtected(h.world.uid, point.x, point.y, point.z) shouldBe true
+            h.commit(); confirming.join() shouldBe Unit
+            h.service.city(h.player)!!.pendingControls shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 
-    test("a barrel broken during site commit is never recreated and construction requires its replacement") {
+    test("an obstructed control after site commit completes with an error and keeps its recoverable receipt") {
         serviceScenario(empty = true) { h ->
             h.start()
             val blueprint = h.previewBlueprint()
@@ -252,18 +456,21 @@ class CivsServiceTest : FunSpec({
             every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             val prepared = h.prepareFounding("Barrel town", "nordic"); h.tick(); prepared.join()
             val point = blueprint.building.control!!
-            val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+            val block = h.world.getBlockAt(point.x, point.y, point.z)
             val confirming = h.service.confirmPreview(h.player); h.tick()
             h.saves.size shouldBe 1
-            block.type = Material.AIR
-            h.commit(); confirming.join() shouldBe Unit
-            block.type shouldBe Material.AIR
+            block.type = Material.DIAMOND_BLOCK
+            h.commit()
+            (shouldThrow<CompletionException> { confirming.join() }.cause as CivsRejection).reason shouldBe "control-obstructed"
+            block.type shouldBe Material.DIAMOND_BLOCK
             val city = h.service.city(h.player)!!
             city.buildings.single().phase shouldBe BuildingPhase.SITE
+            city.pendingControls!!.size shouldBe 1
+            h.service.cityBusy(h.player) shouldBe false
             val start = h.service.startBuilding(h.player, blueprint.building.id)
             (shouldThrow<CompletionException> { start.join() }.cause as CivsRejection).reason shouldBe "control-position-missing"
             verify(exactly = 0) { h.store.loadPlan(any()) }
-            block.type shouldBe Material.AIR
+            block.type shouldBe Material.DIAMOND_BLOCK
         }
     }
 
@@ -1102,11 +1309,12 @@ class CivsServiceTest : FunSpec({
 })
 
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
-    allowedWorlds: Set<String> = setOf("vanilla"), action: (ServiceScenario) -> Unit) =
-    MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds).use(action) }
+    allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
+    action: (ServiceScenario) -> Unit) =
+    MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory).use(action) }
 
 private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
-    worldName: String, allowedWorlds: Set<String>) : AutoCloseable {
+    worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CivsServiceTest")
     val world = paper.addSimpleWorld(worldName)
     val player = mockk<Player>(relaxed = true)
@@ -1125,6 +1333,10 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     val service: CivsService
 
     init {
+        every { worldAdapter.canModify(any(), any(), any()) } returns true
+        every { worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } answers {
+            worldAdapter.capture(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5))
+        }
         every { blueprints.pasteParts(any(), any(), isNull()) } answers { CompletableFuture.completedFuture(listOf(firstArg())) }
         every { citizens.closeAsync() } returns CompletableFuture.completedFuture(null)
         every { renderer.drained() } returns CompletableFuture.completedFuture(null)
@@ -1155,7 +1367,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
             backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary,
-            storageAdapter = CivsStorage(plugin) { emptyArray() })
+            storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin) { emptyArray() })
     }
     fun prepareFounding(name: String, style: String): CompletableFuture<Unit> =
         service.beginFoundingSelection(player, name, style).thenCompose {
@@ -1173,6 +1385,38 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         return CivBlueprint(hall, world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
     }
     fun commit() { saves.last().let { it.second.complete(it.first) }; tick() }
+    fun incrementalPlacement(phase: ConstructionPhase = ConstructionPhase.READY_TO_PLACE, paid: Boolean = false, stock: Int = 0): ServicePlacement {
+        world.getBlockAt(0, 63, 0).type = Material.BARREL
+        if (stock > 0) (world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
+            .setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, stock))
+        val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
+            anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),
+            entrance = CivPosition(15, 64, 3), phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), building.id, 1, 2, 0, phase, Stock(),
+            failure = if (phase == ConstructionPhase.PAUSED) "placement-cancelled" else null, plannedBuilding = building,
+            batches = CivConstructionBatches(2, 16), materials = if (paid) mapOf("OAK_PLANKS" to 1L) else mapOf("STONE" to 1L, "OAK_PLANKS" to 1L),
+            payment = CivConstructionPayment(reservedBatch = if (paid) 0 else null))
+        val ready = CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = city.buildings.mapIndexed { index, b -> if (index == 0) b.copy(control = CivPosition(0, 63, 0)) else b } + building,
+            construction = order))
+        val plan = CivPlacementPlan(order.id, city.id, world.uid, building, listOf(
+            CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:stone"),
+            CivPlanBlock(CivPosition(16, 64, 0), "minecraft:air", "minecraft:oak_planks")), "b".repeat(64))
+        val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
+        val placement = ServicePlacement(ready)
+        every { store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+        every { store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+        every { blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+        every { worldAdapter.revalidate(any(), owner) } returns CompletableFuture.completedFuture(Unit)
+        every { blueprints.pasteParts(snapshot, building, any()) } answers {
+            arg<CivBuildBatch>(2) shouldBe CivBuildBatch(CivPosition(15, 64, 0), CivPosition(15, 64, 0))
+            CompletableFuture.completedFuture(listOf(snapshot))
+        }
+        every { placement.operation.completion } returns placement.pasted
+        every { blueprints.paste(snapshot, world.uid, building.anchor) } returns placement.operation
+        world.loadChunk(0, 0); world.loadChunk(1, 0)
+        return placement
+    }
     fun placement(): ServicePlacement {
         val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
             anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),

@@ -15,6 +15,7 @@ import org.bukkit.Server
 import org.bukkit.World
 import org.bukkit.block.Barrel
 import org.bukkit.block.Block
+import org.bukkit.block.BlockState
 import org.bukkit.block.Chest
 import org.bukkit.block.BlockFace
 import org.bukkit.enchantments.Enchantment
@@ -110,6 +111,102 @@ class CivsStorageTest : FunSpec({
         failure.values["count"] shouldBe "6"
         barrel.getItem(0)?.amount shouldBe 4
         requireNotNull(city.inventory).materials shouldBe mapOf("OAK_LOG" to 3L)
+    }
+
+    test("background debit counts unrelated containers and combines fresh candidates across bounded windows") {
+        DebitWindowFixture(city).use { f ->
+            val first = f.positions[10]
+            val late = f.positions[200]
+            f.contents.getValue(first)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.contents.getValue(late)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.assertBounded(128)
+            (late in f.reads) shouldBe false
+            f.contents.getValue(first)[0]!!.amount shouldBe 1
+            f.clearReads()
+            val plan = requireNotNull(f.prepare(mapOf("OAK_LOG" to 2L)))
+            f.assertBounded()
+            f.reads[first] shouldBe 1 // Candidate is captured again, not retained as an ItemStack.
+            f.reads[late] shouldBe 1
+            plan.changes.map { it.container }.toSet() shouldBe setOf(first, late)
+            plan.inventoryAfter.materials shouldBe f.city.inventory!!.materials // PHYSICAL never spends hidden reserves.
+            f.contents.getValue(first)[0]!!.amount shouldBe 1
+            f.contents.getValue(late)[0]!!.amount shouldBe 1
+            val id = UUID.randomUUID()
+            f.storage.lock(f.city, id)
+            val receipt = transaction(id, f.city, plan).validated()
+            f.storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+            f.storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+            f.contents.getValue(first)[0] shouldBe null
+            f.contents.getValue(late)[0] shouldBe null
+            f.storage.unlock(id)
+        }
+    }
+
+    test("background debit drops stale and removed candidates and rechecks refilled slots without starvation") {
+        DebitWindowFixture(city).use { f ->
+            val first = f.positions[10]
+            val late = f.positions[200]
+            f.contents.getValue(first)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.contents.getValue(late)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            val custom = named(Material.OAK_LOG, 64)
+            f.contents.getValue(first)[0] = custom
+            f.clearReads()
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.assertBounded()
+            f.contents.getValue(first)[0] shouldBe custom
+            f.contents.getValue(late)[0]!!.amount shouldBe 1
+            // An externally removed index member cannot stay eligible merely because an earlier window found it.
+            f.excluded += late
+            f.storage.refreshBuilding(f.city)
+            f.contents.getValue(first)[0] = ItemStack(Material.OAK_LOG, 3)
+            f.clearReads()
+            val plan = requireNotNull(f.prepare(mapOf("OAK_LOG" to 2L)))
+            f.assertBounded()
+            (late in f.reads) shouldBe false
+            plan.changes.single().let {
+                it.container shouldBe first
+                it.before shouldBe CivPlainItem("OAK_LOG", 3)
+                it.after shouldBe CivPlainItem("OAK_LOG", 1)
+            }
+        }
+    }
+
+    test("background debit advances through unloaded windows and resets candidates and cursor on reload and removal") {
+        DebitWindowFixture(city).use { f ->
+            val first = f.positions[10]
+            val late = f.positions[200]
+            f.contents.getValue(first)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.contents.getValue(late)[0] = ItemStack(Material.OAK_LOG, 1)
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.loaded = false
+            f.clearReads()
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.reads shouldBe emptyMap()
+            f.chunkChecks shouldBe 128 // Unloaded candidates consume budget and never cause a chunk load.
+            f.loaded = true
+            f.storage.replaceCities(listOf(f.city))
+            f.clearReads()
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.assertBounded(128)
+            (late in f.reads) shouldBe false
+            f.storage.removeCity(f.city.id)
+            f.clearReads()
+            f.prepare(mapOf("OAK_LOG" to 2L)) shouldBe null
+            f.assertBounded(128)
+            (late in f.reads) shouldBe false
+        }
+    }
+
+    test("background debit includes all 128 snow-layer units in its candidate revalidation budget") {
+        DebitWindowFixture(city).use { f ->
+            f.positions.take(128).forEach { f.contents.getValue(it)[0] = ItemStack(Material.SNOW, 1) }
+            val plan = requireNotNull(f.prepare(mapOf("SNOW" to 128L)))
+            f.assertBounded(128)
+            plan.changes.size shouldBe 128
+            plan.changes.all { it.before == CivPlainItem("SNOW", 1) && it.after == null } shouldBe true
+        }
     }
 
     test("default prototype comparison excludes display PDC enchantment and damage without spending custom items") {
@@ -642,4 +739,90 @@ private fun cargo(block: Block): Inventory = when (val state = block.state) {
     is Barrel -> state.inventory
     is Chest -> state.blockInventory
     else -> error("Test container missing at ${block.location}")
+}
+
+/** Count just the native inventory boundary; Bukkit and ItemStacks still come from Core's test runtime. */
+private class DebitWindowFixture(base: Settlement) : AutoCloseable {
+    val city = base.copy(buildings = listOf(base.buildings.single().copy(
+        bounds = CivBox(CivPosition(2, 64, 0), CivPosition(15, 65, 15)))))
+    val positions = listOf(CivPosition(0, 64, 0)) + (2..15).flatMap { x ->
+        (64..65).flatMap { y -> (0..15).map { z -> CivPosition(x, y, z) } }
+    }.take(260) + CivPosition(1, 64, 0)
+    val contents = positions.associateWith { Array<ItemStack?>(27) { ItemStack(Material.DIRT, 64) } }
+    val reads = mutableMapOf<CivPosition, Int>()
+    private val snapshots = mutableMapOf<CivPosition, Int>()
+    val excluded = mutableSetOf<CivPosition>()
+    var loaded = true
+    var chunkChecks = 0
+    val storage: CivsStorage
+
+    init {
+        val nativeWorld = mockk<World>()
+        val states = positions.associateWith { position ->
+            val inventory = mockk<Inventory>()
+            every { inventory.size } returns 27
+            every { inventory.storageContents } answers {
+                snapshots.merge(position, 1, Int::plus)
+                contents.getValue(position).copyOf()
+            }
+            every { inventory.getItem(any()) } answers { contents.getValue(position)[firstArg<Int>()] }
+            every { inventory.setItem(any(), any()) } answers {
+                contents.getValue(position)[firstArg<Int>()] = secondArg<ItemStack?>()
+            }
+            mockk<Barrel> {
+                every { type } returns Material.BARREL
+                every { x } returns position.x
+                every { y } returns position.y
+                every { z } returns position.z
+                every { this@mockk.inventory } returns inventory
+            }
+        }
+        val blocks = states.mapValues { (_, state) -> mockk<Block> {
+            every { type } returns Material.BARREL
+            every { this@mockk.state } returns state
+        } }
+        val chunk = mockk<Chunk> {
+            every { world } returns nativeWorld
+            every { x } returns 0
+            every { z } returns 0
+        }
+        every { nativeWorld.uid } returns city.worldId
+        every { nativeWorld.name } returns "bounded-debit"
+        every { nativeWorld.minHeight } returns -64
+        every { nativeWorld.maxHeight } returns 320
+        every { nativeWorld.loadedChunks } returns arrayOf(chunk)
+        every { nativeWorld.isChunkLoaded(any<Int>(), any<Int>()) } answers { chunkChecks++; loaded }
+        every { nativeWorld.getChunkAt(any<Int>(), any<Int>()) } answers {
+            check(loaded) { "Background debit must not load chunks" }
+            chunk
+        }
+        every { nativeWorld.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } answers {
+            val position = CivPosition(firstArg(), secondArg(), thirdArg())
+            reads.merge(position, 1, Int::plus)
+            blocks.getValue(position)
+        }
+        val nativeServer = mockk<Server> {
+            every { pluginManager } returns mockk(relaxed = true)
+            every { onlinePlayers } returns emptyList()
+            every { getWorld(city.worldId) } returns nativeWorld
+        }
+        val nativePlugin = mockk<Plugin> { every { server } returns nativeServer }
+        storage = CivsStorage(nativePlugin) { states.filterKeys { it !in excluded }.values.toTypedArray<BlockState>() }
+    }
+
+    fun prepare(required: Map<String, Long>): CivStoragePlan? {
+        val id = UUID.randomUUID()
+        storage.lock(city, id)
+        return try { storage.prepareDebitBackground(city, required) } finally { storage.unlock(id) }
+    }
+
+    fun assertBounded(exact: Int? = null) {
+        (reads.size <= 128) shouldBe true
+        reads.values.all { it == 1 } shouldBe true
+        snapshots shouldBe reads
+        if (exact != null) reads.size shouldBe exact
+    }
+
+    fun clearReads() { reads.clear(); snapshots.clear(); chunkChecks = 0 }
+    override fun close() = storage.close()
 }

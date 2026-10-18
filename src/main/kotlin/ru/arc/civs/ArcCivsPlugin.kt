@@ -96,8 +96,14 @@ open class ArcCivsPlugin : JavaPlugin() {
                 nativeDrains += preview.drained()
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
+            val boundary = CivsBoundaryRenderer(this, lifecycle.tasks, queue, text)
+            lifecycle.own(AutoCloseable {
+                val failure = runCatching { boundary.close() }.exceptionOrNull()
+                nativeDrains += boundary.drained()
+                if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
+            })
             val service = lifecycle.own(CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
-                previewRenderer = preview, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
+                previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
                     // Capture before the rest of CivsService's constructor can fail.
                     lifecycle.own(AutoCloseable {
                         nativeDrains += runCatching { citizens.closeAsync() }

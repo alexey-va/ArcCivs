@@ -7,6 +7,54 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsDevelopmentRulesTest : FunSpec({
+    test("incremental orders can start empty and pay a row exactly once across wait pause and reload") {
+        var city = builderCity().let { it.copy(inventory = it.inventory!!.copy(materials = emptyMap())) }
+        val hut = city.building(id(2))!!
+        val order = batches(hut, 2).copy(batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 3L),
+            payment = CivConstructionPayment())
+        city = CivsRules.startSite(city, city.owner, hut, order)
+        city.inventory!!.materials shouldBe emptyMap()
+        city = trip(city)
+        denied("materials-required") { CivsRules.beginPlacement(city, city.owner, order.id) }
+        city = roundTrip(CivsRules.awaitMaterials(city, city.owner, order.id, 0, mapOf("STONE" to 2L)))
+        city.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+        city.construction!!.materials shouldBe mapOf("STONE" to 3L)
+        denied("stale-construction") { CivsRules.payBatch(city, city.owner, order.id, 1, mapOf("STONE" to 2L)) }
+        city = CivsRules.payBatch(city, city.owner, order.id, 0, mapOf("STONE" to 2L))
+        city.construction!!.materials shouldBe mapOf("STONE" to 1L)
+        denied("stale-construction") { CivsRules.payBatch(city, city.owner, order.id, 0, mapOf("STONE" to 2L)) }
+        city = roundTrip(CivsRules.pauseConstruction(city, city.owner, order.id, "placement-cancelled"))
+        city = CivsRules.retryConstruction(city, city.owner, order.id)
+        city.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+        city.construction!!.payment!!.reservedBatch shouldBe 0
+        city = CivsRules.completeBatch(CivsRules.beginPlacement(city, city.owner, order.id), city.owner, order.id)
+        city.construction!!.payment shouldBe CivConstructionPayment()
+        city = trip(city)
+        city = CivsRules.payBatch(city, city.owner, order.id, 1, mapOf("STONE" to 1L))
+        city = CivsRules.completeBatch(roundTrip(city), city.owner, order.id)
+        city.construction shouldBe null
+        city.building(hut.id)!!.phase shouldBe BuildingPhase.ACTIVE
+    }
+
+    test("incremental payment and control receipts validate their persisted identity") {
+        val city = builderCity()
+        val hut = city.building(id(2))!!
+        val order = batches(hut, 2).copy(batches = CivConstructionBatches(2, 16), payment = CivConstructionPayment())
+        val working = CivsRules.startSite(city, city.owner, hut, order)
+        denied("invalid-state") { CivsRules.validate(working.copy(construction = working.construction!!.copy(phase = ConstructionPhase.PLACING))) }
+        denied("invalid-state") { CivsRules.validate(working.copy(construction = working.construction!!.copy(
+            phase = ConstructionPhase.WAITING_MATERIALS, payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1L))))) }
+        val grant = CivControlPlacement(hut.id, hut.control!!, "minecraft:air")
+        roundTrip(city.copy(pendingControls = listOf(grant))).pendingControls shouldBe listOf(grant)
+        denied("invalid-state") { CivsRules.validate(city.copy(pendingControls = listOf(grant.copy(position = requireNotNull(hut.control).copy(x = 100))))) }
+        denied("invalid-state") { CivsRules.validate(city.copy(pendingControls = listOf(grant, grant))) }
+        val json = Gson().toJsonTree(working).asJsonObject
+        json.getAsJsonObject("construction").remove("payment")
+        val prepaid = CivsRules.validate(Gson().fromJson(json, Settlement::class.java))
+        prepaid.construction!!.payment shouldBe null
+        CivsRules.beginPlacement(trip(prepaid), city.owner, order.id).construction!!.phase shouldBe ConstructionPhase.PLACING
+    }
+
     test("founding reserves a town hall site and a single item grant without a construction or residents") {
         val city = newCity()
         city.buildings.single().phase shouldBe BuildingPhase.SITE

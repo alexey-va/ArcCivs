@@ -78,6 +78,7 @@ sealed interface CivInventoryApplyResult {
 internal const val MAX_INVENTORY_SLOT_CHANGES = 65_536
 private const val MATERIALIZATION_SLOT_CHANGES = 1_024
 private const val MATERIALIZATION_CONTAINERS = 128
+private const val BACKGROUND_DEBIT_CONTAINERS = 128
 private const val STORAGE_SLOTS = 27
 internal val CIVS_STORAGE_TYPES = setOf("CHEST", "TRAPPED_CHEST", "BARREL")
 private val STORAGE_TYPES = CIVS_STORAGE_TYPES
@@ -95,11 +96,18 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>)
     private data class Source(val position: CivPosition, val type: String, val inventory: Inventory)
     private data class Snapshot(val source: Source, val before: List<ItemStack?>, val after: MutableList<ItemStack?>)
+    private class DebitSearch(val worldId: UUID, val owner: UUID, val required: Map<String, Long>) {
+        var positions: Map<CivPosition, String?> = emptyMap()
+        var ordered: List<CivPosition> = emptyList()
+        var cursor = 0
+        var candidates: Set<CivPosition> = emptySet()
+    }
     private val claims = mutableMapOf<UUID, Claim>()
     private val cityClaims = mutableMapOf<UUID, UUID>()
     private val locked = mutableMapOf<Key, UUID>()
     private val index = CivsContainerIndex(plugin.server, tileEntities)
     private val materializationCursors = mutableMapOf<UUID, Int>()
+    private val debitSearches = mutableMapOf<UUID, DebitSearch>()
     private var closed = false
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
@@ -107,12 +115,14 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
     fun replaceCities(cities: Collection<Settlement>) {
         checkMain(); requireOpen()
         materializationCursors.clear()
+        debitSearches.clear()
         index.replace(cities)
     }
     fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city) }
     fun removeCity(cityId: UUID) {
         checkMain(); requireOpen()
         materializationCursors.remove(cityId)
+        debitSearches.remove(cityId)
         index.remove(cityId)
     }
     fun refreshBuilding(city: Settlement, building: CivBuilding? = null) {
@@ -193,7 +203,62 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
         return totals.toSortedMap()
     }
 
-    fun prepareDebit(city: Settlement, required: Map<String, Long>): CivStoragePlan {
+    fun prepareDebit(city: Settlement, required: Map<String, Long>): CivStoragePlan =
+        prepareDebit(city, required, null, null)
+
+    /**
+     * Small construction rows search at most 128 containers, including rechecked candidates.
+     * Null keeps the order waiting: no native changes or partial receipt. Only coordinates survive
+     * between attempts; each accepted slot is freshly captured under the current transaction lock.
+     */
+    fun prepareDebitBackground(city: Settlement, required: Map<String, Long>): CivStoragePlan? {
+        checkClaim(city)
+        validateAmounts(required)
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || required.isEmpty()) {
+            debitSearches.remove(city.id)
+            return try { prepareDebit(city, required) } catch (failure: CivsRejection) {
+                if (failure.reason == "materials-missing") null else throw failure
+            }
+        }
+        // A homogeneous row has at most 16 blocks; eight snow layers are the largest item count.
+        require(required.values.sum() <= BACKGROUND_DEBIT_CONTAINERS) { "Background debit exceeds one construction row" }
+        val search = debitSearches[city.id]?.takeIf {
+            it.worldId == city.worldId && it.owner == city.owner && it.required == required
+        } ?: DebitSearch(city.worldId, city.owner, required.toMap()).also { debitSearches[city.id] = it }
+        val positions = claims.getValue(cityClaims.getValue(city.id)).positions
+        if (search.positions !== positions) {
+            search.positions = positions
+            search.ordered = positions.keys.toList()
+            search.cursor = if (positions.isEmpty()) 0 else Math.floorMod(search.cursor, positions.size)
+        }
+        val candidates = linkedSetOf<CivPosition>()
+        val selected = sequence {
+            val visited = hashSetOf<CivPosition>()
+            for (position in search.candidates) if (position in positions && visited.add(position)) yield(position)
+            var examined = 0
+            while (examined < search.ordered.size) {
+                val position = search.ordered[search.cursor]
+                search.cursor = (search.cursor + 1) % search.ordered.size
+                examined++
+                if (visited.add(position)) yield(position)
+            }
+        }.take(BACKGROUND_DEBIT_CONTAINERS).mapNotNull { position ->
+            try { resolve(city, position, positions[position]) } catch (failure: CivsRejection) {
+                if (failure.reason == "storage-unavailable") null else throw failure
+            }
+        }
+        return try {
+            prepareDebit(city, required, selected, candidates::add).also { debitSearches.remove(city.id) }
+        } catch (failure: CivsRejection) {
+            if (failure.reason != "materials-missing") throw failure
+            search.candidates = candidates
+            null
+        }
+    }
+
+    private fun prepareDebit(city: Settlement, required: Map<String, Long>,
+        physicalSources: Sequence<Source>?, candidate: ((CivPosition) -> Boolean)?,
+    ): CivStoragePlan {
         checkClaim(city)
         validateAmounts(required)
         val inventory = requireNotNull(city.inventory)
@@ -203,10 +268,12 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
         val missing = required.toSortedMap()
         if (inventory.mode == CivStorageMode.PHYSICAL) {
             var changedSlots = 0
-            for (source in sources(city)) {
-                if (missing.isEmpty()) break
+            val native = (physicalSources ?: sources(city)).iterator()
+            while (missing.isNotEmpty() && native.hasNext()) {
+                val source = native.next()
                 val snapshot = snapshot(source)
                 snapshots += snapshot
+                var contributed = false
                 snapshot.after.indices.forEach { slot ->
                     val item = plain(snapshot.after[slot])
                     val remaining = item?.let { missing[it.material] } ?: 0L
@@ -216,8 +283,10 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
                         putAmount(missing, item.material, remaining - taken)
                         snapshot.after[slot] = stack(item.material, item.amount - taken)
                         changedSlots++
+                        contributed = true
                     }
                 }
+                if (contributed) candidate?.invoke(source.position)
             }
         } else {
             required.toSortedMap().forEach { (material, requested) ->
@@ -611,6 +680,7 @@ class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<Blo
         claims.keys.toList().forEach(::unlock)
         index.clear()
         materializationCursors.clear()
+        debitSearches.clear()
     }
     private fun requireOpen() = check(!closed) { "CivsStorage is closed" }
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "CivsStorage requires Paper's main thread" }

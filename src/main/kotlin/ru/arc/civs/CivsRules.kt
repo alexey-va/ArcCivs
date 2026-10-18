@@ -215,6 +215,7 @@ object CivsRules {
             (city.inventory == null || order.batches != null) &&
             validConstructionPrice(order, plan) &&
             order.workDone == 0 && order.phase == ConstructionPhase.CONSTRUCTING && order.failure == null &&
+            (order.payment == null || order.payment == CivConstructionPayment()) &&
             (order.plannedBuilding == null || order.plannedBuilding == plan), "invalid-construction")
         val reserved = order.copy(plannedBuilding = plan)
         city.construction?.let { current ->
@@ -266,7 +267,32 @@ object CivsRules {
         val order = order(city, orderId)
         if (order.phase == ConstructionPhase.PLACING) return city
         check(order.phase == ConstructionPhase.READY_TO_PLACE, "construction-not-ready")
+        check(order.payment == null || order.payment.reservedBatch == order.workDone, "materials-required")
         return changed(city, city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)))
+    }
+
+    /** Called in the same durable inventory receipt as this batch's exact item debit. */
+    fun payBatch(city: Settlement, actor: UUID, orderId: UUID, batch: Int, materials: Map<String, Long>): Settlement {
+        authorized(city, actor)
+        val order = order(city, orderId)
+        val payment = order.payment ?: reject("invalid-construction")
+        check(batch == order.workDone && payment.reservedBatch == null &&
+            order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS), "stale-construction")
+        check(validMaterials(materials) && materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
+        check(payment.awaiting == null || payment.awaiting == materials, "invalid-construction")
+        val remaining = order.materials.orEmpty().mapValues { (key, value) -> value - materials.getOrDefault(key, 0) }.filterValues { it > 0 }
+        return changed(city, city.copy(construction = order.copy(phase = ConstructionPhase.PLACING,
+            materials = remaining, payment = CivConstructionPayment(batch))))
+    }
+
+    fun awaitMaterials(city: Settlement, actor: UUID, orderId: UUID, batch: Int, materials: Map<String, Long>): Settlement {
+        authorized(city, actor)
+        val order = order(city, orderId)
+        check(order.payment?.reservedBatch == null && order.payment != null && order.workDone == batch &&
+            order.phase == ConstructionPhase.READY_TO_PLACE && materials.isNotEmpty() && validMaterials(materials) &&
+            materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
+        return changed(city, city.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS,
+            payment = CivConstructionPayment(awaiting = materials))))
     }
 
     fun pauseConstruction(city: Settlement, actor: UUID, orderId: UUID, failure: String): Settlement {
@@ -280,8 +306,10 @@ object CivsRules {
         authorized(city, actor)
         val order = order(city, orderId)
         if (order.phase != ConstructionPhase.PAUSED) return city
-        val phase = if (order.workDone == order.workRequired) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING
-        return changed(city, city.copy(construction = order.copy(phase = phase, failure = null)))
+        val phase = if (order.workDone == order.workRequired || order.payment?.reservedBatch == order.workDone)
+            ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING
+        return changed(city, city.copy(construction = order.copy(phase = phase, failure = null,
+            payment = order.payment?.copy(awaiting = null))))
     }
 
     fun completeConstruction(city: Settlement, actor: UUID, orderId: UUID): Settlement {
@@ -299,8 +327,10 @@ object CivsRules {
         val order = order(city, orderId)
         check(order.batches != null && order.phase == ConstructionPhase.PLACING, "construction-not-placing")
         val completed = order.workDone + 1
+        check(completed != order.workRequired || order.payment == null || order.materials.orEmpty().isEmpty(), "invalid-construction")
         return if (completed == order.workRequired) finishConstruction(city, order)
-        else changed(city, city.copy(construction = order.copy(workDone = completed, phase = ConstructionPhase.CONSTRUCTING)))
+        else changed(city, city.copy(construction = order.copy(workDone = completed, phase = ConstructionPhase.CONSTRUCTING,
+            payment = order.payment?.let { CivConstructionPayment() })))
     }
 
     private fun finishConstruction(city: Settlement, order: CivConstruction): Settlement {
@@ -380,8 +410,18 @@ object CivsRules {
                     ConstructionPhase.CONSTRUCTING -> order.workDone < order.workRequired && order.failure == null
                     ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING ->
                         (order.batches != null || order.workDone == order.workRequired) && order.failure == null
+                    ConstructionPhase.WAITING_MATERIALS -> order.payment?.awaiting?.isNotEmpty() == true && order.failure == null
                     ConstructionPhase.PAUSED -> order.failure != null && validText(order.failure, 512)
                 })
+                order.payment?.let { payment ->
+                    snapshot(order.batches != null && order.batches.size <= 16)
+                    snapshot(payment.reservedBatch == null || payment.reservedBatch == order.workDone &&
+                        order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING, ConstructionPhase.PAUSED))
+                    snapshot(order.phase != ConstructionPhase.PLACING || payment.reservedBatch == order.workDone)
+                    snapshot(payment.awaiting == null || order.phase in setOf(ConstructionPhase.WAITING_MATERIALS, ConstructionPhase.PAUSED) &&
+                        payment.reservedBatch == null && payment.awaiting.isNotEmpty() && validMaterials(payment.awaiting) &&
+                        payment.awaiting.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value })
+                }
             }
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
             snapshot(city.workers.size in 0..MAX_POPULATION && (city.workers.size >= 4 || city.immigration != null) &&
@@ -408,6 +448,12 @@ object CivsRules {
                     snapshot(building != null && items.values.sum() <= CivInventory.buildingCapacity(building))
                 }
             }
+            city.pendingControls?.let { pending ->
+                snapshot(pending.size <= MAX_BUILDINGS && pending.map { it.buildingId }.distinct().size == pending.size)
+                snapshot(pending.all { present(it.buildingId, it.position) && city.building(it.buildingId)?.control == it.position &&
+                    it.before.isNotEmpty() && it.before.length <= CivsStore.MAX_BLOCK_STATE_CHARS &&
+                    it.before.startsWith("minecraft:") && it.before.none(Char::isISOControl) })
+            }
             return city
         } catch (error: CivsRejection) {
             if (error.reason == "invalid-state") throw error
@@ -429,12 +475,15 @@ object CivsRules {
 
     private fun validConstructionPrice(order: CivConstruction, building: CivBuilding): Boolean {
         val batches = order.batches
-        if (batches == null) return building.type != BuildingType.BUILDER_HUT && order.materials == null && order.cost == cost(building.type, building.level) &&
+        if (batches == null) return order.payment == null && building.type != BuildingType.BUILDER_HUT && order.materials == null && order.cost == cost(building.type, building.level) &&
             order.workRequired == workRequired(building.type, building.level)
         val materials = order.materials ?: return false
         return batches.total in 1..75_000 && batches.size in 1..256 && order.workRequired == batches.total &&
-            order.cost == Stock() && runCatching { CivInventory(CivStorageMode.VIRTUAL, materials).validated() }.isSuccess
+            order.cost == Stock() && validMaterials(materials)
     }
+
+    private fun validMaterials(materials: Map<String, Long>): Boolean =
+        runCatching { CivInventory(CivStorageMode.VIRTUAL, materials).validated() }.isSuccess
 
     private fun isFounding(city: Settlement): Boolean = city.buildings.size == 1 && city.buildings.single().let {
         it.type == BuildingType.TOWN_HALL && it.level == 1 && it.phase == BuildingPhase.CONSTRUCTING && city.construction?.buildingId == it.id
