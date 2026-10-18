@@ -77,6 +77,33 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("a rejected founding request preserves the name and the real Core form can retry") {
+        withUi(realHistory = true) { h ->
+            every { h.host.prepareFounding(any(), any(), any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("wrong-world"))
+            h.ui.open(h.player)
+            h.click("found")
+            h.click("style_0")
+            repeat(2) {
+                h.click("prepare", mapOf("city_name" to "123123"))
+                h.paper.performTicks(2)
+                h.screen.id shouldBe "civs.name"
+                h.screen.inputs.single().initial shouldBe "123123"
+                h.body() shouldContain "Settlement buildings cannot be placed in this world"
+            }
+            verify(exactly = 2) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
+            every { h.host.prepareFounding(any(), any(), any()) } answers {
+                h.preview = preview().copy(cityName = secondArg())
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.click("prepare", mapOf("city_name" to "123123"))
+            h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 3) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
+            verify(exactly = 1) { h.player.closeDialog() }
+        }
+    }
+
     test("an async preview cannot reopen a dismissed flow or an old lifecycle") {
         withUi { h ->
             val first = CompletableFuture<Unit>()

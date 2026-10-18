@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
@@ -10,6 +11,7 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.BlockFace
 import org.bukkit.entity.Player
+import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.util.RayTraceResult
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
@@ -18,9 +20,34 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsServiceTest : FunSpec({
+    for (allowedWorld in listOf("vanilla", "survival")) test("founding rejects a disallowed world and accepts a numeric name in $allowedWorld") {
+        val config = YamlConfiguration().apply {
+            loadFromString(requireNotNull(javaClass.getResourceAsStream("/config.yml"))
+                .bufferedReader().use { it.readText() })
+        }
+        val settings = CivsSettings.read(config)
+        settings.worlds shouldBe setOf("vanilla", "survival")
+        serviceScenario(empty = true, worldName = allowedWorld, allowedWorlds = settings.worlds) { h ->
+            h.start()
+            every { h.player.world } returns h.paper.addSimpleWorld("world")
+            val rejected = h.service.prepareFounding(h.player, "123123", "nordic")
+            (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "wrong-world"
+            verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()) }
+            verify(exactly = 0) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
+            every { h.player.world } returns h.world
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+                CompletableFuture.completedFuture(h.previewBlueprint())
+            val retry = h.service.prepareFounding(h.player, "123123", "nordic")
+            h.tick()
+            retry.join() shouldBe Unit
+            h.service.preview(h.player)!!.cityName shouldBe "123123"
+        }
+    }
+
     test("replacement keeps the prior placement and rejects confirmation until async work resolves") {
         serviceScenario(empty = true) { h ->
             h.start()
@@ -394,12 +421,14 @@ class CivsServiceTest : FunSpec({
     }
 })
 
-private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, action: (ServiceScenario) -> Unit) =
-    MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities).use(action) }
+private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
+    allowedWorlds: Set<String> = setOf("vanilla"), action: (ServiceScenario) -> Unit) =
+    MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds).use(action) }
 
-private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int) : AutoCloseable {
+private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
+    worldName: String, allowedWorlds: Set<String>) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CivsServiceTest")
-    val world = paper.addSimpleWorld("vanilla")
+    val world = paper.addSimpleWorld(worldName)
     val player = mockk<Player>(relaxed = true)
     val store = mockk<CivsStore>()
     val blueprints = mockk<CivsBlueprints>()
@@ -433,7 +462,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         every { store.save(any()) } answers {
             CompletableFuture<Settlement>().also { saves += firstArg<Settlement>() to it }
         }
-        service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), setOf("vanilla"), 96,
+        service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens)
     }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }

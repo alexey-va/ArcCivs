@@ -2,7 +2,7 @@ locale: ru
 force-language: ru
 use-client-locale: false
 schematics-root: /home/freedeeml/McFine/arc_schematics
-allowed-worlds: [vanilla]
+allowed-worlds: [vanilla, survival]
 settlement-radius: 96
 maximum-settlements: 500
 maximum-building-volume: 50000
