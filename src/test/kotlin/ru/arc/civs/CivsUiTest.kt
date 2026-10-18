@@ -14,6 +14,9 @@ import io.mockk.Runs
 import io.papermc.paper.connection.PlayerGameConnection
 import io.papermc.paper.dialog.DialogResponseView
 import net.kyori.adventure.key.Key
+import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.format.TextColor
+import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.entity.Player
 import org.bukkit.Location
 import org.bukkit.Material
@@ -79,18 +82,29 @@ class CivsUiTest : FunSpec({
 
     test("a rejected founding request preserves the name and the real Core form can retry") {
         withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             every { h.host.prepareFounding(any(), any(), any()) } returns
-                CompletableFuture.failedFuture(CivsRejection("wrong-world"))
+                CompletableFuture.failedFuture(CivsRejection("wrong-world", mapOf(
+                    "world" to "world", "worlds" to "survival, vanilla",
+                )))
             h.ui.open(h.player)
             h.click("found")
             h.click("style_0")
+            plainText(h.screen.buttons.single().label) shouldBe "Выбрать место ›"
             repeat(2) {
                 h.click("prepare", mapOf("city_name" to "123123"))
                 h.paper.performTicks(2)
                 h.screen.id shouldBe "civs.name"
                 h.screen.inputs.single().initial shouldBe "123123"
-                h.body() shouldContain "Settlement buildings cannot be placed in this world"
+                plainText(h.screen.body[0].text) shouldBe "Не удалось выбрать место"
+                h.screen.body[0].text.color() shouldBe TextColor.color(0xFF6B61)
+                h.screen.body[0].text.decoration(TextDecoration.ITALIC) shouldBe TextDecoration.State.FALSE
+                plainText(h.screen.body[1].text) shouldBe "В мире world нельзя размещать городские постройки.\n" +
+                    "Разрешённые миры: survival, vanilla.\nПерейдите в один из них и повторите выбор места."
+                h.screen.body[1].text.color() shouldBe CivsText.BODY
+                plainText(h.screen.buttons.single().label) shouldBe "Повторить выбор места ›"
             }
+            verify(exactly = 0) { h.player.sendMessage(any<Component>()) }
             verify(exactly = 2) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
             every { h.host.prepareFounding(any(), any(), any()) } answers {
                 h.preview = preview().copy(cityName = secondArg())
@@ -101,6 +115,31 @@ class CivsUiTest : FunSpec({
             h.ui.showingDialog(h.player) shouldBe false
             verify(exactly = 3) { h.host.prepareFounding(h.player, "123123", "medieval-oak") }
             verify(exactly = 1) { h.player.closeDialog() }
+        }
+    }
+
+    test("delayed ground rejection and empty names use the same prominent inline failure state") {
+        withUi(realHistory = true) { h ->
+            val preparing = CompletableFuture<Unit>()
+            every { h.host.prepareFounding(any(), any(), any()) } returns preparing
+            h.ui.open(h.player); h.click("found"); h.click("style_0")
+            h.click("prepare", mapOf("city_name" to "Oak Town"))
+            h.screen.id shouldBe "civs.preview"
+            preparing.completeExceptionally(CivsRejection("look-at-ground"))
+            h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.name"
+            h.screen.inputs.single().initial shouldBe "Oak Town"
+            plainText(h.screen.body[0].text) shouldBe "Could not choose a location"
+            h.screen.body[0].text.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(h.screen.body[1].text) shouldBe "Look at nearby ground and choose the location again."
+            h.click("prepare", mapOf("city_name" to "   "))
+            h.screen.inputs.single().initial shouldBe ""
+            plainText(h.screen.body[0].text) shouldBe "Could not choose a location"
+            h.screen.body[0].text.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(h.screen.body[1].text) shouldBe "Enter a nonempty name up to 32 characters without control characters."
+            verify(exactly = 1) { h.host.prepareFounding(any(), any(), any()) }
+            verify(exactly = 0) { h.player.closeDialog() }
+            verify(exactly = 0) { h.player.sendMessage(any<Component>()) }
         }
     }
 

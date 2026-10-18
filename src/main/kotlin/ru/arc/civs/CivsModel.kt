@@ -86,7 +86,7 @@ data class Settlement(
 }
 
 /** Domain rejection keys are localized by the UI; no platform side effects happen in rules. */
-class CivsRejection(val reason: String) : IllegalArgumentException(reason)
+class CivsRejection(val reason: String, val values: Map<String, String> = emptyMap()) : IllegalArgumentException(reason)
 
 data class BuildingOffer(val type: BuildingType, val level: Int, val schematicId: String, val cost: Stock)
 

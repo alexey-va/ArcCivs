@@ -59,15 +59,16 @@ class CivsText private constructor(
         (if (status.startsWith("workers.status.")) status else "workers.status.$status")
             .takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable")
 
-    fun reason(player: Player, reason: String?): Component = render(player,
-        "reason.$reason".takeIf { it in messages.getValue("ru") } ?: "common.error")
+    fun reason(player: Player, reason: String?, values: Map<String, String> = emptyMap()): Component = render(player,
+        "reason.$reason".takeIf { it in messages.getValue("ru") } ?: "common.error", *values.toList().toTypedArray())
 
     fun failure(player: Player, failure: Throwable): Component {
         val causes = generateSequence(failure) { it.cause }.take(8).toList()
-        val reasonKey = causes.filterIsInstance<CivsRejection>().firstOrNull()?.reason
+        val rejection = causes.filterIsInstance<CivsRejection>().firstOrNull()
+        val reasonKey = rejection?.reason
             ?: causes.filterIsInstance<ArcSchematicException>().firstOrNull()
                 ?.takeIf { it.reason == ArcSchematicFailure.PROTECTED_AREA }?.let { "protected-area" }
-        return reason(player, reasonKey)
+        return reason(player, reasonKey, rejection?.values.orEmpty())
     }
 
     internal fun keys(locale: String): Set<String> = messages.getValue(locale).keys

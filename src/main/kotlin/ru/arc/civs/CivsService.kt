@@ -556,7 +556,9 @@ class CivsService(
         rejectIf(!player.hasPermission("arccivs.use"), "not-authorized")
     }
     private fun target(player: Player): CivPosition {
-        rejectIf(player.world.name !in settings.worlds, "wrong-world")
+        if (player.world.name !in settings.worlds) throw CivsRejection("wrong-world", mapOf(
+            "world" to player.world.name, "worlds" to settings.worlds.sorted().joinToString(),
+        ))
         val hit = player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER)?.hitBlock ?: throw CivsRejection("look-at-ground")
         rejectIf(!hit.type.isSolid || hit.isLiquid, "look-at-ground")
         return CivPosition(hit.x, hit.y + 1, hit.z)

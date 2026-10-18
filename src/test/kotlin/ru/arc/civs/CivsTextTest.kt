@@ -68,6 +68,18 @@ class CivsTextTest : FunSpec({
         plainText(text.failure(player, failure)) shouldBe "Эта область защищена. Выберите другое место."
     }
 
+    test("wrapped world rejection preserves configured names as literal text") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
+        val worlds = "vanilla, <click:run_command:'/op a'>custom</click>"
+        val failure = CompletionException(CivsRejection("wrong-world", mapOf(
+            "world" to "<red>outside</red>", "worlds" to worlds,
+        )))
+        plainText(text.failure(player, failure)) shouldBe
+            "В мире <red>outside</red> нельзя размещать городские постройки.\n" +
+            "Разрешённые миры: $worlds.\nПерейдите в один из них и повторите выбор места."
+    }
+
     test("construction progress has a real line break and translated phase") {
         val text = CivsText.fromYaml(civsLocaleSource())
         val value = text.render("city.construction", "en", "building" to "Farm", "done" to 2,

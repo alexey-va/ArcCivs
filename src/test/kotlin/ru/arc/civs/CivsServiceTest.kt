@@ -35,7 +35,9 @@ class CivsServiceTest : FunSpec({
             h.start()
             every { h.player.world } returns h.paper.addSimpleWorld("world")
             val rejected = h.service.prepareFounding(h.player, "123123", "nordic")
-            (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "wrong-world"
+            val reason = shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection
+            reason.reason shouldBe "wrong-world"
+            reason.values shouldBe mapOf("world" to "world", "worlds" to "survival, vanilla")
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()) }
             verify(exactly = 0) { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any()) }
             every { h.player.world } returns h.world
@@ -45,6 +47,16 @@ class CivsServiceTest : FunSpec({
             h.tick()
             retry.join() shouldBe Unit
             h.service.preview(h.player)!!.cityName shouldBe "123123"
+        }
+    }
+
+    test("world rejection reports the configured world names instead of bundled defaults") {
+        serviceScenario(empty = true, allowedWorlds = setOf("custom-realm", "builder-world")) { h ->
+            h.start()
+            val rejected = h.service.prepareFounding(h.player, "Oak Town", "nordic")
+            val reason = shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection
+            reason.reason shouldBe "wrong-world"
+            reason.values shouldBe mapOf("world" to "vanilla", "worlds" to "builder-world, custom-realm")
         }
     }
 

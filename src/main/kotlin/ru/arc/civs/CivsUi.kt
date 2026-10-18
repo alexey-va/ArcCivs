@@ -117,10 +117,14 @@ class CivsUi internal constructor(
     private fun showName(player: Player, style: String, initial: String = "", error: Component? = null) {
         var draft = initial
         present(player, "civs.name", "founding.name-title",
-            listOfNotNull(body(player, "founding.name-help"), table(listOf(
-                tr(player, "label.style") to text.style(player, style),
-            )), error?.let(::body)),
-            listOf(button(player, "prepare", "founding.prepare", COMMIT) { context ->
+            buildList {
+                if (error != null) {
+                    add(body(tr(player, "founding.prepare-failed").color(DANGER)))
+                    add(body(error))
+                } else add(body(player, "founding.name-help"))
+                add(table(listOf(tr(player, "label.style") to text.style(player, style))))
+            },
+            listOf(button(player, "prepare", if (error == null) "founding.prepare" else "founding.retry", COMMIT) { context ->
                 val name = context.text(NAME)?.trim().orEmpty()
                 draft = name
                 if (name.isBlank()) showName(player, style, name, text.reason(player, "invalid-name"))
