@@ -1,0 +1,1791 @@
+{
+  "title": "ArcCivs 0.1.15 to 0.1.16 physical storage and confirmed deletion",
+  "assumptions": [
+    "Low/base/high are illustrative scenarios, not observations; participants 1/10/16 cities. Production, one-time reserve movement and deletion sensitivity are separate flows, not a repeat-grant loop.",
+    "Before physical mode silently combines native items with virtual reserves. After physical mode consumes only native containers; old reserves move through exact durable slot receipts, partial when full, preserving remainder. Virtual mode remains an explicit option with unchanged per-building 1728/3456/5184 item caps.",
+    "Before only central barrels plus at most16 explicitly registered containers count. After all chests/barrels inside building bounds join automatically, with central barrel first. Each physical half has27 real slots, so capacity is 27*N slots, 1728*N only for homogeneous64-stack items, less for unstackables/custom occupied slots. Existing manual compatibility containers keep16 cap. This increases reachable capacity, not production rate; filling containers no longer requires manual registration.",
+    "First-ever founder grant remains96 logs96 cobblestone24 bread once per owner across the network. Deletion/refounding still grants0/0/0 and creates0 free barrels. Legacy stock converts exactly remaining units; migration does not mint additional units.",
+    "Accepted construction continues charging exact schematic changes once; 12bread recruitment, levels and worker ceilings unchanged. Storage transitions preserve named/custom native items and no ground drops occur.",
+    "Worst continuous12L3-worker24h ceiling unchanged:138240logs or103680stone/raw crops or34560bread per city/day. More physical space can reduce full-storage downtime; actual utilization and sell-through are unmeasured. Shop SELL remains active, SELL-to-contract future; no invented new SELL price or exchange rate. Prior source assessment documents illustrative bread8Vault sensitivity, not fresh runtime price proof.",
+    "Direct Vault/tokens/XP changes are zero separately. Accepted delete can burn any remaining virtual/legacy units after warning, never physical items. No construction refund. No new currency price or progression fee, so no new savings-time calculation.",
+    "Decision: requested physical default and automatic container inclusion with indexed discovery, unchanged rates, explicit discard warning and receipt recovery. Verify slot idempotency/full storage/auto discovery/stocked deletion. Source and disk delivery do not imply live activation or native client acceptance."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "item_logs": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "240",
+              "960",
+              "34560"
+            ],
+            "network_weekly": [
+              "1680",
+              "67200",
+              "3870720"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "240",
+              "960",
+              "34560"
+            ],
+            "network_weekly_after_cap": [
+              "1680",
+              "67200",
+              "3870720"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "96",
+            "192"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "6720",
+            "21504"
+          ],
+          "network_weekly_net": [
+            "0",
+            "-6720",
+            "-21504"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "-96",
+            "-192"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "96",
+              "192"
+            ],
+            "network_weekly": [
+              "0",
+              "6720",
+              "21504"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "240",
+              "960",
+              "34560"
+            ],
+            "network_weekly": [
+              "1680",
+              "67200",
+              "3870720"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "96",
+              "96",
+              "96"
+            ],
+            "network_weekly": [
+              "672",
+              "6720",
+              "10752"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "240",
+              "960",
+              "34560"
+            ],
+            "network_weekly_after_cap": [
+              "1680",
+              "67200",
+              "3870720"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "96",
+              "96",
+              "96"
+            ],
+            "network_weekly_after_cap": [
+              "672",
+              "6720",
+              "10752"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "96",
+              "192"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "6720",
+              "21504"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "-6720",
+        "-21504"
+      ]
+    },
+    "item_stone": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "180",
+              "720",
+              "25920"
+            ],
+            "network_weekly": [
+              "1260",
+              "50400",
+              "2903040"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "180",
+              "720",
+              "25920"
+            ],
+            "network_weekly_after_cap": [
+              "1260",
+              "50400",
+              "2903040"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "96",
+            "192"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "6720",
+            "21504"
+          ],
+          "network_weekly_net": [
+            "0",
+            "-6720",
+            "-21504"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "-96",
+            "-192"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "96",
+              "192"
+            ],
+            "network_weekly": [
+              "0",
+              "6720",
+              "21504"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "180",
+              "720",
+              "25920"
+            ],
+            "network_weekly": [
+              "1260",
+              "50400",
+              "2903040"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "96",
+              "96",
+              "96"
+            ],
+            "network_weekly": [
+              "672",
+              "6720",
+              "10752"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "180",
+              "720",
+              "25920"
+            ],
+            "network_weekly_after_cap": [
+              "1260",
+              "50400",
+              "2903040"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "96",
+              "96",
+              "96"
+            ],
+            "network_weekly_after_cap": [
+              "672",
+              "6720",
+              "10752"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "96",
+              "192"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "6720",
+              "21504"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "-6720",
+        "-21504"
+      ]
+    },
+    "item_bread": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "60",
+              "240",
+              "8640"
+            ],
+            "network_weekly": [
+              "420",
+              "16800",
+              "967680"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "60",
+              "240",
+              "8640"
+            ],
+            "network_weekly_after_cap": [
+              "420",
+              "16800",
+              "967680"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "24",
+            "48"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "1680",
+            "5376"
+          ],
+          "network_weekly_net": [
+            "0",
+            "-1680",
+            "-5376"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "-24",
+            "-48"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "24",
+              "48"
+            ],
+            "network_weekly": [
+              "0",
+              "1680",
+              "5376"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "60",
+              "240",
+              "8640"
+            ],
+            "network_weekly": [
+              "420",
+              "16800",
+              "967680"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "24",
+              "24",
+              "24"
+            ],
+            "network_weekly": [
+              "168",
+              "1680",
+              "2688"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "production",
+            "kind": "item",
+            "player_daily_potential": [
+              "60",
+              "240",
+              "8640"
+            ],
+            "network_weekly_after_cap": [
+              "420",
+              "16800",
+              "967680"
+            ],
+            "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work."
+          },
+          {
+            "id": "existing_pending_materialization",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "24",
+              "24",
+              "24"
+            ],
+            "network_weekly_after_cap": [
+              "168",
+              "1680",
+              "2688"
+            ],
+            "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve."
+          },
+          {
+            "id": "confirmed_delete",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "24",
+              "48"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "1680",
+              "5376"
+            ],
+            "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "-1680",
+        "-5376"
+      ]
+    },
+    "vault": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prices": []
+}

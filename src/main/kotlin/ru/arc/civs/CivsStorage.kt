@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Bukkit
+import org.bukkit.Chunk
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.block.Block
@@ -14,12 +15,17 @@ import org.bukkit.event.HandlerList
 import org.bukkit.event.Listener
 import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockExplodeEvent
+import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.entity.EntityExplodeEvent
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
+import org.bukkit.event.world.ChunkLoadEvent
+import org.bukkit.event.world.ChunkUnloadEvent
+import org.bukkit.event.world.WorldLoadEvent
+import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.InventoryHolder
 import org.bukkit.inventory.ItemStack
@@ -51,12 +57,11 @@ data class CivInventoryTransaction(
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
         requireNotNull(after.inventory)
-        val allowed = storagePositions(after)
-        require(changes.size <= MAX_STORAGE_CONTAINERS * STORAGE_SLOTS)
+        require(changes.size <= MAX_INVENTORY_SLOT_CHANGES)
         require(changes.map { it.container to it.slot }.distinct().size == changes.size)
         changes.forEach { change ->
             require(change != null && change.container != null && change.containerType in STORAGE_TYPES && change.slot in 0 until STORAGE_SLOTS)
-            require(change.container in allowed && (allowed[change.container] == null || allowed[change.container] == change.containerType))
+            require(storagePositionAllowed(after, change.container, change.containerType))
             require(change.before != change.after)
             change.before?.validated()
             change.after?.validated()
@@ -70,25 +75,22 @@ sealed interface CivInventoryApplyResult {
     data class Conflict(val values: Map<String, String>) : CivInventoryApplyResult
 }
 
-private const val MAX_STORAGE_CONTAINERS = 32
+internal const val MAX_INVENTORY_SLOT_CHANGES = 65_536
+private const val MATERIALIZATION_SLOT_CHANGES = 1_024
+private const val MATERIALIZATION_CONTAINERS = 128
 private const val STORAGE_SLOTS = 27
-private val STORAGE_TYPES = setOf("CHEST", "BARREL")
+internal val CIVS_STORAGE_TYPES = setOf("CHEST", "TRAPPED_CHEST", "BARREL")
+private val STORAGE_TYPES = CIVS_STORAGE_TYPES
 
-/** Null means an explicitly registered chest or barrel; building controls must remain barrels. */
-private fun storagePositions(city: Settlement): Map<CivPosition, String?> {
-    require(city.buildings.size <= 16)
-    val inventory = requireNotNull(city.inventory) { "Settlement inventory has not been migrated" }.validated()
-    val result = linkedMapOf<CivPosition, String?>()
-    inventory.containers.forEach { result[it] = null }
-    city.buildings.mapNotNull(CivBuilding::control).forEach { result[it] = "BARREL" }
-    require(result.size <= MAX_STORAGE_CONTAINERS)
-    require(result.keys.all { city.contains(it.x, it.z) && it.y in -4_096..4_096 &&
-        kotlin.math.abs(it.x.toLong()) <= 30_000_000 && kotlin.math.abs(it.z.toLong()) <= 30_000_000 })
-    return result
-}
+/** Recovery authorizes durable coordinates against geometry, independently of loaded chunks or the index. */
+private fun storagePositionAllowed(city: Settlement, position: CivPosition, type: String): Boolean =
+    type in STORAGE_TYPES && city.contains(position.x, position.z) && position.y in -4_096..4_096 &&
+        kotlin.math.abs(position.x.toLong()) <= 30_000_000 && kotlin.math.abs(position.z.toLong()) <= 30_000_000 &&
+        (if (city.buildings.any { it.control == position }) type == "BARREL" else
+            position in city.inventory?.containers.orEmpty() || city.buildings.any { it.bounds.contains(position.x, position.y, position.z) })
 
 /** Bounded main-thread storage. No IO, chunk loads, item drops or native mutation during planning. */
-class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
+class CivsStorage(private val plugin: Plugin, tileEntities: (Chunk) -> Array<BlockState> = { it.tileEntities }) : Listener, AutoCloseable {
     private data class Key(val worldId: UUID, val position: CivPosition)
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>)
     private data class Source(val position: CivPosition, val type: String, val inventory: Inventory)
@@ -96,19 +98,59 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
     private val claims = mutableMapOf<UUID, Claim>()
     private val cityClaims = mutableMapOf<UUID, UUID>()
     private val locked = mutableMapOf<Key, UUID>()
+    private val index = CivsContainerIndex(plugin.server, tileEntities)
+    private val materializationCursors = mutableMapOf<UUID, Int>()
     private var closed = false
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
+
+    fun replaceCities(cities: Collection<Settlement>) {
+        checkMain(); requireOpen()
+        materializationCursors.clear()
+        index.replace(cities)
+    }
+    fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city) }
+    fun removeCity(cityId: UUID) {
+        checkMain(); requireOpen()
+        materializationCursors.remove(cityId)
+        index.remove(cityId)
+    }
+    fun refreshBuilding(city: Settlement, building: CivBuilding? = null) {
+        checkMain(); requireOpen()
+        index.refresh(city, building)
+    }
+
+    /** Background materialization waits until players finish managing their native containers. */
+    fun hasViewers(city: Settlement): Boolean {
+        checkMain(); requireOpen()
+        val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
+        return plugin.server.onlinePlayers.any { player ->
+            holderPositions(player.openInventory.topInventory.holder).any { it.worldId == city.worldId && it.position in positions }
+        }
+    }
 
     /** Acquire before preparing a receipt; keep it through journal, city commit and journal deletion. */
     fun lock(city: Settlement, transactionId: UUID) {
         checkMain()
         requireOpen()
-        val positions = storagePositions(city)
+        lock(city, transactionId, index.positions(city))
+    }
+
+    /** Exact receipt coordinates remain locked even if their chunks or current index entries are absent. */
+    fun lock(transaction: CivInventoryTransaction) {
+        checkMain(); requireOpen()
+        transaction.validated()
+        val positions = transaction.changes.associate { it.container to it.containerType }
+        lock(transaction.after, transaction.id, positions)
+    }
+
+    private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>) {
         val existing = claims[transactionId]
         if (existing != null) {
             require(existing.city.id == city.id && existing.city.owner == city.owner && existing.city.worldId == city.worldId &&
-                existing.positions == positions && (existing.city.revision == city.revision ||
+                positions.all { (position, type) -> position in existing.positions &&
+                    (type == null || existing.positions[position] == null || existing.positions[position] == type) } &&
+                (existing.city.revision == city.revision ||
                 existing.city.revision < Long.MAX_VALUE && existing.city.revision + 1 == city.revision ||
                 city.revision < Long.MAX_VALUE && city.revision + 1 == existing.city.revision)) { "Storage lock identity changed" }
             return
@@ -118,11 +160,9 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
         cityClaims[city.id] = transactionId
         positions.keys.forEach { locked[Key(city.worldId, it)] = transactionId }
         try {
-            positions.forEach { (position, type) ->
-                val world = plugin.server.getWorld(city.worldId) ?: return@forEach
-                if (!world.isChunkLoaded(position.x shr 4, position.z shr 4)) return@forEach
-                val source = try { resolve(city, position, type) } catch (_: CivsRejection) { return@forEach }
-                source.inventory.viewers.toList().forEach { it.closeInventory() }
+            // Closing current viewers scales with players, not every container in a large settlement.
+            plugin.server.onlinePlayers.forEach { player ->
+                if (locked(player.openInventory.topInventory)) player.closeInventory()
             }
         } catch (error: Exception) {
             unlock(transactionId)
@@ -141,12 +181,14 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
         checkMain()
         requireOpen()
         val inventory = requireNotNull(city.inventory).validated()
-        val totals = inventory.materials.toMutableMap()
-        inventory.buildingMaterials.orEmpty().values.forEach { warehouse ->
-            warehouse.forEach { (material, count) -> totals.merge(material, count, Math::addExact) }
-        }
+        val totals = mutableMapOf<String, Long>()
         if (inventory.mode == CivStorageMode.PHYSICAL) sources(city).forEach { source ->
             source.inventory.storageContents.forEach { stack -> plain(stack)?.let { totals.merge(it.material, it.amount.toLong(), Math::addExact) } }
+        } else {
+            totals.putAll(inventory.materials)
+            inventory.buildingMaterials.orEmpty().values.forEach { warehouse ->
+                warehouse.forEach { (material, count) -> totals.merge(material, count, Math::addExact) }
+            }
         }
         return totals.toSortedMap()
     }
@@ -157,29 +199,39 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
         val inventory = requireNotNull(city.inventory)
         val virtual = inventory.materials.toMutableMap()
         val warehouses = warehouses(inventory)
-        val snapshots = if (inventory.mode == CivStorageMode.PHYSICAL) snapshots(sources(city)) else emptyList()
-        val missing = sortedMapOf<String, Long>()
-        required.toSortedMap().forEach { (material, requested) ->
-            var remaining = requested
-            snapshots.forEach { snapshot ->
+        val snapshots = mutableListOf<Snapshot>()
+        val missing = required.toSortedMap()
+        if (inventory.mode == CivStorageMode.PHYSICAL) {
+            var changedSlots = 0
+            for (source in sources(city)) {
+                if (missing.isEmpty()) break
+                val snapshot = snapshot(source)
+                snapshots += snapshot
                 snapshot.after.indices.forEach { slot ->
                     val item = plain(snapshot.after[slot])
-                    if (remaining > 0 && item?.material == material) {
+                    val remaining = item?.let { missing[it.material] } ?: 0L
+                    if (remaining > 0 && item != null) {
+                        reject(changedSlots == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
                         val taken = minOf(remaining, item.amount.toLong()).toInt()
-                        remaining -= taken
-                        snapshot.after[slot] = stack(material, item.amount - taken)
+                        putAmount(missing, item.material, remaining - taken)
+                        snapshot.after[slot] = stack(item.material, item.amount - taken)
+                        changedSlots++
                     }
                 }
             }
-            val taken = minOf(remaining, virtual[material] ?: 0)
-            putAmount(virtual, material, (virtual[material] ?: 0) - taken)
-            remaining -= taken
-            warehouses.toSortedMap().values.forEach { warehouse ->
-                val amount = minOf(remaining, warehouse[material] ?: 0)
-                putAmount(warehouse, material, (warehouse[material] ?: 0) - amount)
-                remaining -= amount
+        } else {
+            required.toSortedMap().forEach { (material, requested) ->
+                var remaining = requested
+                val taken = minOf(remaining, virtual[material] ?: 0)
+                putAmount(virtual, material, (virtual[material] ?: 0) - taken)
+                remaining -= taken
+                warehouses.toSortedMap().values.forEach { warehouse ->
+                    val amount = minOf(remaining, warehouse[material] ?: 0)
+                    putAmount(warehouse, material, (warehouse[material] ?: 0) - amount)
+                    remaining -= amount
+                }
+                putAmount(missing, material, remaining)
             }
-            if (remaining > 0) missing[material] = remaining
         }
         if (missing.isNotEmpty()) throw CivsRejection("materials-missing", mapOf(
             "material" to missing.firstKey(), "count" to missing.getValue(missing.firstKey()).toString(),
@@ -200,16 +252,62 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
             putAmount(warehouse, material, Math.addExact(warehouse[material] ?: 0, count))
             return CivStoragePlan(inventory.copy(buildingMaterials = freeze(inventory, warehouses)).validated(), emptyList())
         }
-        val snapshots = snapshots(sources(city))
+        val prepared = mutableListOf<Snapshot>()
+        val snapshots = sources(city, buildingId).map { snapshot(it).also(prepared::add) }
         reject(insert(snapshots, material, count) != 0L, "storage-full")
-        return plan(inventory, snapshots)
+        return plan(inventory, prepared)
+    }
+
+    /** Move reserves into real slots in a bounded receipt; full/unloaded storage leaves every remainder durable. */
+    fun prepareMaterialization(city: Settlement, targetMode: CivStorageMode = CivStorageMode.PHYSICAL): CivStoragePlan {
+        checkClaim(city)
+        reject(targetMode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
+        val inventory = requireNotNull(city.inventory)
+        val virtual = inventory.materials.toMutableMap()
+        val warehouses = warehouses(inventory)
+        val positions = materializationWindow(city)
+        val prepared = linkedMapOf<CivPosition, Snapshot?>()
+        val changed = hashSetOf<Pair<CivPosition, Int>>()
+        fun move(amounts: MutableMap<String, Long>, buildingId: UUID?) {
+            val preferred = buildingId?.let { city.building(it)?.control }
+            val ordered = if (preferred == null) positions else positions.filter { it.first == preferred } + positions.filter { it.first != preferred }
+            for ((material, count) in amounts.toSortedMap()) {
+                if (changed.size >= MATERIALIZATION_SLOT_CHANGES) break
+                val snapshots = ordered.asSequence().mapNotNull { (position, type) ->
+                    if (position !in prepared) prepared[position] = try {
+                        snapshot(resolve(city, position, type))
+                    } catch (failure: CivsRejection) {
+                        if (failure.reason == "storage-unavailable") null else throw failure
+                    }
+                    prepared[position]
+                }
+                val remaining = insert(snapshots, material, count, changed)
+                putAmount(amounts, material, remaining)
+            }
+        }
+        move(virtual, null)
+        warehouses.toSortedMap().forEach { (id, amounts) -> move(amounts, UUID.fromString(id)) }
+        return plan(inventory.copy(mode = targetMode, materials = virtual.toMap(), buildingMaterials = freeze(inventory, warehouses)), prepared.values.filterNotNull())
+    }
+
+    /** Select before native reads; advance even when this whole window is full or unloaded. */
+    private fun materializationWindow(city: Settlement): List<Pair<CivPosition, String?>> {
+        val positions = claims.getValue(cityClaims.getValue(city.id)).positions
+        val controls = city.buildings.mapNotNull(CivBuilding::control).distinct().filter { it in positions }
+        val others = positions.keys.filter { it !in controls }
+        val count = minOf(MATERIALIZATION_CONTAINERS - controls.size, others.size)
+        val start = if (others.isEmpty()) 0 else (materializationCursors[city.id] ?: 0) % others.size
+        val selected = controls + (0 until count).map { others[(start + it) % others.size] }
+        materializationCursors[city.id] = if (others.isEmpty()) 0 else (start + count) % others.size
+        return selected.map { it to positions[it] }
     }
 
     /** Deposit plain cargo into this building's warehouse, retaining custom items and overflow. */
     fun depositFromControl(city: Settlement, building: CivBuilding): CivStoragePlan {
         checkClaim(city)
         val inventory = requireNotNull(city.inventory)
-        val snapshot = snapshots(listOf(control(city, building))).single()
+        reject(inventory.mode != CivStorageMode.VIRTUAL, "invalid-storage-mode")
+        val snapshot = snapshot(control(city, building))
         val warehouses = warehouses(inventory)
         val warehouse = warehouses.getOrPut(building.id.toString(), ::linkedMapOf)
         var space = warehouseSpace(city, building.id)
@@ -236,7 +334,7 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
         val warehouse = warehouses.getOrPut(building.id.toString(), ::linkedMapOf)
         val available = Math.addExact(warehouse[material] ?: 0, inventory.materials[material] ?: 0)
         if (available == 0L) throw CivsRejection("materials-missing", mapOf("material" to material, "count" to "1"))
-        val snapshots = snapshots(listOf(control(city, building)))
+        val snapshots = listOf(snapshot(control(city, building)))
         val requested = minOf(available, maximum.toLong())
         val remaining = insert(snapshots, material, requested)
         val moved = requested - remaining
@@ -318,9 +416,20 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
         require(claim.city == city) { "Storage preparation does not match its locked city revision" }
     }
 
-    private fun sources(city: Settlement): List<Source> = storagePositions(city).mapNotNull { (position, type) ->
-        try { resolve(city, position, type) } catch (failure: CivsRejection) {
-            if (failure.reason == "storage-unavailable") null else throw failure
+    private fun sources(city: Settlement, preferredBuildingId: UUID? = null): Sequence<Source> {
+        val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
+        val preferred = preferredBuildingId?.let { id ->
+            (city.building(id) ?: throw CivsRejection("building-not-found")).control
+        }
+        // The claim freezes source membership across journal IO. New event-indexed containers join the next operation.
+        val ordered = sequence {
+            if (preferred != null && preferred in positions) yield(preferred to positions[preferred])
+            positions.forEach { (position, type) -> if (position != preferred) yield(position to type) }
+        }
+        return ordered.mapNotNull { (position, type) ->
+            try { resolve(city, position, type) } catch (failure: CivsRejection) {
+                if (failure.reason == "storage-unavailable") null else throw failure
+            }
         }
     }
 
@@ -331,8 +440,8 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
     }
 
     private fun resolve(city: Settlement, position: CivPosition, expectedType: String?): Source {
-        val allowed = storagePositions(city)
-        reject(position !in allowed, "not-authorized")
+        val control = city.buildings.any { it.control == position }
+        reject(!storagePositionAllowed(city, position, if (control) "BARREL" else expectedType ?: "CHEST"), "not-authorized")
         val values = mapOf("x" to position.x.toString(), "y" to position.y.toString(), "z" to position.z.toString(), "world" to city.worldId.toString())
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable", values)
         val located = values + ("world_name" to world.name)
@@ -346,38 +455,57 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
             is Barrel -> state.inventory
             else -> throw CivsRejection("storage-container-invalid", located + ("block" to block.type.name))
         }
-        if (expectedType != null && block.type.name != expectedType || allowed[position] != null && block.type.name != allowed[position])
+        if (block.type.name !in STORAGE_TYPES || expectedType != null && block.type.name != expectedType || control && block.type != Material.BARREL)
             throw CivsRejection("storage-container-invalid", located + ("block" to block.type.name))
         require(inventory.size == STORAGE_SLOTS)
         return Source(position, block.type.name, inventory)
     }
 
-    private fun snapshots(sources: List<Source>): List<Snapshot> = sources.map { source ->
+    private fun snapshot(source: Source): Snapshot {
         val before = source.inventory.storageContents.map { it?.clone() }
         require(before.size == STORAGE_SLOTS)
-        Snapshot(source, before, before.map { it?.clone() }.toMutableList())
+        return Snapshot(source, before, before.map { it?.clone() }.toMutableList())
     }
 
-    private fun plan(inventory: CivInventory, snapshots: List<Snapshot>): CivStoragePlan = CivStoragePlan(inventory.validated(), snapshots.flatMap { snapshot ->
-        snapshot.before.indices.mapNotNull { slot ->
-            val before = plain(snapshot.before[slot])
-            val after = plain(snapshot.after[slot])
-            if (before == after) null else CivInventorySlotChange(snapshot.source.position, snapshot.source.type, slot, before, after)
+    private fun plan(inventory: CivInventory, snapshots: List<Snapshot>): CivStoragePlan {
+        val changes = mutableListOf<CivInventorySlotChange>()
+        snapshots.forEach { snapshot ->
+            snapshot.before.indices.forEach { slot ->
+                val before = plain(snapshot.before[slot])
+                val after = plain(snapshot.after[slot])
+                if (before != after) {
+                    reject(changes.size == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
+                    changes += CivInventorySlotChange(snapshot.source.position, snapshot.source.type, slot, before, after)
+                }
+            }
         }
-    })
+        return CivStoragePlan(inventory.validated(), changes.toList())
+    }
 
-    private fun insert(snapshots: List<Snapshot>, material: String, amount: Long): Long {
+    private fun insert(snapshots: List<Snapshot>, material: String, amount: Long): Long = insert(snapshots.asSequence(), material, amount)
+
+    private fun insert(snapshots: Sequence<Snapshot>, material: String, amount: Long,
+        changed: MutableSet<Pair<CivPosition, Int>>? = null): Long {
         var remaining = amount
+        var writes = 0
         val limit = requireNotNull(stack(material, 1)).maxStackSize
-        // Fill matching stacks first, then empty slots, retaining every custom or unrelated item.
-        for (empty in listOf(false, true)) for (snapshot in snapshots) for (slot in snapshot.after.indices) {
+        // Finish each source before proceeding: the control remains primary even when another chest has a partial stack.
+        for (snapshot in snapshots) for (empty in listOf(false, true)) for (slot in snapshot.after.indices) {
             if (remaining == 0L) return 0
             val current = snapshot.after[slot]
             val item = plain(current)
             if (if (empty) !isEmpty(current) else item?.material != material) continue
             val count = if (empty) 0 else requireNotNull(item).amount
             val added = minOf(remaining, (limit - count).coerceAtLeast(0).toLong()).toInt()
-            if (added > 0) snapshot.after[slot] = stack(material, count + added)
+            if (added > 0) {
+                if (changed != null) {
+                    val key = snapshot.source.position to slot
+                    if (key !in changed && changed.size >= MATERIALIZATION_SLOT_CHANGES) return remaining
+                    changed += key
+                } else reject(writes == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
+                snapshot.after[slot] = stack(material, count + added)
+                writes++
+            }
             remaining -= added
         }
         return remaining
@@ -458,12 +586,31 @@ class CivsStorage(private val plugin: Plugin) : Listener, AutoCloseable {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onEntityExplosion(event: EntityExplodeEvent) { event.blockList().removeIf(::locked) }
 
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexPlace(event: BlockPlaceEvent) { index.changed(event.blockPlaced) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexBreak(event: BlockBreakEvent) { index.removed(event.block) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexBlockExplosion(event: BlockExplodeEvent) { event.blockList().forEach(index::removed) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexEntityExplosion(event: EntityExplodeEvent) { event.blockList().forEach(index::removed) }
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun indexChunkLoad(event: ChunkLoadEvent) { index.load(event.chunk) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexChunkUnload(event: ChunkUnloadEvent) { index.unload(event.chunk) }
+    @EventHandler(priority = EventPriority.MONITOR)
+    fun indexWorldLoad(event: WorldLoadEvent) { event.world.loadedChunks.forEach(index::load) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun indexWorldUnload(event: WorldUnloadEvent) { index.unloadWorld(event.world.uid) }
+
     override fun close() {
         checkMain()
         if (closed) return
         closed = true
         HandlerList.unregisterAll(this)
         claims.keys.toList().forEach(::unlock)
+        index.clear()
+        materializationCursors.clear()
     }
     private fun requireOpen() = check(!closed) { "CivsStorage is closed" }
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "CivsStorage requires Paper's main thread" }

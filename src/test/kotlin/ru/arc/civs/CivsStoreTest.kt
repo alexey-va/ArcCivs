@@ -142,9 +142,9 @@ class CivsStoreTest : FreeSpec({
         val initial = settlement()
         val store = CivsStore(root, directExecutor, maximumCities = 1)
         store.save(initial).join() shouldBe initial
-        val emptied = emptyInventory(initial).copy(revision = 1)
-        store.save(emptied).join()
-        store.delete(emptied).join()
+        val stocked = initial.copy(revision = 1)
+        store.save(stocked).join()
+        store.delete(stocked).join()
         // Simulate a crash after the tombstone commit, before old city-file cleanup.
         val oldPath = root.resolve("cities/${initial.id}.json")
         writeCity(oldPath, initial)

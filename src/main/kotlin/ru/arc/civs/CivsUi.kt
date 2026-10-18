@@ -260,19 +260,33 @@ class CivsUi internal constructor(
                 tr(player, "label.construction") to constructionText(player, city),
             )),
             construction?.failure?.let { body(text.reason(player, it)) },
-            body(nextStep(player, city)), body(player, "city.boundary-help"), body(player, "city.sleep-rule"), busyBody(player), feedback?.let(::body),
+            body(nextStep(player, city)), busyBody(player), feedback?.let(::body),
         ), buildList {
             add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             add(button(player, "buildings", "buildings.open", LAND) { showBuildings(player) })
             add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
+            add(button(player, "guide", "guide.open", NAVIGATION) { showGuide(player) })
         }, reopen = { showOverview(player) })
+    }
+
+    private fun showGuide(player: Player) {
+        city(player) ?: return
+        present(player, "civs.guide", "guide.title", listOf(
+            body(player, "city.boundary-help"), body(player, "city.sleep-rule"), body(player, "buildings.site-help"),
+            body(player, "guide.storage-help"),
+        ), emptyList(), reopen = { showGuide(player) })
     }
 
     private fun showManagement(player: Player) {
         val city = city(player) ?: return
         present(player, "civs.management", "management.title", listOfNotNull(
             body(tr(player, "city.intro", "name" to city.name)),
-            body(player, "management.help"), busyBody(player),
+            body(player, "management.help"),
+            city.inventory?.let { inventory -> table(listOf(
+                tr(player, "stock.mode-label") to tr(player, "stock.mode.${inventory.mode.name.lowercase(Locale.ROOT)}"),
+            )) },
+            city.inventory?.let { body(player, "stock.${it.mode.name.lowercase(Locale.ROOT)}-help") },
+            busyBody(player),
         ), buildList {
             add(button(player, "stock", "stock.open", STOCK) { showStock(player) })
             add(button(player, "upgrades", "upgrades.open", PERSONAL) { showUpgrades(player) })
@@ -295,21 +309,18 @@ class CivsUi internal constructor(
         val inventory = city.inventory
         val hasVirtualStock = inventory?.materials?.values.orEmpty().any { it > 0 } ||
             inventory?.buildingMaterials.orEmpty().values.any { stock -> stock.values.any { it > 0 } }
-        val legacyStock = city.stock != Stock()
         val busy = host.cityBusy(player)
-        val canConfirm = !hasVirtualStock && !legacyStock && !busy
         var draft = initial
         present(player, "civs.delete-city", "delete.title", listOfNotNull(
             body(tr(player, "delete.city", "name" to city.name).color(DANGER)),
             body(player, "delete.world-help"), body(player, "delete.founding-help"),
+            body(tr(player, "delete.stock-help").color(DANGER)),
             if (city.construction != null) body(player, "delete.construction-help") else null,
-            if (legacyStock) body(text.reason(player, "materials-migration-pending")) else null,
-            if (hasVirtualStock) body(text.reason(player, "delete-storage-not-empty")) else null,
-            if (!hasVirtualStock && !legacyStock) body(player, "delete.name-help") else null,
+            body(player, "delete.name-help"),
             busyBody(player), error?.let { body(it.color(DANGER)) },
         ), buildList {
             if (hasVirtualStock) add(button(player, "stock", "delete.open-storage", STOCK) { showStock(player) })
-            if (canConfirm) add(button(player, "delete", "delete.confirm", DANGER) { context ->
+            if (!busy) add(button(player, "delete", "delete.confirm", DANGER) { context ->
                 val name = context.text(DELETE_NAME).orEmpty()
                 draft = name
                 if (name != city.name) showDeleteCity(player, expectedCityId, name, text.reason(player, "delete-name-mismatch"))
@@ -323,9 +334,9 @@ class CivsUi internal constructor(
             add(button(player, "refresh", "common.refresh") { context ->
                 showDeleteCity(player, expectedCityId, context.text(DELETE_NAME) ?: draft)
             })
-        }, inputs = if (!hasVirtualStock && !legacyStock) listOf(
+        }, inputs = listOf(
             PaperDialogTextInput(DELETE_NAME, tr(player, "delete.name-label"), initial = initial.take(32), width = 320, maxLength = 32),
-        ) else emptyList(), reopen = { showDeleteCity(player, expectedCityId, draft) })
+        ), reopen = { showDeleteCity(player, expectedCityId, draft) })
     }
 
     private fun showStock(player: Player, page: Int = 0, error: Component? = null) {
@@ -336,19 +347,28 @@ class CivsUi internal constructor(
             return
         }
         val current = page.coerceIn(0, lastPage(city.buildings.size))
+        val physical = inventory.mode == CivStorageMode.PHYSICAL
+        val pending = inventory.materials.values.sum() + inventory.buildingMaterials.orEmpty().values.sumOf { it.values.sum() }
+        val busy = host.cityBusy(player)
         present(player, "civs.stock", "stock.title", listOfNotNull(
-            body(player, "stock.help"), table(listOf(
-                tr(player, "stock.mode-label") to tr(player, "stock.mode.${inventory.mode.name.lowercase(Locale.ROOT)}"),
-                tr(player, "stock.reserve-label") to tr(player, "stock.items", "amount" to inventory.materials.values.sum()),
-                tr(player, "stock.containers-label") to tr(player, "common.fraction", "value" to inventory.containers.size, "limit" to CivInventory.MAX_CONTAINERS),
-            )), body(player, "stock.reserve-help"), busyBody(player), error?.let(::body),
+            body(player, if (physical) "stock.physical-help" else "stock.help"), table(buildList {
+                add(tr(player, "stock.mode-label") to tr(player, "stock.mode.${inventory.mode.name.lowercase(Locale.ROOT)}"))
+                if (!physical) add(tr(player, "stock.reserve-label") to tr(player, "stock.items", "amount" to inventory.materials.values.sum()))
+                else if (pending > 0) add(tr(player, "stock.pending-label") to tr(player, "stock.items", "amount" to pending))
+            }), if (!physical) body(player, "stock.reserve-help") else null,
+            if (physical && pending > 0) body(player, "stock.pending-help") else null,
+            busyBody(player), error?.let(::body),
         ), buildList {
             add(button(player, "materials", "stock.available", STOCK) { showAvailableMaterials(player) })
             add(button(player, "mode", "stock.mode-open") { showStorageMode(player) })
             add(button(player, "containers", "stock.containers-open") { showContainers(player) })
-            city.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
+            if (physical && pending > 0 && !busy) add(button(player, "materialize", "stock.materialize", COMMIT) {
+                perform(player, "civs.stock", "stock.title", { host.materializeStorage(player) },
+                    success = { showStock(player, current) }, failure = { showStock(player, current, it) })
+            })
+            if (!physical || !busy) city.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
                 add(valueButton(player, "warehouse_$index", "common.destination", buildingName(player, building.type, building.level), STOCK) {
-                    showWarehouse(player, building.id)
+                    openWarehouse(player, building.id)
                 })
             }
             pages(player, current, city.buildings.size) { showStock(player, it) }
@@ -357,12 +377,12 @@ class CivsUi internal constructor(
     }
 
     private fun showAvailableMaterials(player: Player, page: Int = 0) {
-        city(player) ?: return
+        val city = city(player) ?: return
         val result = runCatching { host.availableMaterials(player).toSortedMap().entries.toList() }
         val materials = result.getOrDefault(emptyList())
         val current = page.coerceIn(0, lastPage(materials.size))
         present(player, "civs.materials", "stock.available-title", listOfNotNull(
-            body(player, "stock.available-help"),
+            body(player, if (city.inventory?.mode == CivStorageMode.PHYSICAL) "stock.available-physical-help" else "stock.available-help"),
             if (materials.isEmpty() && result.isSuccess) body(player, "stock.empty") else null,
             if (materials.isNotEmpty()) table(materials.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
                 materialName(player, material) to text.literal(count)
@@ -431,10 +451,18 @@ class CivsUi internal constructor(
         }, reopen = { showContainer(player, position) })
     }
 
+    private fun openWarehouse(player: Player, buildingId: UUID) {
+        val city = city(player) ?: return
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL) return showWarehouse(player, buildingId)
+        if (host.cityBusy(player)) return showBuilding(player, buildingId, text.reason(player, "city-busy"))
+        openIntake(player, buildingId)
+    }
+
     private fun showWarehouse(player: Player, buildingId: UUID, page: Int = 0, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         val inventory = city.inventory ?: return showStock(player)
+        if (inventory.mode != CivStorageMode.VIRTUAL) return showBuilding(player, buildingId, error)
         val own = inventory.buildingStock(buildingId)
         val reserve = inventory.materials
         val materials = (own.keys + reserve.keys).sorted()
@@ -469,6 +497,7 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         val inventory = city.inventory ?: return showStock(player)
+        if (inventory.mode != CivStorageMode.VIRTUAL) return showBuilding(player, buildingId, error)
         val own = inventory.buildingStock(buildingId)
         val reserve = inventory.materials
         val materials = (own.keys + reserve.keys).sorted()
@@ -501,8 +530,13 @@ class CivsUi internal constructor(
         future.whenCompleteSync(tasks, epoch) { _, error ->
             if (error != null && !closed && player.isOnline && player.uniqueId !in visits) {
                 runtime.beginFlow(player)
-                roots[player.uniqueId] = "civs.warehouse"
-                showWarehouse(player, buildingId, error = text.failure(player, error))
+                if (host.city(player)?.inventory?.mode == CivStorageMode.PHYSICAL) {
+                    roots[player.uniqueId] = "civs.building"
+                    showBuilding(player, buildingId, text.failure(player, error))
+                } else {
+                    roots[player.uniqueId] = "civs.warehouse"
+                    showWarehouse(player, buildingId, error = text.failure(player, error))
+                }
             }
         }
     }
@@ -569,7 +603,9 @@ class CivsUi internal constructor(
             if (building.type == BuildingType.TOWN_HALL && CivsRules.legacyHallBuilder(city)) body(player, "buildings.legacy-builder-help") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
-            add(button(player, "warehouse", "warehouse.open", STOCK) { showWarehouse(player, buildingId) })
+            if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
+                add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
+            }
             if (building.phase == BuildingPhase.SITE) add(button(player, "materials", "materials.open", COMMIT) { loadBuildingMaterials(player, buildingId) })
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (CivsProduction.options(building.type).isNotEmpty()) add(button(player, "production", "production.open", PERSONAL) { showProduction(player, buildingId) })
@@ -733,8 +769,8 @@ class CivsUi internal constructor(
             table(buildList {
                 add(tr(player, "label.level") to tr(player, "common.change", "before" to building.level, "after" to target))
                 add(tr(player, "label.benefit") to upgradeBenefit(player, building))
-                add(tr(player, "warehouse.capacity") to tr(player, "common.change", "before" to CivInventory.buildingCapacity(building),
-                    "after" to CivInventory.buildingCapacity(building.copy(level = target))))
+                if (city.inventory?.mode == CivStorageMode.VIRTUAL) add(tr(player, "warehouse.capacity") to tr(player, "common.change",
+                    "before" to CivInventory.buildingCapacity(building), "after" to CivInventory.buildingCapacity(building.copy(level = target))))
                 if (building.type == BuildingType.TOWN_HALL) add(tr(player, "label.radius") to tr(player, "common.change", "before" to city.radius, "after" to city.radius.toLong() + 32))
             }), body(player, "upgrades.materials-help"),
             when {

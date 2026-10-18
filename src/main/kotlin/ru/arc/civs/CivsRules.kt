@@ -15,13 +15,11 @@ object CivsRules {
     const val MAX_TERRITORY_GROWTH = 64
     val STARTING_STOCK = Stock(96, 96, 24)
 
-    /** Deletion never destroys or converts stored items; withdraw the virtual stock first. */
+    /** Confirmed deletion discards virtual records; native blocks and container contents stay in the world. */
     fun requireDeletion(city: Settlement, actor: UUID, expectedCityId: UUID, confirmationName: String) {
         ownerOnly(city, actor)
         check(city.id == expectedCityId, "delete-city-changed")
         check(confirmationName.trim() == city.name, "delete-name-mismatch")
-        check(city.stock == Stock() && city.inventory?.materials.orEmpty().isEmpty() &&
-            city.inventory?.buildingMaterials.orEmpty().values.all { it.isEmpty() }, "delete-storage-not-empty")
     }
     private val ESSENTIAL_BUILDINGS = setOf(BuildingType.WAREHOUSE, BuildingType.FARM, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY)
 

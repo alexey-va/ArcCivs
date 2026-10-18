@@ -43,6 +43,7 @@ class CivsService(
     onCitizensCreated: (CivsCitizens) -> Unit = {},
     private val clock: () -> Long = System::currentTimeMillis,
     boundaryRenderer: CivsBoundaryRenderer? = null,
+    storageAdapter: CivsStorage? = null,
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
         val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
@@ -53,7 +54,7 @@ class CivsService(
         val type: BuildingType, val expires: Long,
     )
     private data class PlacementTarget(val position: CivPosition, val groundLevel: Boolean)
-    private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>) {
+    private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>, val containersChanged: Boolean) {
         var repairing = false
     }
     private data class RecoveredPlacement(val plan: CivPlacementPlan, val snapshot: ArcSchematicSnapshot,
@@ -80,7 +81,7 @@ class CivsService(
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
-    private val storage = CivsStorage(plugin)
+    private val storage = storageAdapter ?: CivsStorage(plugin)
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
@@ -354,7 +355,6 @@ class CivsService(
                     val city = cityId?.let { cities[it] ?: throw CivsRejection("no-city") }
                     val source = requireNotNull(blueprint)
                     val prepared = source.copy(building = source.building.copy(production = city?.building(buildingId)?.production))
-                    if (upgrading) rejectIf(city?.building(buildingId)?.control != prepared.building.control, "control-relocation-required")
                     if (city != null) rejectIf(!city.canManage(player.uniqueId) ||
                         !city.contains(prepared.building.bounds.min.x, prepared.building.bounds.min.z) ||
                         !city.contains(prepared.building.bounds.max.x, prepared.building.bounds.max.z), "outside-city")
@@ -389,6 +389,9 @@ class CivsService(
         if (!preview.upgrading) requireControlBarrel(blueprint.worldId, blueprint.building)
         val cityId = preview.cityId ?: UUID.randomUUID()
         val previousCity = preview.cityId?.let { managed(player).also { current -> rejectIf(current.id != it, "not-authorized") } }
+        // Legacy controls must not prevent seeing the correct upgrade marker. Rebind before any world capture or debit.
+        if (preview.upgrading) rejectIf(previousCity?.building(blueprint.building.id)?.control != blueprint.building.control,
+            "control-relocation-required")
         rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
         if (previousCity == null) {
             requireFounder(player)
@@ -614,6 +617,10 @@ class CivsService(
         val tx = try {
             val prepared = prepare(city)
             val after = CivsRules.validate(transition(city, prepared.inventoryAfter))
+            if (after == city && prepared.changes.isEmpty()) {
+                storage.unlock(id)
+                return CompletableFuture.completedFuture(city)
+            }
             require(after.revision == city.revision + 1)
             CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes)
         } catch (failure: Exception) { storage.unlock(id); throw failure }
@@ -621,6 +628,15 @@ class CivsService(
         val result = tracked<Settlement>()
         store.saveInventoryTransaction(tx).whenCompleteSync(tasks) { _, failure ->
             if (failure != null) {
+                val rejection = CivsDiagnostics.rejection(failure)
+                if (rejection?.reason == "storage-transaction-too-large") {
+                    // The store rejects oversized bytes before writing a journal; no native mutation has started.
+                    storage.unlock(id)
+                    busy -= cityId
+                    result.completeExceptionally(rejection)
+                    updateHealth()
+                    return@whenCompleteSync
+                }
                 inventoryRecovery[cityId] = tx
                 unhealthy += cityId
                 blockedRecovery += cityId
@@ -687,7 +703,7 @@ class CivsService(
         val city = cities[tx.cityId] ?: run { blockedRecovery += tx.cityId; return }
         busy += city.id
         runCatching {
-            storage.lock(tx.after, tx.id)
+            storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) finishInventory(tx, null)
             else throw CivsRejection("inventory-conflict")
@@ -700,11 +716,34 @@ class CivsService(
     override fun availableMaterials(player: Player): Map<String, Long> = storage.available(managed(player))
 
     override fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit> = action("storage_mode", player, "mode" to mode) {
-        mutate(managed(player).id) { city ->
-            val inventory = city.inventory ?: throw CivsRejection("materials-migration-pending")
-            if (inventory.mode == mode) city else CivsRules.validate(city.copy(inventory = inventory.copy(mode = mode), revision = city.revision + 1))
+        val city = managed(player)
+        if (mode == CivStorageMode.PHYSICAL) materialize(city.id).thenApply { Unit }
+        else mutate(city.id) { current ->
+            val inventory = current.inventory ?: throw CivsRejection("materials-migration-pending")
+            if (inventory.mode == mode) current else CivsRules.validate(current.copy(inventory = inventory.copy(mode = mode), revision = current.revision + 1))
         }.thenApply { Unit }
     }
+
+    override fun materializeStorage(player: Player): CompletableFuture<Unit> = action("storage_materialize", player) {
+        val city = managed(player)
+        rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
+        materialize(city.id).thenApply { Unit }
+    }
+
+    private fun materialize(cityId: UUID): CompletableFuture<Settlement> {
+        val before = cities[cityId] ?: throw CivsRejection("no-city")
+        return inventoryMutation(cityId, { storage.prepareMaterialization(it) }) { current, inventory ->
+            if (inventory == current.inventory) current else current.copy(inventory = inventory, revision = current.revision + 1)
+        }.whenComplete { saved, failure ->
+            if (failure == null && saved != before) CivsDiagnostics.event("storage_materialized", "city" to cityId,
+                "revision" to saved.revision, "moved_items" to pendingMaterials(before) - pendingMaterials(saved),
+                "pending_items" to pendingMaterials(saved))
+        }
+    }
+
+    private fun pendingMaterials(city: Settlement): Long = city.inventory?.let { inventory ->
+        inventory.materials.values.sum() + inventory.buildingMaterials.orEmpty().values.sumOf { it.values.sum() }
+    } ?: 0L
 
     private fun inventoryBuilding(player: Player, city: Settlement, buildingId: UUID): CivBuilding {
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
@@ -717,8 +756,14 @@ class CivsService(
     override fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("inventory_open", player, "building" to buildingId) {
         val city = managed(player)
         rejectIf(city.id in busy, "city-busy")
-        storage.openControl(player, city, inventoryBuilding(player, city, buildingId))
-        CompletableFuture.completedFuture(Unit)
+        inventoryBuilding(player, city, buildingId)
+        val prepared = if (city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0)
+            materialize(city.id) else CompletableFuture.completedFuture(city)
+        prepared.thenApply {
+            val current = managed(player)
+            rejectIf(current.id != city.id, "no-city")
+            storage.openControl(player, current, inventoryBuilding(player, current, buildingId))
+        }
     }
 
     override fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition> = action("control_locate", player, "building" to buildingId) {
@@ -819,7 +864,7 @@ class CivsService(
         val block = player.rayTraceBlocks(6.0, FluidCollisionMode.NEVER)?.hitBlock ?: throw CivsRejection("look-at-container")
         val point = CivPosition(block.x, block.y, block.z)
         rejectIf(block.world.uid != city.worldId || !city.contains(point.x, point.z), "outside-city")
-        rejectIf(block.type !in setOf(Material.CHEST, Material.BARREL), "look-at-container")
+        rejectIf(block.type !in setOf(Material.CHEST, Material.TRAPPED_CHEST, Material.BARREL), "look-at-container")
         rejectIf(!world.canModify(city.owner, block), "lands-denied")
         rejectIf(civsProtectedBuildings(city).any { it.phase == BuildingPhase.CONSTRUCTING && it.bounds.contains(point.x, point.y, point.z) } ||
             city.construction?.plannedBuilding?.bounds?.contains(point.x, point.y, point.z) == true, "construction-busy")
@@ -889,6 +934,9 @@ class CivsService(
                         citizens.pulse(now())
                         CivsDiagnostics.event("city_deleted", "city" to city.id, "owner" to city.owner,
                             "revision" to city.revision, "buildings_preserved" to city.buildings.size,
+                            "discarded_shared_items" to city.inventory?.materials.orEmpty().values.sum(),
+                            "discarded_building_items" to city.inventory?.buildingMaterials.orEmpty().values.sumOf { it.values.sum() },
+                            "discarded_legacy_stock" to city.stock,
                             "construction_cancelled" to city.construction?.id)
                         result.complete(Unit)
                     }
@@ -956,8 +1004,9 @@ class CivsService(
                 inventoryRecovery.clear()
                 blockedRecovery.clear()
                 inventoryRecovery.putAll(transactions.associateBy { it.cityId })
+                storage.replaceCities(records.values)
                 // Recovery is gradual, but native containers must be locked before any player can reopen them.
-                transactions.forEach { storage.lock(it.after, it.id) }
+                transactions.forEach(storage::lock)
                 cities = records
                 protection.publish(prepared)
                 geometryGeneration++
@@ -989,12 +1038,12 @@ class CivsService(
             if (failure != null) result.completeExceptionally(failure)
             else if (geometryGeneration != expected) publish(cityId, city).whenComplete { _, retryFailure ->
                 if (retryFailure == null) result.complete(Unit) else result.completeExceptionally(retryFailure)
-            } else {
+            } else runCatching {
+                if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
                 protection.publish(requireNotNull(prepared))
                 geometryGeneration++
-                result.complete(Unit)
-            }
+            }.onSuccess { result.complete(Unit) }.onFailure(result::completeExceptionally)
         }
         return result
     }
@@ -1009,6 +1058,7 @@ class CivsService(
             recoverInventories()
             pulseImmigration()
             pulseControls()
+            pulseStorage()
         }
         pulseConstruction()
         updateHealth()
@@ -1016,6 +1066,21 @@ class CivsService(
 
     private val controlFailures = mutableSetOf<UUID>()
     private var controlCursor = 0
+    private var nextStorageTransferAt = 0L
+    private var storageCursor = 0
+
+    private fun pulseStorage() {
+        if (now() < nextStorageTransferAt) return
+        val candidates = cities.values.filter { city ->
+            city.id !in busy && city.id !in unhealthy && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&
+                !storage.hasViewers(city) &&
+                plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
+        }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(storageCursor++, candidates.size)]
+        nextStorageTransferAt = now() + 5_000L
+        runCatching { materialize(city.id) }.onFailure { log("materialize stored items ${city.id}", it) }
+    }
 
     /** The player provides this block: registering/deleting sites must not mint free containers. */
     private fun requireControlBarrel(worldId: UUID, building: CivBuilding) {
@@ -1039,6 +1104,7 @@ class CivsService(
         rejectIf(block.state is org.bukkit.block.TileState || block.type in setOf(Material.BEDROCK, Material.LAVA), "control-obstructed")
         rejectIf(!world.canModify(city.owner, block, Material.BARREL), "lands-denied")
         block.setType(Material.BARREL, false)
+        storage.refreshBuilding(city, building)
         controlFailures -= building.id
         CivsDiagnostics.event("control_placed", "city" to city.id, "building" to building.id, "world" to city.worldId, "block" to point)
     }
@@ -1131,9 +1197,11 @@ class CivsService(
                     it.position.x in batch.minimum.x..batch.maximum.x && it.position.y == batch.minimum.y &&
                         it.position.z in batch.minimum.z..batch.maximum.z
                 }
+                val containerTypes = setOf("minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel")
+                val containersChanged = cells.any { it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes }
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y == batch.minimum.y && p.z in batch.minimum.z..batch.maximum.z
-                }), batch, plan.copy(blocks = cells))
+                }, containersChanged), batch, plan.copy(blocks = cells))
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
             if (closed) return@whenCompleteSync
@@ -1195,6 +1263,7 @@ class CivsService(
                         else {
                             CivsDiagnostics.event("construction_batch_committed", "city" to cityId, "order" to orderId,
                                 "completed" to (order.workDone + 1), "total" to order.workRequired)
+                            if (access.containersChanged) saved?.let { storage.refreshBuilding(it, plan.building) }
                             if (saved?.construction == null) repairCommitted(cityId, plan, fullSnapshot)
                             else releasePlacement(cityId)
                         }

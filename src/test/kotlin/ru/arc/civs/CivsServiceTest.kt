@@ -29,6 +29,106 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("physical mode materializes existing reserves only after its journal and does not repeat the transfer") {
+        serviceScenario { h ->
+            val control = CivPosition(0, 63, 0)
+            h.world.getBlockAt(0, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory.starting(Stock(96, 96, 24), CivStorageMode.VIRTUAL),
+                buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            val retire = CompletableFuture<Boolean>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns retire
+            h.start()
+            val switched = h.service.setStorageMode(h.player, CivStorageMode.PHYSICAL)
+            barrel.contents.filterNotNull().sumOf { it.amount } shouldBe 7
+            h.service.city(h.player) shouldBe city
+            journal.complete(receipt!!); h.tick()
+            barrel.contents.filterNotNull().sumOf { it.amount } shouldBe 223
+            barrel.getItem(0)!!.amount shouldBe 7
+            h.commit()
+            switched.isDone shouldBe false
+            retire.complete(true); h.tick(); switched.join() shouldBe Unit
+            h.service.city(h.player)!!.inventory!!.let {
+                it.mode shouldBe CivStorageMode.PHYSICAL
+                it.materials shouldBe emptyMap()
+            }
+            h.service.materializeStorage(h.player).join() shouldBe Unit
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            barrel.contents.filterNotNull().sumOf { it.amount } shouldBe 223
+        }
+    }
+
+    test("full physical containers retain pending reserves without writing an empty journal") {
+        serviceScenario { h ->
+            val control = CivPosition(0, 63, 0)
+            h.world.getBlockAt(0, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
+            for (slot in 0 until barrel.size) barrel.setItem(slot, org.bukkit.inventory.ItemStack(Material.STONE, 64))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory.starting(Stock(96, 96, 24)),
+                buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start()
+            h.service.materializeStorage(h.player).join() shouldBe Unit
+            h.service.city(h.player) shouldBe city
+            h.service.cityBusy(h.player) shouldBe false
+            h.service.availableMaterials(h.player) shouldBe mapOf("STONE" to 1728L)
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.save(any()) }
+        }
+    }
+
+    test("known receipt size rejection unlocks physical items without entering recovery") {
+        serviceScenario { h ->
+            val control = CivPosition(0, 63, 0)
+            h.world.getBlockAt(0, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.BREAD, 24))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } returns CompletableFuture.failedFuture(CivsRejection("storage-transaction-too-large"))
+            h.start()
+            val rejected = h.service.recruit(h.player); h.tick()
+            (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
+            h.service.cityBusy(h.player) shouldBe false
+            h.service.ready() shouldBe true
+            barrel.getItem(0)!!.amount shouldBe 24
+            verify(exactly = 0) { h.store.save(any()); h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("legacy control permits upgrade preview but requires rebinding before capture or debit") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().let { it.copy(control = it.anchor) }
+            val target = CivPosition(1, 65, 1)
+            val city = h.city.copy(buildings = listOf(hall) + h.city.buildings.drop(1))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val upgraded = CivBlueprint(hall.copy(level = 3, control = target), h.world.uid,
+                mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1))
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+                arg<Int>(2) shouldBe 3
+                arg<CivPosition>(8) shouldBe hall.entrance
+                CompletableFuture.completedFuture(upgraded)
+            }
+            h.start()
+            val preview = h.service.prepareUpgrade(h.player, hall.id); h.tick(); preview.join() shouldBe Unit
+            h.service.preview(h.player)!!.let {
+                it.level shouldBe 3
+                it.control shouldBe target
+                it.entrance shouldBe hall.entrance
+                it.movable shouldBe false
+            }
+            verify(exactly = 1) { h.renderer.show(h.player, upgraded.building, upgraded.surface) }
+            val rejected = shouldThrow<CompletionException> { h.service.confirmPreview(h.player).join() }.cause as CivsRejection
+            rejected.reason shouldBe "control-relocation-required"
+            verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()); h.store.save(any()); h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     test("clicking an existing barrel uses its exact block position without adding the authored ground height") {
         serviceScenario(empty = true) { h ->
             val point = CivPosition(0, 63, 0)
@@ -173,7 +273,9 @@ class CivsServiceTest : FunSpec({
             val block = h.world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
             val barrel = (block.state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
-            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL,
+                materials = mapOf("OAK_LOG" to 96L),
+                buildingMaterials = mapOf(h.city.buildings.first().id.toString() to mapOf("BREAD" to 24L))),
                 buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val durable = CompletableFuture<Unit>()
@@ -203,11 +305,11 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("deletion guards cannot reach storage with a stale confirmation or remaining stock") {
+    test("deletion guards cannot reach storage with a stale confirmation or wrong name") {
         serviceScenario { h ->
             h.start()
             for ((id, name, reason) in listOf(Triple(UUID.randomUUID(), h.city.name, "delete-city-changed"),
-                Triple(h.city.id, "wrong", "delete-name-mismatch"), Triple(h.city.id, h.city.name, "delete-storage-not-empty"))) {
+                Triple(h.city.id, "wrong", "delete-name-mismatch"))) {
                 val failure = shouldThrow<CompletionException> { h.service.deleteCity(h.player, id, name).join() }
                 (failure.cause as CivsRejection).reason shouldBe reason
             }
@@ -1052,7 +1154,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
-            backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary)
+            backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary,
+            storageAdapter = CivsStorage(plugin) { emptyArray() })
     }
     fun prepareFounding(name: String, style: String): CompletableFuture<Unit> =
         service.beginFoundingSelection(player, name, style).thenCompose {

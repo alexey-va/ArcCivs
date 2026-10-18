@@ -104,6 +104,7 @@ interface CivsUiHost {
     fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>
     fun relocateControl(player: Player, buildingId: UUID, expectedTarget: CivPosition): CompletableFuture<Unit>
     fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit>
+    fun materializeStorage(player: Player): CompletableFuture<Unit>
     fun depositMaterials(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun withdrawMaterial(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
     fun registerContainer(player: Player): CompletableFuture<Unit>

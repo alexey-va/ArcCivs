@@ -133,3 +133,40 @@ construction requires it present. Thus each new site uses an existing item and
 delete/refound creates zero net new barrels. Existing ACTIVE legacy controls
 keep compatibility repair; new cities are never founded as ACTIVE. No native
 container contents are removed, converted or refunded by deletion.
+
+
+## Physical default and deletion warning (0.1.15 to 0.1.16)
+
+The [focused assessment](storage-economy-assessment.json) and
+[calculator result](storage-economy-assessment-result.json) compare this release
+with0.1.15 rather than treating the historical0.1.13 item launch as new income.
+All production quantities,12bread recruitment, exact blueprint costs, virtual
+level capacities and one-time96/96/24 founder grant remain unchanged.
+Direct differences are0Vault,0tokens and0XP, in separate units.
+
+PHYSICAL used to include invisible common/building virtual reserves. It now
+spends only native items. Materialization transfers already-owned records into
+containers with the existing durable before/after journal; a full container
+preserves the pending remainder. It neither mints nor drops items. Each physical
+container half has27slots; total capacity is27×Nslots, or at most1728×N homogeneous
+64-stack items. All chests/barrels inside building volumes join automatically;
+the16limit remains only for extra manual registrations outside those volumes.
+This can reduce full-storage downtime and increase realized output without
+changing rates or the continuous-work upper bound. Actual fill/withdrawal and
+SELL utilization remain unmeasured. SELL is still active in the model; the
+owner's planned contract transition remains a future scenario.
+
+Confirmed deletion no longer requires empty virtual/legacy records. Its warning
+explicitly states those remaining records are discarded; world blocks and native
+items remain. Sensitivity cases in the JSON are0/1/2 existing-reserve equivalents
+burned per owner-day, not a repeated founder grant or observed deletion rate.
+Local/SQL tombstones still prevent another founder grant and stale resurrection.
+Reserved construction materials are not refunded. No new price, currency exchange
+rate or savings target is introduced.
+
+Decision: implement the requested physical default and automatic discovery,
+preserve optional virtual storage and recovery guarantees, and replace the
+empty-stock deletion gate with an explicit confirmation warning. Verification
+covers stock conservation, receipt replay, full containers, registered/indexed
+container boundaries and deletion/refounding. Delivery, activation and player
+acceptance remain separate evidence.

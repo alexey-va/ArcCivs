@@ -173,7 +173,10 @@ class CivsStore(
             require(pending.size < maximumCities && pending.none { it.cityId == snapshot.cityId }) {
                 "City already has an inventory transaction or journal capacity is full"
             }
-            requireNotNull(store.write(InventoryTransactionDocument(SCHEMA_VERSION, snapshot)).transaction)
+            val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
+            if (gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
+                throw CivsRejection("storage-transaction-too-large")
+            requireNotNull(store.write(document).transaction)
         }
     }
 
@@ -484,7 +487,7 @@ class CivsStore(
         const val MAX_CITY_BYTES = 256L * 1024L
         const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
         const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
-        const val MAX_INVENTORY_TRANSACTION_BYTES = 512L * 1024L
+        const val MAX_INVENTORY_TRANSACTION_BYTES = 32L * 1024L * 1024L
         const val MAX_DELETED_CITY_BYTES = 1_024L
         const val MAX_DELETED_CITIES = 100_000
         internal const val MAX_PLAN_BLOCKS = 150_000

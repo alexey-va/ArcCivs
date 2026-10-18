@@ -8,7 +8,7 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
-    test("deletion requires current owner exact name and empty virtual and legacy stores") {
+    test("deletion requires current owner and exact name but permits virtual and legacy stock") {
         val city = activeCity().copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), members = setOf(uuid(900)))
         CivsRules.requireDeletion(city, owner, city.id, " ${city.name} ") shouldBe Unit
         rejects("owner-required") { CivsRules.requireDeletion(city, uuid(900), city.id, city.name) }
@@ -17,7 +17,7 @@ class CivsRulesTest : FunSpec({
         for (stocked in listOf(city.copy(stock = Stock(food = 1), inventory = null),
             city.copy(inventory = city.inventory!!.copy(materials = mapOf("BREAD" to 1L))),
             city.copy(inventory = city.inventory!!.copy(buildingMaterials = mapOf(hallId.toString() to mapOf("BREAD" to 1L)))))) {
-            rejects("delete-storage-not-empty") { CivsRules.requireDeletion(stocked, owner, city.id, city.name) }
+            CivsRules.requireDeletion(stocked, owner, city.id, city.name) shouldBe Unit
         }
     }
 

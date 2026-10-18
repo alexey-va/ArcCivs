@@ -1,0 +1,319 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.15 to 0.1.16 physical storage and confirmed deletion",
+  "assumptions": [
+    "Low/base/high are illustrative scenarios, not observations; participants 1/10/16 cities. Production, one-time reserve movement and deletion sensitivity are separate flows, not a repeat-grant loop.",
+    "Before physical mode silently combines native items with virtual reserves. After physical mode consumes only native containers; old reserves move through exact durable slot receipts, partial when full, preserving remainder. Virtual mode remains an explicit option with unchanged per-building 1728/3456/5184 item caps.",
+    "Before only central barrels plus at most16 explicitly registered containers count. After all chests/barrels inside building bounds join automatically, with central barrel first. Each physical half has27 real slots, so capacity is 27*N slots, 1728*N only for homogeneous64-stack items, less for unstackables/custom occupied slots. Existing manual compatibility containers keep16 cap. This increases reachable capacity, not production rate; filling containers no longer requires manual registration.",
+    "First-ever founder grant remains96 logs96 cobblestone24 bread once per owner across the network. Deletion/refounding still grants0/0/0 and creates0 free barrels. Legacy stock converts exactly remaining units; migration does not mint additional units.",
+    "Accepted construction continues charging exact schematic changes once; 12bread recruitment, levels and worker ceilings unchanged. Storage transitions preserve named/custom native items and no ground drops occur.",
+    "Worst continuous12L3-worker24h ceiling unchanged:138240logs or103680stone/raw crops or34560bread per city/day. More physical space can reduce full-storage downtime; actual utilization and sell-through are unmeasured. Shop SELL remains active, SELL-to-contract future; no invented new SELL price or exchange rate. Prior source assessment documents illustrative bread8Vault sensitivity, not fresh runtime price proof.",
+    "Direct Vault/tokens/XP changes are zero separately. Accepted delete can burn any remaining virtual/legacy units after warning, never physical items. No construction refund. No new currency price or progression fee, so no new savings-time calculation.",
+    "Decision: requested physical default and automatic container inclusion with indexed discovery, unchanged rates, explicit discard warning and receipt recovery. Verify slot idempotency/full storage/auto discovery/stocked deletion. Source and disk delivery do not imply live activation or native client acceptance."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "item_logs": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "production",
+          "kind": "item",
+          "source": "CivsProduction.amount; CivsService.deliver",
+          "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        },
+        {
+          "id": "existing_pending_materialization",
+          "kind": "transfer",
+          "source": "CivsStorage.prepareMaterialization; CivsService inventory journal",
+          "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "confirmed_delete",
+          "kind": "burn",
+          "source": "CivsRules.requireDeletion; CivsStore.delete",
+          "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "item_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "production",
+          "kind": "item",
+          "source": "CivsProduction.amount; CivsService.deliver",
+          "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        },
+        {
+          "id": "existing_pending_materialization",
+          "kind": "transfer",
+          "source": "CivsStorage.prepareMaterialization; CivsService inventory journal",
+          "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "confirmed_delete",
+          "kind": "burn",
+          "source": "CivsRules.requireDeletion; CivsStore.delete",
+          "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "96",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "production",
+          "kind": "item",
+          "source": "CivsProduction.amount; CivsService.deliver",
+          "basis": "Same completed-trip rates; independent workforce scenarios, 1 L1 worker 1h / 1 L2 2h / 12 L3 4h, no offline work.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        },
+        {
+          "id": "existing_pending_materialization",
+          "kind": "transfer",
+          "source": "CivsStorage.prepareMaterialization; CivsService inventory journal",
+          "basis": "Illustrative transfer of one existing founder reserve per active city; not mint and not a repeat grant. All transferred units are deducted from the durable reserve.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "24",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "24",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "confirmed_delete",
+          "kind": "burn",
+          "source": "CivsRules.requireDeletion; CivsStore.delete",
+          "basis": "Separate deletion sensitivity: 0 / 1 / 2 existing-reserve equivalents discarded per owner-day after explicit warning. Not an assumed deletion rate or repeat founder grant; additional stock must have been earned. Native contents remain.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "24",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "24",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              2
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

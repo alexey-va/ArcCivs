@@ -76,9 +76,17 @@ when its old paid construction is complete; legacy snapshots and orders decode
 unchanged. Virtual maps contain plain obtainable vanilla materials only; custom
 items remain untouched in physical inventory. There is no Vault or token payout.
 
-Each building has a paginated virtual warehouse of1728/3456/5184items by level,
-plus its real27-slot control barrel for input/output. Explicitly registered city
-chests/barrels are physical sources; only one half of a double chest is used.
+PHYSICAL is the default and uses only actual native items. Each building's real
+27-slot control barrel is its primary warehouse. All CHEST/TRAPPED_CHEST/BARREL
+blocks inside its 3D bounds are indexed automatically. A double chest contributes
+each eligible 27-slot half once. Existing explicit city registrations remain
+compatible. Discovery reads loaded chunk tile entities on geometry registration
+and chunk load, updates individual placement/break events, and refreshes affected
+building chunks after a paste. Availability and production never rescan world
+blocks or chunk tile entities. Unloaded chunks are not loaded for storage.
+
+VIRTUAL is an explicit opt-in with paginated warehouses of1728/3456/5184items by
+building level. The control barrel remains the visible input/output for transfers.
 An owner or city member with management access may explicitly rebind only a legacy
 ACTIVE building's control through its building menu after placing a new player-owned
 BARREL at the target coordinates. The old barrel and its inventory are never moved
@@ -86,9 +94,15 @@ or cleared; the old container is
 automatically registered as an additional warehouse within the 16-container limit.
 The city UUID and stocks remain unchanged. SITE buildings and buildings with an
 accepted construction cannot be rebound.
-PHYSICAL mode consumes loaded containers first, then the common reserve and
-building warehouses; VIRTUAL consumes those durable virtual maps. Mode changes
-create no items. Deposit moves actual control-barrel cargo to that building's
+PHYSICAL consumes loaded containers only; VIRTUAL consumes its durable maps.
+Existing common/building reserves in PHYSICAL are pending delivery, not invisible
+spendable materials. Materialization uses the same durable slot receipt, examines
+at most 128 containers and changes at most 1024 slots per attempt, preserving any
+remainder when full. Control barrels have priority; other containers rotate fairly
+even after a full/no-op attempt. Each selected container is read at most once. Opening
+a physical warehouse or switching to PHYSICAL attempts it; nearby cities with
+pending items also retry one city per5s fairly. Mode changes create no items.
+Deposit in VIRTUAL moves actual control-barrel cargo to that building's
 warehouse; withdrawal moves up to64 items to its barrel, using its own warehouse
 then the common initial/legacy reserve. No direct player-inventory automation.
 
@@ -134,8 +148,10 @@ with at most60parts per viewer and no perimeter/world scans.
 
 /civs (alias /city) opens the city overview. Its **Управление поселением** submenu
 contains storage, development, members and owner-only deletion. Founding and building
-screens remain separate. Right-clicking a building control opens that building:
-level, work assignments, output choice, materials and its paginated warehouse. Selection and
+screens remain separate. **Гайд** holds the explanatory boundary, sleep and placement
+instructions, keeping overview focused on state and actions. Right-clicking a building
+control opens that building: level, work assignments, output choice, materials and
+its native barrel by default (paginated warehouse only in VIRTUAL). Selection and
 confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery

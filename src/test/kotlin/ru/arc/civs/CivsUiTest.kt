@@ -513,7 +513,7 @@ class CivsUiTest : FunSpec({
 
     test("intake closes the dialog before opening native inventory and busy storage hides transfers") {
         withUi { h ->
-            h.city = settlement(h.player)
+            h.city = settlement(h.player).let { it.copy(inventory = it.inventory!!.copy(mode = CivStorageMode.VIRTUAL)) }
             val building = h.city!!.buildings.first()
             h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse"); h.click("intake")
             h.paper.performTicks(2)
@@ -523,6 +523,89 @@ class CivsUiTest : FunSpec({
             h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse")
             h.body() shouldContain "Another settlement action"
             h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+        }
+    }
+
+    test("physical building storage opens the central barrel directly from both entries") {
+        withUi { h ->
+            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+            val building = h.city!!.buildings.first()
+            h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse")
+            h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            verifyOrder { h.runtime.close(h.player); h.host.openBuildingInventory(h.player, building.id) }
+            h.open(); h.click("management"); h.click("stock"); h.click("warehouse_0")
+            h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            h.screens.any { it.id == "civs.warehouse" } shouldBe false
+            verify(exactly = 2) { h.host.openBuildingInventory(h.player, building.id) }
+            verify(exactly = 0) { h.host.depositMaterials(any(), any()); h.host.withdrawMaterial(any(), any(), any()) }
+        }
+    }
+
+    test("a missing physical barrel returns to the building card and busy storage hides opening") {
+        withUi { h ->
+            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+            val building = h.city!!.buildings.first()
+            every { h.host.openBuildingInventory(h.player, building.id) } returns CompletableFuture.failedFuture(CivsRejection("control-missing"))
+            h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse")
+            h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building"
+            h.body() shouldContain "The control barrel is missing"
+            verify(exactly = 1) { h.host.openBuildingInventory(h.player, building.id) }
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, h.city!!.id, building.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "warehouse"
+            h.body() shouldContain "Another settlement action"
+            h.open(); h.click("management"); h.click("stock")
+            h.screen.buttons.any { it.id.value.startsWith("warehouse_") } shouldBe false
+        }
+    }
+
+    test("physical residual stock remains visible after partial transfer and clears only when delivered") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.first()
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("BREAD" to 12L),
+                buildingMaterials = mapOf(building.id.toString() to mapOf("OAK_LOG" to 64L))))
+            every { h.host.materializeStorage(h.player) } answers {
+                h.city = h.city!!.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("BREAD" to 4L)))
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.open(); h.click("management"); h.click("stock")
+            h.body() shouldContain "76 items"
+            h.body() shouldContain "Remaining stock is preserved"
+            h.screen.buttons.any { it.id.value == "materialize" } shouldBe true
+            h.click("materialize"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.stock"
+            h.body() shouldContain "4 items"
+            h.body() shouldContain "Remaining stock is preserved"
+            every { h.host.cityBusy(h.player) } returns true
+            h.click("refresh")
+            h.screen.buttons.map { it.id.value } shouldNotContain "materialize"
+            every { h.host.cityBusy(h.player) } returns false
+            h.city = h.city!!.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+            h.click("refresh")
+            h.body().contains("Remaining stock is preserved") shouldBe false
+            h.body().contains("4 items") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldNotContain "materialize"
+            verify(exactly = 1) { h.host.materializeStorage(h.player) }
+        }
+    }
+
+    test("a stale physical transfer reports the changed mode and returns to virtual storage") {
+        withUi { h ->
+            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("BREAD" to 12L)))
+            h.open(); h.click("management"); h.click("stock")
+            h.city = h.city!!.let { it.copy(inventory = it.inventory!!.copy(mode = CivStorageMode.VIRTUAL)) }
+            every { h.host.materializeStorage(h.player) } returns CompletableFuture.failedFuture(CivsRejection("invalid-storage-mode"))
+            h.click("materialize"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.stock"
+            h.body() shouldContain "The storage mode changed"
+            h.screen.buttons.map { it.id.value } shouldNotContain "materialize"
+            h.click("warehouse_0")
+            h.screen.id shouldBe "civs.warehouse"
+            verify(exactly = 0) { h.host.openBuildingInventory(any(), any()) }
         }
     }
 
@@ -655,7 +738,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "guide")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"
@@ -671,6 +754,24 @@ class CivsUiTest : FunSpec({
             }
             h.click("history")
             h.screen.id shouldBe "civs.overview"
+        }
+    }
+
+    test("the guide keeps static instructions out of the overview and returns through Core history") {
+        withUi(realHistory = true) { h ->
+            h.city = settlement(h.player)
+            h.open()
+            h.body().contains("Cyan markers appear") shouldBe false
+            h.body().contains("Without nearby players") shouldBe false
+            h.click("guide")
+            h.screen.id shouldBe "civs.guide"
+            h.body() shouldContain "Cyan markers appear"
+            h.body() shouldContain "Without nearby players"
+            h.body() shouldContain "green preview frame"
+            h.body() shouldContain "Building warehouse opens the central barrel"
+            h.click("history")
+            h.screen.id shouldBe "civs.overview"
+            h.body().contains("Without nearby players") shouldBe false
         }
     }
 
@@ -738,7 +839,7 @@ class CivsUiTest : FunSpec({
 
     test("a wrong deletion name stays in the form without submitting the destructive action") {
         withUi { h ->
-            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+            h.city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL, mapOf("OAK_LOG" to 1L)))
             h.open(); h.click("management"); h.click("delete_city")
             h.click("delete", mapOf("delete_city_name" to "oak town"))
             h.screen.id shouldBe "civs.delete-city"
@@ -766,41 +867,51 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("shared reserve and each building warehouse block deletion and lead to storage") {
+    test("shared reserve building warehouses and legacy stock warn without blocking exact-name deletion") {
         withUi { h ->
             val base = settlement(h.player)
-            for (inventory in listOf(
-                CivInventory(CivStorageMode.PHYSICAL, mapOf("OAK_LOG" to 1L)),
-                CivInventory(CivStorageMode.VIRTUAL, buildingMaterials = mapOf(base.buildings.last().id.toString() to mapOf("STONE" to 1L))),
-            )) {
-                h.city = base.copy(inventory = inventory)
-                h.open(); h.click("management"); h.click("delete_city")
-                h.body() shouldContain "First withdraw all virtual stock into barrels"
-                h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "refresh")
-                h.screen.inputs shouldBe emptyList()
-                h.click("stock")
-                h.screen.id shouldBe "civs.stock"
+            every { h.host.deleteCity(any(), any(), any()) } answers {
+                h.city = null
+                CompletableFuture.completedFuture(Unit)
             }
-            h.city = base.copy(inventory = null, stock = Stock(food = 1))
-            h.open(); h.click("management"); h.click("delete_city")
-            h.body() shouldContain "being converted"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
-            verify(exactly = 0) { h.host.deleteCity(any(), any(), any()) }
+            for (city in listOf(
+                base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("OAK_LOG" to 1L))),
+                base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL,
+                    buildingMaterials = mapOf(base.buildings.last().id.toString() to mapOf("STONE" to 1L)))),
+                base.copy(inventory = null, stock = Stock(food = 1)),
+            )) {
+                h.city = city
+                h.open(); h.click("management"); h.click("delete_city")
+                h.body() shouldContain "Any virtual stock left in building warehouses or the shared reserve will be lost"
+                h.body() shouldContain "Buildings and items in chests and barrels remain"
+                h.screen.inputs.size shouldBe 1
+                h.screen.buttons.map { it.id.value }.contains("delete") shouldBe true
+                if (city.inventory != null) {
+                    h.click("stock")
+                    h.screen.id shouldBe "civs.stock"
+                    h.open(); h.click("management"); h.click("delete_city")
+                }
+                h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
+                h.screen.id shouldBe "civs.welcome"
+            }
+            verify(exactly = 3) { h.host.deleteCity(h.player, base.id, base.name) }
         }
     }
 
-    test("a delivery arriving after deletion confirmation was opened blocks the retried form") {
+    test("deletion warns before a later delivery and still submits the confirmed settlement") {
         withUi { h ->
             val city = settlement(h.player).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
             h.city = city
             h.open(); h.click("management"); h.click("delete_city")
+            h.body() shouldContain "Any virtual stock left in building warehouses or the shared reserve will be lost"
+            h.city = city.copy(inventory = city.inventory!!.copy(materials = mapOf("BREAD" to 1L)))
             every { h.host.deleteCity(any(), any(), any()) } answers {
-                h.city = city.copy(inventory = city.inventory!!.copy(materials = mapOf("BREAD" to 1L)))
-                CompletableFuture.failedFuture(CivsRejection("delete-storage-not-empty"))
+                h.city = null
+                CompletableFuture.completedFuture(Unit)
             }
             h.click("delete", mapOf("delete_city_name" to city.name)); h.paper.performTicks(2)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "refresh")
-            h.body() shouldContain "First withdraw all virtual stock into barrels"
+            verify(exactly = 1) { h.host.deleteCity(h.player, city.id, city.name) }
+            h.screen.id shouldBe "civs.welcome"
         }
     }
 
@@ -909,10 +1020,17 @@ class CivsUiTest : FunSpec({
             exportUiScreen(directory, "site-materials", h.screen)
             h.open(); h.click("management"); h.click("delete_city")
             exportUiScreen(directory, "delete-stock", h.screen)
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, mapOf("BREAD" to 12L),
+                buildingMaterials = mapOf(building.id.toString() to mapOf("OAK_LOG" to 64L))))
+            h.open(); h.click("management"); h.click("stock")
+            exportUiScreen(directory, "stock-physical", h.screen)
             h.city = base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL), construction = CivConstruction(
                 UUID.randomUUID(), building.id, 2, 100, 20, ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("OAK_LOG" to 24L)))
             h.open()
             exportUiScreen(directory, "overview", h.screen)
+            h.click("guide")
+            exportUiScreen(directory, "guide", h.screen)
+            h.open()
             h.click("management")
             exportUiScreen(directory, "management-owner", h.screen)
             h.click("delete_city")
@@ -1087,6 +1205,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.startBuilding(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.deleteCity(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.openBuildingInventory(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.materializeStorage(any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.depositMaterials(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.withdrawMaterial(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.refreshCity(any()) } returns CompletableFuture.completedFuture(Unit)
