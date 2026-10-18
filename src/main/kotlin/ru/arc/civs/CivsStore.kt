@@ -42,11 +42,7 @@ class CivsStore(
     fun homeServer() = network?.server
 
     fun save(city: Settlement): CompletableFuture<Settlement> {
-        val snapshot = city.copy(
-            buildings = city.buildings.toList(),
-            workers = city.workers.toList(),
-            members = city.members.toSet(),
-        )
+        val snapshot = snapshotCity(city)
         if (network != null) return synchronized(lifecycleLock) {
             if (closed) CompletableFuture.failedFuture(IllegalStateException("CivsStore is closed")) else network.save(snapshot)
         }
@@ -118,6 +114,36 @@ class CivsStore(
         store.deleteIfExists()
     }
 
+    /** Immutable write-ahead item receipt; the same UUID can only retry identical bytes/state. */
+    fun saveInventoryTransaction(transaction: CivInventoryTransaction): CompletableFuture<CivInventoryTransaction> {
+        val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList())
+        return submit {
+            snapshot.validated()
+            val trustedRoot = trustedRoot()
+            val store = inventoryTransactionStore(trustedRoot, snapshot.id)
+            val existing = store.loadOrNull()?.transaction
+            if (existing != null) {
+                require(existing == snapshot) { "Inventory transaction retry differs from its journal" }
+                return@submit existing
+            }
+            val pending = loadInventoryTransactions(trustedRoot)
+            require(pending.size < maximumCities && pending.none { it.cityId == snapshot.cityId }) {
+                "City already has an inventory transaction or journal capacity is full"
+            }
+            requireNotNull(store.write(InventoryTransactionDocument(SCHEMA_VERSION, snapshot)).transaction)
+        }
+    }
+
+    fun loadInventoryTransactions(): CompletableFuture<List<CivInventoryTransaction>> = submit {
+        loadInventoryTransactions(trustedRoot())
+    }
+
+    fun deleteInventoryTransaction(id: UUID): CompletableFuture<Boolean> = submit {
+        val store = inventoryTransactionStore(trustedRoot(), id)
+        if (store.loadOrNull() == null) return@submit false
+        store.deleteIfExists()
+    }
+
     /** A pure path accessor for Core's later asynchronous schematic open. */
     fun schematicRoot(): Path = root.resolve("captured")
 
@@ -136,6 +162,10 @@ class CivsStore(
             }
             Unit
         }
+    }
+
+    fun loadSchematic(id: UUID): CompletableFuture<ByteArray?> = submit {
+        schematicStore(trustedRoot(), id).loadOrNull()?.copyOf()
     }
 
     fun deleteSchematic(id: UUID): CompletableFuture<Boolean> = submit {
@@ -207,6 +237,30 @@ class CivsStore(
         return id
     }
 
+    private fun loadInventoryTransactions(trustedRoot: Path): List<CivInventoryTransaction> {
+        val directory = trustedRoot.resolve("inventory-transactions")
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return emptyList()
+        require(!Files.isSymbolicLink(directory) && Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) {
+            "Inventory transaction directory is invalid"
+        }
+        val ids = mutableListOf<UUID>()
+        Files.newDirectoryStream(directory).use { files ->
+            files.forEach { file ->
+                if (file.fileName.toString().endsWith(".json")) {
+                    require(ids.size < maximumCities) { "Inventory transaction directory exceeds its limit" }
+                    ids += idFromJsonFilename(file)
+                }
+            }
+        }
+        val records = ids.sortedBy(UUID::toString).map { id ->
+            requireNotNull(inventoryTransactionStore(trustedRoot, id).loadOrNull()?.transaction) {
+                "Inventory transaction disappeared during load"
+            }
+        }
+        require(records.map { it.cityId }.distinct().size == records.size) { "City has multiple pending inventory transactions" }
+        return records
+    }
+
     private fun cityStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
         root = trustedRoot,
         relativePath = Path.of("cities", "$id.json"),
@@ -242,6 +296,27 @@ class CivsStore(
         encode = { it },
         decode = { it },
         validate = { require(it.isNotEmpty()) { "Captured schematic must not be empty" } },
+    )
+
+    private fun inventoryTransactionStore(trustedRoot: Path, id: UUID) = AtomicFileStore(
+        root = trustedRoot,
+        relativePath = Path.of("inventory-transactions", "$id.json"),
+        maxBytes = MAX_INVENTORY_TRANSACTION_BYTES,
+        encode = { gson.toJson(it).toByteArray(StandardCharsets.UTF_8) },
+        decode = { decodeJson(it, InventoryTransactionDocument::class.java) },
+        validate = { record ->
+            require(record.schemaVersion == SCHEMA_VERSION) { "Unsupported inventory transaction schema" }
+            val transaction = requireNotNull(record.transaction) { "Inventory transaction is missing" }
+            require(transaction.id == id) { "Inventory transaction id does not match its filename" }
+            transaction.validated()
+        },
+    )
+
+    private fun snapshotCity(city: Settlement): Settlement = city.copy(
+        buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet(),
+        inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
+            buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
+        construction = city.construction?.let { it.copy(materials = it.materials?.toMap()) },
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {
@@ -317,6 +392,7 @@ class CivsStore(
 
     private data class CityDocument(val schemaVersion: Int, val city: Settlement?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
+    private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
     private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long)
 
     internal companion object {
@@ -324,6 +400,7 @@ class CivsStore(
         const val MAX_CITY_BYTES = 256L * 1024L
         const val MAX_PLAN_BYTES = 32L * 1024L * 1024L
         const val MAX_SCHEMATIC_BYTES = 16 * 1024 * 1024
+        const val MAX_INVENTORY_TRANSACTION_BYTES = 512L * 1024L
         internal const val MAX_PLAN_BLOCKS = 150_000
         const val MAX_SCHEMATIC_ID_CHARS = 512
         internal const val MAX_BLOCK_STATE_CHARS = 2_048

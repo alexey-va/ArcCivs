@@ -149,7 +149,9 @@ class CivsWorld internal constructor(
             requireCivs(all.none { it.id != cityId && it.worldId == worldId && civsIntersectsCity(building.bounds, it) }, "city-overlap")
             requireCivs(all.filter { it.worldId == worldId }.none { other ->
                 civsProtectedBuildings(other).any {
-                    (other.id != cityId || it.id != building.id) && it.bounds.overlaps(building.bounds)
+                    (other.id != cityId || it.id != building.id) && (it.bounds.overlaps(building.bounds) ||
+                        it.control?.let { p -> building.bounds.contains(p.x, p.y, p.z) || p == building.control } == true ||
+                        building.control?.let { p -> it.bounds.contains(p.x, p.y, p.z) } == true)
                 }
             }, "building-overlap")
             validateIdentity(city)
@@ -192,6 +194,11 @@ class CivsWorld internal constructor(
             requireCivs((-1..1).all { dx -> (-1..1).all { dz -> world.isChunkLoaded(chunkX + dx, chunkZ + dz) } }, "chunks-unloaded")
             val block = read(position)
             val data = predictedEntrance[position] ?: block.blockData
+            if (position == building.control) {
+                if (block.type != Material.BARREL && (block.state is TileState || block.type in setOf(Material.BEDROCK, Material.LAVA)))
+                    rejectAt("control-obstructed", block)
+                if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+            }
             if (!entranceSafety(data, block, entranceIndex == 0)) rejectAt("entrance-blocked", block)
             entranceIndex++
             return entranceIndex == entranceCells.size
@@ -227,7 +234,8 @@ class CivsWorld internal constructor(
             requireCivs(city?.building(building.id) == previous, "invalid-building")
             if (previous != null) requireCivs(previous.id == building.id && previous.type == building.type &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
-                previous.level + 1 == building.level && previous.phase == BuildingPhase.ACTIVE, "invalid-building")
+                (previous.level + 1 == building.level && previous.phase == BuildingPhase.ACTIVE ||
+                    previous.level == building.level && previous.phase == BuildingPhase.SITE), "invalid-building")
             if (previous != null) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
         }
 
@@ -251,6 +259,10 @@ class CivsWorld internal constructor(
             }
             if (previous?.bounds?.contains(position.x, position.y, position.z) != true &&
                 (!civsNaturalTerrain(block.type) || block.state is TileState)) rejectAt("protected-terrain", block)
+            // Never replace a player's inventory, including chests installed while a SITE was waiting.
+            if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
+            if (cities().firstOrNull { it.id == cityId }?.inventory?.containers?.contains(position) == true)
+                rejectAt("registered-container", block)
             val after = parse(cell.blockData)
             requireCivs(after.material != Material.BARRIER && cell.isAir == after.material.isAir, "invalid-plan")
             if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)
@@ -280,6 +292,7 @@ class CivsWorld internal constructor(
             val cell = plan.blocks[index++]
             checkCell(cell.position)
             val block = read(cell.position)
+            if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             val current = block.blockData.asString
             if (current != cell.before && current != cell.after) rejectAt("world-changed", block)
             val after = parse(cell.after)

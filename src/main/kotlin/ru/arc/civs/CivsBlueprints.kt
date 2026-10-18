@@ -13,6 +13,7 @@ data class CivBlueprint(
     val cells: List<ArcSchematicBlock>,
     val surface: List<ArcSchematicBlock>,
     val sourceBytes: ByteArray,
+    val materials: Map<String, Long> = emptyMap(),
 )
 
 /** Curated families share one ground pivot, one south-facing front and identical level bounds. */
@@ -74,12 +75,14 @@ class CivsBlueprints(
                         CivPosition(anchor.x + transformed.minimum.x, anchor.y + transformed.minimum.y, anchor.z + transformed.minimum.z),
                         CivPosition(anchor.x + transformed.maximum.x, anchor.y + transformed.maximum.y, anchor.z + transformed.maximum.z),
                     )
-                    val building = CivBuilding(buildingId, type, level, anchor, turns * 90, id, bounds, entrance, BuildingPhase.CONSTRUCTING)
+                    val building = CivBuilding(buildingId, type, level, anchor, turns * 90, id, bounds, entrance, BuildingPhase.CONSTRUCTING, control = anchor)
                     val cells = worldCells(transformed, anchor)
                     rejectHazards(cells)
                     val surface = exposedCells(cells)
                     if (surface.size > 6_000) throw CivsRejection("preview-too-large")
-                    CivBlueprint(building, worldId, transformed, cells, surface, bytes)
+                    val estimate = CivsMaterials.required(CivPlacementPlan(buildingId, buildingId, worldId, building,
+                        cells.map { CivPlanBlock(CivPosition(it.position.x, it.position.y, it.position.z), "minecraft:air", it.blockData) }))
+                    CivBlueprint(building, worldId, transformed, cells, surface, bytes, estimate)
                 }, executor)
             }, executor)
         }, executor)
@@ -97,6 +100,11 @@ class CivsBlueprints(
     fun paste(snapshot: ArcSchematicSnapshot, worldId: UUID, anchor: CivPosition): ArcSchematicOperation =
         captured.paste(snapshot, ArcSchematicPasteTarget(worldId, ArcSchematicPoint(anchor.x, anchor.y, anchor.z)), ArcSchematicPasteOptions(false, true, false))
 
+    internal fun crop(snapshot: ArcSchematicSnapshot, building: CivBuilding, batch: CivBuildBatch): CompletableFuture<ArcSchematicSnapshot> =
+        captured.crop(snapshot,
+            ArcSchematicPoint(batch.minimum.x - building.anchor.x, batch.minimum.y - building.anchor.y, batch.minimum.z - building.anchor.z),
+            ArcSchematicPoint(batch.maximum.x - building.anchor.x, batch.maximum.y - building.anchor.y, batch.maximum.z - building.anchor.z))
+
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 
     override fun close() { source.close(); captured.close() }
@@ -111,6 +119,7 @@ class CivsBlueprints(
             require(style in STYLES && level in 1..3)
             val name = when (type) {
                 BuildingType.TOWN_HALL -> "fundamentals/townhall"
+                BuildingType.BUILDER_HUT -> "fundamentals/builder"
                 BuildingType.HOUSE -> "fundamentals/residence"
                 BuildingType.FORESTER -> "fundamentals/lumberjack"
                 BuildingType.QUARRY -> "fundamentals/miner"

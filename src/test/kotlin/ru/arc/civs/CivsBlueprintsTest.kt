@@ -8,12 +8,12 @@ import ru.arc.paper.api.ArcSchematicPoint
 import ru.arc.paper.api.ArcSchematicSnapshot
 
 class CivsBlueprintsTest : FunSpec({
-    test("catalog selects all 54 levels only from the private upgrade-aligned namespace") {
+    test("catalog selects all 63 levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
             BuildingType.entries.flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
-        ids.size shouldBe 54
-        ids.toSet().size shouldBe 54
+        ids.size shouldBe 63
+        ids.toSet().size shouldBe 63
         ids.all { it.startsWith("civs/minecolonies/") } shouldBe true
         CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 1) shouldBe
             "civs/minecolonies/nordic/fundamentals/townhall1"

@@ -1,222 +1,305 @@
 {
   "version": 1,
-  "title": "ArcCivs internal resources and external economy assessment (static source model)",
+  "title": "ArcCivs actual construction and city inventory 0.1.13",
   "assumptions": [
-    "This is a source-derived before/after model, not a live-server observation. Before means no ArcCivs flows; after means the source-defined rules, not proof of a deployed plugin.",
-    "participants [1, 10, 16] mean active settlement owners with a nearby viewer during the assumed work window, not registered accounts or measured concurrent users.",
-    "Per active owner-day ceilings: low = one L1 producer for one hour (60 trips); base = one L2 producer for two hours (120 trips); high = three L3 producer workers for four hours (720 trips). These are theoretical trip bounds before route time and storage-full pauses, not measured throughput.",
-    "Wood, stone and food each use a separate, non-tradeable internal stock-unit namespace. Their item-kind calculator rows describe gross stock production and must not be read as Vault, token, XP or physical inventory-item emission.",
-    "Each resource's low/base/high production row is an independent ceiling. The high rows reuse the same 48 active NPCs and cannot be summed as simultaneous output for all three resources.",
-    "Ordinary production consumes no food. Construction and recruitment costs are shown as exact one-time internal resource costs below; no unsupported daily spending frequency is assumed.",
-    "The plugin has no source-defined Vault/token payout or redemption path. Existing EconomyShopGUI SELL and AutoSellChests flows remain outside this model and are not assumed to be removed or replaced."
+    "Low/base/high are explicit scenarios, not measured activity: 1 L1 worker for 1h, 1 L2 worker for 2h, 12 L3 workers for 4h; 1/10/16 participating cities. Categories are mutually exclusive workforce allocations.",
+    "At most one completed trip per production minute and no offline catch-up. Actual navigation may reduce throughput. 48 visible NPC network budget further limits simultaneous cities.",
+    "Before: closed virtual WOOD/STONE/FOOD. After: actual material items; exact blueprint requirements are reserved once, physical/virtual moves are transfers, breaking completed blocks recovers previously paid items.",
+    "Bread uses the vanilla three-wheat conversion: one bread per level per trip instead of three raw crop items; raw crops remain three per level, logs four, stone three. No currency paid by ArcCivs.",
+    "Shop SELL remains active now; planned SELL removal is a distinct target scenario, not an assumption that sales have stopped. Tracked config prices are illustrative disk evidence, not a verified current runtime quote.",
+    "Observed live 168h: shop mint 5752268.59 vault, jobs396907.80, farms16135, contracts35352.64. Admin 67001499 is excluded from normal income. Tokens remain separate. Requested item attribution only had cobble90 for4.49vault; missing materials mean no observation, not zero SELL price.",
+    "No city deletion/reset grant loop. One founder account belongs to at most one network city. New-city grant96logs96cobble24bread once; legacy conversion exactly remaining closed stock, not fresh grant. Max500cities, 12workers/city; physical output requires free registered loaded containers; virtual warehouse cap1728/3456/5184 items per building L1/L2/L3, separate physical27slot control barrel. Virtual production credits only its own building warehouse and stops when full.",
+    "Worst 24h12L3 workers: logs138240, rawcrops/stone103680, bread34560 items/city/day, assuming uninterrupted trips and withdrawals. At illustrative bread SELL8:276480vault/day; 16 cities alone would exceed typical current income, requiring explicit future postactivation observation. No offline mint or unload simulation.",
+    "Bootstrap/progression is now paid in actual build palettes rather than cheap three-resource quotes. Nordic builder1 requires ~1000 actual placeable materials, hall1~2200 before reuse of terrain. Full costs vary by style and existing blocks and are shown from immutable plan. Thus no universal coins-to-level price is invented.",
+    "Decision: enable user-requested item storage/production with existing raw unit rate, recipe-adjusted bread, exact construction sink and journal idempotency. Do not activate without existing owner decision; source/delivery separate from measured behavior."
   ],
-  "participants": [1, 10, 16],
+  "participants": [
+    1,
+    10,
+    16
+  ],
   "currencies": {
-    "vault": {
-      "minor_per_unit": 100,
+    "item_logs": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          240,
+          960,
+          34560
+        ]
+      },
       "flows": [
         {
-          "id": "civs_direct_vault_mint",
+          "id": "producer",
+          "kind": "item",
+          "source": "ArcCivs CivsRules.deliveryAmount / CivsProduction.amount",
+          "basis": "Scenario: equivalent level1 completed trips; only one resource workforce scenario at a time",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        }
+      ]
+    },
+    "item_stone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          180,
+          720,
+          25920
+        ]
+      },
+      "flows": [
+        {
+          "id": "producer",
+          "kind": "item",
+          "source": "ArcCivs CivsRules.deliveryAmount / CivsProduction.amount",
+          "basis": "Scenario: equivalent level1 completed trips; only one resource workforce scenario at a time",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        }
+      ]
+    },
+    "item_raw_food": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          180,
+          720,
+          25920
+        ]
+      },
+      "flows": [
+        {
+          "id": "producer",
+          "kind": "item",
+          "source": "ArcCivs CivsRules.deliveryAmount / CivsProduction.amount",
+          "basis": "Scenario: equivalent level1 completed trips; only one resource workforce scenario at a time",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          60,
+          240,
+          8640
+        ]
+      },
+      "flows": [
+        {
+          "id": "producer",
+          "kind": "item",
+          "source": "ArcCivs CivsRules.deliveryAmount / CivsProduction.amount",
+          "basis": "Scenario: equivalent level1 completed trips; only one resource workforce scenario at a time",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          0,
+          0,
+          0
+        ]
+      },
+      "flows": [
+        {
+          "id": "direct",
           "kind": "mint",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:5-13; ArcCivs/ARCHITECTURE.md:17-21",
-          "basis": "Static source contract has no Vault integration or money payout; explicit zero placeholder only.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
+          "source": "ArcCivs has no Vault payout call",
+          "basis": "Items only, no direct monetary mint",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
         },
         {
-          "id": "civs_direct_vault_burn",
-          "kind": "burn",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:5-13; ArcCivs/ARCHITECTURE.md:17-21",
-          "basis": "Construction and recruitment spend internal stock, not Vault; no direct Vault burn path is defined.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
+          "id": "bread_sell_disk_sensitivity",
+          "kind": "mint",
+          "source": "classic/plugins/EconomyShopGUI-Premium/shops/Food.yml bread sell8",
+          "basis": "Sensitivity if all produced bread sold; not additive with rawfood/other workforce; not runtime price proof",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              240,
+              8640
+            ]
+          }
         }
       ]
     },
     "tokens": {
       "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "civs_direct_token_mint",
-          "kind": "mint",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:5-13; ArcCivs/ARCHITECTURE.md:17-21",
-          "basis": "Static source contract has no token integration, payout or redemption; explicit zero placeholder only.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
-        },
-        {
-          "id": "civs_direct_token_burn",
-          "kind": "burn",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:5-13; ArcCivs/ARCHITECTURE.md:17-21",
-          "basis": "No token charge or token sink is defined.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
-        }
-      ]
-    },
-    "experience_points": {
-      "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "civs_xp_item_flow",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:5-13; ArcCivs/src/main/kotlin/ru/arc/civs/CivsProtection.kt:35-38",
-          "basis": "No XP grant, conversion or redemption is defined; protected settlement blocks are not XP rewards.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
-        }
-      ]
-    },
-    "physical_inventory_items": {
-      "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "civs_inventory_item_flow",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsProtection.kt:35-38,64-130; ArcCivs/ARCHITECTURE.md:17-21,32-38",
-          "basis": "Internal stock cannot be withdrawn as items; generated buildings are protected assets, not loot or inventory rewards.",
-          "before": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]},
-          "after": {"enabled": false, "amount_per_event": {"value": "0", "unit": "minor"}, "events_per_player_day": [0, 0, 0]}
-        }
-      ]
-    },
-    "civ_wood_stock_units": {
-      "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "forester_L1_wood_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L1 forester trip adds 4 wood to closed city stock; low assumes one such worker for one hour.",
-          "before": {"enabled": false, "amount_per_event": {"value": "4", "unit": "minor"}, "events_per_player_day": [60, 0, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "4", "unit": "minor"}, "events_per_player_day": [60, 0, 0]}
-        },
-        {
-          "id": "forester_L2_wood_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L2 forester trip adds 8 wood to closed city stock; base assumes one such worker for two hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "8", "unit": "minor"}, "events_per_player_day": [0, 120, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "8", "unit": "minor"}, "events_per_player_day": [0, 120, 0]}
-        },
-        {
-          "id": "forester_L3_wood_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L3 forester trip adds 12 wood to closed city stock; high assumes three such workers for four hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "12", "unit": "minor"}, "events_per_player_day": [0, 0, 720]},
-          "after": {"enabled": true, "amount_per_event": {"value": "12", "unit": "minor"}, "events_per_player_day": [0, 0, 720]}
-        }
-      ]
-    },
-    "civ_stone_stock_units": {
-      "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "quarry_L1_stone_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L1 quarry trip adds 3 stone to closed city stock; low assumes one such worker for one hour.",
-          "before": {"enabled": false, "amount_per_event": {"value": "3", "unit": "minor"}, "events_per_player_day": [60, 0, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "3", "unit": "minor"}, "events_per_player_day": [60, 0, 0]}
-        },
-        {
-          "id": "quarry_L2_stone_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L2 quarry trip adds 6 stone to closed city stock; base assumes one such worker for two hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "6", "unit": "minor"}, "events_per_player_day": [0, 120, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "6", "unit": "minor"}, "events_per_player_day": [0, 120, 0]}
-        },
-        {
-          "id": "quarry_L3_stone_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L3 quarry trip adds 9 stone to closed city stock; high assumes three such workers for four hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "9", "unit": "minor"}, "events_per_player_day": [0, 0, 720]},
-          "after": {"enabled": true, "amount_per_event": {"value": "9", "unit": "minor"}, "events_per_player_day": [0, 0, 720]}
-        }
-      ]
-    },
-    "civ_food_stock_units": {
-      "minor_per_unit": 1,
-      "flows": [
-        {
-          "id": "farm_L1_food_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L1 farm trip adds 3 food to closed city stock; low assumes one such worker for one hour.",
-          "before": {"enabled": false, "amount_per_event": {"value": "3", "unit": "minor"}, "events_per_player_day": [60, 0, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "3", "unit": "minor"}, "events_per_player_day": [60, 0, 0]}
-        },
-        {
-          "id": "farm_L2_food_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L2 farm trip adds 6 food to closed city stock; base assumes one such worker for two hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "6", "unit": "minor"}, "events_per_player_day": [0, 120, 0]},
-          "after": {"enabled": true, "amount_per_event": {"value": "6", "unit": "minor"}, "events_per_player_day": [0, 120, 0]}
-        },
-        {
-          "id": "farm_L3_food_per_trip",
-          "kind": "item",
-          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:52-70,73; ArcCivs/ARCHITECTURE.md:23-30",
-          "basis": "An L3 farm trip adds 9 food to closed city stock; high assumes three such workers for four hours.",
-          "before": {"enabled": false, "amount_per_event": {"value": "9", "unit": "minor"}, "events_per_player_day": [0, 0, 720]},
-          "after": {"enabled": true, "amount_per_event": {"value": "9", "unit": "minor"}, "events_per_player_day": [0, 0, 720]}
-        }
-      ]
+      "disposable_per_player_day": {
+        "before": [
+          0,
+          0,
+          0
+        ],
+        "after": [
+          0,
+          0,
+          0
+        ]
+      },
+      "flows": []
     }
   },
-  "prices": [],
-  "internal_resource_rules": {
-    "status": "Source model only; no live rates, balances or activity were queried.",
-    "limits": {
-      "cities": 500,
-      "residents_per_city": 12,
-      "maximum_persisted_residents_at_city_cap": 6000,
-      "active_npcs_server_wide": 48,
-      "buildings_per_city": 16,
-      "production_interval_seconds": 60,
-      "offline_production_or_catchup": false
-    },
-    "starting_grant_once_per_city": {"wood": 96, "stone": 96, "food": 24, "pioneers": 4},
-    "maximum_lifetime_starting_grants_at_500_cities": {"wood": 48000, "stone": 48000, "food": 12000},
-    "cost_units": "Internal non-transferable stock units; wood, stone and food are not summed with or valued as external currencies.",
-    "target_level_costs": {
-      "TOWN_HALL": {"1": {"wood": 0, "stone": 0, "food": 0}, "2": {"wood": 128, "stone": 96, "food": 24}, "3": {"wood": 384, "stone": 288, "food": 72}},
-      "WAREHOUSE": {"1": {"wood": 32, "stone": 16, "food": 0}, "2": {"wood": 128, "stone": 64, "food": 0}, "3": {"wood": 288, "stone": 144, "food": 0}},
-      "HOUSE": {"1": {"wood": 24, "stone": 12, "food": 0}, "2": {"wood": 96, "stone": 48, "food": 0}, "3": {"wood": 216, "stone": 108, "food": 0}},
-      "FORESTER": {"1": {"wood": 20, "stone": 12, "food": 0}, "2": {"wood": 80, "stone": 48, "food": 0}, "3": {"wood": 180, "stone": 108, "food": 0}},
-      "QUARRY": {"1": {"wood": 20, "stone": 20, "food": 0}, "2": {"wood": 80, "stone": 80, "food": 0}, "3": {"wood": 180, "stone": 180, "food": 0}},
-      "FARM": {"1": {"wood": 24, "stone": 8, "food": 0}, "2": {"wood": 96, "stone": 32, "food": 0}, "3": {"wood": 216, "stone": 72, "food": 0}}
-    },
-    "cumulative_upgrade_costs_L1_to_L3": {
-      "TOWN_HALL": {"wood": 512, "stone": 384, "food": 96},
-      "WAREHOUSE": {"wood": 448, "stone": 224, "food": 0},
-      "HOUSE": {"wood": 336, "stone": 168, "food": 0},
-      "FORESTER": {"wood": 280, "stone": 168, "food": 0},
-      "QUARRY": {"wood": 280, "stone": 280, "food": 0},
-      "FARM": {"wood": 336, "stone": 112, "food": 0}
-    },
-    "maximum_population_example": {
-      "one_of_each_building_type_to_L3": {"wood": 2192, "stone": 1336, "food": 96},
-      "second_L1_house_for_12_beds": {"wood": 24, "stone": 12, "food": 0},
-      "eight_recruits_at_12_food_each": {"wood": 0, "stone": 0, "food": 96},
-      "gross_total": {"wood": 2216, "stone": 1348, "food": 192},
-      "less_one_time_starting_grant": {"wood": 96, "stone": 96, "food": 24},
-      "minimum_gross_production_needed_for_this_example": {"wood": 2120, "stone": 1252, "food": 168}
-    },
-    "storage": {
-      "base_capacity_per_resource": 128,
-      "active_warehouse_capacity_per_resource": {"L1": 256, "L2": 512, "L3": 1024},
-      "one_active_L3_warehouse_total_per_resource": 1152,
-      "delivery_at_capacity": "Rejected as storage-full; no overflow/export."
-    },
-    "production_scenarios": {
-      "low": {"active_cities": 1, "active_producers_per_city": 1, "producer_level": 1, "hours_per_active_city_day": 1, "trips_per_worker_hour_ceiling": 60},
-      "base": {"active_cities": 10, "active_producers_per_city": 1, "producer_level": 2, "hours_per_active_city_day": 2, "trips_per_worker_hour_ceiling": 60},
-      "high": {"active_cities": 16, "active_producers_per_city": 3, "producer_level": 3, "hours_per_active_city_day": 4, "trips_per_worker_hour_ceiling": 60, "active_npcs": 48}
-    }
-  }
+  "prices": []
 }

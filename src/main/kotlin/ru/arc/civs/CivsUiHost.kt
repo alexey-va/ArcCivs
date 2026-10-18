@@ -24,6 +24,7 @@ data class CivsPreviewView(
     val bounds: CivBox,
     val movable: Boolean,
     val busy: Boolean,
+    val materials: Map<String, Long> = emptyMap(),
 )
 
 /** Coordinates from the interaction, never a second ray cast after the click. */
@@ -66,6 +67,7 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 interface CivsUiHost {
     fun ready(): Boolean
     fun unavailableReason(): String?
+    fun cityBusy(player: Player): Boolean
     fun styles(): List<String>
     fun settlements(): List<Settlement>
     fun city(player: Player): Settlement?
@@ -93,5 +95,15 @@ interface CivsUiHost {
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit>
+    fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>
+    fun availableMaterials(player: Player): Map<String, Long>
+    fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit>
+    fun depositMaterials(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun withdrawMaterial(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
+    fun registerContainer(player: Player): CompletableFuture<Unit>
+    fun unregisterContainer(player: Player, position: CivPosition): CompletableFuture<Unit>
+    fun setProduction(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
     fun reload(player: Player): CompletableFuture<Unit>
 }

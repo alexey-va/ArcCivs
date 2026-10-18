@@ -11,11 +11,13 @@ import org.bukkit.block.Container
 import org.bukkit.event.Event
 import org.bukkit.event.block.Action
 import org.bukkit.event.block.BlockBreakEvent
+import org.bukkit.event.block.BlockDropItemEvent
 import org.bukkit.event.block.BlockExplodeEvent
 import org.bukkit.event.block.BlockFromToEvent
 import org.bukkit.event.block.BlockMultiPlaceEvent
 import org.bukkit.event.block.BlockPistonExtendEvent
 import org.bukkit.event.block.BlockPistonRetractEvent
+import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
@@ -101,14 +103,17 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("doors remain usable but item actions and containers cannot withdraw generated assets") {
+    test("members can remodel finished buildings with drops and containers while strangers stay blocked") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("settlement")
             val player = paper.addPlayer("Owner")
-            val listener = CivsProtection({ listOf(protectionCity(world.uid, player.uniqueId, protectionBuilding(0, 2))) })
+            val member = paper.addPlayer("Member")
+            val stranger = paper.addPlayer("Stranger")
+            val city = protectionCity(world.uid, player.uniqueId, protectionBuilding(0, 2)).copy(members = setOf(member.uniqueId))
+            val listener = CivsProtection({ listOf(city) })
             paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("ProtectionTest"))
             val door = world.getBlockAt(0, 64, 0).apply { type = Material.OAK_DOOR }
-            val doorClick = PlayerInteractEvent(player, Action.RIGHT_CLICK_BLOCK, ItemStack(Material.STICK),
+            val doorClick = PlayerInteractEvent(stranger, Action.RIGHT_CLICK_BLOCK, ItemStack(Material.STICK),
                 door, BlockFace.NORTH, EquipmentSlot.HAND)
             val priorUse = doorClick.useInteractedBlock()
             paper.callEvent(doorClick).useInteractedBlock() shouldBe priorUse
@@ -117,18 +122,81 @@ class CivsProtectionTest : FunSpec({
             deniedDoorClick.setUseInteractedBlock(Event.Result.DENY)
             paper.callEvent(deniedDoorClick).useInteractedBlock() shouldBe Event.Result.DENY
             val chest = world.getBlockAt(1, 64, 0).apply { type = Material.CHEST }
-            val chestClick = paper.callEvent(PlayerInteractEvent(player, Action.RIGHT_CLICK_BLOCK, null, chest, BlockFace.NORTH, EquipmentSlot.HAND))
+            val chestClick = paper.callEvent(PlayerInteractEvent(stranger, Action.RIGHT_CLICK_BLOCK, null, chest, BlockFace.NORTH, EquipmentSlot.HAND))
             chestClick.useInteractedBlock() shouldBe Event.Result.DENY
             val inventory = (chest.state as Container).inventory
-            val view = mockk<InventoryView>()
-            every { view.topInventory } returns inventory
-            every { view.player } returns player
-            paper.callEvent(InventoryOpenEvent(view)).isCancelled shouldBe true
+            for (actor in listOf(player, member, stranger)) {
+                val denied = actor == stranger
+                paper.callEvent(BlockBreakEvent(chest, actor)).isCancelled shouldBe denied
+                paper.callEvent(BlockPlaceEvent(chest, chest.state, door, ItemStack(Material.CHEST), actor, true, EquipmentSlot.HAND)).isCancelled shouldBe denied
+                paper.callEvent(BlockMultiPlaceEvent(listOf(chest.state, door.state), door, ItemStack(Material.CHEST), actor,
+                    true, EquipmentSlot.HAND)).isCancelled shouldBe denied
+                paper.callEvent(BlockDropItemEvent(chest, chest.state, actor, mutableListOf())).isCancelled shouldBe denied
+                val view = mockk<InventoryView>()
+                every { view.topInventory } returns inventory
+                every { view.player } returns actor
+                paper.callEvent(InventoryOpenEvent(view)).isCancelled shouldBe denied
+                val click = PlayerInteractEvent(actor, Action.RIGHT_CLICK_BLOCK, ItemStack(Material.STICK), chest, BlockFace.NORTH, EquipmentSlot.HAND)
+                val before = click.useItemInHand()
+                paper.callEvent(click).useItemInHand() shouldBe if (denied) Event.Result.DENY else before
+            }
             val outside = world.getBlockAt(10, 64, 0).apply { type = Material.CHEST }
             val outsideInventory = (outside.state as Container).inventory
             paper.callEvent(InventoryMoveItemEvent(inventory, ItemStack(Material.STONE), outsideInventory, true)).isCancelled shouldBe true
             paper.callEvent(InventoryMoveItemEvent(outsideInventory, ItemStack(Material.STONE), inventory, true)).isCancelled shouldBe true
             paper.callEvent(InventoryPickupItemEvent(inventory, mockk())).isCancelled shouldBe true
+        }
+    }
+
+    test("sites allow member edits but control blocks and every accepted construction phase stay locked") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("site-protection")
+            val owner = paper.addPlayer("Owner")
+            val member = paper.addPlayer("Member")
+            val stranger = paper.addPlayer("Stranger")
+            val control = CivPosition(-1, 63, 0)
+            val building = protectionBuilding(0, 2).copy(phase = BuildingPhase.SITE, control = control)
+            var city = protectionCity(world.uid, owner.uniqueId, building).copy(members = setOf(member.uniqueId))
+            val listener = CivsProtection({ listOf(city) })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("SiteProtectionTest"))
+            val barrel = world.getBlockAt(control.x, control.y, control.z).apply { type = Material.BARREL }
+            for (actor in listOf(owner, member, stranger)) {
+                paper.callEvent(BlockBreakEvent(world.getBlockAt(1, 64, 1), actor)).isCancelled shouldBe (actor == stranger)
+                paper.callEvent(BlockBreakEvent(world.getBlockAt(control.x, control.y, control.z), actor)).isCancelled shouldBe true
+                val view = mockk<InventoryView>()
+                every { view.topInventory } returns (barrel.state as Container).inventory
+                every { view.player } returns actor
+                paper.callEvent(InventoryOpenEvent(view)).isCancelled shouldBe (actor == stranger)
+            }
+            for (phase in ConstructionPhase.entries) {
+                val planned = building.copy(phase = BuildingPhase.CONSTRUCTING,
+                    bounds = CivBox(CivPosition(0, 64, 0), CivPosition(4, 66, 4)))
+                city = city.copy(buildings = listOf(building.copy(phase = BuildingPhase.ACTIVE)),
+                    construction = CivConstruction(UUID.randomUUID(), building.id, 2, 3, 0, phase, Stock(), plannedBuilding = planned))
+                listener.refresh()
+                for (actor in listOf(owner, member, stranger)) {
+                    listener.isProtected(world.uid, 0, 64, 0, actor.uniqueId) shouldBe true
+                    listener.isProtected(world.uid, 4, 64, 4, actor.uniqueId) shouldBe true
+                    listener.isProtected(world.uid, control.x, control.y, control.z, actor.uniqueId) shouldBe true
+                }
+            }
+        }
+    }
+
+    test("membership-only publication immediately revokes edits without changing geometry") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("membership-protection")
+            val owner = UUID.randomUUID()
+            val member = UUID.randomUUID()
+            var city = protectionCity(world.uid, owner, protectionBuilding(0, 2)).copy(members = setOf(member))
+            val listener = CivsProtection({ listOf(city) })
+            listener.isProtected(world.uid, 1, 64, 1, owner) shouldBe false
+            listener.isProtected(world.uid, 1, 64, 1, member) shouldBe false
+            listener.isProtected(world.uid, 1, 64, 1) shouldBe true
+            city = city.copy(members = emptySet())
+            listener.refresh() shouldBe true
+            listener.isProtected(world.uid, 1, 64, 1, member) shouldBe true
+            listener.isProtected(world.uid, 1, 64, 1, owner) shouldBe false
         }
     }
 

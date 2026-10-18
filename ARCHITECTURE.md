@@ -1,7 +1,7 @@
 # ArcCivs settlement contract
 
 Players found one settlement, choose a curated imported building style, place
-and preview a town hall, assign four pioneers, build production and housing,
+and preview a town hall site, welcome gradual pioneers, assign a hut builder, build production and housing,
 recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management; unrelated players cannot build, break or loot city structures.
@@ -46,35 +46,78 @@ to the city. Empty allowed-worlds makes a backend view-only.
 
 ## Domain
 
-Six building types: TOWN_HALL, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM; levels
-1..3. Internal resources WOOD, STONE, FOOD cannot be withdrawn as items/money.
-Food pays for recruitment/development; ordinary work does not consume food.
-Starting stock is 96 wood, 96 stone, 24 food, with four pioneers. This grant is
-part of the durable city creation, never repeated on join/reload.
-The network conversion changes no prices, rates, grants or caps. Remote viewing
-produces zero WOOD/STONE/FOOD and introduces no external currency or item flow.
+Seven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
+QUARRY, FARM; levels1..3. New placement creates a SITE and its physical barrel
+control at the selected ground approach, outside the schematic write volume.
+It does not paste the completed building. The first pioneer arrives after30s,
+then one per60s while a viewer is nearby; each arrival commits its remaining
+receipt before spawning. A restart never grants four more residents or catches
+up multiple arrivals. Idle residents choose bounded safe loaded wander targets.
 
-Town hall limits population to 4/8/12 and supplies four beds, base storage128,
-one builder slot and one construction project. Houses add2/4/6 beds; warehouse
-adds256/512/1024 capacity per resource. Production buildings have1/2/3 jobs,
-produce4 wood or3 stone/food per60seconds times their level, and require a real
-worker trip to the workplace and then storage. Recruitment costs12food.
-Population cap12, buildings cap16, active NPC cap48 server-wide. No offline
-production/catch-up; cities without nearby viewers sleep. Player-visible pause
-reasons include no assignment, unreachable route and full storage.
+The SITE hall supplies the initial four beds and a depot. A SITE builder hut
+has one assignable slot: its builder can construct that same hut first, then
+other buildings. New worker assignments never use the hall as a workshop.
+Population remains4/8/12 by hall level,12maximum; houses add2/4/6beds. Building
+limit16 and native NPC limit48 remain. Completed hall upgrades expand the actual
+persisted radius by32, including96→128→160 for new default cities. New founding
+reserves future maximum spacing; existing cities keep their actual radius.
 
-Building resources are reserved exactly once before construction. Construction
-has one durable identity and explicit preparation/placement/completion states;
-restart recovery continues the same operation without charging again. Placement
-validates city ownership, bounds, collisions, loaded chunks and Lands access.
-Foreign world changes are not silently overwritten. Protected buildings cannot
-be dismantled into free resources. Mutable source schematics affect future
-requests; an already accepted construction keeps its captured immutable plan.
+Items replace the closed WOOD/STONE/FOOD ledger. One-time founder reserve is
+96OAK_LOG,96COBBLESTONE,24BREAD. Legacy remaining stock converts1:1 exactly once
+when its old paid construction is complete; legacy snapshots and orders decode
+unchanged. Virtual maps contain plain obtainable vanilla materials only; custom
+items remain untouched in physical inventory. There is no Vault or token payout.
+
+Each building has a paginated virtual warehouse of1728/3456/5184items by level,
+plus its real27-slot control barrel for input/output. Explicitly registered city
+chests/barrels are physical sources; only one half of a double chest is used.
+PHYSICAL mode consumes loaded containers first, then the common reserve and
+building warehouses; VIRTUAL consumes those durable virtual maps. Mode changes
+create no items. Deposit moves actual control-barrel cargo to that building's
+warehouse; withdrawal moves up to64 items to its barrel, using its own warehouse
+then the common initial/legacy reserve. No direct player-inventory automation.
+
+Production requires an observed completed NPC round trip and the old60s work
+period plus travel. Logs yield4×level, stone and raw crops3×level; bread applies
+the vanilla3-wheat recipe and yields1×level. The chosen output is persisted per
+building. Physical mode inserts real items without drops, virtual mode credits
+that producer's bounded warehouse. A full destination pauses delivery. Recruitment
+consumes12BREAD after all population/bed checks. No offline production/catch-up.
+
+All item movement uses exact native slot before/after receipts stored by Core
+AtomicFileStore on the I/O executor before native writes. One locked city transaction
+closes container viewers and blocks inventory edits while in flight. It checks all
+changed slots before any writes; restart may finish only known before/after states.
+Drift is an explicit conflict. The city revision commits after native application;
+only an exact same-revision retry is accepted. Unknown outcomes retain the receipt,
+freeze city mutations and reconcile against canonical SQL on reload. Native chunk
+persistence and SQL are separate systems: this is guarded replay, not a distributed
+atomic transaction; a power-loss rollback of already-acknowledged chunk data remains
+a platform persistence boundary. No blind repeat after an unknown result.
+
+Construction reserves exact obtainable materials for the immutable captured
+before/after plan once. Matching existing blocks need no replacement. A builder's
+observed trip authorizes one deterministic horizontal tile of at most256cells;
+Core's provider-owned crop/paste does the bounded native writes. Only its successful
+completion advances the durable tile cursor. Callback fencing includes order and
+expected cursor, not just the order UUID. PLACING restart rechecks that same tile
+and accepts only planned before/after states; completed tiles are not repasted.
+Old paid orders retain their original whole-plan algorithm. Mutable source files
+cannot change an accepted design. Full snapshots are released after each step.
+
+World placement validates ownership, loaded chunks, borders, Lands, building boxes
+and foreign controlpoints. It preserves nonempty inventories and registered storage.
+Owners and members may remodel ACTIVE buildings and unstarted SITE areas with normal
+drops. Accepted construction footprints and control blocks remain locked. Environmental
+and other-plugin schematic guards retain protection, so strangers cannot bypass it
+with explosions or pistons. Native control inventory remains accessible to members.
+Personal cyan boundary cues use Core packet displays within24blocks of an edge,
+with at most60parts per viewer and no perimeter/world scans.
 
 ## UI
 
 /civs (alias /city) opens a native dialog hub. Founding, buildings, stock,
-workers, upgrades and members are separate stable screens. Selection and
+workers, upgrades and members are separate stable screens. Right-clicking a building control opens that building: level, work assignments, output choice, materials and its paginated warehouse. Selection and
 confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery
@@ -119,3 +162,16 @@ do not own movement or confirmation. No physical blocks change for previews.
 Build and focused domain/platform/recovery checks, consumer/package checks,
 then production deployment and full native player journey. Lab/production
 fixtures must preserve existing users and have an explicit cleanup record.
+
+## Migration and recovery visibility
+
+All loaded inventory receipts acquire native container locks before the service
+publishes readiness. Recovery may process one receipt per pulse, but players
+cannot alter later receipts' before/after slots while they wait. A known SQL
+rejection preserves the founding preview; an unknown commit result freezes
+changes until canonical reload.
+
+A migrated city already containing sixteen buildings and no builder hut retains
+one builder assignment in its active hall. This narrowly avoids an irreversible
+bootstrap deadlock in old full cities. New city placement reserves a hut slot,
+so the compatibility condition is unreachable through the new normal flow.

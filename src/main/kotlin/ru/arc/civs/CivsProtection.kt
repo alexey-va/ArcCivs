@@ -33,8 +33,9 @@ import org.bukkit.inventory.InventoryHolder
 import java.util.UUID
 
 /**
- * Generated structures are permanent city assets, never withdrawable world loot.
- * The full current and planned boxes are locked for everyone, including the owner;
+ * Members may remodel finished buildings and unstarted sites. Control blocks and the
+ * current/planned footprint of an accepted construction stay locked for everyone.
+ * Environmental changes and third-party pastes retain the complete footprint guard;
  * the settlement radius itself grants no event protection. Core pastes do not emit these events.
  */
 class CivsProtection(
@@ -42,11 +43,13 @@ class CivsProtection(
     private val available: () -> Boolean = { true },
     private val protectedWorlds: Set<String> = emptySet(),
 ) : Listener {
-    internal data class Footprint(val worldId: UUID, val bounds: CivBox)
-    internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>)
-    internal class IndexNode(val bounds: CivBox, val boxes: List<CivBox>, val left: IndexNode? = null, val right: IndexNode? = null) {
-        fun contains(x: Int, y: Int, z: Int): Boolean = bounds.contains(x, y, z) &&
-            (boxes.any { it.contains(x, y, z) } || left?.contains(x, y, z) == true || right?.contains(x, y, z) == true)
+    internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>)
+    internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
+        val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>)
+    internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
+        fun contains(x: Int, y: Int, z: Int, actor: UUID?): Boolean = bounds.contains(x, y, z) &&
+            (boxes.any { it.bounds.contains(x, y, z) && (actor == null || actor !in it.editors) } ||
+                left?.contains(x, y, z, actor) == true || right?.contains(x, y, z, actor) == true)
     }
     private var snapshot = prepare(emptyList())
 
@@ -68,28 +71,41 @@ class CivsProtection(
     companion object {
         /** Pure index construction over detached immutable city records. */
         internal fun prepare(cities: Collection<Settlement>): Snapshot {
-            val current = cities.flatMap { city -> civsProtectedBuildings(city).map { Footprint(city.worldId, it.bounds) }.toList() }.distinct()
+            val current = cities.flatMap { city ->
+                val editors = (city.members + city.owner).toSet()
+                buildList {
+                    city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors)) }
+                    city.buildings.forEach { building ->
+                        val locked = building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id
+                        add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
+                    }
+                    city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
+                    civsProtectedBuildings(city).mapNotNull { it.control }.distinct().forEach { point ->
+                        add(Footprint(city.worldId, CivBox(point, point), emptySet()))
+                    }
+                }
+            }.distinct()
             return Snapshot(current, current.groupBy { it.worldId }.mapValues { (_, footprints) ->
-                index(footprints.map { it.bounds })
-            })
+                index(footprints)
+            }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap())
         }
 
         /** Area-independent memory preserves old large footprints without enumerating their chunks. */
-        private fun index(boxes: List<CivBox>): IndexNode {
-            val bounds = CivBox(CivPosition(boxes.minOf { it.min.x }, boxes.minOf { it.min.y }, boxes.minOf { it.min.z }),
-                CivPosition(boxes.maxOf { it.max.x }, boxes.maxOf { it.max.y }, boxes.maxOf { it.max.z }))
+        private fun index(boxes: List<Footprint>): IndexNode {
+            val bounds = CivBox(CivPosition(boxes.minOf { it.bounds.min.x }, boxes.minOf { it.bounds.min.y }, boxes.minOf { it.bounds.min.z }),
+                CivPosition(boxes.maxOf { it.bounds.max.x }, boxes.maxOf { it.bounds.max.y }, boxes.maxOf { it.bounds.max.z }))
             if (boxes.size <= 8) return IndexNode(bounds, boxes)
             val xWidth = bounds.max.x.toLong() - bounds.min.x
             val zWidth = bounds.max.z.toLong() - bounds.min.z
-            val sorted = boxes.sortedBy { if (xWidth >= zWidth) it.min.x.toLong() + it.max.x else it.min.z.toLong() + it.max.z }
+            val sorted = boxes.sortedBy { if (xWidth >= zWidth) it.bounds.min.x.toLong() + it.bounds.max.x else it.bounds.min.z.toLong() + it.bounds.max.z }
             val middle = sorted.size / 2
             return IndexNode(bounds, emptyList(), index(sorted.subList(0, middle)), index(sorted.subList(middle, sorted.size)))
         }
     }
 
-    fun isProtected(worldId: UUID, x: Int, y: Int, z: Int): Boolean =
+    fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID? = null): Boolean =
         (!available() && Bukkit.getWorld(worldId)?.name in protectedWorlds) ||
-            snapshot.worlds[worldId]?.contains(x, y, z) == true
+            snapshot.worlds[worldId]?.contains(x, y, z, actor) == true
 
     private fun protected(block: Block): Boolean = isProtected(block.world.uid, block.x, block.y, block.z)
     private fun protected(location: Location?): Boolean = location?.world?.let {
@@ -97,6 +113,12 @@ class CivsProtection(
     } ?: false
     private fun protected(block: Block, direction: BlockFace): Boolean =
         isProtected(block.world.uid, block.x + direction.modX, block.y + direction.modY, block.z + direction.modZ)
+    private fun protected(block: Block, actor: UUID): Boolean = isProtected(block.world.uid, block.x, block.y, block.z, actor)
+    private fun protected(location: Location?, actor: UUID): Boolean = location?.world?.let {
+        isProtected(it.uid, location.blockX, location.blockY, location.blockZ, actor)
+    } ?: false
+    private fun protected(block: Block, direction: BlockFace, actor: UUID): Boolean =
+        isProtected(block.world.uid, block.x + direction.modX, block.y + direction.modY, block.z + direction.modZ, actor)
 
     private fun protected(holder: InventoryHolder?): Boolean = when (holder) {
         is BlockState -> protected(holder.location)
@@ -104,16 +126,28 @@ class CivsProtection(
         else -> false
     }
     private fun protected(inventory: Inventory): Boolean = protected(inventory.holder) || protected(inventory.location)
+    private fun protected(holder: InventoryHolder?, actor: UUID): Boolean = when (holder) {
+        is BlockState -> protectedInventory(holder.location, actor)
+        is DoubleChest -> protected(holder.leftSide, actor) || protected(holder.rightSide, actor)
+        else -> false
+    }
+    private fun protectedInventory(location: Location?, actor: UUID): Boolean {
+        if (available() && location?.world != null && actor in snapshot.controlEditors[location.world!!.uid to
+                CivPosition(location.blockX, location.blockY, location.blockZ)].orEmpty()) return false
+        return protected(location, actor)
+    }
+    private fun protected(inventory: Inventory, actor: UUID): Boolean =
+        protected(inventory.holder, actor) || protectedInventory(inventory.location, actor)
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun breakBlock(event: BlockBreakEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun breakBlock(event: BlockBreakEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun placeBlock(event: BlockPlaceEvent) { if (protected(event.blockPlaced)) event.isCancelled = true }
+    fun placeBlock(event: BlockPlaceEvent) { if (protected(event.blockPlaced, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun placeMultiple(event: BlockMultiPlaceEvent) {
-        if (event.replacedBlockStates.any { protected(it.location) }) event.isCancelled = true
+        if (event.replacedBlockStates.any { protected(it.location, event.player.uniqueId) }) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -184,13 +218,13 @@ class CivsProtection(
     fun destroy(event: BlockDestroyEvent) { if (protected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun drops(event: BlockDropItemEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun drops(event: BlockDropItemEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun cook(event: BlockCookEvent) { if (protected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun sign(event: SignChangeEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun sign(event: SignChangeEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun tree(event: StructureGrowEvent) {
@@ -218,24 +252,25 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun emptyBucket(event: PlayerBucketEmptyEvent) {
-        if (protected(event.block) || protected(event.blockClicked) || protected(event.blockClicked, event.blockFace)) event.isCancelled = true
+        val actor = event.player.uniqueId
+        if (protected(event.block, actor) || protected(event.blockClicked, actor) || protected(event.blockClicked, event.blockFace, actor)) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun fillBucket(event: PlayerBucketFillEvent) {
-        if (protected(event.block) || protected(event.blockClicked)) event.isCancelled = true
+        if (protected(event.block, event.player.uniqueId) || protected(event.blockClicked, event.player.uniqueId)) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun harvest(event: PlayerHarvestBlockEvent) { if (protected(event.harvestedBlock)) event.isCancelled = true }
+    fun harvest(event: PlayerHarvestBlockEvent) { if (protected(event.harvestedBlock, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun shear(event: PlayerShearBlockEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun shear(event: PlayerShearBlockEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun interact(event: PlayerInteractEvent) {
         val block = event.clickedBlock ?: return
-        if (!protected(block)) return
+        if (!protected(block, event.player.uniqueId)) return
         event.setUseItemInHand(Event.Result.DENY)
         if (event.action != Action.RIGHT_CLICK_BLOCK || block.blockData !is Openable) {
             event.setUseInteractedBlock(Event.Result.DENY)
@@ -243,16 +278,16 @@ class CivsProtection(
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun open(event: InventoryOpenEvent) { if (protected(event.inventory)) event.isCancelled = true }
+    fun open(event: InventoryOpenEvent) { if (protected(event.inventory, event.player.uniqueId)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun click(event: InventoryClickEvent) {
-        if (protected(event.view.topInventory)) event.isCancelled = true
+        if (protected(event.view.topInventory, event.whoClicked.uniqueId)) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun drag(event: InventoryDragEvent) {
-        if (protected(event.view.topInventory)) event.isCancelled = true
+        if (protected(event.view.topInventory, event.whoClicked.uniqueId)) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

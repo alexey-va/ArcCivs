@@ -3,8 +3,8 @@ package ru.arc.civs
 import java.util.UUID
 
 enum class Resource { WOOD, STONE, FOOD }
-enum class BuildingType { TOWN_HALL, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM }
-enum class BuildingPhase { CONSTRUCTING, ACTIVE }
+enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM }
+enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, PLACING, PAUSED }
 
 data class Stock(val wood: Long = 0, val stone: Long = 0, val food: Long = 0) {
@@ -39,6 +39,8 @@ data class CivBuilding(
     val bounds: CivBox,
     val entrance: CivPosition,
     val phase: BuildingPhase,
+    val control: CivPosition? = null,
+    val production: String? = null,
 )
 
 data class CivWorker(
@@ -60,7 +62,12 @@ data class CivConstruction(
     val cost: Stock,
     val failure: String? = null,
     val plannedBuilding: CivBuilding? = null,
+    val batches: CivConstructionBatches? = null,
+    val materials: Map<String, Long>? = null,
 )
+
+/** A durable remaining grant. Null in legacy snapshots means the pioneers already arrived. */
+data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
 
 data class Settlement(
     val id: UUID,
@@ -77,6 +84,8 @@ data class Settlement(
     val construction: CivConstruction? = null,
     val revision: Long = 0,
     val createdAt: Long = 0,
+    val inventory: CivInventory? = null,
+    val immigration: CivImmigration? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

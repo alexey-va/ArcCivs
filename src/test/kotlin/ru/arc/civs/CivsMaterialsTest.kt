@@ -1,0 +1,50 @@
+package ru.arc.civs
+
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.shouldBe
+import io.kotest.assertions.throwables.shouldThrow
+import org.bukkit.Material
+
+class CivsMaterialsTest : FunSpec({
+    lateinit var paper: ru.arc.paper.testing.MockBukkitTestRuntime
+    beforeEach { paper = ru.arc.paper.testing.MockBukkitTestRuntime.open() }
+    afterEach { paper.close() }
+
+    test("real building materials account for paired blocks and variants") {
+        CivsMaterials.requirements("minecraft:spruce_door[half=lower]") shouldBe mapOf("SPRUCE_DOOR" to 1L)
+        CivsMaterials.requirements("minecraft:spruce_door[half=upper]") shouldBe emptyMap()
+        CivsMaterials.requirements("minecraft:red_bed[part=head]") shouldBe emptyMap()
+        CivsMaterials.requirements("minecraft:spruce_slab[type=double]") shouldBe mapOf("SPRUCE_SLAB" to 2L)
+        CivsMaterials.requirements("minecraft:wall_torch[facing=north]") shouldBe mapOf("TORCH" to 1L)
+        CivsMaterials.requirements("minecraft:potted_poppy") shouldBe mapOf("FLOWER_POT" to 1L, "POPPY" to 1L)
+        CivsMaterials.requirements("minecraft:wheat[age=7]") shouldBe mapOf("WHEAT_SEEDS" to 1L)
+        CivsMaterials.requirements("minecraft:oak_stairs[waterlogged=true]") shouldBe mapOf("OAK_STAIRS" to 1L, "WATER_BUCKET" to 1L)
+        CivsMaterials.requirements("minecraft:structure_void") shouldBe emptyMap()
+        shouldThrow<CivsRejection> { CivsMaterials.requirements("minecraft:nether_portal") }.reason shouldBe "unsupported-material"
+    }
+
+    test("curated vanilla palettes have obtainable deterministic material requirements") {
+        val states = javaClass.getResourceAsStream("/blueprint-material-states.txt")!!.bufferedReader().use { it.readLines() }
+            .filter { it.isNotBlank() && !it.startsWith('#') }
+        (states.size > 100) shouldBe true
+        for (state in states) {
+            val costs = try { CivsMaterials.requirements(state) } catch (e: CivsRejection) { error("Cannot price $state: ${e.values}") }
+            costs.all { (name, count) -> Material.getMaterial(name)?.isItem == true && count in 1..8 } shouldBe true
+        }
+    }
+
+    test("construction tiles cover every voxel exactly once across negative coordinates") {
+        val box = CivBox(CivPosition(-19, -4, -7), CivPosition(11, 3, 28))
+        val batches = civsBuildBatches(box)
+        val seen = hashSetOf<CivPosition>()
+        for (batch in batches) {
+            batch.minimum.y shouldBe batch.maximum.y
+            ((batch.maximum.x - batch.minimum.x + 1) * (batch.maximum.z - batch.minimum.z + 1) <= 256) shouldBe true
+            for (x in batch.minimum.x..batch.maximum.x) for (z in batch.minimum.z..batch.maximum.z)
+                seen.add(CivPosition(x, batch.minimum.y, z)) shouldBe true
+        }
+        seen.size shouldBe 31 * 8 * 36
+        seen.all { box.contains(it.x, it.y, it.z) } shouldBe true
+        batches.map { it.minimum.y }.sorted() shouldBe batches.map { it.minimum.y }
+    }
+})

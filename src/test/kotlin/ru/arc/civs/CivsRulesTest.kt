@@ -8,7 +8,7 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
-    test("founding grant and first builder are durable before placement activates the hall") {
+    test("legacy founding grant and first builder recover without another charge or worker grant") {
         val founded = foundedCity()
         founded.stock shouldBe Stock(96, 96, 24)
         founded.workers.size shouldBe 4
@@ -173,7 +173,7 @@ class CivsRulesTest : FunSpec({
         var city = construct(activeCity(), building(3, BuildingType.FORESTER, x = 10))
         city = CivsRules.assign(city, owner, uuid(101), uuid(3), 1_000)
         rejects("workplace-full") { CivsRules.assign(city, owner, uuid(102), uuid(3), 1_000) }
-        rejects("workplace-full") { CivsRules.assign(city, owner, uuid(102), hallId, 1_000) }
+        rejects("invalid-assignment") { CivsRules.assign(city, owner, uuid(102), hallId, 1_000) }
         rejects("invalid-building") { CivsRules.reserveBuild(city, owner, building(4, BuildingType.HOUSE, x = 10), orderFor(building(4, BuildingType.HOUSE, x = 10))) }
         rejects("invalid-building") { CivsRules.reserveBuild(city, owner, building(4, BuildingType.HOUSE, x = 101), orderFor(building(4, BuildingType.HOUSE, x = 101))) }
         val house = building(4, BuildingType.HOUSE, x = 20)
@@ -314,8 +314,9 @@ class CivsRulesTest : FunSpec({
         val invalidConstruction = city.copy(construction = orderFor(hall.copy(level = 2)).copy(workDone = 7, plannedBuilding = hall.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)))
         rejects("invalid-state") { CivsRules.validate(invalidConstruction) }
         rejects("arithmetic-overflow") { CivsRules.addMember(city.copy(revision = Long.MAX_VALUE), owner, uuid(900)) }
-        val unassigned = CivsRules.assign(city, owner, uuid(100), null, 1_000)
-        rejects("arithmetic-overflow") { CivsRules.assign(unassigned, owner, uuid(100), hallId, Long.MAX_VALUE) }
+        val unassigned = CivsRules.placeSite(CivsRules.assign(city, owner, uuid(100), null, 1_000), owner,
+            building(55, BuildingType.BUILDER_HUT, x = 10))
+        rejects("arithmetic-overflow") { CivsRules.assign(unassigned, owner, uuid(100), uuid(55), Long.MAX_VALUE) }
         val reserved = CivsRules.reserveBuild(city, owner, building(2, BuildingType.HOUSE, x = 10), orderFor(building(2, BuildingType.HOUSE, x = 10)))
         val exhausted = reserved.copy(workers = reserved.workers.mapIndexed { index, worker -> if (index == 0) worker.copy(completedCycles = Long.MAX_VALUE) else worker })
         rejects("arithmetic-overflow") { deliver(exhausted, exhausted.workers.first()) }
@@ -331,8 +332,15 @@ private fun building(id: Int, type: BuildingType, x: Int, z: Int = 0, phase: Bui
     CivBuilding(uuid(id), type, 1, CivPosition(x, 64, z), 0, "${type.name.lowercase()}-1",
         CivBox(CivPosition(x - 1, 64, z - 1), CivPosition(x + 1, 68, z + 1)), CivPosition(x, 64, z + 2), phase)
 
-private fun foundedCity(): Settlement = CivsRules.found(uuid(10), owner, "Settlement", uuid(30), CivPosition(0, 64, 0), 100,
-    "medieval", building(1, BuildingType.TOWN_HALL, x = 0), (100..103).map { CivWorker(uuid(it), "Pioneer $it", null) }, foundationId, 1_000)
+/** Exact pre-SITE contract, retained as a migration/recovery fixture. */
+private fun foundedCity(): Settlement {
+    val hall = building(1, BuildingType.TOWN_HALL, x = 0)
+    return CivsRules.validate(Settlement(uuid(10), owner, "Settlement", uuid(30), CivPosition(0, 64, 0), 100,
+        "medieval", Stock(96, 96, 24), listOf(hall), (100..103).map {
+            CivWorker(uuid(it), "Pioneer $it", if (it == 100) hall.id else null, nextDeliveryAt = if (it == 100) 11_000 else 0)
+        }, construction = CivConstruction(foundationId, hall.id, 1, 0, 0, ConstructionPhase.READY_TO_PLACE,
+            Stock(), plannedBuilding = hall), createdAt = 1_000))
+}
 
 private fun activeCity(): Settlement = CivsRules.completeConstruction(CivsRules.beginPlacement(foundedCity(), owner, foundationId), owner, foundationId)
 

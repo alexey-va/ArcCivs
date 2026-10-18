@@ -433,6 +433,63 @@ class CivsCitizensTest : FunSpec({
         citizenPlan(city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)), worker)?.idleReason shouldBe "construction-paused"
         citizenPlan(city, worker.copy(assignment = null))?.idleReason shouldBe "unassigned"
     }
+
+    test("a site hall supplies a depot while a builder assigned to its unfinished hut can build that hut") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(phase = BuildingPhase.SITE)
+        val hut = building(BuildingType.BUILDER_HUT, CivPosition(8, 64, 0)).copy(phase = BuildingPhase.CONSTRUCTING)
+        val worker = CivWorker(UUID.randomUUID(), "Строитель", hut.id, nextDeliveryAt = 10_000)
+        val order = CivConstruction(UUID.randomUUID(), hut.id, 1, 2, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = hut, batches = CivConstructionBatches(2), materials = emptyMap())
+        val city = city(listOf(hall, hut), worker, order)
+        val plan = requireNotNull(citizenPlan(city, worker))
+        plan.storage shouldBe hall.entrance
+        plan.workplace shouldBe hut.entrance
+        plan.workMillis shouldBe CivsRules.BUILDER_INTERVAL
+        plan.idleReason shouldBe null
+        citizenPlan(city, worker.copy(assignment = hall.id))?.idleReason shouldBe "building-unavailable"
+        val otherOrder = order.copy(buildingId = hall.id, plannedBuilding = hall.copy(phase = BuildingPhase.CONSTRUCTING))
+        citizenPlan(city.copy(construction = otherOrder), worker)?.idleReason shouldBe "building-unavailable"
+        citizenPlan(city.copy(construction = null), worker.copy(assignment = null))?.idleReason shouldBe "unassigned"
+    }
+
+    test("upgrading producers pause while a builder continues rebuilding its own active hut") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val hut = building(BuildingType.BUILDER_HUT, CivPosition(8, 64, 0))
+        val farm = building(BuildingType.FARM, CivPosition(12, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Житель", farm.id, nextDeliveryAt = 10_000)
+        val order = CivConstruction(UUID.randomUUID(), farm.id, 2, 2, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = farm.copy(level = 2, phase = BuildingPhase.CONSTRUCTING),
+            batches = CivConstructionBatches(2), materials = emptyMap())
+        val city = city(listOf(hall, hut, farm), worker, order)
+        citizenPlan(city, worker)?.idleReason shouldBe "building-unavailable"
+        val selfUpgrade = order.copy(buildingId = hut.id, plannedBuilding = hut.copy(level = 2, phase = BuildingPhase.CONSTRUCTING))
+        citizenPlan(city.copy(construction = selfUpgrade), worker.copy(assignment = hut.id))?.idleReason shouldBe null
+    }
+
+    test("idle wander remains bounded and timed without advancing a production cycle") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(phase = BuildingPhase.SITE)
+        val worker = CivWorker(UUID.randomUUID(), "Свободный", null)
+        val city = city(listOf(hall), worker, null)
+        val plan = requireNotNull(citizenPlan(city, worker))
+        plan.idleReason shouldBe "unassigned"
+        val wander = CitizenWander()
+        val cycle = CitizenCycle(plan.token, plan.workMillis)
+        wander.ready(0) shouldBe true
+        val targets = (0..23).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
+        targets.distinct().size shouldBe 24
+        targets.all { city.contains(it.x, it.z) && kotlin.math.abs(it.x) <= 4 && kotlin.math.abs(it.z) <= 4 && it.y in 63..65 } shouldBe true
+        wander.finish(1_000, true)
+        wander.ready(5_999) shouldBe false
+        wander.ready(6_000) shouldBe true
+        wander.finish(6_000, false)
+        wander.ready(20_999) shouldBe false
+        wander.ready(21_000) shouldBe true
+        cycle.phase shouldBe CitizenPhase.IDLE
+        cycle.beginDelivery(Long.MAX_VALUE) shouldBe null
+        worker.completedCycles shouldBe 0L
+        city.stock shouldBe Stock()
+        (0..23).all { citizenWanderTarget(city.copy(radius = 1), hall.entrance, worker.id, it) == null } shouldBe true
+    }
 })
 
 private fun token(nextDeliveryAt: Long = 0) = CitizenToken(UUID.randomUUID(), 0, nextDeliveryAt, null)

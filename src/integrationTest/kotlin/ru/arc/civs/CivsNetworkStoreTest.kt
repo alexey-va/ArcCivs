@@ -285,8 +285,7 @@ class CivsNetworkStoreTest : FreeSpec({
             )
             return CivsRules.found(
                 UUID.randomUUID(), owner, "Test settlement", UUID.randomUUID(), CivPosition(0, 64, 0),
-                16, "nordic", hall, (0..3).map { CivWorker(UUID.randomUUID(), "Worker$it", null) },
-                UUID.randomUUID(), 1_000,
+                16, "nordic", hall, 1_000,
             )
         }
 

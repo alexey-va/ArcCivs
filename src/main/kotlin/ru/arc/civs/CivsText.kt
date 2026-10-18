@@ -3,6 +3,7 @@ package ru.arc.civs
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.format.TextDecoration
+import org.bukkit.Material
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
@@ -59,8 +60,15 @@ class CivsText private constructor(
         (if (status.startsWith("workers.status.")) status else "workers.status.$status")
             .takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable")
 
+    /** Vanilla names follow the client language; all other host values remain literal. */
+    fun material(player: Player, material: String): Component = Material.matchMaterial(material)?.let {
+        Component.translatable(it.translationKey())
+    } ?: render(player, "materials.unknown")
+
     fun reason(player: Player, reason: String?, values: Map<String, String> = emptyMap()): Component = render(player,
-        "reason.$reason".takeIf { it in messages.getValue("ru") } ?: "common.error", *values.toList().toTypedArray())
+        "reason.$reason".takeIf { it in messages.getValue("ru") } ?: "common.error", *values.map { (key, value) ->
+            key to if (key == "material") material(player, value) else value
+        }.toTypedArray())
 
     fun failure(player: Player, failure: Throwable): Component {
         val causes = generateSequence(failure) { it.cause }.take(8).toList()

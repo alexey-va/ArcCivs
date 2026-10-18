@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.google.gson.GsonBuilder
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldNotContain
@@ -11,6 +12,7 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
 import io.mockk.verify
+import io.mockk.verifyOrder
 import io.mockk.spyk
 import io.mockk.just
 import io.mockk.Runs
@@ -18,6 +20,7 @@ import io.papermc.paper.connection.PlayerGameConnection
 import io.papermc.paper.dialog.DialogResponseView
 import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.entity.Player
@@ -35,6 +38,9 @@ import ru.arc.paper.api.ArcSchematicPoint
 import ru.arc.paper.display.PacketBlockDisplay
 import ru.arc.paper.display.PaperPacketDisplays
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
@@ -292,13 +298,13 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
             h.body() shouldContain "Waiting for work"
-            h.body().contains("No workplace assigned") shouldBe false
+            h.body().contains("Walking around · unassigned") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
 
             every { h.host.workerStatus(worker.id) } returns "workers.status.working"
             h.click("unassign")
             h.paper.performTicks(2)
-            h.body() shouldContain "No workplace assigned"
+            h.body() shouldContain "Walking around · unassigned"
             h.body().contains("Working") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, null) }
             verify(exactly = 0) { h.runtime.close(h.player) }
@@ -326,15 +332,199 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("resource shortage explains the block and storage offers no export action") {
+    test("an empty warehouse does not block marking another building site") {
         withUi { h ->
-            h.city = settlement(h.player).copy(stock = Stock())
+            h.city = settlement(h.player).copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
             h.open(); h.click("stock")
-            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
-            h.body() shouldContain "cannot be withdrawn"
+            h.body() shouldContain "Each building has its own warehouse"
+            h.click("warehouse_0")
+            h.body() shouldContain "Nothing stored yet"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit", "refresh")
             h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
-            h.screen.buttons.map { it.id.value } shouldNotContain "prepare"
-            h.body() shouldContain "does not have enough resources"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
+            h.body() shouldContain "Marking a site is free"
+            verify(exactly = 0) { h.host.startBuilding(any(), any()); h.host.availableMaterials(any()) }
+        }
+    }
+
+    test("site material estimate is not a debit gate and starting uses the selected building once") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val site = base.buildings.first { it.type == BuildingType.BUILDER_HUT }.copy(phase = BuildingPhase.SITE)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
+            every { h.host.buildingMaterials(h.player, site.id) } returns CompletableFuture.completedFuture(mapOf("OAK_LOG" to 900L))
+            every { h.host.availableMaterials(h.player) } returns emptyMap()
+            every { h.host.startBuilding(h.player, site.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuilding(h.player, base.id, site.id)
+            h.screen.id shouldBe "civs.building"
+            h.body() shouldContain "Site marked out"
+            h.click("materials"); h.paper.performTicks(2)
+            h.body() shouldContain "upper estimates"
+            h.body() shouldContain "0 / up to 900"
+            val before = h.screen
+            h.click("start"); h.click("start", screen = before)
+            h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.startBuilding(h.player, site.id) }
+        }
+    }
+
+    test("closed material lookup cannot reopen a building menu") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val site = base.buildings.last().copy(phase = BuildingPhase.SITE)
+            h.city = base.copy(buildings = base.buildings.dropLast(1) + site)
+            val pending = CompletableFuture<Map<String, Long>>()
+            every { h.host.buildingMaterials(h.player, site.id) } returns pending
+            h.ui.openBuilding(h.player, base.id, site.id)
+            h.click("materials")
+            val count = h.screens.size
+            h.dismiss()
+            pending.complete(mapOf("OAK_LOG" to 10L)); h.paper.performTicks(2)
+            h.screens.size shouldBe count
+        }
+    }
+
+    test("warehouse pages isolate building stock from reserve and use level capacity") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val hall = base.buildings.first()
+            val forest = base.buildings.last()
+            val own = listOf("BIRCH_LOG", "BRICKS", "CARROT", "COBBLESTONE", "DIRT", "GLASS", "OAK_LOG", "POTATO", "SAND", "STONE")
+                .associateWith { 10L }
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL, mapOf("BREAD" to 12L),
+                buildingMaterials = mapOf(hall.id.toString() to own, forest.id.toString() to mapOf("DIAMOND" to 99L))))
+            h.ui.openBuilding(h.player, base.id, hall.id); h.click("warehouse")
+            h.body() shouldContain "100 / 3456"
+            h.body() shouldContain "0 · reserve 12"
+            h.body().contains("99") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldNotContain "previous"
+            h.click("next")
+            h.screen.buttons.map { it.id.value }.contains("previous") shouldBe true
+            h.screen.buttons.map { it.id.value } shouldNotContain "next"
+            h.click("withdraw")
+            h.screen.buttons.count { it.id.value.startsWith("withdraw_") } shouldBe 8
+            h.click("next")
+            h.screen.buttons.count { it.id.value.startsWith("withdraw_") } shouldBe 3
+            val expected = (own.keys + "BREAD").sorted()[8]
+            h.click("withdraw_0"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.withdrawMaterial(h.player, hall.id, expected) }
+            verify(exactly = 0) { h.host.withdrawMaterial(h.player, forest.id, any()) }
+        }
+    }
+
+    test("intake closes the dialog before opening native inventory and busy storage hides transfers") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            val building = h.city!!.buildings.first()
+            h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse"); h.click("intake")
+            h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            verifyOrder { h.runtime.close(h.player); h.host.openBuildingInventory(h.player, building.id) }
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, h.city!!.id, building.id); h.click("warehouse")
+            h.body() shouldContain "Another settlement action"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+        }
+    }
+
+    test("building worker selection reassigns the chosen resident to that exact building") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            val forest = h.city!!.buildings.last()
+            val worker = h.city!!.workers.first()
+            every { h.host.assign(any(), any(), any()) } answers {
+                h.city = CivsRules.assign(h.city!!, h.player.uniqueId, secondArg(), thirdArg(), 0)
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openBuilding(h.player, h.city!!.id, forest.id); h.click("workers")
+            h.screen.id shouldBe "civs.building-workers"
+            h.click("worker_0"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.assign(h.player, worker.id, forest.id) }
+            h.screen.buttons.count { it.id.value.startsWith("worker_") } shouldBe 1
+            h.click("worker_0"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.assign(h.player, worker.id, null) }
+        }
+    }
+
+    test("a full migrated town without a builder hut can assign its town hall builder") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val hall = base.buildings.first()
+            val template = base.buildings.first { it.type == BuildingType.HOUSE }
+            val positions = listOf(-50, -35, 35, 50).flatMap { x -> listOf(-50, -35, 35, 50).map { z -> x to z } }
+            val houses = positions.take(13).map { (x, z) -> template.copy(id = UUID.randomUUID(), anchor = CivPosition(x, 64, z),
+                bounds = CivBox(CivPosition(x, 64, z), CivPosition(x + 4, 70, z + 4)),
+                entrance = CivPosition(x + 2, 64, z - 1), control = CivPosition(x + 2, 63, z - 1)) }
+            h.city = base.copy(buildings = base.buildings.filter { it.type != BuildingType.BUILDER_HUT } + houses,
+                workers = base.workers.map { it.copy(assignment = null) })
+            every { h.host.assign(any(), any(), any()) } answers {
+                h.city = CivsRules.assign(h.city!!, h.player.uniqueId, secondArg(), thirdArg(), 0)
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.open()
+            h.body().contains("mark a builder hut") shouldBe false
+            h.ui.openBuilding(h.player, base.id, hall.id)
+            h.body() shouldContain "One resident can work as a builder at the town hall"
+            h.screen.buttons.map { it.id.value }.contains("workers") shouldBe true
+            val worker = h.city!!.workers[1]
+            h.ui.openWorker(h.player, base.id, worker.id); h.click("assign"); h.click("assign_0"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.assign(h.player, worker.id, hall.id) }
+        }
+    }
+
+    test("production selector follows the building options and displays durable selection") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            val forest = h.city!!.buildings.last()
+            every { h.host.setProduction(any(), any(), any()) } answers {
+                val product = thirdArg<String>()
+                h.city = h.city!!.copy(buildings = h.city!!.buildings.map { if (it.id == forest.id) it.copy(production = product) else it })
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openBuilding(h.player, h.city!!.id, forest.id); h.click("production")
+            h.screen.buttons.count { it.id.value.startsWith("production_") } shouldBe CivsProduction.options(forest.type).size
+            h.click("production_1"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.setProduction(h.player, forest.id, "SPRUCE_LOG") }
+            plainText(h.screen.buttons.first { it.id.value == "production_1" }.label).startsWith("✔") shouldBe true
+        }
+    }
+
+    test("storage mode and container controls use the existing city APIs") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            val container = CivPosition(3, 64, 9)
+            every { h.host.setStorageMode(any(), any()) } answers {
+                h.city = h.city!!.copy(inventory = h.city!!.inventory!!.copy(mode = secondArg()))
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.host.registerContainer(h.player) } answers {
+                h.city = h.city!!.copy(inventory = h.city!!.inventory!!.copy(containers = listOf(container)))
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.host.unregisterContainer(h.player, container) } returns CompletableFuture.completedFuture(Unit)
+            h.open(); h.click("stock"); h.click("mode"); h.click("mode_virtual"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.setStorageMode(h.player, CivStorageMode.VIRTUAL) }
+            h.open(); h.click("stock"); h.click("containers"); h.click("register"); h.paper.performTicks(2)
+            h.click("container_0"); h.click("unregister"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.registerContainer(h.player); h.host.unregisterContainer(h.player, container) }
+        }
+    }
+
+    test("arriving pioneers remain visible and an unassigned sleeping resident is not mislabeled") {
+        withUi { h ->
+            val base = settlement(h.player)
+            h.city = base.copy(workers = emptyList(), immigration = CivImmigration(4, 30_000))
+            h.open(); h.click("workers")
+            h.body() shouldContain "30 seconds"
+            h.screen.buttons.map { it.id.value } shouldNotContain "recruit"
+            h.city = base
+            val idle = base.workers[1]
+            every { h.host.workerStatus(idle.id) } returns "workers.status.sleeping"
+            h.ui.openWorker(h.player, base.id, idle.id)
+            h.body() shouldContain "Settlement is sleeping"
+            every { h.host.workerStatus(idle.id) } returns "workers.status.unassigned"
+            h.ui.openWorker(h.player, base.id, idle.id)
+            h.body() shouldContain "Walking around · unassigned"
         }
     }
 
@@ -404,6 +594,38 @@ class CivsUiTest : FunSpec({
             val text = CivsText.fromYaml(civsLocaleSource())
             plainText(text.failure(h.player, IllegalStateException("private/internal/path"))) shouldBe
                 "The action did not complete. Refresh this screen and try again."
+        }
+    }
+
+    test("export representative building and warehouse screens from actual presenter components") {
+        val directory = System.getenv("CIVS_UI_PREVIEW_OUT") ?: return@test
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val building = base.buildings.last()
+            val own = listOf("BIRCH_LOG", "BRICKS", "CARROT", "COBBLESTONE", "DIRT", "GLASS", "OAK_LOG", "POTATO", "SAND", "STONE")
+                .associateWith { 32L }
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.VIRTUAL, mapOf("BREAD" to 12L, "OAK_LOG" to 64L),
+                buildingMaterials = mapOf(building.id.toString() to own)))
+            h.ui.openBuilding(h.player, base.id, building.id)
+            exportUiScreen(directory, "building", h.screen)
+            h.click("warehouse")
+            exportUiScreen(directory, "warehouse", h.screen)
+            h.click("next")
+            exportUiScreen(directory, "warehouse-page-2", h.screen)
+            h.click("withdraw")
+            exportUiScreen(directory, "withdraw", h.screen)
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("production")
+            exportUiScreen(directory, "production", h.screen)
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("warehouse")
+            exportUiScreen(directory, "warehouse-busy", h.screen)
+            every { h.host.cityBusy(h.player) } returns false
+            h.city = h.city!!.copy(buildings = h.city!!.buildings.map { if (it.id == building.id) it.copy(phase = BuildingPhase.SITE) else it })
+            every { h.host.buildingMaterials(h.player, building.id) } returns CompletableFuture.completedFuture(
+                mapOf("OAK_LOG" to 124L, "COBBLESTONE" to 260L, "GLASS" to 16L))
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.paper.performTicks(2)
+            exportUiScreen(directory, "site-materials", h.screen)
         }
     }
 
@@ -533,6 +755,19 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { player.closeDialog() } just Runs
         every { host.ready() } returns true
         every { host.unavailableReason() } returns null
+        every { host.cityBusy(any()) } returns false
+        every { host.availableMaterials(any()) } answers {
+            city?.inventory?.materials.orEmpty().toMutableMap().also { total ->
+                city?.inventory?.buildingMaterials.orEmpty().values.forEach { stock ->
+                    stock.forEach { (material, count) -> total[material] = (total[material] ?: 0) + count }
+                }
+            }
+        }
+        every { host.buildingMaterials(any(), any()) } returns CompletableFuture.completedFuture(emptyMap())
+        every { host.startBuilding(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.openBuildingInventory(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.depositMaterials(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.withdrawMaterial(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.refreshCity(any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.remoteCity(any()) } returns null
         every { host.foundingAllowed() } returns true
@@ -605,15 +840,45 @@ private fun preview() = CivsPreviewView(BuildingType.TOWN_HALL, 1, "medieval-oak
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,
         CivPosition(x, 64, 0), 0, "medieval-oak/${type.name.lowercase()}",
-        CivBox(CivPosition(x, 64, 0), CivPosition(x + 4, 70, 4)), CivPosition(x + 2, 64, -1), BuildingPhase.ACTIVE)
+        CivBox(CivPosition(x, 64, 0), CivPosition(x + 4, 70, 4)), CivPosition(x + 2, 64, -1), BuildingPhase.ACTIVE, control = CivPosition(x + 2, 63, -1))
     val hall = building(BuildingType.TOWN_HALL, 0, 2)
     val house = building(BuildingType.HOUSE, 10)
+    val builder = building(BuildingType.BUILDER_HUT, -10)
     val forest = building(BuildingType.FORESTER, 20)
     return Settlement(UUID.randomUUID(), player.uniqueId, "Oak Town", player.world.uid, CivPosition(0, 64, 0), 64,
-        "medieval-oak", Stock(96, 96, 24), listOf(hall, house, forest),
-        listOf(CivWorker(UUID.randomUUID(), "Builder", hall.id, nextDeliveryAt = 10_000),
+        "medieval-oak", Stock(), listOf(hall, house, builder, forest),
+        listOf(CivWorker(UUID.randomUUID(), "Builder", builder.id, nextDeliveryAt = 10_000),
             CivWorker(UUID.randomUUID(), "Resident A", null), CivWorker(UUID.randomUUID(), "Resident B", null),
-            CivWorker(UUID.randomUUID(), "Forester", null)))
+            CivWorker(UUID.randomUUID(), "Forester", null)), inventory = CivInventory.starting(Stock(96, 96, 24)))
+}
+
+/** Opt-in source export for the shared native dialog renderer; no UI behavior is mirrored here. */
+private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScreen) {
+    val legacy = LegacyComponentSerializer.builder().character('&').hexColors().build()
+    val content = linkedMapOf("title" to legacy.serialize(screen.title))
+    val body = screen.body.mapIndexed { index, value ->
+        val key = "body-$index"
+        content[key] = legacy.serialize(value.text)
+        mapOf("id" to key, "text-key" to key, "width" to value.width)
+    }
+    fun button(value: ru.arc.paper.menu.PaperDialogButton): Map<String, Any> {
+        val key = value.id.value
+        content[key] = legacy.serialize(value.label)
+        content["$key-tooltip"] = legacy.serialize(value.tooltip)
+        return mapOf("id" to key, "text-key" to key, "tooltip-key" to "$key-tooltip", "width" to value.width)
+    }
+    val dialog = mapOf("id" to id, "source" to id, "format" to "reference-multi-action", "name-key" to "title",
+        "external-title-key" to "title", "columns" to screen.columns, "body" to body,
+        "buttons" to screen.buttons.map(::button), "exit-button" to screen.exitButton?.let(::button),
+        "viewport" to listOf(854, 480), "variants" to listOf(mapOf("id" to "example")))
+    val hashes = listOf("src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml").associateWith { source ->
+        MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(source))).joinToString("") { "%02x".format(it) }
+    }
+    val out = Path.of(directory)
+    Files.createDirectories(out)
+    Files.writeString(out.resolve("$id.json"), GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create().toJson(
+        mapOf("content" to content, "dialog" to dialog, "sourceSha256" to hashes,
+            "evidence" to "Actual native dialog presenter components with fixture town state; native translations require Minecraft language assets. No native-client acceptance.")))
 }
 
 private fun withPreview(action: (PreviewHarness) -> Unit) = MockBukkitTestRuntime.open().use { paper ->

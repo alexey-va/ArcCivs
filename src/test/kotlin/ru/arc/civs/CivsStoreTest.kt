@@ -186,10 +186,85 @@ class CivsStoreTest : FreeSpec({
 
         val directStore = CivsStore(root, directExecutor)
         directStore.saveSchematic(id, expected).join() shouldBe Unit
+        val loaded = requireNotNull(directStore.loadSchematic(id).join())
+        loaded.fill(8)
+        directStore.loadSchematic(id).join()?.toList() shouldBe expected.toList()
         shouldThrow<CompletionException> { directStore.saveSchematic(id, byteArrayOf(5)).join() }
         Files.readAllBytes(directStore.schematicRoot().resolve("$id.schem")).toList() shouldBe expected.toList()
         directStore.deleteSchematic(id).join() shouldBe true
         directStore.deleteSchematic(id).join() shouldBe false
+        directStore.loadSchematic(id).join() shouldBe null
+    }
+
+    "inventory journal allows only an exact retry, retains one pending receipt per city and reloads after reopen" {
+        val transaction = inventoryTransaction(settlement())
+        val store = CivsStore(root, directExecutor)
+        store.saveInventoryTransaction(transaction).join() shouldBe transaction
+        store.saveInventoryTransaction(transaction).join() shouldBe transaction
+        shouldThrow<CompletionException> {
+            store.saveInventoryTransaction(transaction.copy(after = transaction.after.copy(name = "Changed retry"))).join()
+        }
+        shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction.copy(id = UUID.randomUUID())).join() }
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadInventoryTransactions().join() shouldBe listOf(transaction)
+        reopened.deleteInventoryTransaction(transaction.id).join() shouldBe true
+        reopened.deleteInventoryTransaction(transaction.id).join() shouldBe false
+        reopened.loadInventoryTransactions().join() shouldBe emptyList()
+    }
+
+    "queued journal captures immutable slots and nested building stock and finishes admitted work after close" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val base = inventoryTransaction(settlement())
+        val cargo = mutableMapOf("BREAD" to 2L)
+        val warehouses = mutableMapOf(base.after.buildings.single().id.toString() to cargo)
+        val changes = base.changes.toMutableList()
+        val mutable = base.copy(after = base.after.copy(inventory = requireNotNull(base.after.inventory).copy(
+            buildingMaterials = warehouses)), changes = changes)
+        val expected = mutable.copy(after = mutable.after.copy(inventory = requireNotNull(mutable.after.inventory).copy(
+            buildingMaterials = warehouses.mapValues { it.value.toMap() })), changes = changes.toList())
+        val accepted = store.saveInventoryTransaction(mutable)
+        cargo["BREAD"] = 99
+        warehouses.clear()
+        changes.clear()
+        store.close()
+        shouldThrow<CompletionException> { store.loadInventoryTransactions().join() }
+        queued.runNext()
+        accepted.join() shouldBe expected
+        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(expected)
+    }
+
+    "invalid inventory receipts are rejected before writing and corrupt records are preserved" {
+        val transaction = inventoryTransaction(settlement())
+        val store = CivsStore(root, directExecutor)
+        val change = transaction.changes.single()
+        listOf(
+            transaction.copy(after = transaction.after.copy(revision = 7)),
+            transaction.copy(changes = listOf(change, change)),
+            transaction.copy(changes = listOf(change.copy(container = CivPosition(9, 64, 9)))),
+            transaction.copy(changes = listOf(change.copy(slot = 27))),
+            transaction.copy(changes = listOf(change.copy(after = CivPlainItem("minecraft:oak_log", 1)))),
+        ).forEach { invalid -> shouldThrow<CompletionException> { store.saveInventoryTransaction(invalid).join() } }
+        Files.exists(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe false
+
+        val path = root.resolve("inventory-transactions/${transaction.id}.json")
+        Files.createDirectories(path.parent)
+        Files.writeString(path, "{broken")
+        shouldThrow<CompletionException> { store.loadInventoryTransactions().join() }
+        Files.readString(path) shouldBe "{broken"
+    }
+
+    "oversized inventory journals fail before decoding and identity mismatch never deletes the receipt" {
+        val transaction = inventoryTransaction(settlement())
+        val path = root.resolve("inventory-transactions/${transaction.id}.json")
+        Files.createDirectories(path.parent)
+        RandomAccessFile(path.toFile(), "rw").use { it.setLength(CivsStore.MAX_INVENTORY_TRANSACTION_BYTES + 1) }
+        shouldThrow<CompletionException> { CivsStore(root, directExecutor).loadInventoryTransactions().join() }
+        Files.size(path) shouldBe CivsStore.MAX_INVENTORY_TRANSACTION_BYTES + 1
+        Files.writeString(path, Gson().toJson(mapOf("schemaVersion" to 1,
+            "transaction" to transaction.copy(id = UUID.randomUUID()))))
+        shouldThrow<CompletionException> { CivsStore(root, directExecutor).deleteInventoryTransaction(transaction.id).join() }
+        Files.exists(path) shouldBe true
     }
 }) {
     companion object {
@@ -211,7 +286,6 @@ class CivsStoreTest : FreeSpec({
                 entrance = CivPosition(0, 61, -2),
                 phase = BuildingPhase.CONSTRUCTING,
             )
-            val pioneers = (0..3).map { CivWorker(UUID.randomUUID(), "Worker$it", null) }
             return CivsRules.found(
                 id = id,
                 owner = owner,
@@ -221,8 +295,6 @@ class CivsStoreTest : FreeSpec({
                 radius = 16,
                 style = "nordic",
                 townHall = hall,
-                pioneers = pioneers,
-                orderId = UUID.randomUUID(),
                 now = 1_000,
             )
         }
@@ -236,6 +308,15 @@ class CivsStoreTest : FreeSpec({
                 building = building,
                 blocks = listOf(CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:stone")),
             )
+        }
+
+        private fun inventoryTransaction(city: Settlement): CivInventoryTransaction {
+            val control = CivPosition(3, 64, 0)
+            val after = city.copy(revision = city.revision + 1,
+                buildings = city.buildings.map { it.copy(control = control) })
+            return CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, listOf(
+                CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("OAK_LOG", 2), CivPlainItem("OAK_LOG", 1)),
+            ))
         }
 
         private fun writeCity(path: Path, city: Settlement) {

@@ -201,6 +201,7 @@ internal class CivsPlacementControls(
         selected: CivPosition? = null,
         action: () -> CompletableFuture<Unit>) {
         if (session.pending != null) return
+        val upgrading = confirming && host.preview(player)?.movable == false
         val request = UUID.randomUUID()
         session.pending = request
         session.confirming = confirming
@@ -216,7 +217,7 @@ internal class CivsPlacementControls(
                 session.hintTicks = 0
                 player.sendActionBar(requireNotNull(session.feedback))
             } else if (failure != null) player.sendMessage(text.failure(player, failure))
-            else if (confirming) player.sendMessage(text.render(player, "panel.confirmed"))
+            else if (confirming) player.sendMessage(text.render(player, if (upgrading) "panel.upgrade-confirmed" else "panel.confirmed"))
             else if (session.selecting) {
                 session.selecting = false
                 clearTarget(session)

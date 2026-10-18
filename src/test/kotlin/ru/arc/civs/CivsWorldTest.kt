@@ -293,6 +293,48 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    for (material in listOf(Material.CHEST, Material.BEDROCK)) test("a $material support cannot become an unusable locked control") {
+        worldScenario { s ->
+            val control = CivPosition(-1, 63, 0)
+            s.world.getBlockAt(control.x, control.y, control.z).type = material
+            val building = worldBuilding(worldBox(0, 0)).copy(control = control)
+            val capture = s.subject.capture(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building, worldCells(building), null)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "control-obstructed"
+            s.world.getBlockAt(control.x, control.y, control.z).type shouldBe material
+        }
+    }
+
+    for (registered in listOf(false, true)) test("starting a site preserves a registered=$registered player container") {
+        worldScenario { s ->
+            val site = worldBuilding(worldBox(0, 0)).copy(phase = BuildingPhase.SITE)
+            val point = CivPosition(0, 64, 0)
+            val city = worldCity(s.world.uid, site).copy(inventory = CivInventory(CivStorageMode.PHYSICAL,
+                containers = if (registered) listOf(point) else emptyList()))
+            s.cities += city
+            val block = s.world.getBlockAt(0, 64, 0).also { it.type = Material.CHEST }
+            if (!registered) (block.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val target = site.copy(phase = BuildingPhase.CONSTRUCTING)
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, target, worldCells(target), site)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe if (registered) "registered-container" else "container-not-empty"
+            block.type shouldBe Material.CHEST
+            if (!registered) (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
+    test("another building cannot cover a control located outside the original footprint") {
+        worldScenario { s ->
+            val hall = worldBuilding(worldBox(10, 10)).copy(phase = BuildingPhase.ACTIVE, control = CivPosition(0, 64, 0))
+            val city = worldCity(s.world.uid, hall)
+            s.cities += city
+            val candidate = worldBuilding(worldBox(0, 0)).copy(type = BuildingType.HOUSE)
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, candidate, worldCells(candidate), null)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "building-overlap"
+        }
+    }
+
     test("planned upgrade overlap and owner mismatch are rejected before block capture") {
         worldScenario { s ->
             val hall = worldBuilding(worldBox(10, 10)).copy(phase = BuildingPhase.ACTIVE)

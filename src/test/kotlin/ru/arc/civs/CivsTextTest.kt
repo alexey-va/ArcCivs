@@ -5,6 +5,8 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.string.shouldContain
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
+import net.kyori.adventure.text.TranslatableComponent
+import net.kyori.adventure.text.Component
 import io.mockk.every
 import io.mockk.mockk
 import org.bukkit.entity.Player
@@ -78,6 +80,32 @@ class CivsTextTest : FunSpec({
         plainText(text.failure(player, failure)) shouldBe
             "В мире <red>outside</red> нельзя размещать городские постройки.\n" +
             "Разрешённые миры: $worlds.\nПерейдите в один из них и повторите выбор места."
+    }
+
+    test("material failures keep native item translation and literal quantities without technical fallbacks") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
+        val failure = text.failure(player, CivsRejection("materials-missing", mapOf("material" to "OAK_LOG", "count" to "7")))
+        fun translations(component: Component): List<String> =
+            listOfNotNull((component as? TranslatableComponent)?.key()) + component.children().flatMap(::translations)
+        translations(failure) shouldBe listOf("block.minecraft.oak_log")
+        plainText(failure) shouldContain "× 7"
+        plainText(text.reason(player, "unsupported-material", mapOf("material" to "PRIVATE_INTERNAL_ID"))) shouldBe
+            "Этот материал нельзя использовать: неизвестный материал."
+    }
+
+    test("new development and inventory states have localized messages in both catalogs") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        for (locale in listOf("ru", "en")) {
+            val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag(locale) }
+            listOf("inventory-recovery", "inventory-conflict", "materials-migration-pending", "container-not-empty",
+                "control-missing", "control-obstructed", "look-at-container", "container-limit", "registered-container",
+                "invalid-production", "builder-required", "storage-busy", "storage-container-invalid", "storage-empty").forEach { reason ->
+                (plainText(text.reason(player, reason)) != plainText(text.render(player, "common.error"))) shouldBe true
+            }
+            plainText(text.render(player, "building-phase.site")).isNotBlank() shouldBe true
+            plainText(text.building(player, BuildingType.BUILDER_HUT)).isNotBlank() shouldBe true
+        }
     }
 
     test("construction progress has a real line break and translated phase") {
