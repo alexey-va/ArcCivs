@@ -44,7 +44,7 @@ open class ArcCivsPlugin : JavaPlugin() {
             PaperArcRuntime.installScheduling(this)
             installedScheduler = Tasks.scheduler
             ArcLogging.install(PaperLoggingPlatform("ArcCivs", "ArcCivs"), LoggingConfigSource { EmptyConfig })
-            val queue = ru.arc.core.BudgetedTaskQueue(lifecycle.tasks, 128, 2_000_000L, System::nanoTime, 4096).also { nativeWork = it }
+            val queue = ru.arc.core.BudgetedTaskQueue(lifecycle.tasks, 512, 4_000_000L, System::nanoTime, 4096).also { nativeWork = it }
             prepare(lifecycle, queue, server.servicesManager.load(ArcSchematicService::class.java), dataPath)
         } catch (failure: Throwable) {
             lifecycle.health.markDown()
