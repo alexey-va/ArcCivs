@@ -155,7 +155,7 @@ internal class CivsPlacementControls(
         }
         // Leave the authored control visible and placeable between the two columns.
         val grid = if (moving) ActionPanelGridSettings(0.26, 2.5, 1.4f, 0.23f, 0.75f)
-            else ActionPanelGridSettings(0.26, 2.8, 1.75f, 0.23f, 0.8f)
+            else ActionPanelGridSettings(0.26, 2.75, 1.7f, 0.23f, 0.8f)
         val layout = ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0, grid)
         if (buttons.isEmpty()) return layout
         return ActionPanelLayout(layout.buttons.mapIndexed { index, button ->
@@ -367,7 +367,7 @@ internal class CivsPlacementControls(
     companion object {
         /** Symmetric columns leave the control ray clear; move controls also leave terrain visible below. */
         internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings =
-            ActionPanelFollowSettings(3.0, 0.0, if (moving) 0.3 else 0.0, 1.25, 0.03)
+            ActionPanelFollowSettings(if (moving) 3.0 else 2.8, 0.0, if (moving) 0.3 else 0.0, 1.25, 0.03)
 
         internal fun actions(preview: CivsPreviewView, moving: Boolean): List<CivsPlacementAction> = when {
             moving && preview.movable -> listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,

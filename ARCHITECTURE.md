@@ -168,7 +168,8 @@ page of six one-block nudges, Done and Cancel; a ground right-click relocates th
 whole preview. The green marker identifies the inside-building control coordinate;
 cyan marks the separate visual entrance and the light-blue frame shows the ground
 destination. Upgrades preserve the existing entrance and rotation.
-Both control pages face the authored control point from three blocks away. Their
+Both control pages face the authored control point: normal controls from 2.8 blocks,
+move controls from three. Their
 two columns and left-aligned status leave a clear central corridor for seeing and
 placing the barrel; move controls also sit slightly higher to keep terrain picking
 clear below them. Core still owns obstacle avoidance, reach checks and hit testing.

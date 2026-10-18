@@ -19,6 +19,8 @@ import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.atan2
+import kotlin.math.abs
+import kotlin.math.tan
 
 /** Exports actual consumer layouts and Core geometry; the sampled world contains explicit fixtures. */
 class CivsPlacementPreviewExportTest : FunSpec({
@@ -97,6 +99,22 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     // In move mode the player looks at the sampled terrain destination while the panel
                     // retains its target-facing orientation, exactly as a head turn does at runtime.
                     val cameraTarget = if (moving) ActionPanelPoint(7.5, 64.0, 5.5) else target
+                    val viewport = if (!moving) {
+                        val forward = Vector(cameraTarget.x - eye.x, cameraTarget.y - eye.y, cameraTarget.z - eye.z).normalize()
+                        val right = forward.clone().crossProduct(Vector(0.0, 1.0, 0.0)).normalize()
+                        val up = right.clone().crossProduct(forward).normalize()
+                        val halfHeight = tan(Math.toRadians(35.0))
+                        val projected = rects.flatMap { ActionPanelGeometry.corners(placed, it) }.map { corner ->
+                            val delta = Vector(corner.x - eye.x, corner.y - eye.y, corner.z - eye.z)
+                            val depth = delta.dot(forward)
+                            (depth > 0) shouldBe true
+                            abs(delta.dot(right) / depth / (halfHeight * 16.0 / 9.0)) to abs(delta.dot(up) / depth / halfHeight)
+                        }
+                        (projected.maxOf { it.first } <= 1.0) shouldBe true
+                        (projected.maxOf { it.second } <= 1.0) shouldBe true
+                        mapOf("maximumHorizontalFraction" to projected.maxOf { it.first },
+                            "maximumVerticalFraction" to projected.maxOf { it.second }, "verticalFov" to 70)
+                    } else emptyMap<String, Any>()
                     val candidate = if (moving) civsAnchorCues(CivPosition(7, 63, 5), Material.LIGHT_BLUE_CONCRETE) else emptyList()
                     val corridor = if (moving) {
                         val lowerEdge = layout.buttons.minOf { ActionPanelGeometry.localToWorld(placed, it.rect.center).y - it.rect.height / 2 }
@@ -119,6 +137,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     return mapOf("id" to name, "eye" to eye, "target" to target, "cameraTarget" to cameraTarget, "anchor" to placed,
                         "distance" to distance, "shift" to chosenShift, "labels" to labels, "obstacles" to obstacles,
                         "controlCorridor" to mapOf("sampledRays" to controlRays.size, "interceptedRays" to 0),
+                        "viewport" to viewport,
                         "terrainCorridor" to corridor, "cues" to (civsPreviewCues(building) + candidate),
                         "bounds" to building.bounds, "control" to requireNotNull(building.control),
                         "entrance" to building.entrance, "pasteOrigin" to building.anchor, "groundY" to 63)
