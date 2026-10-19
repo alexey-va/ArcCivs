@@ -1,17 +1,13 @@
 package ru.arc.civs
 
-import com.destroystokyo.paper.entity.Pathfinder
 import net.citizensnpcs.api.CitizensAPI
-import net.citizensnpcs.api.ai.AbstractPathStrategy
-import net.citizensnpcs.api.ai.NavigatorParameters
 import net.citizensnpcs.api.ai.PathfinderType
-import net.citizensnpcs.api.ai.TargetType
-import net.citizensnpcs.api.ai.event.CancelReason
 import net.citizensnpcs.api.event.NPCRightClickEvent
 import net.citizensnpcs.api.npc.MemoryNPCDataStore
 import net.citizensnpcs.api.npc.NPC
 import net.citizensnpcs.api.npc.NPCRegistry
-import net.citizensnpcs.trait.VillagerProfession
+import net.citizensnpcs.api.trait.trait.Equipment
+import net.citizensnpcs.trait.SkinTrait
 import net.citizensnpcs.util.NMS
 import org.bukkit.Bukkit
 import org.bukkit.Chunk
@@ -21,7 +17,6 @@ import org.bukkit.World
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Player
-import org.bukkit.entity.Villager
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.HandlerList
@@ -31,8 +26,8 @@ import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.player.PlayerTeleportEvent
 import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.event.world.WorldUnloadEvent
+import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
-import org.bukkit.util.Vector
 import ru.arc.observability.StructuredDebugLine
 import ru.arc.paper.api.ArcNativeCleanupService
 import java.util.IdentityHashMap
@@ -57,6 +52,7 @@ class CivsCitizens(
     private val registry: NPCRegistry
     private val citizensProvider: Plugin
     private val nativeCleanup: ArcNativeCleanupService
+    private val skins: List<CitizenSkin>
     private var actors = linkedMapOf<UUID, Actor>()
     private var statuses = mutableMapOf<UUID, String>()
     private var spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
@@ -69,6 +65,7 @@ class CivsCitizens(
     init {
         require(maxActive in 1..48 && viewerRange in 1..96)
         checkMainThread()
+        skins = loadCitizenSkins()
         nativeCleanup = requireNotNull(plugin.server.servicesManager.load(ArcNativeCleanupService::class.java)) {
             "ArcCore native cleanup service is unavailable"
         }
@@ -125,7 +122,7 @@ class CivsCitizens(
                 actor.plan = nextPlan
                 actor.cycle = CitizenCycle(nextPlan.token, nextPlan.workMillis, nextPlan.completeAtWorkplace)
                 actor.wander = CitizenWander()
-                setProfession(actor.npc, nextPlan.type)
+                setEquipment(actor.npc, nextPlan)
             }
             try {
                 update(actor, city, requireNotNull(world), nowMillis)
@@ -170,24 +167,24 @@ class CivsCitizens(
                     statuses[workerId] = "route-unreachable"
                     continue
                 }
-                npc = registry.createNPC(EntityType.VILLAGER, citizenName(worker.name, workerId))
-                configure(npc, plan.type)
+                npc = registry.createNPC(EntityType.PLAYER, citizenName(worker.name, workerId))
+                configure(npc, workerId, plan)
                 check(npc.spawn(point) { entity ->
-                    val villager = entity as Villager
-                    villager.setAdult()
-                    villager.ageLock = true
-                    villager.setBreed(false)
-                    villager.recipes = emptyList()
-                    villager.canPickupItems = false
-                    villager.isPersistent = false
-                    villager.isInvulnerable = true
-                    villager.isCollidable = false
-                    villager.isSilent = true
+                    val player = entity as Player
+                    player.canPickupItems = false
+                    player.isPersistent = false
+                    player.isInvulnerable = true
+                    player.isCollidable = false
+                    player.isSilent = true
                 }) { "Citizens rejected spawn" }
                 val actor = Actor(city.id, workerId, city.worldId, npc, plan)
                 actors[workerId] = actor
                 spawnRetries.remove(workerId)
                 update(actor, city, world, nowMillis)
+                if (actors[workerId] === actor) CivsDiagnostics.event("citizen_spawn", "city" to city.id,
+                    "worker" to workerId, "type" to npc.entity.type,
+                    "skin" to npc.getOrAddTrait(SkinTrait::class.java).skinName,
+                    "tool" to npc.getOrAddTrait(Equipment::class.java).get(Equipment.EquipmentSlot.HAND)?.type)
             } catch (error: Exception) {
                 actors.remove(workerId)?.cycle?.close()
                 runCatching { npc?.destroy() }.onFailure { plugin.logger.log(Level.WARNING,
@@ -238,6 +235,7 @@ class CivsCitizens(
         actor.plan.idleReason?.let {
             if (it !in setOf("placing", "waiting-materials", "construction-paused")) wander(actor, city, world, now)
             statuses[actor.workerId] = it
+            animateWork(actor, city, world, now)
             return
         }
         if (cycle.reason == "storage-full") {
@@ -294,7 +292,26 @@ class CivsCitizens(
             }
             else -> Unit
         }
-        if (actors[actor.workerId] === actor) statuses[actor.workerId] = cycle.status()
+        if (actors[actor.workerId] === actor) {
+            statuses[actor.workerId] = cycle.status()
+            animateWork(actor, city, world, now)
+        }
+    }
+
+    private fun animateWork(actor: Actor, city: Settlement, world: World, now: Long) {
+        val working = citizenWorking(actor.plan, actor.cycle.phase, city.construction?.phase)
+        if (!working || actor.npc.navigator.isNavigating) return
+        val workplace = actor.plan.workplace ?: return
+        if (!arrived(actor.npc.entity.location, resolvedTarget(actor, workplace).location(world))) return
+        if (!actor.animation.swing(now)) return
+        // The gesture depicts an active work session, not placement of a particular schematic block.
+        citizenWorkBuilding(city, actor.plan)?.bounds?.let { bounds ->
+            actor.npc.faceLocation(Location(world,
+                (bounds.min.x.toDouble() + bounds.max.x) / 2.0 + 0.5,
+                actor.npc.entity.location.y + 0.9,
+                (bounds.min.z.toDouble() + bounds.max.z) / 2.0 + 0.5))
+        }
+        (actor.npc.entity as Player).swingMainHand()
     }
 
     private fun wander(actor: Actor, city: Settlement, world: World, now: Long) {
@@ -356,9 +373,9 @@ class CivsCitizens(
         navigator.defaultParameters.range((distance + 8).coerceAtLeast(16.0).toFloat())
         val route = Route(from.point(), to, chunks, now, (10_000 + distance * 1_500).toLong().coerceAtMost(90_000))
         actor.route = route
-        navigator.setTarget { parameters ->
-            CitizenExactNavigation((actor.npc.entity as Villager).pathfinder, to, parameters)
-        }
+        // Citizens owns native player movement. Its early completion still passes through
+        // our exact arrived check and bounded recovery before any work can begin.
+        navigator.setTarget(to)
         route.strategy = navigator.pathStrategy?.javaClass?.simpleName
         navigator.localParameters.addSingleUseCallback { reason ->
             if (actor.route === route) {
@@ -383,7 +400,7 @@ class CivsCitizens(
     private fun pauseNavigation(actor: Actor, status: String, detail: String, target: Location, now: Long) {
         val route = actor.route
         if (route != null && route.completion == null) observePath(actor, route)
-        val entity = actor.npc.entity as Villager
+        val entity = actor.npc.entity as Player
         val actual = entity.location.point()
         val velocity = entity.velocity
         val navigator = actor.npc.navigator
@@ -495,13 +512,14 @@ class CivsCitizens(
             "ArcCivs NPC failure city=${actor.cityId} worker=${actor.workerId} phase=$phase cycle=${actor.plan.token.completedCycles}", error)
     }
 
-    private fun configure(npc: NPC, type: BuildingType?) {
+    private fun configure(npc: NPC, workerId: UUID, plan: CitizenPlan) {
         npc.isProtected = true
         npc.setUseMinecraftAI(false)
         npc.setAlwaysUseNameHologram(false)
         npc.data().set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
         npc.data().set(NPC.Metadata.SHOULD_SAVE, false)
-        npc.data().set(NPC.Metadata.VILLAGER_BLOCK_TRADES, true)
+        npc.data().set(NPC.Metadata.REMOVE_FROM_PLAYERLIST, true)
+        npc.data().set(NPC.Metadata.REMOVE_FROM_TABLIST, true)
         npc.data().set(NPC.Metadata.PICKUP_ITEMS, false)
         npc.data().set(NPC.Metadata.DROPS_ITEMS, false)
         npc.data().set(NPC.Metadata.COLLIDABLE, false)
@@ -510,17 +528,19 @@ class CivsCitizens(
         npc.navigator.defaultParameters.pathfinderType(PathfinderType.MINECRAFT).stuckAction(null)
             .destinationTeleportMargin(-1.0).distanceMargin(0.35).pathDistanceMargin(0.35)
             .straightLineTargetingDistance(0f).stationaryTicks(100).range(96f).speedModifier(1.0f)
-        setProfession(npc, type)
+        val skin = citizenSkin(skins, workerId)
+        npc.getOrAddTrait(SkinTrait::class.java).apply {
+            setFetchDefaultSkin(false)
+            setShouldUpdateSkins(false)
+            setSkinPersistent(skin.name, skin.signature, skin.texture)
+        }
+        setEquipment(npc, plan)
     }
 
-    private fun setProfession(npc: NPC, type: BuildingType?) {
-        npc.getOrAddTrait(VillagerProfession::class.java).profession = when (type) {
-            BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT -> Villager.Profession.TOOLSMITH
-            BuildingType.FORESTER -> Villager.Profession.FLETCHER
-            BuildingType.QUARRY -> Villager.Profession.MASON
-            BuildingType.FARM -> Villager.Profession.FARMER
-            else -> Villager.Profession.NONE
-        }
+    private fun setEquipment(npc: NPC, plan: CitizenPlan) {
+        // Equipment belongs only to this transient, protected NPC; pickup and drops stay disabled.
+        npc.getOrAddTrait(Equipment::class.java).set(Equipment.EquipmentSlot.HAND,
+            citizenTool(plan)?.let { ItemStack(it) })
     }
 
     private fun spawnPoint(world: World, storage: CivPosition, ordinal: Int, viewers: List<CitizenViewer>): Location? {
@@ -674,6 +694,7 @@ class CivsCitizens(
         var cycle = CitizenCycle(plan.token, plan.workMillis, plan.completeAtWorkplace)
         val targets = mutableMapOf<CivPosition, CivPosition>()
         var wander = CitizenWander()
+        val animation = CitizenWorkAnimation()
         var route: Route? = null
         var reportedFailure = false
     }
@@ -689,52 +710,6 @@ class CivsCitizens(
 
     private companion object {
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
-    }
-}
-
-/**
- * Keep native movement under Citizens lifecycle, but use Paper's exact-block path request.
- * Citizens' Minecraft location strategy uses a one-block reach range, which can finish
- * 1.45 blocks before an entrance. Paper findPath uses reach range zero on Paper 1.21.11.
- */
-internal class CitizenExactNavigation(
-    private val pathfinder: Pathfinder,
-    target: Location,
-    private val parameters: NavigatorParameters,
-) : AbstractPathStrategy(TargetType.LOCATION) {
-    private val target = target.clone()
-    private var started = false
-    private var stopped = false
-    private var path: Pathfinder.PathResult? = null
-
-    override fun getTargetAsLocation(): Location = target.clone()
-    override fun getCurrentDestination(): Location = target.clone()
-    override fun getPath(): Iterable<Vector>? = path?.points?.map { it.toVector() }
-
-    override fun update(): Boolean {
-        if (stopped) return true
-        if (!started) {
-            // Citizens applies the route-local native range before this first update.
-            started = true
-            val candidate = pathfinder.findPath(target)
-            path = candidate
-            val end = candidate?.finalPoint
-            if (candidate == null || !candidate.canReachFinalPoint() || end == null ||
-                end.world != target.world || end.blockX != target.blockX ||
-                end.blockY != target.blockY || end.blockZ != target.blockZ ||
-                !pathfinder.moveTo(candidate, parameters.speedModifier().toDouble())) {
-                setCancelReason(CancelReason.STUCK)
-                return true
-            }
-        }
-        return !pathfinder.hasPath()
-    }
-
-    override fun stop() {
-        if (stopped) return
-        stopped = true
-        path = null
-        pathfinder.stopPathfinding()
     }
 }
 
@@ -778,7 +753,7 @@ internal fun <T> citizenRotateAfterAdmission(actors: MutableMap<UUID, T>, worker
     actors[workerId] = actor
 }
 
-/** NPC.update also runs during inactive villager ticks, too late to activate that tick's movement. */
+/** Keep native route movement active before Paper chooses this tick's entity activation. */
 internal fun activateCitizenRoute(npc: NPC, registry: NPCRegistry, worldId: UUID, viewers: List<CitizenViewer>,
     viewerRange: Int, chunksReady: (World) -> Boolean, activate: (Entity) -> Unit = NMS::activate): Boolean {
     if (npc.owningRegistry !== registry || !npc.isSpawned || !npc.navigator.isNavigating) return false

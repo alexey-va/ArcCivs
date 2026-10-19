@@ -8,7 +8,12 @@ management; unrelated players cannot build, break or loot city structures.
 
 Core 2.7.41 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
-schematic service. NPCs use Citizens ordinary bounded point-to-point navigation. A failed or stuck
+schematic service. Human residents use transient Citizens PLAYER actors with
+bundled signed skins, native hand equipment and work-only arm swings. Skins are
+stable per worker UUID; lookup/update is disabled. Equipment never enters city
+storage and NPC item pickup/drops are disabled. NPCs use Citizens native Minecraft
+bounded point-to-point navigation, with ArcCivs checking actual arrival separately
+from the navigator's completion callback. A failed or stuck
 route may teleport to a safe loaded point near its target, as explicitly requested
 by the owner; the same arrival, work and cycle-token checks still apply. There is
 no Core packet-NPC API. No duplicated pools, schematic cache or display
