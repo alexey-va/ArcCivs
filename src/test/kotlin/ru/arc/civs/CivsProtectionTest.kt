@@ -32,6 +32,19 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("pending deletion protects an absent control from replacement until the record is retired") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("deletion-protection")
+            val owner = UUID.randomUUID()
+            val building = protectionBuilding(0, 1).copy(control = CivPosition(0, 64, 0))
+            val city = protectionCity(world.uid, owner, building).copy(pendingDeletion = CivDeletion(null))
+            val index = CivsProtection.prepare(listOf(city)).worlds.getValue(world.uid)
+            index.contains(0, 64, 0, owner, restoringBarrel = true) shouldBe true
+            val retired = CivsProtection.prepare(emptyList())
+            retired.worlds[world.uid] shouldBe null
+        }
+    }
+
     test("large persisted footprints use area independent indexes and keep every boundary protected") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("large-protection")

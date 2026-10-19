@@ -66,6 +66,8 @@ data class CivConstruction(
     val materials: Map<String, Long>? = null,
     /** Null identifies an old order whose complete price was already paid. */
     val payment: CivConstructionPayment? = null,
+    /** Remaining rows authorized by one observed builder session; null is a legacy single-row session. */
+    val workCredit: Int? = null,
 )
 
 data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)
@@ -76,6 +78,9 @@ data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, 
 
 /** A durable remaining grant. Null in legacy snapshots means the pioneers already arrived. */
 data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
+
+/** Null buildingId retires the whole city. Native control cleanup follows this durable intent. */
+data class CivDeletion(val buildingId: UUID?)
 
 data class Settlement(
     val id: UUID,
@@ -95,6 +100,8 @@ data class Settlement(
     val inventory: CivInventory? = null,
     val immigration: CivImmigration? = null,
     val pendingControls: List<CivControlPlacement>? = null,
+    val constructionQueue: List<UUID>? = null,
+    val pendingDeletion: CivDeletion? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

@@ -8,8 +8,10 @@ management; unrelated players cannot build, break or loot city structures.
 
 Core 2.7.41 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
-schematic service. NPCs use Citizens ordinary bounded point-to-point navigation;
-there is no Core packet-NPC API. No duplicated pools, schematic cache or display
+schematic service. NPCs use Citizens ordinary bounded point-to-point navigation. A failed or stuck
+route may teleport to a safe loaded point near its target, as explicitly requested
+by the owner; the same arrival, work and cycle-token checks still apply. There is
+no Core packet-NPC API. No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
 
 ## Network authority
@@ -155,14 +157,17 @@ a platform persistence boundary. No blind repeat after an unknown result.
 
 Construction starts without requiring the complete material list. New orders split the
 immutable captured before/after plan into deterministic horizontal rows of at most16
-adjacent cells with identical per-cell material requirements. Each observed builder trip
-authorizes one row. Only that row's exact obtainable items are debited, in the existing
+adjacent cells with identical per-cell material requirements. One observed builder
+session authorizes at most eight existing rows after two seconds of work. Durable
+work credit preserves the remaining authorization across pause/restart; it does
+not change row indices or charge already paid rows again. Only that row's exact obtainable items are debited, in the existing
 durable inventory receipt together with the READY→PLACING transition and `reservedBatch`.
 Missing items persist WAITING_MATERIALS without any debit; one waiting city is retried
 per5s in round-robin order, while open warehouse viewers defer that city's retry. Adding
 the required items resumes automatically. `materials` holds the unpaid remainder.
 Paid rows retain their reservation across pause, retry and restart, so replay cannot charge
-twice. Completing the row clears its reservation before the next builder trip. Legacy
+twice. Completing the row clears its reservation and advances within the bounded
+session while credit remains; the next trip is required when that credit ends. Legacy
 orders with null payment state retain their already-paid 256-cell tile algorithm.
 The unique marker cell is omitted from new paste plans;
 matching existing target blocks need no replacement. Core's provider-owned paste
@@ -189,6 +194,23 @@ labels respect terrain occlusion and never use the paste origin or a future upgr
 marker. State changes update existing packet handles. Leaving, deletion, reload and
 shutdown retire them with the existing scene; no physical entities or world scan.
 
+SITE plans may be placed while a different building is under construction. A
+persistent ordered list of building IDs holds requested SITE jobs, with one active
+construction. Duplicate requests are idempotent. Starting the next job reloads its
+saved plan and captures/revalidates current terrain. A failed queue head retains
+its position and exposes a concrete retry reason; it is not silently skipped.
+Upgrades retain their existing active-order contract.
+
+Building and city removal first persist a deletion intent in the city snapshot.
+The service loads only the exact control chunks asynchronously, then revalidates
+registered controls and Lands access on the main thread. Only BARREL controls are
+removed; native contents are dropped with metadata, and the free barrel itself is
+not granted as an item. Already absent/replaced controls are preserved on retry.
+Final city deletion retains the existing tombstone contract; removing a queued or
+active building clears its corresponding task and lets the next job proceed.
+World blocks and dropped entities retain native save durability; this is not a
+second escrow or a cross-system atomic transaction.
+
 ## UI
 
 /civs (alias /city) opens the city overview. Its **Управление поселением** submenu
@@ -196,7 +218,10 @@ contains storage, development, members and owner-only deletion. Founding and bui
 screens remain separate. **Гайд** holds the explanatory boundary, sleep and placement
 instructions, keeping overview focused on state and actions. Right-clicking a building
 control opens that building: level, work assignments, output choice, materials and
-its native barrel by default (paginated warehouse only in VIRTUAL). Selection and
+its native barrel by default (paginated warehouse only in VIRTUAL). Worker and
+building views show the resolved current work or blocking reason. **Очередь** lists
+the active job and waiting plans; ordinary building/plan removal has a confirmation.
+Selection and
 confirmation revalidate current city revision and authority; async callbacks
 cannot open a stale preview. Menus use Core tables/frames, light body text,
 plain untrusted placeholders and RU/EN locale resources. Admin status/recovery

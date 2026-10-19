@@ -277,12 +277,15 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("assignment and removal use persisted state while Citizens still reports the previous job") {
+    test("assignment transitions show the fresh workplace and source-owned worker status") {
         withUi { h ->
             h.city = settlement(h.player)
             val worker = h.city!!.workers.last()
             val forester = h.city!!.buildings.last()
-            every { h.host.workerStatus(worker.id) } returns "workers.status.unassigned"
+            var assignedStatus = "moving-to-work"
+            every { h.host.workerStatus(worker.id) } answers {
+                "workers.status.${if (h.city!!.workers.single { it.id == worker.id }.assignment == null) "unassigned" else assignedStatus}"
+            }
             every { h.host.assign(any(), any(), any()) } answers {
                 h.city = CivsRules.assign(h.city!!, h.player.uniqueId, secondArg(), thirdArg(), 0)
                 CompletableFuture.completedFuture(Unit)
@@ -295,11 +298,11 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
-            h.body() shouldContain "Waiting for work"
+            h.body() shouldContain "Walking to work"
             h.body().contains("Walking around · unassigned") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
 
-            every { h.host.workerStatus(worker.id) } returns "workers.status.working"
+            assignedStatus = "working"
             h.click("unassign")
             h.paper.performTicks(2)
             h.body() shouldContain "Walking around · unassigned"
@@ -309,15 +312,17 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("worker list uses the same assignment truth while current assigned runtime states remain visible") {
+    test("worker list and detail preserve concrete source-owned reasons") {
         withUi { h ->
             h.city = settlement(h.player)
             val worker = h.city!!.workers.last()
             h.city = CivsRules.assign(h.city!!, h.player.uniqueId, worker.id, h.city!!.buildings.last().id, 0)
             for ((status, label) in listOf(
-                "no-assignment" to "Waiting for work",
+                "no-construction" to "Walking around · no construction",
                 "sleeping" to "Settlement is sleeping",
                 "route-unreachable" to "No accessible route",
+                "waiting-materials" to "Waiting for construction materials",
+                "placing" to "Placing the next section",
                 "working" to "Working",
             )) {
                 every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
@@ -330,17 +335,23 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("an empty warehouse does not block marking another building site") {
+    test("empty warehouses and an active construction do not block marking another building site") {
         withUi { h ->
-            h.city = settlement(h.player).copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            val base = settlement(h.player)
+            h.city = base.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                construction = CivConstruction(UUID.randomUUID(), base.buildings.last().id, 1, 100, 20,
+                    ConstructionPhase.CONSTRUCTING, Stock(), payment = CivConstructionPayment()))
             h.open(); h.click("management"); h.click("stock")
             h.body() shouldContain "Each building has its own warehouse"
             h.click("warehouse_0")
             h.body() shouldContain "Nothing stored yet"
             h.screen.buttons.map { it.id.value } shouldBe listOf("intake", "deposit")
-            h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_0")
+            h.open(); h.click("buildings"); h.click("catalog"); h.click("offer_2")
             h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
             h.body() shouldContain "create a control barrel and temporary fence"
+            every { h.host.beginBuildingSelection(h.player, BuildingType.HOUSE) } returns CompletableFuture.completedFuture(Unit)
+            h.click("prepare"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.beginBuildingSelection(h.player, BuildingType.HOUSE) }
             verify(exactly = 0) { h.host.startBuilding(any(), any()); h.host.availableMaterials(any()) }
         }
     }
@@ -455,6 +466,7 @@ class CivsUiTest : FunSpec({
             val base = settlement(h.player)
             val site = base.buildings.first { it.type == BuildingType.BUILDER_HUT }.copy(phase = BuildingPhase.SITE)
             h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
+            every { h.host.buildingStatus(site.id) } returns "building-status.site"
             every { h.host.buildingMaterials(h.player, site.id) } returns CompletableFuture.completedFuture(mapOf("OAK_LOG" to 900L))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
             val pending = CompletableFuture<Unit>()
@@ -1166,6 +1178,155 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("building details show the resolved work reason rather than the saved building phase") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.last().copy(control = CivPosition(16, 66, 1))
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it })
+            for ((status, label) in listOf("no-workers" to "No workers assigned", "route-unreachable" to "Worker cannot reach the destination",
+                "waiting-materials" to "Waiting for materials", "working" to "Working", "no-construction" to "No active construction",
+                "work-route-too-long" to "Storage is too far away", "control-missing" to "Control barrel is missing",
+                "lands-denied" to "No permission for this plot", "world-changed" to "The plot has changed",
+                "protected-terrain" to "A protected block cannot be replaced", "building-overlap" to "Overlaps another building",
+                "outside-city" to "Outside town borders", "protected-area" to "The plot is protected")) {
+                every { h.host.buildingStatus(building.id) } returns "building-status.$status"
+                h.ui.openBuilding(h.player, base.id, building.id)
+                // Core wraps a measured table cell into framed rows; keep checking the whole label.
+                h.body().replace(Regex("\\p{Co}"), "").replace(Regex("\\s+"), " ") shouldContain label
+                h.body().contains("building-status.") shouldBe false
+            }
+            every { h.host.buildingStatus(building.id) } returns "building-status.future-internal-key"
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.body() shouldContain "Status is updating"
+            h.body().contains("future-internal-key") shouldBe false
+
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val worker = base.workers.first()
+            every { h.host.workerStatus(worker.id) } returns "workers.status.route-unreachable"
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.body() shouldContain "Нет доступного пути"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "worker-route-ru", h.screen, listOf(588, 380)) }
+
+            h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), building.id, 1, 475, 40,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), plannedBuilding = building.copy(phase = BuildingPhase.CONSTRUCTING),
+                materials = builderMaterialEstimate(), payment = CivConstructionPayment()))
+            every { h.host.buildingStatus(building.id) } returns "building-status.waiting-materials"
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.body() shouldContain "Ждёт материалы"
+            h.body() shouldContain "40 / 475"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "building-waiting-ru", h.screen, listOf(588, 380)) }
+        }
+    }
+
+    test("site starts join the existing construction queue and queued materials cannot enqueue twice") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val active = base.buildings.last()
+            val first = active.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, phase = BuildingPhase.SITE)
+            val second = active.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.SITE)
+            h.city = base.copy(buildings = base.buildings + first + second,
+                construction = CivConstruction(UUID.randomUUID(), active.id, 1, 475, 40, ConstructionPhase.CONSTRUCTING,
+                    Stock(), materials = mapOf("COBBLESTONE" to 19L), payment = CivConstructionPayment()),
+                constructionQueue = listOf(first.id))
+            every { h.host.buildingStatus(any()) } answers {
+                "building-status.${when (firstArg<UUID>()) {
+                    active.id -> "working"
+                    in h.city!!.constructionQueue.orEmpty() -> "queued"
+                    else -> "site"
+                }}"
+            }
+            every { h.host.buildingMaterials(h.player, second.id) } returns CompletableFuture.completedFuture(mapOf("COBBLESTONE" to 19L))
+            every { h.host.availableMaterials(h.player) } returns emptyMap()
+            every { h.host.startBuilding(h.player, second.id) } answers {
+                h.city = h.city!!.copy(constructionQueue = h.city!!.constructionQueue.orEmpty() + second.id)
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openBuilding(h.player, base.id, second.id); h.click("materials"); h.paper.performTicks(2)
+            plainText(h.screen.buttons.single { it.id.value == "start" }.label) shouldBe "Queue"
+            val form = h.screen
+            h.click("start"); h.click("start", screen = form); h.paper.performTicks(2)
+            h.body() shouldContain "Queued · No. 2"
+            verify(exactly = 1) { h.host.startBuilding(h.player, second.id) }
+            h.click("materials"); h.paper.performTicks(2)
+            h.body() shouldContain "Queued · No. 2"
+            h.body() shouldContain "0 / up to 19"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
+
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.ui.openBuilding(h.player, base.id, second.id); h.click("queue")
+            h.screen.id shouldBe "civs.queue"
+            h.body() shouldContain "40/475"
+            plainText(h.screen.buttons.single { it.id.value == "queue_0" }.label) shouldBe "№1 · Склад · ур. 1 ›"
+            plainText(h.screen.buttons.single { it.id.value == "queue_1" }.label) shouldBe "№2 · Дом · ур. 1 ›"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "construction-queue-ru", h.screen, listOf(588, 380)) }
+            h.click("queue_1")
+            h.screen.id shouldBe "civs.building"
+            h.body() shouldContain "В очереди · №2"
+            h.screen.buttons.any { it.id.value == "refresh" } shouldBe false
+
+            val third = second.copy(id = UUID.randomUUID(), type = BuildingType.QUARRY)
+            h.city = h.city!!.copy(buildings = h.city!!.buildings + third, construction = null)
+            every { h.host.buildingMaterials(h.player, third.id) } returns CompletableFuture.completedFuture(emptyMap())
+            h.ui.openBuilding(h.player, base.id, third.id); h.click("materials"); h.paper.performTicks(2)
+            plainText(h.screen.buttons.single { it.id.value == "start" }.label) shouldBe "В очередь"
+        }
+    }
+
+    test("deleting an ordinary building requires confirmation and binds the exact city and building") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val hall = base.buildings.first()
+            val building = base.buildings.last()
+            h.city = base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, buildingMaterials = mapOf(building.id.toString() to mapOf("OAK_LOG" to 12L))),
+                construction = CivConstruction(UUID.randomUUID(), building.id, 2, 475, 40, ConstructionPhase.CONSTRUCTING,
+                    Stock(), payment = CivConstructionPayment()))
+            h.ui.openBuilding(h.player, base.id, hall.id)
+            h.screen.buttons.any { it.id.value == "delete_building" } shouldBe false
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("delete_building")
+            h.screen.id shouldBe "civs.delete-building"
+            h.body() shouldContain "Уже поставленные блоки"
+            h.body() shouldContain "содержимое выпадет на землю"
+            h.body() shouldContain "Уже потраченные материалы не возвращаются"
+            h.body() shouldContain "перейдут в общий резерв"
+            h.screen.buttons.single().label.color() shouldBe TextColor.color(0xFF6B61)
+            h.screen.inputs shouldBe emptyList()
+            verify(exactly = 0) { h.host.deleteBuilding(any(), any(), any()) }
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "delete-building-ru", h.screen, listOf(588, 380)) }
+            val pending = CompletableFuture<Unit>()
+            every { h.host.deleteBuilding(h.player, base.id, building.id) } returns pending
+            val confirmation = h.screen
+            h.click("delete"); h.click("delete", screen = confirmation)
+            h.city = h.city!!.copy(buildings = base.buildings.filterNot { it.id == building.id }, construction = null)
+            pending.complete(Unit); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.deleteBuilding(h.player, base.id, building.id) }
+            h.screen.id shouldBe "civs.buildings"
+            h.screen.buttons.none { plainText(it.label).contains("Лесорубка") } shouldBe true
+            plainText(h.screen.exitButton!!.label) shouldBe "Закрыть"
+        }
+    }
+
+    test("building deletion hides while busy and stale confirmation keeps its original city id") {
+        withUi { h ->
+            val base = settlement(h.player)
+            val building = base.buildings.last()
+            h.city = base
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.screen.buttons.any { it.id.value == "delete_building" } shouldBe false
+            every { h.host.cityBusy(h.player) } returns false
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("delete_building")
+            val replacement = base.copy(id = UUID.randomUUID())
+            h.city = replacement
+            every { h.host.deleteBuilding(h.player, base.id, building.id) } returns CompletableFuture.failedFuture(CivsRejection("stale-city"))
+            h.click("delete"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.deleteBuilding(h.player, base.id, building.id) }
+            h.city shouldBe replacement
+            h.body() shouldContain "The town has changed"
+            h.screen.buttons.any { it.id.value == "delete" } shouldBe false
+        }
+    }
+
     test("export representative building and warehouse screens from actual presenter components") {
         val directory = System.getenv("CIVS_UI_PREVIEW_OUT") ?: return@test
         withUi { h ->
@@ -1435,6 +1596,8 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.preview(any()) } answers { preview }
         every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"
+        every { host.buildingStatus(any()) } returns "building-status.active"
+        every { host.deleteBuilding(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.confirmPreview(any()) } answers {
             city = settlement(player)
             preview = null

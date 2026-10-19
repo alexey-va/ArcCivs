@@ -235,6 +235,7 @@ class CivsNetworkStore internal constructor(
         construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
+        constructionQueue = city.constructionQueue?.toList(),
     )
 
     private fun findCity(connection: Connection, id: UUID): CivsNetworkCity? =

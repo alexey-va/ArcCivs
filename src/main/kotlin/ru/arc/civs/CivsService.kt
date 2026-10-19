@@ -70,6 +70,7 @@ class CivsService(
     private val previewLoads = mutableSetOf<UUID>()
     private val completions = mutableSetOf<CompletableFuture<*>>()
     private val placing = mutableSetOf<UUID>()
+    private val placementRuns = mutableMapOf<UUID, UUID>()
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
     private var initialized = false
@@ -79,6 +80,7 @@ class CivsService(
     private var loadFailure: String? = null
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
+    private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
     private val storage = (storageAdapter ?: CivsStorage(plugin)).also { it.beginReceiptBootstrap() }
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
@@ -112,7 +114,7 @@ class CivsService(
         }
     }
     lateinit var ui: CivsUi
-    private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() },
+    private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList() },
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
         }, settings.maximumNpcs, settings.viewerRange)).also(onCitizensCreated)
@@ -134,7 +136,7 @@ class CivsService(
     override fun settlements(): List<Settlement> = cities.values.toList()
     override fun city(player: Player): Settlement? = cities.values.firstOrNull { it.canManage(player.uniqueId) }
     override fun remoteCity(player: Player): CivsNetworkCity? = remoteCities[player.uniqueId]
-    override fun cityBusy(player: Player): Boolean = city(player)?.id?.let { it in busy || it in unhealthy } == true
+    override fun cityBusy(player: Player): Boolean = city(player)?.let { it.id in busy || it.id in unhealthy || it.pendingDeletion != null } == true
     override fun foundingAllowed(): Boolean = settings.worlds.isNotEmpty()
     override fun refreshCity(player: Player): CompletableFuture<Unit> = action("lookup", player) {
         requireReady(player)
@@ -177,7 +179,66 @@ class CivsService(
         rejectIf(outcome != BackendTransferResult.SENT, "transfer-failed")
         CompletableFuture.completedFuture(Unit)
     }
-    override fun workerStatus(workerId: UUID): String = citizens.status(workerId)
+    override fun workerStatus(workerId: UUID): String {
+        val city = cities.values.firstOrNull { it.workers.any { worker -> worker.id == workerId } }
+            ?: return "workers.status.unavailable"
+        val worker = city.workers.first { it.id == workerId }
+        if (city.pendingDeletion != null) return "workers.status.waiting"
+        if (city.id in inventoryRecovery) return "workers.status.inventory-recovery"
+        if (city.id in unhealthy) return "workers.status.storage-unavailable"
+        citizenPlan(city, worker)?.idleReason?.let {
+            val reason = if (it == "construction-paused") constructionFailureStatus(city.construction?.failure) else it
+            return "workers.status.$reason"
+        }
+        val status = citizens.status(workerId)
+        return if (status in setOf("workers.status.unassigned", "workers.status.no-construction", "workers.status.building-unavailable",
+                "workers.status.construction-paused", "workers.status.waiting-materials", "workers.status.placing")) "workers.status.waiting" else status
+    }
+
+    override fun buildingStatus(buildingId: UUID): String {
+        val city = cities.values.firstOrNull { it.building(buildingId) != null } ?: return "building-status.paused"
+        val building = requireNotNull(city.building(buildingId))
+        val order = city.construction?.takeIf { it.buildingId == buildingId }
+        val status = when {
+            city.pendingDeletion != null -> "deleting"
+            city.id in inventoryRecovery -> "inventory-recovery"
+            city.id in unhealthy -> "storage-unavailable"
+            order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting-materials"
+            order?.phase == ConstructionPhase.PAUSED -> constructionFailureStatus(order.failure)
+            order?.phase in setOf(ConstructionPhase.PLACING, ConstructionPhase.READY_TO_PLACE) -> "placing"
+            buildingId in city.constructionQueue.orEmpty() -> queueFailures[city.id]?.takeIf { it.first == buildingId }?.second?.let {
+                constructionFailureStatus(it)
+            } ?: "queued"
+            building.phase == BuildingPhase.SITE -> "site"
+            else -> {
+                val workers = city.workers.filter { worker -> worker.assignment?.let(city::building)?.let { assigned ->
+                    if (order != null) CivsRules.isBuilder(assigned) && CivsRules.builderCanWork(city, assigned)
+                    else assigned.id == buildingId
+                } == true }
+                if (workers.isEmpty()) {
+                    if (order != null) "builder-required" else if (CivsRules.slots(city, building) > 0) "no-workers" else "active"
+                } else workers.map { workerStatus(it.id).removePrefix("workers.status.") }.let { states ->
+                    val selected = states.firstOrNull { it in setOf("working", "moving-to-work", "moving-to-storage") } ?: states.first()
+                    when (selected) {
+                        "waiting", "delivering" -> "working"
+                        "world-unloaded", "chunk-unloaded", "capacity", "closed" -> "sleeping"
+                        "construction-paused", "building-unavailable", "unavailable" -> "paused"
+                        else -> selected
+                    }
+                }
+            }
+        }
+        return "building-status.$status"
+    }
+
+    private fun constructionFailureStatus(reason: String?): String = when (reason) {
+        "builder-required", "storage-full", "storage-unavailable", "route-unreachable",
+        "work-route-too-long", "lands-denied", "world-changed", "protected-terrain", "building-overlap",
+        "outside-city", "protected-area", "placement-failed", "placement-cancelled" -> reason
+        "control-position-missing", "control-missing", "control-obstructed" -> "control-missing"
+        "world-unavailable", "chunk-unloaded" -> "sleeping"
+        else -> "paused"
+    }
     override fun activeNpcCount(): Int = citizens.activeCount()
 
     override fun preview(player: Player): CivsPreviewView? = previews[player.uniqueId]?.takeIf { it.expires > now() }?.let {
@@ -209,7 +270,6 @@ class CivsService(
     override fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit> = action("begin_building_selection", player, "type" to type) {
         val city = managed(player)
         rejectIf(type == BuildingType.TOWN_HALL, "invalid-building")
-        rejectIf(city.construction != null, "construction-busy")
         rejectIf(player.world.uid != city.worldId, "outside-city")
         beginSelection(player, city.id, city.name, city.style, type)
     }
@@ -242,7 +302,6 @@ class CivsService(
             } else {
                 val city = managed(player)
                 rejectIf(city.id != selection.cityId, "not-authorized")
-                rejectIf(city.construction != null, "construction-busy")
                 rejectIf(!city.contains(point.x, point.z), "outside-city")
             }
             CivsDiagnostics.event("selection_selected", *CivsDiagnostics.actor(player), "selection" to selection.id,
@@ -408,7 +467,7 @@ class CivsService(
                 near(player, blueprint.worldId, blueprint.building.entrance)
                 val capturedPlan = requireNotNull(captured).copy(capturedSha256 = blueprint.snapshot.fileSha256)
                 if (preview.upgrading) {
-                    startOrder(player, cities.getValue(cityId), capturedPlan, blueprint.sourceBytes).whenCompleteSync(tasks) { _, failure ->
+                    startOrder(player.uniqueId, cities.getValue(cityId), capturedPlan, blueprint.sourceBytes).whenCompleteSync(tasks) { _, failure ->
                         if (failure == null) cancelPreview(player.uniqueId)
                         finishReservation(cityId, player.uniqueId, result, failure)
                     }
@@ -531,10 +590,26 @@ class CivsService(
 
     override fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("construction_order", player, "building" to buildingId) {
         val city = managed(player)
-        rejectIf(city.id in busy || city.construction != null, "construction-busy")
+        rejectIf(city.id in busy, "city-busy")
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         rejectIf(building.phase != BuildingPhase.SITE, "invalid-building")
         near(player, city.worldId, building.entrance)
+        queueFailures.remove(city.id)
+        if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty()) {
+            return@action mutate(city.id) { CivsRules.enqueue(it, player.uniqueId, buildingId) }.thenApply { saved ->
+                if (saved.revision != city.revision) CivsDiagnostics.event("construction_enqueued", "city" to city.id,
+                    "building" to buildingId, "position" to (saved.constructionQueue.orEmpty().indexOf(buildingId) + 1))
+                Unit
+            }
+        }
+        activateSite(city, building, player)
+    }
+
+    private fun activateSite(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> {
+        val buildingId = building.id
+        val actor = player?.uniqueId ?: city.owner
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        rejectIf(city.construction != null || city.id in busy, "city-busy")
         requireControlBarrel(city.worldId, building)
         requireAssignedBuilder(city, building.id)
         busy += city.id
@@ -546,32 +621,35 @@ class CivsService(
                 Triple(plan, snapshot, requireNotNull(bytes))
             }
         }.whenCompleteSync(tasks) { loaded, failure ->
-            if (failure != null) return@whenCompleteSync finishReservation(city.id, player.uniqueId, result, failure)
+            if (failure != null) return@whenCompleteSync finishReservation(city.id, actor, result, failure)
             val (sitePlan, snapshot, bytes) = requireNotNull(loaded)
             CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, building.anchor) }, executor).whenCompleteSync(tasks) { cells, cellsFailure ->
-                if (cellsFailure != null) return@whenCompleteSync finishReservation(city.id, player.uniqueId, result, cellsFailure)
+                if (cellsFailure != null) return@whenCompleteSync finishReservation(city.id, actor, result, cellsFailure)
                 // SITE owners can remodel freely: reserve against fresh before-images, not the old preview.
                 world.capture(city.id, city.owner, city.worldId, building.copy(phase = BuildingPhase.CONSTRUCTING), requireNotNull(cells), building)
                     .whenCompleteSync(tasks) { captured, captureFailure ->
-                        if (captureFailure != null) return@whenCompleteSync finishReservation(city.id, player.uniqueId, result, captureFailure)
+                        if (captureFailure != null) return@whenCompleteSync finishReservation(city.id, actor, result, captureFailure)
                         runCatching {
-                            rejectIf(!player.isOnline, "not-authorized")
-                            near(player, city.worldId, building.entrance)
+                            rejectIf(!ready() || cities[city.id]?.pendingDeletion != null, "not-ready")
+                            if (player != null) {
+                                rejectIf(!player.isOnline, "not-authorized")
+                                near(player, city.worldId, building.entrance)
+                            }
                             requireControlBarrel(city.worldId, building)
-                            startOrder(player, cities.getValue(city.id), requireNotNull(captured).copy(capturedSha256 = sitePlan.capturedSha256), bytes)
-                                .whenCompleteSync(tasks) { _, orderFailure -> finishReservation(city.id, player.uniqueId, result, orderFailure) }
-                        }.onFailure { finishReservation(city.id, player.uniqueId, result, it) }
+                            startOrder(actor, cities.getValue(city.id), requireNotNull(captured).copy(capturedSha256 = sitePlan.capturedSha256), bytes)
+                                .whenCompleteSync(tasks) { _, orderFailure -> finishReservation(city.id, actor, result, orderFailure) }
+                        }.onFailure { finishReservation(city.id, actor, result, it) }
                     }
             }
         }
-        result
+        return result
     }
 
     /** Starting an order reserves the immutable design; each worked row pays independently later. */
-    private fun startOrder(player: Player, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<Settlement> {
+    private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<Settlement> {
         rejectIf(city.construction != null, "construction-busy")
         rejectIf(city.inventory == null, "materials-migration-pending")
-        rejectIf(!city.canManage(player.uniqueId), "not-authorized")
+        rejectIf(!city.canManage(actor), "not-authorized")
         val building = plan.building
         requireAssignedBuilder(city, building.id)
         if (building.type == BuildingType.TOWN_HALL && building.level > city.level()) {
@@ -592,12 +670,13 @@ class CivsService(
         }.whenCompleteSync(tasks) { preparedOrder, failure ->
             if (failure != null) { busy -= city.id; result.completeExceptionally(failure) }
             else runCatching {
+                requireAssignedBuilder(cities.getValue(city.id), building.id)
                 val order = requireNotNull(preparedOrder)
                 val materials = requireNotNull(order.materials)
                 val batches = requireNotNull(order.batches)
                 busy -= city.id
                 mutate(city.id) { before ->
-                    val reserved = CivsRules.reserveBuild(before, player.uniqueId, building, order)
+                    val reserved = CivsRules.reserveBuild(before, actor, building, order)
                     if (approach == null) reserved else CivsRules.validate(reserved.copy(
                         pendingControls = reserved.pendingControls.orEmpty() + approach))
                 }
@@ -614,7 +693,7 @@ class CivsService(
                         }.onFailure(result::completeExceptionally)
                     }
                 }
-            }.onFailure { result.completeExceptionally(it) }
+            }.onFailure { busy -= city.id; result.completeExceptionally(it) }
         }
         return result
     }
@@ -692,6 +771,7 @@ class CivsService(
         rejectIf(!ready(), "not-ready")
         rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
         val city = cities[cityId] ?: throw CivsRejection("no-city")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
         val id = UUID.randomUUID()
         storage.lock(city, id, sourcePlayer)
         val tx = try {
@@ -990,59 +1070,201 @@ class CivsService(
 
     override fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit> =
         action("delete_city", player, "city" to expectedCityId) {
-            val city = managed(player)
+            val city = managed(player, allowDeletion = true)
             CivsRules.requireDeletion(city, player.uniqueId, expectedCityId, confirmationName)
-            rejectIf(city.id in busy || city.id in placing || city.id in inventoryRecovery, "city-busy")
-            busy += city.id
-            val result = tracked<Unit>()
-            store.delete(city).whenCompleteSync(tasks) { _, failure ->
-                if (failure != null) {
-                    busy -= city.id
-                    val rejection = CivsDiagnostics.rejection(failure)
-                    if (rejection != null) result.completeExceptionally(rejection)
-                    else {
-                        unhealthy += city.id
-                        log("delete settlement ${city.id}", failure)
-                        result.completeExceptionally(CivsRejection("storage-unavailable"))
-                    }
-                    updateHealth()
-                } else publish(city.id, null).whenCompleteSync(tasks) { _, publishFailure ->
-                    busy -= city.id
-                    if (publishFailure != null) {
-                        unhealthy += city.id
-                        log("publish settlement deletion ${city.id}", publishFailure)
-                        result.completeExceptionally(CivsRejection("storage-unavailable"))
-                    } else {
-                        // Invalidate old drafts and membership callbacks before a new city can be founded.
-                        (city.members + city.owner).forEach { member ->
-                            lookups.remove(member)
-                            remoteCities.remove(member)
-                            cancelPreview(member, "city-deleted")
-                            boundary.clear(member)
-                        }
-                        remoteCities.entries.removeIf { it.value.city.id == city.id }
-                        city.buildings.forEach { controlFailures.remove(it.id) }
-                        citizens.pulse(now())
-                        CivsDiagnostics.event("city_deleted", "city" to city.id, "owner" to city.owner,
-                            "revision" to city.revision, "buildings_preserved" to city.buildings.size,
-                            "discarded_shared_items" to city.inventory?.materials.orEmpty().values.sum(),
-                            "discarded_building_items" to city.inventory?.buildingMaterials.orEmpty().values.sumOf { it.values.sum() },
-                            "discarded_legacy_stock" to city.stock,
-                            "construction_cancelled" to city.construction?.id)
-                        result.complete(Unit)
-                    }
-                    updateHealth()
-                }
-            }
-            result
+            beginDeletion(city, player.uniqueId, null)
         }
 
-    private fun mutate(cityId: UUID, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
+    override fun deleteBuilding(player: Player, expectedCityId: UUID, buildingId: UUID): CompletableFuture<Unit> =
+        action("delete_building", player, "city" to expectedCityId, "building" to buildingId) {
+            val city = managed(player, allowDeletion = true)
+            rejectIf(city.id != expectedCityId, "delete-city-changed")
+            beginDeletion(city, player.uniqueId, buildingId)
+        }
+
+    private val deletionFailures = mutableMapOf<UUID, String>()
+    private val deletionRequests = mutableSetOf<UUID>()
+    private var nextDeletionAt = 0L
+    private var deletionCursor = 0
+
+    private fun beginDeletion(city: Settlement, actor: UUID, buildingId: UUID?): CompletableFuture<Unit> {
+        rejectIf(city.id in busy || city.id in inventoryRecovery || city.id in deletionRequests, "city-busy")
+        val proposed = CivsRules.requestDeletion(city, actor, buildingId)
+        if (city.pendingDeletion != null) return finishDeletion(city)
+        busy += city.id
+        val result = tracked<Unit>()
+        // The durable save releases busy before its continuation runs; recovery must not steal that handoff.
+        deletionRequests += city.id
+        result.whenCompleteSync(tasks) { _, _ -> deletionRequests -= city.id }
+        val loaded = tracked<Unit>()
+        runCatching { stopPlacement(city.id) }.onSuccess { stopped -> stopped.whenCompleteSync(tasks) { _, stopFailure ->
+            if (stopFailure != null) loaded.completeExceptionally(stopFailure)
+            else runCatching { loadControlChunks(city, deletionBuildings(proposed)) }.onSuccess { chunks ->
+                chunks.whenComplete { _, chunkFailure ->
+                    if (chunkFailure == null) loaded.complete(Unit) else loaded.completeExceptionally(chunkFailure)
+                }
+            }.onFailure(loaded::completeExceptionally)
+        } }.onFailure(loaded::completeExceptionally)
+        loaded.whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) {
+                busy -= city.id
+                result.completeExceptionally(failure)
+            } else runCatching {
+                rejectIf(!ready() || cities[city.id] != city, "stale-city")
+                controlCleanup.prepare(city, deletionBuildings(proposed))
+                busy -= city.id
+                mutate(city.id) { CivsRules.requestDeletion(it, actor, buildingId) }.whenCompleteSync(tasks) { saved, saveFailure ->
+                    if (saveFailure != null) result.completeExceptionally(saveFailure)
+                    else {
+                        CivsDiagnostics.event("deletion_reserved", "city" to city.id, "building" to buildingId,
+                            "construction" to city.construction?.id)
+                        runCatching { finishDeletion(requireNotNull(saved)) }.onSuccess { finished ->
+                            finished.whenCompleteSync(tasks) { _, deleteFailure ->
+                                if (deleteFailure == null) result.complete(Unit) else result.completeExceptionally(deleteFailure)
+                            }
+                        }.onFailure(result::completeExceptionally)
+                    }
+                }
+            }.onFailure { busy -= city.id; result.completeExceptionally(it) }
+        }
+        return result
+    }
+
+    private fun deletionBuildings(city: Settlement): List<CivBuilding> {
+        val intent = requireNotNull(city.pendingDeletion)
+        return intent.buildingId?.let { listOf(requireNotNull(city.building(it))) } ?: city.buildings
+    }
+
+    /** Explicit deletion may load only the already-authored control chunks; gameplay pulses never scan/load a region. */
+    private fun loadControlChunks(city: Settlement, buildings: List<CivBuilding>): CompletableFuture<Unit> {
+        checkMain()
+        val target = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        val loads = buildings.mapNotNull(CivBuilding::control).map { (it.x shr 4) to (it.z shr 4) }.distinct()
+            .filterNot { (x, z) -> target.isChunkLoaded(x, z) }.map { (x, z) -> target.getChunkAtAsync(x, z, false) }
+        return CompletableFuture.allOf(*loads.toTypedArray()).thenApply { Unit }
+    }
+
+    private fun stopPlacement(cityId: UUID): CompletableFuture<Unit> {
+        val operation = operations[cityId]
+        releasePlacement(cityId) // Fence every outstanding prepare/revalidate/paste callback before cancelling native work.
+        if (operation == null) return CompletableFuture.completedFuture(Unit)
+        operation.cancel()
+        return operation.completion.handle { _, _ -> Unit }
+    }
+
+    private fun finishDeletion(city: Settlement): CompletableFuture<Unit> {
+        rejectIf(city.id in busy || city.id in inventoryRecovery, "city-busy")
+        val buildings = deletionBuildings(city)
+        busy += city.id
+        val result = tracked<Unit>()
+        val loading = runCatching { loadControlChunks(city, buildings) }.getOrElse {
+            busy -= city.id
+            return CompletableFuture.failedFuture(it)
+        }
+        loading.whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) { busy -= city.id; result.completeExceptionally(failure) }
+            else runCatching {
+                rejectIf(!ready() || cities[city.id] != city, "stale-city")
+                val controls = controlCleanup.prepare(city, buildings)
+                val removed = controlCleanup.apply(city, controls)
+                CivsDiagnostics.event("controls_deleted", "city" to city.id, "building" to city.pendingDeletion?.buildingId,
+                    "registered" to controls.size, "removed" to removed)
+                if (city.pendingDeletion?.buildingId == null) {
+                    deleteCityRecord(city).whenCompleteSync(tasks) { _, deleteFailure ->
+                        if (deleteFailure == null) result.complete(Unit) else result.completeExceptionally(deleteFailure)
+                    }
+                } else {
+                    busy -= city.id
+                    mutate(city.id, allowDeletion = true) { CivsRules.finishBuildingDeletion(it, it.owner) }.whenCompleteSync(tasks) { saved, deleteFailure ->
+                        if (deleteFailure != null) result.completeExceptionally(deleteFailure)
+                        else {
+                            val id = requireNotNull(city.pendingDeletion.buildingId)
+                            queueFailures.remove(city.id)
+                            deletionFailures.remove(city.id)
+                            controlFailures.remove(id)
+                            storage.refreshBuilding(requireNotNull(saved))
+                            CivsDiagnostics.event("building_deleted", "city" to city.id, "building" to id,
+                                "construction_cancelled" to city.construction?.takeIf { it.buildingId == id }?.id)
+                            tasks.runLater(1) { if (ready()) pulseQueue() }
+                            result.complete(Unit)
+                        }
+                    }
+                }
+            }.onFailure { busy -= city.id; result.completeExceptionally(it) }
+        }
+        return result
+    }
+
+    private fun pulseDeletions() {
+        if (now() < nextDeletionAt) return
+        nextDeletionAt = now() + 5_000L
+        val pending = cities.values.filter { it.pendingDeletion != null && it.id !in busy && it.id !in unhealthy &&
+            it.id !in inventoryRecovery && it.id !in deletionRequests }
+        if (pending.isEmpty()) return
+        val city = pending[Math.floorMod(deletionCursor++, pending.size)]
+        runCatching { finishDeletion(city) }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
+            if (failure == null) deletionFailures.remove(city.id)
+            else {
+                val reason = CivsDiagnostics.rejection(failure)?.reason ?: "storage-unavailable"
+                if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure)
+            }
+        } }.onFailure { failure ->
+            val reason = CivsDiagnostics.rejection(failure)?.reason ?: "storage-unavailable"
+            if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure)
+        }
+    }
+
+    private fun deleteCityRecord(city: Settlement): CompletableFuture<Unit> {
+        val result = tracked<Unit>()
+        store.delete(city).whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) {
+                busy -= city.id
+                val rejection = CivsDiagnostics.rejection(failure)
+                if (rejection != null) result.completeExceptionally(rejection)
+                else {
+                    unhealthy += city.id
+                    log("delete settlement ${city.id}", failure)
+                    result.completeExceptionally(CivsRejection("storage-unavailable"))
+                }
+                updateHealth()
+            } else publish(city.id, null).whenCompleteSync(tasks) { _, publishFailure ->
+                busy -= city.id
+                if (publishFailure != null) {
+                    unhealthy += city.id
+                    log("publish settlement deletion ${city.id}", publishFailure)
+                    result.completeExceptionally(CivsRejection("storage-unavailable"))
+                } else {
+                    // Invalidate old drafts and membership callbacks before a new city can be founded.
+                    (city.members + city.owner).forEach { member ->
+                        lookups.remove(member)
+                        remoteCities.remove(member)
+                        cancelPreview(member, "city-deleted")
+                        boundary.clear(member)
+                    }
+                    remoteCities.entries.removeIf { it.value.city.id == city.id }
+                    city.buildings.forEach { controlFailures.remove(it.id) }
+                    citizens.pulse(now())
+                    CivsDiagnostics.event("city_deleted", "city" to city.id, "owner" to city.owner,
+                        "revision" to city.revision, "buildings_preserved" to city.buildings.size,
+                        "discarded_shared_items" to city.inventory?.materials.orEmpty().values.sum(),
+                        "discarded_building_items" to city.inventory?.buildingMaterials.orEmpty().values.sumOf { it.values.sum() },
+                        "discarded_legacy_stock" to city.stock,
+                        "construction_cancelled" to city.construction?.id)
+                    result.complete(Unit)
+                }
+                updateHealth()
+            }
+        }
+        return result
+    }
+
+    private fun mutate(cityId: UUID, allowDeletion: Boolean = false, transform: (Settlement) -> Settlement): CompletableFuture<Settlement> {
         checkMain()
         rejectIf(closed, "not-ready")
         rejectIf(cityId in unhealthy, "storage-unavailable")
         rejectIf(cityId in busy, "city-busy")
         val city = cities[cityId] ?: throw CivsRejection("no-city")
+        rejectIf(city.pendingDeletion != null && !allowDeletion, "deletion-pending")
         val next = transform(city)
         if (next == city) return CompletableFuture.completedFuture(city)
         busy += cityId
@@ -1098,6 +1320,8 @@ class CivsService(
                 geometryGeneration++
                 unhealthy.clear()
                 unhealthy.addAll(inventoryRecovery.keys)
+                queueFailures.clear()
+                deletionFailures.clear()
                 initialized = true
                 result.complete(Unit)
                 pulseConstruction()
@@ -1139,7 +1363,7 @@ class CivsService(
         if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
         val previous = cities[cityId]
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
-            previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls) {
+            previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion) {
             cities[city.id] = city
             return CompletableFuture.completedFuture(Unit)
         }
@@ -1169,10 +1393,12 @@ class CivsService(
         plugin.server.onlinePlayers.forEach { player -> boundary.pulse(player, if (ready()) city(player) else null) }
         if (ready()) {
             recoverInventories()
+            pulseDeletions()
             pulseImmigration()
             pulseAutoAssignments()
             pulseControls()
             pulseStorage()
+            pulseQueue()
         }
         pulseConstruction()
         updateHealth()
@@ -1186,7 +1412,7 @@ class CivsService(
     private fun pulseStorage() {
         if (now() < nextStorageTransferAt) return
         val candidates = cities.values.filter { city ->
-            city.id !in busy && city.id !in unhealthy && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&
+            city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&
                 !storage.hasViewers(city) &&
                 plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
         }
@@ -1330,7 +1556,7 @@ class CivsService(
 
     private fun pulseImmigration() {
         cities.values.firstOrNull { city ->
-            city.id !in busy && city.id !in unhealthy && city.immigration?.let { it.remaining > 0 && it.nextArrivalAt <= now() } == true &&
+            city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && city.immigration?.let { it.remaining > 0 && it.nextArrivalAt <= now() } == true &&
                 plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId &&
                     player.location.toVector().distanceSquared(org.bukkit.util.Vector(city.center.x.toDouble(), city.center.y.toDouble(), city.center.z.toDouble())) <= settings.viewerRange * settings.viewerRange }
         }?.let { city ->
@@ -1344,7 +1570,7 @@ class CivsService(
 
     private fun pulseAutoAssignments() {
         val city = cities.values.firstOrNull { city ->
-            city.id !in busy && city.id !in unhealthy && CivsRules.needsAutoAssignment(city) &&
+            city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && CivsRules.needsAutoAssignment(city) &&
                 plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId && city.contains(player.location.blockX, player.location.blockZ) }
         } ?: return
         runCatching { mutate(city.id) { CivsRules.autoAssign(it, it.owner, now()) } }.onSuccess { future ->
@@ -1373,13 +1599,45 @@ class CivsService(
 
     private var nextMaterialCheckAt = 0L
     private var materialCursor = 0
+    private val queueFailures = mutableMapOf<UUID, Pair<UUID, String>>()
+    private var nextQueueAt = 0L
+    private var queueCursor = 0
+
+    private fun pulseQueue() {
+        if (!ready() || now() < nextQueueAt) return
+        nextQueueAt = now() + 5_000L
+        val candidates = cities.values.filter { city ->
+            city.construction == null && city.pendingDeletion == null && city.constructionQueue.orEmpty().isNotEmpty() &&
+                city.id !in busy && city.id !in unhealthy && city.id !in placing &&
+                plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
+        }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(queueCursor++, candidates.size)]
+        val building = city.building(city.constructionQueue!!.first()) ?: return
+        val target = plugin.server.getWorld(city.worldId) ?: return
+        if (!target.isChunkLoaded(building.entrance.x shr 4, building.entrance.z shr 4)) return
+        fun failed(failure: Throwable) {
+            val reason = CivsDiagnostics.rejection(failure)?.reason ?: "placement-failed"
+            if (queueFailures.put(city.id, building.id to reason) != (building.id to reason)) {
+                CivsDiagnostics.event("construction_queue_waiting", "city" to city.id, "building" to building.id, "reason" to reason)
+                if (CivsDiagnostics.rejection(failure) == null) log("start queued building ${building.id}", failure)
+            }
+        }
+        runCatching { activateSite(city, building) }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
+            if (failure != null) failed(failure)
+            else {
+                queueFailures.remove(city.id)
+                CivsDiagnostics.event("construction_dequeued", "city" to city.id, "building" to building.id)
+            }
+        } }.onFailure(::failed)
+    }
 
     private fun pulseConstruction() {
         if (!ready()) return
         if (now() >= nextMaterialCheckAt) {
             nextMaterialCheckAt = now() + 5_000L
             val waiting = cities.values.filter { city ->
-                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && city.id !in busy && city.id !in unhealthy &&
+                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
                     city.id !in placing && city.pendingControls.orEmpty().none { it.buildingId == city.construction.buildingId } &&
                     plugin.server.getWorld(city.worldId)?.let { target ->
                         city.construction.plannedBuilding?.entrance?.let { target.isChunkLoaded(it.x shr 4, it.z shr 4) }
@@ -1400,7 +1658,7 @@ class CivsService(
         for (city in cities.values.toList()) {
             if (placing.size >= 2) break
             val order = city.construction ?: continue
-            if (city.id in busy || city.id in unhealthy || city.id in placing) continue
+            if (city.id in busy || city.id in unhealthy || city.id in placing || city.pendingDeletion != null) continue
             if (city.pendingControls.orEmpty().any { it.buildingId == order.buildingId }) continue
             if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
             // A reloaded city sleeps until its destination chunks are already available.
@@ -1413,6 +1671,7 @@ class CivsService(
 
     private fun startPlacement(city: Settlement, order: CivConstruction) {
         placing += city.id
+        val run = UUID.randomUUID().also { placementRuns[city.id] = it }
         store.loadPlan(order.id).thenCompose { plan ->
             requireNotNull(plan) { "Missing captured construction plan ${order.id}" }
             require(plan.cityId == city.id && plan.worldId == city.worldId && plan.building == order.plannedBuilding)
@@ -1441,12 +1700,12 @@ class CivsService(
                 }, containersChanged), batch, plan.copy(blocks = cells))
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
-            if (closed) return@whenCompleteSync
+            if (closed || placementRuns[city.id] != run) return@whenCompleteSync
             if (failure != null) return@whenCompleteSync placementFailed(city.id, order.id, failure)
             val (plan, snapshot, access, batch, batchPlan) = requireNotNull(recovered)
             val validation = if (batchPlan.blocks.isEmpty()) CompletableFuture.completedFuture(Unit) else world.revalidate(batchPlan, city.owner)
             validation.whenCompleteSync(tasks) { _, validationFailure ->
-                if (closed) return@whenCompleteSync
+                if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)
                 runCatching {
                     val required = if (order.payment != null && order.payment.reservedBatch == null)
@@ -1455,7 +1714,7 @@ class CivsService(
                         else mutate(city.id) { CivsRules.beginPlacement(it, it.owner, order.id) }
                     begin
                         .whenCompleteSync(tasks) { paid, beginFailure ->
-                            if (closed) return@whenCompleteSync
+                            if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                             if (beginFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, beginFailure)
                             if (required != null && paid?.construction?.payment?.reservedBatch != order.workDone) {
                                 releasePlacement(city.id)
@@ -1470,6 +1729,7 @@ class CivsService(
                                 return@whenCompleteSync
                             }
                             blueprints.pasteParts(snapshot, plan.building, batch).whenCompleteSync(tasks) { parts, cropFailure ->
+                                if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                                 if (cropFailure != null) placementFailed(city.id, order.id, cropFailure)
                                 else {
                                     CivsDiagnostics.event("construction_parts_prepared", "city" to city.id, "order" to order.id,
@@ -1527,7 +1787,7 @@ class CivsService(
                                 "completed" to (order.workDone + 1), "total" to order.workRequired)
                             if (access.containersChanged) saved?.let { storage.refreshBuilding(it, plan.building) }
                             if (saved?.construction == null) repairCommitted(cityId, plan, fullSnapshot)
-                            else releasePlacement(cityId)
+                            else { releasePlacement(cityId); tasks.runLater(1) { pulseConstruction() } }
                         }
                     }
                 }.onFailure { placementFailed(cityId, orderId, it) }
@@ -1565,6 +1825,7 @@ class CivsService(
     }
 
     private fun releasePlacement(cityId: UUID) {
+        placementRuns.remove(cityId)
         operations.remove(cityId)
         placementAccess.remove(cityId)
         placing -= cityId
@@ -1573,7 +1834,7 @@ class CivsService(
     private fun placementFailed(cityId: UUID, orderId: UUID, failure: Throwable) {
         releasePlacement(cityId)
         log("place construction $orderId", failure)
-        if (closed || cityId in unhealthy || cities[cityId]?.construction?.id != orderId) return
+        if (closed || cityId in unhealthy || cities[cityId]?.pendingDeletion != null || cities[cityId]?.construction?.id != orderId) return
         val causes = generateSequence(failure) { it.cause }.toList()
         val reason = causes.filterIsInstance<CivsRejection>().firstOrNull()?.reason
             ?: if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.PROTECTED_AREA }) "protected-area" else "placement-failed"
@@ -1587,12 +1848,13 @@ class CivsService(
         return previews[player.uniqueId]?.takeIf { it.expires > now() && it.blueprint.worldId == player.world.uid }
             ?: throw CivsRejection("preview-expired")
     }
-    private fun managed(player: Player): Settlement {
+    private fun managed(player: Player, allowDeletion: Boolean = false): Settlement {
         requireReady(player)
         val city = city(player) ?: throw remoteCity(player)?.let {
             CivsRejection("remote-city", mapOf("server" to it.server.value))
         } ?: CivsRejection("no-city")
         rejectIf(city.id in unhealthy, "storage-unavailable")
+        rejectIf(city.pendingDeletion != null && !allowDeletion, "deletion-pending")
         return city
     }
     private fun requireReady(player: Player) {
@@ -1689,6 +1951,7 @@ class CivsService(
         initialized = false
         HandlerList.unregisterAll(this)
         placementAccess.clear()
+        placementRuns.clear()
         placing.clear()
         operations.values.toList().forEach { it.cancel() }
         operations.clear()

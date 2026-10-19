@@ -887,7 +887,108 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("city deletion waits for durable confirmation then removes authority while preserving native blocks and items") {
+    for (alreadyRemoved in listOf(false, true)) test("restart finishes pending building deletion once with control alreadyRemoved=$alreadyRemoved") {
+        serviceScenario { h ->
+            val control = CivPosition(10, 63, 0)
+            val building = h.city.buildings.last().copy(control = control)
+            val block = h.world.getBlockAt(control.x, control.y, control.z)
+            if (!alreadyRemoved) {
+                block.type = Material.BARREL
+                (block.state as org.bukkit.block.Barrel).inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
+            }
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), building), pendingDeletion = CivDeletion(building.id))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start(); h.paper.performTicks(20)
+            block.type shouldBe Material.AIR
+            h.service.city(h.player)!!.pendingDeletion shouldBe CivDeletion(building.id)
+            h.service.buildingStatus(building.id) shouldBe "building-status.deleting"
+            h.saves.single().first.building(building.id) shouldBe null
+            h.commit(); h.time += 6_000; h.paper.performTicks(40)
+            h.service.city(h.player)!!.pendingDeletion shouldBe null
+            h.service.city(h.player)!!.building(building.id) shouldBe null
+            h.world.entities.filterIsInstance<org.bukkit.entity.Item>().sumOf { it.itemStack.amount } shouldBe if (alreadyRemoved) 0 else 3
+            h.saves.size shouldBe 1
+        }
+    }
+
+    test("deleting an active construction fences its late validation and cancels only the selected building") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            h.start(); h.paper.performTicks(20)
+            val buildingId = placement.city.construction!!.buildingId
+            val deletion = h.service.deleteBuilding(h.player, h.city.id, buildingId)
+            h.tick()
+            h.saves.single().first.pendingDeletion shouldBe CivDeletion(buildingId)
+            h.commit()
+            placement.validation.complete(Unit); h.tick()
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            h.saves.size shouldBe 2
+            h.commit(); deletion.join() shouldBe Unit
+            h.service.city(h.player)!!.construction shouldBe null
+            h.service.city(h.player)!!.building(buildingId) shouldBe null
+            h.service.city(h.player)!!.buildings.size shouldBe h.city.buildings.size
+        }
+    }
+
+    test("active construction accepts another site into an idempotent queue and opens new placement") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val site = active.city.buildings[1].copy(phase = BuildingPhase.SITE)
+            val city = active.city.copy(buildings = active.city.buildings.map { if (it.id == site.id) site else it })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start()
+            val queued = h.service.startBuilding(h.player, site.id); h.tick()
+            h.service.city(h.player)!!.constructionQueue shouldBe null
+            h.saves.single().first.constructionQueue shouldBe listOf(site.id)
+            h.commit(); queued.join() shouldBe Unit
+            h.service.startBuilding(h.player, site.id).join() shouldBe Unit
+            h.saves.size shouldBe 1
+            h.service.buildingStatus(site.id) shouldBe "building-status.queued"
+            h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join() shouldBe Unit
+            h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
+            verify(exactly = 0) { h.store.loadPlan(site.id) }
+        }
+    }
+
+    test("reloaded queue starts its head from fresh terrain and removes that id only with the order commit") {
+        serviceScenario { h ->
+            val viewer = h.paper.addPlayer("QueueViewer")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            val site = h.city.buildings.last().copy(phase = BuildingPhase.SITE,
+                control = CivPosition(10, 63, 0), entrance = CivPosition(10, 64, 3))
+            val hut = site.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, phase = BuildingPhase.ACTIVE,
+                anchor = CivPosition(20, 64, 0), bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)),
+                entrance = CivPosition(20, 64, 3), control = null)
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            h.world.getBlockAt(10, 63, 3).type = Material.DIRT
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), site, hut), constructionQueue = listOf(site.id),
+                workers = h.city.workers.mapIndexed { i, worker -> if (i == 0) worker.copy(assignment = hut.id, nextDeliveryAt = 1) else worker })
+            val immutable = CivPlacementPlan(site.id, city.id, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING),
+                listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:dirt", "minecraft:stone")), "a".repeat(64))
+            val fresh = immutable.copy(id = UUID.randomUUID(), blocks = immutable.blocks.map { it.copy(before = "minecraft:oak_planks") })
+            val snapshot = mockk<ArcSchematicSnapshot>()
+            every { snapshot.blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.loadPlan(site.id) } returns CompletableFuture.completedFuture(immutable)
+            every { h.store.loadSchematic(site.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
+            every { h.blueprints.recover(immutable) } returns CompletableFuture.completedFuture(snapshot)
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(fresh)
+            every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+            every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            h.start(); h.paper.performTicks(20)
+            h.saves.single().first.construction!!.id shouldBe fresh.id
+            h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
+            verify(exactly = 1) { h.worldAdapter.capture(city.id, city.owner, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING), any(), site) }
+            verify(exactly = 1) { h.store.savePlan(fresh) }
+            h.commit()
+            h.service.city(h.player)!!.constructionQueue shouldBe emptyList()
+            h.service.city(h.player)!!.construction!!.buildingId shouldBe site.id
+        }
+    }
+
+    test("city deletion journals intent before retiring controls and drops contents without the free barrel") {
         serviceScenario { h ->
             val control = CivPosition(0, 63, 0)
             val block = h.world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
@@ -899,7 +1000,7 @@ class CivsServiceTest : FunSpec({
                 buildings = h.city.buildings.mapIndexed { i, b -> if (i == 0) b.copy(control = control) else b })
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val durable = CompletableFuture<Unit>()
-            every { h.store.delete(city) } returns durable
+            every { h.store.delete(any()) } returns durable
             h.start()
             val lookup = CompletableFuture<CivsNetworkCity?>()
             every { h.store.lookup(h.owner) } returns lookup
@@ -910,6 +1011,14 @@ class CivsServiceTest : FunSpec({
             h.service.city(h.player) shouldBe city
             protection.isProtected(h.world.uid, 0, 63, 0) shouldBe true
             h.service.deleteCity(h.player, city.id, city.name).isCompletedExceptionally shouldBe true
+            block.type shouldBe Material.BARREL
+            barrel.getItem(0)!!.amount shouldBe 7
+            h.tick()
+            h.saves.single().first.pendingDeletion shouldBe CivDeletion(null)
+            h.commit()
+            block.type shouldBe Material.AIR
+            h.world.entities.filterIsInstance<org.bukkit.entity.Item>().map { it.itemStack.type to it.itemStack.amount } shouldBe listOf(Material.DIAMOND to 7)
+            deleted.isDone shouldBe false
             durable.complete(Unit); h.tick()
             deleted.join() shouldBe Unit
             h.service.city(h.player) shouldBe null
@@ -918,9 +1027,8 @@ class CivsServiceTest : FunSpec({
             h.service.remoteCity(h.player) shouldBe null
             h.service.ready() shouldBe true
             protection.isProtected(h.world.uid, 0, 63, 0) shouldBe false
-            block.type shouldBe Material.BARREL
-            barrel.getItem(0)!!.amount shouldBe 7
-            verify(exactly = 1) { h.store.delete(city); h.boundary.clear(h.owner) }
+            block.type shouldBe Material.AIR
+            verify(exactly = 1) { h.store.delete(h.saves.single().first); h.boundary.clear(h.owner) }
             h.service.beginFoundingSelection(h.player, city.name, city.style).join() shouldBe Unit
         }
     }
@@ -942,14 +1050,14 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-            every { h.store.delete(city) } returns CompletableFuture.failedFuture(java.io.IOException("ack lost"))
+            every { h.store.delete(any()) } returns CompletableFuture.failedFuture(java.io.IOException("ack lost"))
             h.start()
-            val deletion = h.service.deleteCity(h.player, city.id, city.name); h.tick()
+            val deletion = h.service.deleteCity(h.player, city.id, city.name); h.tick(); h.commit()
             (shouldThrow<CompletionException> { deletion.join() }.cause as CivsRejection).reason shouldBe "storage-unavailable"
-            h.service.city(h.player) shouldBe city
+            h.service.city(h.player) shouldBe h.saves.single().first
             h.service.cityBusy(h.player) shouldBe true
             h.service.deleteCity(h.player, city.id, city.name).isCompletedExceptionally shouldBe true
-            verify(exactly = 1) { h.store.delete(city) }
+            verify(exactly = 1) { h.store.delete(h.saves.single().first) }
             every { h.store.load() } returns CompletableFuture.completedFuture(emptyList())
             val reload = h.service.reload(h.player); h.tick(); reload.join() shouldBe Unit
             h.service.city(h.player) shouldBe null
@@ -1641,6 +1749,10 @@ class CivsServiceTest : FunSpec({
     for (writesBeforeRevocation in 0..1) test("Lands revocation after preflight stops write ${writesBeforeRevocation + 1} and pauses the same paid construction") {
         serviceScenario { h ->
             val placement = h.placement()
+            val staffed = placement.city.copy(workers = placement.city.workers.mapIndexed { index, worker ->
+                if (index == 0) worker.copy(assignment = placement.city.buildings.first().id, nextDeliveryAt = 1L) else worker
+            })
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(staffed))
             val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
             var allowed = true
             every { h.worldAdapter.canModify(h.owner, any(), any()) } answers { allowed }
@@ -1665,6 +1777,8 @@ class CivsServiceTest : FunSpec({
             val paused = h.service.city(h.player)!!
             paused.construction!!.id shouldBe placement.city.construction!!.id
             paused.construction.failure shouldBe "protected-area"
+            h.service.buildingStatus(paused.construction.buildingId) shouldBe "building-status.protected-area"
+            h.service.workerStatus(staffed.workers.first().id) shouldBe "workers.status.protected-area"
             paused.stock shouldBe placement.city.stock
             h.world.getBlockAt(15, 64, 0).type shouldBe if (writesBeforeRevocation == 1) Material.OAK_PLANKS else Material.AIR
             h.world.getBlockAt(16, 64, 0).type shouldBe Material.AIR

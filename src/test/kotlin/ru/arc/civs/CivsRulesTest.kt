@@ -333,7 +333,7 @@ class CivsRulesTest : FunSpec({
         val city = activeCity()
         val invalid = listOf(
             city.copy(stock = Stock(-1, 0, 0)),
-            city.copy(stock = Stock(129, 0, 0)),
+            city.copy(stock = Stock(128L + (CivsRules.MAX_BUILDINGS - 1) * 1024L + 1, 0, 0)),
             city.copy(revision = -1),
             city.copy(workers = city.workers + city.workers.first()),
             city.copy(workers = city.workers.map { it.copy(assignment = uuid(666)) }),

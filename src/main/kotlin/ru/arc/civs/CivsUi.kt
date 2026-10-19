@@ -534,14 +534,42 @@ class CivsUi internal constructor(
         present(player, "civs.buildings", "buildings.title", listOf(
             body(player, "buildings.help"), table(listOf(tr(player, "label.construction") to constructionText(player, city))),
         ), buildList {
+            if (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty()) {
+                add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
+            }
             city.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
-                add(valueButton(player, "building_$index", "common.destination", buildingName(player, building.type, building.level), LAND) {
+                add(valueButton(player, "building_$index", "common.destination", buildingName(player, building.type, building.level), LAND,
+                    buildingStatus(player, city, building)) {
                     showBuilding(player, building.id)
                 })
             }
             if (city.buildings.size < CivsRules.MAX_BUILDINGS) add(button(player, "catalog", "buildings.catalog", PERSONAL) { showCatalog(player) })
             pages(player, current, city.buildings.size) { showBuildings(player, it) }
         }, reopen = { showBuildings(player, current) })
+    }
+
+    private fun showQueue(player: Player, page: Int = 0) {
+        val city = city(player) ?: return
+        val queued = city.constructionQueue.orEmpty()
+        val current = page.coerceIn(0, lastPage(queued.size))
+        present(player, "civs.queue", "queue.title", listOfNotNull(
+            city.construction?.let { table(listOf(tr(player, "queue.active") to constructionText(player, city))) }
+                ?: body(player, "queue.no-active"),
+            body(tr(player, if (queued.isEmpty()) "queue.empty" else "queue.waiting", "count" to queued.size)),
+        ), buildList {
+            city.construction?.let { order ->
+                add(button(player, "active", "queue.active-open", LAND) { showBuilding(player, order.buildingId) })
+            }
+            queued.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, id ->
+                city.building(id)?.let { building ->
+                    add(valueButton(player, "queue_$index", "common.destination", tr(player, "queue.entry",
+                        "position" to current * PAGE_SIZE + index + 1,
+                        "building" to buildingName(player, building.type, building.level)), LAND,
+                        buildingStatus(player, city, building)) { showBuilding(player, id) })
+                }
+            }
+            pages(player, current, queued.size) { showQueue(player, it) }
+        }, reopen = { showQueue(player, current) })
     }
 
     private fun showCatalog(player: Player) {
@@ -571,18 +599,21 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         val assigned = city.workers.count { it.assignment == buildingId }
+        val queued = queuePosition(city, buildingId) != null
         val legacyControl = building.phase == BuildingPhase.ACTIVE && (building.control == null || building.control == building.anchor)
         present(player, "civs.building", "buildings.detail-title", listOfNotNull(
             body(buildingName(player, building.type, building.level)),
             body(player, "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
             table(buildList {
                 add(tr(player, "label.control") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")))
-                add(tr(player, "label.state") to tr(player, "building-phase.${building.phase.name.lowercase(Locale.ROOT)}"))
+                add(tr(player, "label.state") to buildingStatus(player, city, building))
                 add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
                 CivsProduction.material(building)?.let { material ->
                     add(tr(player, "label.output") to tr(player, "buildings.output", "amount" to CivsProduction.amount(building), "resource" to materialName(player, material)))
                 }
-                if (city.construction?.buildingId == buildingId) add(tr(player, "label.construction") to constructionText(player, city))
+                city.construction?.takeIf { it.buildingId == buildingId }?.let { order ->
+                    add(tr(player, "label.construction") to tr(player, "common.fraction", "value" to order.workDone, "limit" to order.workRequired))
+                }
             }), body(player, "buildings.control-help"),
             if (legacyControl) body(player, "control.legacy-help") else null,
             if (legacyControl && city.construction != null) body(player, "reason.construction-busy") else null,
@@ -592,16 +623,47 @@ class CivsUi internal constructor(
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
             }
-            if (building.phase == BuildingPhase.SITE || city.construction?.buildingId == buildingId) {
+            if (building.phase == BuildingPhase.SITE || city.construction?.buildingId == buildingId || queued) {
                 add(button(player, "materials", "materials.open", COMMIT) { loadBuildingMaterials(player, buildingId) })
             }
+            if (queued) add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (CivsProduction.options(building.type).isNotEmpty()) add(button(player, "production", "production.open", PERSONAL) { showProduction(player, buildingId) })
             if (building.level < 3 && building.phase == BuildingPhase.ACTIVE) add(button(player, "upgrade", "upgrades.open", PERSONAL) { showUpgrade(player, building.id) })
             if (legacyControl && !host.cityBusy(player) && city.construction == null) {
                 add(button(player, "relocate_control", "control.open", NAVIGATION) { loadControlRelocation(player, buildingId) })
             }
+            if (building.type != BuildingType.TOWN_HALL && !host.cityBusy(player)) {
+                add(button(player, "delete_building", "delete-building.open", DANGER) { showDeleteBuilding(player, city.id, buildingId) })
+            }
         }, reopen = { showBuilding(player, buildingId) })
+    }
+
+    private fun showDeleteBuilding(player: Player, expectedCityId: UUID, buildingId: UUID, error: Component? = null) {
+        val city = host.city(player)
+        if (city == null || city.id != expectedCityId || !city.canManage(player.uniqueId)) {
+            notice(player, "civs.delete-building", "delete-building.title", text.reason(player, "stale-city")) { showEntry(player) }
+            return
+        }
+        val building = city.building(buildingId) ?: return showBuildings(player)
+        if (building.type == BuildingType.TOWN_HALL) return showBuilding(player, buildingId)
+        present(player, "civs.delete-building", "delete-building.title", listOfNotNull(
+            body(buildingName(player, building.type, building.level).color(DANGER)),
+            body(player, "delete-building.world-help"), body(player, "delete-building.control-help"),
+            if (city.construction?.buildingId == buildingId) body(player, "delete-building.construction-help") else null,
+            if (city.inventory?.buildingStock(buildingId)?.values.orEmpty().any { it > 0 }) body(player, "delete-building.virtual-help") else null,
+            busyBody(player), error?.let { body(it.color(DANGER)) },
+        ), buildList {
+            if (!host.cityBusy(player)) add(button(player, "delete", "delete-building.confirm", DANGER) {
+                perform(player, "civs.delete-building", "delete-building.title",
+                    { host.deleteBuilding(player, expectedCityId, buildingId) }, success = {
+                        runtime.beginFlow(player)
+                        roots[player.uniqueId] = "civs.buildings"
+                        showBuildings(player)
+                        player.sendMessage(text.success(player, "delete-building.success", "building" to text.building(player, building.type)))
+                    }, failure = { showDeleteBuilding(player, expectedCityId, buildingId, it) })
+            })
+        }, reopen = { showDeleteBuilding(player, expectedCityId, buildingId) })
     }
 
     private fun loadControlRelocation(player: Player, buildingId: UUID, error: Component? = null) {
@@ -662,6 +724,7 @@ class CivsUi internal constructor(
         val available = runCatching { host.availableMaterials(player) }
         val entries = (order?.materials ?: estimate).toSortedMap().entries.toList()
         val incremental = order?.payment != null
+        val queued = queuePosition(city, buildingId)
         val current = page.coerceIn(0, lastPage(entries.size, MATERIALS_PAGE_SIZE))
         val canSupply = !host.cityBusy(player) && available.isSuccess && (order == null || incremental) &&
             entries.any { (material, count) -> count > (available.getOrNull()?.get(material) ?: 0) }
@@ -676,17 +739,17 @@ class CivsUi internal constructor(
                 if (order == null) name else name.append(Component.text(" · ${order.workDone}/${order.workRequired}"))
             }, 460),
             PaperDialogBody(error ?: tr(player, when {
+                queued != null -> "queue.materials-help"
                 order != null && !incremental -> "materials.prepaid-help"
                 order?.phase == ConstructionPhase.WAITING_MATERIALS -> "materials.waiting-help"
                 incremental -> "materials.remaining-help"
                 else -> "materials.site-help"
-            }), 460),
+            }, "position" to queued), 460),
             if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * MATERIALS_PAGE_SIZE).take(MATERIALS_PAGE_SIZE).map { (material, count) ->
                 materialName(player, material) to tr(player, if (incremental) "materials.available-remaining" else "materials.available-needed",
                     "have" to (available.getOrNull()?.get(material) ?: 0), "need" to count)
             }, tr(player, "materials.item") to tr(player, "materials.stock-needed"),
                 DialogTables.Frame.EPIC, 320, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
-            if (city.construction != null && order == null) body(player, "reason.construction-busy") else null,
             available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player),
         ), buildList {
             if (canSupply) {
@@ -701,7 +764,8 @@ class CivsUi internal constructor(
                         workingKey = "materials.supplying")
                 }.copy(tooltip = tr(player, "materials.grant-help")))
             }
-            if (city.construction == null && !host.cityBusy(player) && available.isSuccess) add(button(player, "start", "materials.start", COMMIT) {
+            if (order == null && queued == null && !host.cityBusy(player) && available.isSuccess) add(button(player, "start",
+                if (city.construction == null && city.constructionQueue.orEmpty().isEmpty()) "materials.start" else "queue.add", COMMIT) {
                 perform(player, "civs.building-materials", "materials.title", { host.startBuilding(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
                     workingKey = "materials.preparing")
@@ -992,14 +1056,15 @@ class CivsUi internal constructor(
         return tr(player, key)
     }
 
-    private fun workerStatus(player: Player, worker: CivWorker): Component {
-        val status = host.workerStatus(worker.id).removePrefix("workers.status.")
-        // Durable assignments can change before the next Citizens pulse updates its cached status.
-        return text.status(player, when {
-            worker.assignment == null && status in setOf("working", "building", "delivering", "to-store", "to-work", "moving-to-work", "moving-to-storage") -> "unassigned"
-            worker.assignment != null && (status == "unassigned" || status == "no-assignment") -> "waiting"
-            else -> status
-        })
+    private fun workerStatus(player: Player, worker: CivWorker): Component = text.status(player, host.workerStatus(worker.id))
+
+    private fun queuePosition(city: Settlement, buildingId: UUID): Int? =
+        city.constructionQueue.orEmpty().indexOf(buildingId).takeIf { it >= 0 }?.plus(1)
+
+    private fun buildingStatus(player: Player, city: Settlement, building: CivBuilding): Component {
+        val key = "building-status.${host.buildingStatus(building.id).removePrefix("building-status.")}"
+        return tr(player, key.takeIf { it in text.keys("ru") } ?: "workers.status.unavailable",
+            "position" to queuePosition(city, building.id))
     }
 
     private fun upgradeBenefit(player: Player, building: CivBuilding): Component = when (building.type) {
@@ -1016,7 +1081,8 @@ class CivsUi internal constructor(
         val planned = order.plannedBuilding ?: city.building(order.buildingId)
         return tr(player, "city.construction", "building" to (planned?.let { text.building(player, it.type) } ?: tr(player, "buildings.generic")),
             "done" to order.workDone, "total" to order.workRequired,
-            "state" to tr(player, "construction-phase.${order.phase.name.lowercase(Locale.ROOT)}"))
+            "state" to (planned?.let { buildingStatus(player, city, it) }
+                ?: tr(player, "construction-phase.${order.phase.name.lowercase(Locale.ROOT)}")))
     }
 
     private fun city(player: Player): Settlement? {

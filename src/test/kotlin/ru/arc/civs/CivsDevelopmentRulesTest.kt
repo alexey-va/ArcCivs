@@ -29,7 +29,9 @@ class CivsDevelopmentRulesTest : FunSpec({
         city.construction!!.payment!!.reservedBatch shouldBe 0
         city = CivsRules.completeBatch(CivsRules.beginPlacement(city, city.owner, order.id), city.owner, order.id)
         city.construction!!.payment shouldBe CivConstructionPayment()
-        city = trip(city)
+        city.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+        city.construction!!.workCredit shouldBe 1
+        city.workers.first().completedCycles shouldBe 1L
         city = CivsRules.payBatch(city, city.owner, order.id, 1, mapOf("STONE" to 1L))
         city = CivsRules.completeBatch(roundTrip(city), city.owner, order.id)
         city.construction shouldBe null

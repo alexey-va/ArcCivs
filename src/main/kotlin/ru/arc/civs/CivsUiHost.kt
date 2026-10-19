@@ -79,6 +79,7 @@ interface CivsUiHost {
     fun foundingAllowed(): Boolean
     fun transferHome(player: Player): CompletableFuture<Unit>
     fun workerStatus(workerId: UUID): String
+    fun buildingStatus(buildingId: UUID): String
     fun activeNpcCount(): Int
     fun preview(player: Player): CivsPreviewView?
     fun selection(player: Player): CivsSelectionView?
@@ -98,6 +99,7 @@ interface CivsUiHost {
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>
+    fun deleteBuilding(player: Player, expectedCityId: UUID, buildingId: UUID): CompletableFuture<Unit>
     fun retryConstruction(player: Player, cityId: UUID): CompletableFuture<Unit>
     fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>

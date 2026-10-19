@@ -82,13 +82,13 @@ class CivsProtection(
                     }
                     city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors)) }
                     city.buildings.forEach { building ->
-                        val locked = building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id
+                        val locked = city.pendingDeletion != null || building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id
                         add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
                     }
                     city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
                     civsProtectedBuildings(city).forEach { building ->
                         val point = building.control ?: return@forEach
-                        val restorers = if (building.phase != BuildingPhase.CONSTRUCTING && city.construction?.buildingId != building.id)
+                        val restorers = if (city.pendingDeletion == null && building.phase != BuildingPhase.CONSTRUCTING && city.construction?.buildingId != building.id)
                             editors else emptySet()
                         add(Footprint(city.worldId, CivBox(point, point), emptySet(), restorers))
                     }

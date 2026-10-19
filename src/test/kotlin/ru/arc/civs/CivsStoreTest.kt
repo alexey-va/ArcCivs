@@ -38,6 +38,39 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe false
     }
 
+    "queue session credit and deletion intent roundtrip through the existing city journal without aliasing" {
+        val base = settlement()
+        val hall = base.buildings.single().copy(phase = BuildingPhase.CONSTRUCTING)
+        val site = hall.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
+            anchor = CivPosition(8, 64, 0), bounds = CivBox(CivPosition(7, 63, 0), CivPosition(9, 67, 2)), entrance = CivPosition(8, 64, -1))
+        val queue = mutableListOf(site.id)
+        val order = CivConstruction(UUID.randomUUID(), hall.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS, Stock(),
+            plannedBuilding = hall, batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 2L),
+            payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1L)), workCredit = 2)
+        val city = CivsRules.validate(base.copy(buildings = listOf(hall, site), construction = order, constructionQueue = queue))
+        val executor = QueuedExecutor()
+        val store = CivsStore(root, executor)
+        val saving = store.save(city)
+        queue.clear()
+        executor.runNext()
+        val saved = saving.join()
+        saved.constructionQueue shouldBe listOf(site.id)
+        saved.construction!!.workCredit shouldBe 2
+        val reopened = CivsStore(root, directExecutor)
+        reopened.load().join().single() shouldBe saved
+        val pending = CivsRules.requestDeletion(saved, saved.owner, site.id)
+        reopened.save(pending).join() shouldBe pending
+        CivsStore(root, directExecutor).load().join().single() shouldBe pending
+        val old = settlement()
+        val oldStore = CivsStore(root.resolve("legacy"), directExecutor)
+        oldStore.save(old).join()
+        oldStore.load().join().single().let {
+            it.constructionQueue shouldBe null
+            it.pendingDeletion shouldBe null
+            it.construction shouldBe null
+        }
+    }
+
     "rejects duplicate owners and filename identity mismatches during load" {
         val city = settlement()
         val second = settlement(owner = city.owner)

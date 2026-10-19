@@ -28,6 +28,7 @@ import org.bukkit.event.HandlerList
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerChangedWorldEvent
 import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.event.player.PlayerTeleportEvent
 import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.event.world.WorldUnloadEvent
 import org.bukkit.plugin.Plugin
@@ -63,6 +64,7 @@ class CivsCitizens(
     private val closed = AtomicBoolean()
     private var retirement: CompletableFuture<Void>? = null
     private var wanderBudget = 0
+    private var recoveryBudget = 0
 
     init {
         require(maxActive in 1..48 && viewerRange in 1..96)
@@ -79,6 +81,7 @@ class CivsCitizens(
         checkMainThread()
         if (closed.get()) return
         wanderBudget = 8 // Aggregate native target checks across all idle actors, not eight per NPC.
+        recoveryBudget = 2 // At most two bounded safe-position searches after real route failures per pulse.
         drainCompletions(nowMillis)
         val cities = cityProvider().associateBy { it.id }
         val workers = cities.values.flatMap { city -> city.workers.map { it.id to (city to it) } }.toMap()
@@ -118,8 +121,9 @@ class CivsCitizens(
                 }
                 cancelRoute(actor)
                 actor.cycle.close()
+                if (actor.plan.storage != nextPlan.storage || actor.plan.workplace != nextPlan.workplace) actor.targets.clear()
                 actor.plan = nextPlan
-                actor.cycle = CitizenCycle(nextPlan.token, nextPlan.workMillis)
+                actor.cycle = CitizenCycle(nextPlan.token, nextPlan.workMillis, nextPlan.completeAtWorkplace)
                 actor.wander = CitizenWander()
                 setProfession(actor.npc, nextPlan.type)
             }
@@ -200,6 +204,15 @@ class CivsCitizens(
     /** Stable locale keys; no Bukkit objects or user-controlled text enter the key. */
     fun status(workerId: UUID): String {
         checkMainThread()
+        if (!closed.get()) {
+            val city = cityProvider().firstOrNull { it.workers.any { worker -> worker.id == workerId } }
+            val worker = city?.workers?.firstOrNull { it.id == workerId }
+            if (city != null && worker != null) {
+                val plan = citizenPlan(city, worker)
+                plan?.idleReason?.let { return "workers.status.$it" }
+                if (actors[workerId]?.plan?.token?.let { it != plan?.token } == true) return "workers.status.waiting"
+            }
+        }
         return "workers.status.${if (closed.get()) "closed" else statuses[workerId] ?: "sleeping"}"
     }
 
@@ -223,7 +236,7 @@ class CivsCitizens(
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
         val cycle = actor.cycle
         actor.plan.idleReason?.let {
-            wander(actor, city, world, now)
+            if (it !in setOf("placing", "waiting-materials", "construction-paused")) wander(actor, city, world, now)
             statuses[actor.workerId] = it
             return
         }
@@ -266,13 +279,15 @@ class CivsCitizens(
                 }
             }
             CitizenPhase.WORKING -> {
-                if (!arrived(actor.npc.entity.location, requireNotNull(actor.plan.workplace).location(world)))
-                    pauseNavigation(actor, "route-unreachable", "left-workplace", requireNotNull(actor.plan.workplace).location(world), now)
+                val target = resolvedTarget(actor, requireNotNull(actor.plan.workplace)).location(world)
+                if (!arrived(actor.npc.entity.location, target))
+                    pauseNavigation(actor, "route-unreachable", "left-workplace", target, now)
                 else cycle.work(now)
             }
             CitizenPhase.READY -> {
-                if (!arrived(actor.npc.entity.location, actor.plan.storage.location(world))) {
-                    pauseNavigation(actor, "route-unreachable", "left-storage", actor.plan.storage.location(world), now)
+                val target = resolvedTarget(actor, if (actor.plan.completeAtWorkplace) requireNotNull(actor.plan.workplace) else actor.plan.storage).location(world)
+                if (!arrived(actor.npc.entity.location, target)) {
+                    pauseNavigation(actor, "route-unreachable", "left-delivery-point", target, now)
                 } else if (!hasCapacity(city, actor.plan)) {
                     cycle.pause("storage-full", now, true)
                 } else cycle.beginDelivery(now)?.let { ticket -> submitDelivery(actor, ticket, now) }
@@ -299,8 +314,7 @@ class CivsCitizens(
         if (!actor.wander.ready(now) || wanderBudget == 0) return
         wanderBudget--
         // Keep short invalid-target retries fair within the shared eight-check budget.
-        actors.remove(actor.workerId)
-        actors[actor.workerId] = actor
+        citizenRotateAfterAdmission(actors, actor.workerId)
         val target = citizenWanderTarget(city, actor.plan.storage, actor.workerId, actor.wander.step)
         // startRoute owns the single loaded-chunk, support and headroom check.
         if (target != null && startRoute(actor, world, target, now)) {
@@ -317,20 +331,25 @@ class CivsCitizens(
 
     private fun startRoute(actor: Actor, world: World, target: CivPosition, now: Long): Boolean {
         val from = actor.npc.entity.location
-        val to = target.location(world)
+        val resolved = resolvedTarget(actor, target)
+        val to = resolved.location(world)
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point())) {
             if (actor.plan.idleReason == null) pauseNavigation(actor, "route-unreachable", "outside-route-range", to, now)
             return false
         }
-        val chunks = CitizenChunks.between(from.blockX, from.blockZ, target.x, target.z)
+        val chunks = CitizenChunks.between(from.blockX, from.blockZ, resolved.x, resolved.z)
         if (!chunks.ready(world)) {
             if (actor.plan.idleReason == null) remove(actor, "chunk-unloaded")
             return false
         }
-        if (!citizenStandable(world, target)) {
+        if (!citizenStandable(world, resolved)) {
             if (actor.plan.idleReason == null) pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now)
             return false
+        }
+        if (actor.plan.idleReason == null && arrived(from, to)) {
+            actor.cycle.arrive(now)
+            return true
         }
         // Citizens itself retains the already-loaded destination while navigating. ArcCivs never loads a chunk.
         val navigator = actor.npc.navigator
@@ -385,7 +404,35 @@ class CivsCitizens(
             "distance_margin" to parameters.distanceMargin(), "path_distance_margin" to parameters.pathDistanceMargin(),
             "strategy" to route?.strategy,
         ))
-        pause(actor, status, now)
+        if (!recoverNavigation(actor, target, now)) pause(actor, status, now)
+    }
+
+    private fun resolvedTarget(actor: Actor, target: CivPosition): CivPosition = actor.targets[target] ?: target
+
+    /** A failed path may relocate to a nearby safe endpoint; it never grants work or delivery itself. */
+    private fun recoverNavigation(actor: Actor, target: Location, now: Long): Boolean {
+        if (recoveryBudget == 0 || actor.plan.idleReason != null) return false
+        val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
+        val entity = actor.npc.entity
+        if (!entity.isValid || entity.world.uid != city.worldId || target.world?.uid != city.worldId) return false
+        val authored = if (actor.cycle.phase in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING) ||
+            actor.cycle.phase == CitizenPhase.READY && actor.plan.completeAtWorkplace) actor.plan.workplace ?: return false else actor.plan.storage
+        recoveryBudget--
+        citizenRotateAfterAdmission(actors, actor.workerId)
+        val viewers = viewers()
+        val point = citizenRecoveryTarget(city, authored) { candidate ->
+            citizenStandable(entity.world, candidate) &&
+                citizenHasViewer(city.worldId, candidate.point(), viewers, viewerRange)
+        } ?: return false
+        val destination = point.location(entity.world)
+        cancelRoute(actor)
+        if (!arrived(entity.location, destination) && !entity.teleport(destination, PlayerTeleportEvent.TeleportCause.PLUGIN)) return false
+        if (!arrived(entity.location, destination)) return false
+        actor.targets[authored] = point
+        actor.cycle.arrive(now) // Same phase-specific transition as a verified native arrival; WORKING/READY retain their phase.
+        CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
+            "phase" to actor.cycle.phase, "requested" to authored, "destination" to point)
+        return true
     }
 
     private fun submitDelivery(actor: Actor, ticket: UUID, now: Long) {
@@ -624,7 +671,8 @@ class CivsCitizens(
 
     private class Actor(val cityId: UUID, val workerId: UUID, val worldId: UUID, val npc: NPC, var plan: CitizenPlan) {
         val instanceId: UUID = UUID.randomUUID()
-        var cycle = CitizenCycle(plan.token, plan.workMillis)
+        var cycle = CitizenCycle(plan.token, plan.workMillis, plan.completeAtWorkplace)
+        val targets = mutableMapOf<CivPosition, CivPosition>()
         var wander = CitizenWander()
         var route: Route? = null
         var reportedFailure = false
@@ -724,6 +772,12 @@ internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
 
+/** Failed native target checks consume an admission too, so they must not monopolize the next pulse. */
+internal fun <T> citizenRotateAfterAdmission(actors: MutableMap<UUID, T>, workerId: UUID) {
+    val actor = actors.remove(workerId) ?: return
+    actors[workerId] = actor
+}
+
 /** NPC.update also runs during inactive villager ticks, too late to activate that tick's movement. */
 internal fun activateCitizenRoute(npc: NPC, registry: NPCRegistry, worldId: UUID, viewers: List<CitizenViewer>,
     viewerRange: Int, chunksReady: (World) -> Boolean, activate: (Entity) -> Unit = NMS::activate): Boolean {
@@ -748,7 +802,7 @@ internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, 
 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
-    val type: BuildingType?, val workMillis: Long, val idleReason: String?)
+    val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false)
 
 internal fun citizenPlan(city: Settlement, worker: CivWorker): CitizenPlan? {
     val assigned = worker.assignment?.let(city::building)
@@ -762,13 +816,33 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker): CitizenPlan? {
         assigned == null -> "building-unavailable"
         builder && order == null -> "no-construction"
         builder && !CivsRules.builderCanWork(city, assigned) -> "building-unavailable"
-        builder && order?.phase != ConstructionPhase.CONSTRUCTING -> "construction-paused"
+        builder && order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting-materials"
+        builder && order?.phase == ConstructionPhase.PAUSED -> "construction-paused"
+        builder && order?.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING) -> "placing"
         !builder && !CivsRules.productionAvailable(city, assigned) -> "building-unavailable"
         workplace == null -> "building-unavailable"
         else -> null
     }
     return CitizenPlan(CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, order?.id),
-        storage, workplace, assigned?.type, assigned?.type?.let(CivsRules::deliveryInterval) ?: 0, reason)
+        storage, workplace, assigned?.type,
+        if (builder && order?.payment != null) CivsRules.BUILDER_SESSION_INTERVAL else assigned?.type?.let(CivsRules::deliveryInterval) ?: 0,
+        reason, builder && order?.payment != null)
+}
+
+/** Exact entrance first, then at most 26 neighboring loaded, supported feet positions; never inside a building. */
+internal fun citizenRecoveryTarget(city: Settlement, target: CivPosition, safe: (CivPosition) -> Boolean): CivPosition? {
+    val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1, 1 to -1, -1 to -1)
+    for (dy in listOf(0, 1, -1)) for ((dx, dz) in offsets) {
+        val x = target.x.toLong() + dx
+        val y = target.y.toLong() + dy
+        val z = target.z.toLong() + dz
+        if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
+            z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) continue
+        val point = CivPosition(x.toInt(), y.toInt(), z.toInt())
+        if (city.contains(point.x, point.z) && city.buildings.none { it.bounds.contains(point.x, point.y, point.z) } &&
+            city.construction?.plannedBuilding?.bounds?.contains(point.x, point.y, point.z) != true && safe(point)) return point
+    }
+    return null
 }
 
 private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
@@ -833,8 +907,8 @@ internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, RETURNING
 
 private const val CITIZEN_DELIVERY_RETRY_DELAY_MILLIS = 5_000L
 
-/** Only observed work time counts. Every cycle must visit storage, workplace and storage in that order. */
-internal class CitizenCycle(val token: CitizenToken, private val workMillis: Long) {
+/** Only observed work counts. Producers return cargo to storage; builders finish the session at their worksite. */
+internal class CitizenCycle(val token: CitizenToken, private val workMillis: Long, private val completeAtWorkplace: Boolean = false) {
     var phase = CitizenPhase.IDLE
         private set
     var reason: String? = null
@@ -852,6 +926,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         phase = when (phase) {
             CitizenPhase.TO_STORAGE -> CitizenPhase.TO_WORK
             CitizenPhase.TO_WORK -> CitizenPhase.WORKING.also { workedMillis = 0; observedAt = now }
+            CitizenPhase.WORKING -> CitizenPhase.WORKING.also { observedAt = now } // Recovery cannot count the known interval away from work.
             CitizenPhase.RETURNING -> CitizenPhase.READY
             else -> phase
         }
@@ -861,7 +936,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         val delta = now - observedAt
         observedAt = now
         if (delta in 0..2_500) workedMillis += delta
-        if (workedMillis >= workMillis) phase = CitizenPhase.RETURNING
+        if (workedMillis >= workMillis) phase = if (completeAtWorkplace) CitizenPhase.READY else CitizenPhase.RETURNING
     }
     fun beginDelivery(now: Long): UUID? {
         if (phase != CitizenPhase.READY || now < token.nextDeliveryAt) return null
@@ -889,6 +964,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         ticket = null
         deliveryRetryAt = null
         retries.fail(now)
+        if (reason == "route-unreachable" && retries.exhausted) deliveryRetryAt = now + 15_000L
         phase = CitizenPhase.PAUSED
     }
     fun retry(now: Long) {

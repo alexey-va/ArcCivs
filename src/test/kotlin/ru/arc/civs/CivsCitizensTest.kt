@@ -286,6 +286,87 @@ class CivsCitizensTest : FunSpec({
         cycle.beginDelivery(161_001) shouldBe null
     }
 
+    test("incremental builder ends a two second observed session at work without a return delivery trip") {
+        val cycle = CitizenCycle(token(), CivsRules.BUILDER_SESSION_INTERVAL, completeAtWorkplace = true)
+        cycle.start()
+        cycle.work(100_000)
+        cycle.beginDelivery(100_000) shouldBe null
+        cycle.arrive(100_000)
+        cycle.arrive(100_000)
+        cycle.work(101_000)
+        cycle.phase shouldBe CitizenPhase.WORKING
+        cycle.work(102_000)
+        cycle.phase shouldBe CitizenPhase.READY
+        cycle.beginDelivery(102_000)?.let(cycle::acceptsCompletion) shouldBe true
+        cycle.beginDelivery(102_001) shouldBe null
+    }
+
+    test("arrival after a recovery teleport never credits time known to have been away from work") {
+        val cycle = CitizenCycle(token(), 2_000, completeAtWorkplace = true)
+        reachWork(cycle)
+        cycle.arrive(1_000) // Recovery after observing the NPC away from the workplace.
+        cycle.work(2_000)
+        cycle.phase shouldBe CitizenPhase.WORKING
+        cycle.beginDelivery(2_000) shouldBe null
+        cycle.work(3_000)
+        cycle.phase shouldBe CitizenPhase.READY
+    }
+
+    test("navigation keeps retrying safely after three failures instead of an eternal pause") {
+        val cycle = CitizenCycle(token(), 2_000, completeAtWorkplace = true)
+        cycle.start()
+        repeat(5) { attempt ->
+            val now = attempt * 20_000L
+            cycle.pause("route-unreachable", now, false)
+            cycle.retry(now + 15_000)
+            cycle.phase shouldBe CitizenPhase.TO_STORAGE
+            cycle.beginDelivery(now + 15_000) shouldBe null
+        }
+        cycle.arrive(100_000)
+        cycle.arrive(100_000)
+        cycle.work(101_000)
+        cycle.work(102_000)
+        cycle.phase shouldBe CitizenPhase.READY
+    }
+
+    test("two unsafe recovery targets cannot starve a third safe actor on synchronized retries") {
+        val first = UUID.randomUUID()
+        val second = UUID.randomUUID()
+        val safe = UUID.randomUUID()
+        val actors = linkedMapOf(first to false, second to false, safe to true)
+        val examined = mutableListOf<UUID>()
+        fun pulse(): UUID? {
+            var remaining = 2
+            for (id in actors.keys.toList()) {
+                if (remaining == 0) break
+                remaining--
+                citizenRotateAfterAdmission(actors, id)
+                examined += id
+                if (actors.getValue(id)) return id
+            }
+            return null
+        }
+        pulse() shouldBe null
+        examined shouldBe listOf(first, second)
+        pulse() shouldBe safe
+        examined shouldBe listOf(first, second, safe)
+    }
+
+    test("safe teleport selection is bounded near the real target and excludes building interiors and void") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hall.id)
+        val settlement = city(listOf(hall), worker, null)
+        val target = CivPosition(20, 64, 20)
+        var checks = 0
+        citizenRecoveryTarget(settlement, target) { checks++; false } shouldBe null
+        checks shouldBe 27
+        citizenRecoveryTarget(settlement, target) { it == target } shouldBe target
+        val alternate = CivPosition(21, 65, 20)
+        citizenRecoveryTarget(settlement, target) { it == alternate } shouldBe alternate
+        citizenRecoveryTarget(settlement, hall.bounds.min) { hall.bounds.contains(it.x, it.y, it.z) } shouldBe null
+        citizenRecoveryTarget(settlement, CivPosition(settlement.center.x + settlement.radius + 2, 64, 0)) { true } shouldBe null
+    }
+
     test("builder work is ten observed seconds and an inactive interval never catches up") {
         val cycle = CitizenCycle(token(nextDeliveryAt = 100_000), 10_000)
         reachWork(cycle)
@@ -433,7 +514,7 @@ class CivsCitizensTest : FunSpec({
         plan.workMillis shouldBe CivsRules.BUILDER_INTERVAL
         plan.idleReason shouldBe null
         citizenPlan(city.copy(construction = null), worker)?.idleReason shouldBe "no-construction"
-        citizenPlan(city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)), worker)?.idleReason shouldBe "construction-paused"
+        citizenPlan(city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)), worker)?.idleReason shouldBe "placing"
         citizenPlan(city, worker.copy(assignment = null))?.idleReason shouldBe "unassigned"
     }
 
