@@ -134,13 +134,13 @@ class CivsProtection(
 
     private fun protected(holder: InventoryHolder?): Boolean = when (holder) {
         is BlockState -> protected(holder.location)
-        is DoubleChest -> protected(holder.leftSide) || protected(holder.rightSide)
+        is DoubleChest -> protected(holder.getLeftSide(false)) || protected(holder.getRightSide(false))
         else -> false
     }
-    private fun protected(inventory: Inventory): Boolean = protected(inventory.holder) || protected(inventory.location)
+    private fun protected(inventory: Inventory): Boolean = protected(inventory.getHolder(false)) || protected(inventory.location)
     private fun protected(holder: InventoryHolder?, actor: UUID): Boolean = when (holder) {
         is BlockState -> protectedInventory(holder.location, actor)
-        is DoubleChest -> protected(holder.leftSide, actor) || protected(holder.rightSide, actor)
+        is DoubleChest -> protected(holder.getLeftSide(false), actor) || protected(holder.getRightSide(false), actor)
         else -> false
     }
     private fun protectedInventory(location: Location?, actor: UUID): Boolean {
@@ -149,7 +149,7 @@ class CivsProtection(
         return protected(location, actor)
     }
     private fun protected(inventory: Inventory, actor: UUID): Boolean =
-        protected(inventory.holder, actor) || protectedInventory(inventory.location, actor)
+        protected(inventory.getHolder(false), actor) || protectedInventory(inventory.location, actor)
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun breakBlock(event: BlockBreakEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
@@ -309,7 +309,7 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun moveItem(event: InventoryMoveItemEvent) {
-        if (protected(event.source) || protected(event.destination) || protected(event.initiator)) event.isCancelled = true
+        if (protected(event.source) || protected(event.destination)) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

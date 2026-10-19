@@ -935,10 +935,14 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun playerLocked(playerId: UUID): Boolean = receiptBootstrap || playerId in lockedPlayers
     private fun locked(inventory: Inventory): Boolean = receiptBootstrap || exactLocked(inventory)
-    private fun exactLocked(inventory: Inventory): Boolean = (inventory.holder as? Player)?.uniqueId?.let { it in lockedPlayers } == true ||
-        holderPositions(inventory.holder).any { it in locked }
+    private fun exactLocked(inventory: Inventory): Boolean {
+        if (locked.isEmpty() && lockedPlayers.isEmpty()) return false
+        val holder = inventory.getHolder(false)
+        return (holder as? Player)?.uniqueId?.let { it in lockedPlayers } == true ||
+            holderPositions(holder).any { it in locked }
+    }
     private fun holderPositions(holder: InventoryHolder?): List<Key> = when (holder) {
-        is DoubleChest -> holderPositions(holder.leftSide) + holderPositions(holder.rightSide)
+        is DoubleChest -> holderPositions(holder.getLeftSide(false)) + holderPositions(holder.getRightSide(false))
         is BlockState -> listOf(Key(holder.world.uid, CivPosition(holder.x, holder.y, holder.z)))
         else -> emptyList()
     }
