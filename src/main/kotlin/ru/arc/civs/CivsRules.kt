@@ -12,6 +12,7 @@ object CivsRules {
     const val BUILDER_INTERVAL = 10_000L
     const val BUILDER_SESSION_INTERVAL = 2_000L
     const val BUILDER_SESSION_ROWS = 8
+    const val MAX_BUILDER_WORK_CREDIT = MAX_POPULATION * BUILDER_SESSION_ROWS
     const val FIRST_IMMIGRATION_DELAY = 30_000L
     const val IMMIGRATION_INTERVAL = 60_000L
     const val MAX_TERRITORY_GROWTH = 64
@@ -34,7 +35,8 @@ object CivsRules {
             else -> Stock(384, 288, 72)
         }
         val base = when (type) {
-            BuildingType.BUILDER_HUT -> Stock() // New construction reserves exact materials, never an abstract price.
+            BuildingType.BUILDER_HUT, BuildingType.SAWMILL, BuildingType.BLACKSMITH,
+            BuildingType.STONEMASON, BuildingType.LIBRARY -> Stock() // New construction reserves exact materials, never an abstract price.
             BuildingType.WAREHOUSE -> Stock(32, 16)
             BuildingType.HOUSE -> Stock(24, 12)
             BuildingType.FORESTER -> Stock(20, 12)
@@ -58,9 +60,12 @@ object CivsRules {
 
     fun populationLimit(city: Settlement): Int = city.level() * 4
 
-    fun slots(building: CivBuilding): Int = if (building.type == BuildingType.BUILDER_HUT) 1
+    fun slots(building: CivBuilding): Int = if (building.type == BuildingType.BUILDER_HUT) {
+        if (building.phase == BuildingPhase.ACTIVE) building.level else 1
+    }
     else if (building.phase != BuildingPhase.ACTIVE) 0 else when (building.type) {
-        BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM -> building.level
+        BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
+        BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY -> building.level
         else -> 0
     }
 
@@ -70,21 +75,31 @@ object CivsRules {
         city.buildings.any { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
 
     fun slots(city: Settlement, building: CivBuilding): Int =
-        if (building.type == BuildingType.TOWN_HALL && legacyHallBuilder(city)) 1 else slots(building)
+        if (building.type == BuildingType.WAREHOUSE && city.inventory == null) 0
+        else if (building.type == BuildingType.TOWN_HALL && isBuilder(city, building)) {
+            if (building.phase == BuildingPhase.ACTIVE) 1 else 0
+        } else slots(building)
 
-    fun isBuilder(building: CivBuilding): Boolean = building.type == BuildingType.BUILDER_HUT || building.type == BuildingType.TOWN_HALL
+    /** Old paid orders and full cities keep their hall builder until a normal hut can serve them. */
+    fun effectiveWorkType(city: Settlement, building: CivBuilding): BuildingType =
+        if (building.type == BuildingType.TOWN_HALL && (city.inventory == null || legacyHallBuilder(city)))
+            BuildingType.BUILDER_HUT else building.type
+
+    fun isBuilder(city: Settlement, building: CivBuilding): Boolean = effectiveWorkType(city, building) == BuildingType.BUILDER_HUT
 
     fun isDepot(building: CivBuilding): Boolean = building.type == BuildingType.TOWN_HALL ||
         building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE
 
     fun builderCanWork(city: Settlement, building: CivBuilding): Boolean = when (building.type) {
-        BuildingType.TOWN_HALL -> building.phase == BuildingPhase.ACTIVE && (city.construction?.batches == null || legacyHallBuilder(city))
+        BuildingType.TOWN_HALL -> isBuilder(city, building) && building.phase == BuildingPhase.ACTIVE &&
+            (city.construction?.batches == null || legacyHallBuilder(city))
         BuildingType.BUILDER_HUT -> building.phase == BuildingPhase.ACTIVE || city.construction?.buildingId == building.id
         else -> false
     }
 
     fun productionAvailable(city: Settlement, building: CivBuilding): Boolean =
-        building.phase == BuildingPhase.ACTIVE && resource(building.type) != null && city.construction?.buildingId != building.id
+        building.phase == BuildingPhase.ACTIVE && !isBuilder(city, building) &&
+            CivsProduction.options(building.type).isNotEmpty() && city.construction?.buildingId != building.id
 
     fun resource(type: BuildingType): Resource? = when (type) {
         BuildingType.FORESTER -> Resource.WOOD
@@ -94,10 +109,16 @@ object CivsRules {
     }
 
     fun profession(type: BuildingType): String = when (type) {
-        BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT -> "builder"
+        BuildingType.TOWN_HALL -> "scribe"
+        BuildingType.BUILDER_HUT -> "builder"
         BuildingType.FORESTER -> "forester"
         BuildingType.QUARRY -> "miner"
         BuildingType.FARM -> "farmer"
+        BuildingType.SAWMILL -> "carpenter"
+        BuildingType.BLACKSMITH -> "blacksmith"
+        BuildingType.STONEMASON -> "stonemason"
+        BuildingType.LIBRARY -> "librarian"
+        BuildingType.WAREHOUSE -> "courier"
         else -> "unassigned"
     }
 
@@ -107,7 +128,11 @@ object CivsRules {
         null -> 0L
     }
 
-    fun deliveryInterval(type: BuildingType): Long = if (type == BuildingType.TOWN_HALL || type == BuildingType.BUILDER_HUT) BUILDER_INTERVAL else PRODUCTION_INTERVAL
+    fun profession(city: Settlement, building: CivBuilding): String = profession(effectiveWorkType(city, building))
+
+    fun deliveryInterval(type: BuildingType): Long = if (type == BuildingType.BUILDER_HUT) BUILDER_INTERVAL else PRODUCTION_INTERVAL
+
+    fun deliveryInterval(city: Settlement, building: CivBuilding): Long = deliveryInterval(effectiveWorkType(city, building))
 
     fun workRequired(type: BuildingType, targetLevel: Int): Int {
         check(targetLevel in 1..3, "invalid-level")
@@ -236,7 +261,7 @@ object CivsRules {
             check(city.workers.count { it.assignment == buildingId } < slots(city, building), "workplace-full")
         }
         // A monotonic schedule also invalidates an old trip after unassign/reassign at the same timestamp.
-        val due = maxOf(add(worker.nextDeliveryAt, 1), add(now, building?.let { deliveryInterval(it.type) } ?: 0L))
+        val due = maxOf(add(worker.nextDeliveryAt, 1), add(now, building?.let { deliveryInterval(city, it) } ?: 0L))
         return changed(city, city.copy(workers = city.workers.map {
             if (it.id == workerId) it.copy(assignment = buildingId, nextDeliveryAt = due) else it
         }))
@@ -281,21 +306,31 @@ object CivsRules {
     }
 
     fun needsAutoAssignment(city: Settlement): Boolean = city.workers.any { it.assignment == null } &&
-        city.buildings.any { building -> city.workers.count { it.assignment == building.id } < slots(city, building) }
+        city.buildings.any { automaticVacancies(city, it) > 0 }
+
+    private fun automaticVacancies(city: Settlement, building: CivBuilding): Int {
+        val capacity = if (building.type == BuildingType.WAREHOUSE) minOf(1, slots(city, building)) else slots(city, building)
+        return (capacity - city.workers.count { it.assignment == building.id }).coerceAtLeast(0)
+    }
 
     /** Fill vacancies without moving a resident who already has a job. Builder sites bootstrap themselves. */
     fun autoAssign(city: Settlement, actor: UUID, now: Long): Settlement {
         authorized(city, actor)
         check(now >= 0, "invalid-time")
         if (!needsAutoAssignment(city)) return city
-        val vacancies = city.buildings.sortedBy { if (isBuilder(it)) 0 else 1 }.flatMap { building ->
-            List((slots(city, building) - city.workers.count { it.assignment == building.id }).coerceAtLeast(0)) { building }
+        val vacancies = city.buildings.sortedBy { when {
+            isBuilder(city, it) -> 0
+            it.type == BuildingType.WAREHOUSE -> 1
+            it.type == BuildingType.TOWN_HALL -> 3
+            else -> 2
+        } }.flatMap { building ->
+            List(automaticVacancies(city, building)) { building }
         }.iterator()
         val workers = city.workers.map { worker ->
             if (worker.assignment != null || !vacancies.hasNext()) worker else {
                 val building = vacancies.next()
                 worker.copy(assignment = building.id,
-                    nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1), add(now, deliveryInterval(building.type))))
+                    nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1), add(now, deliveryInterval(city, building))))
             }
         }
         return changed(city, city.copy(workers = workers))
@@ -460,6 +495,7 @@ object CivsRules {
         authorized(city, actor)
         check(now >= 0, "invalid-time")
         val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
+        check(worker.cargo == null, "stale-delivery")
         check(worker.assignment != null, "unassigned")
         check(worker.assignment == assignmentId && worker.completedCycles == expectedCompletedCycles &&
             worker.nextDeliveryAt == expectedNextDeliveryAt, "stale-delivery")
@@ -467,27 +503,36 @@ object CivsRules {
         val building = city.building(assignmentId) ?: reject("building-not-found")
         var stock = city.stock
         var construction = city.construction
-        if (isBuilder(building)) {
+        if (isBuilder(city, building)) {
             val current = construction ?: reject("no-construction")
             check(builderCanWork(city, building), "invalid-assignment")
-            check(current.phase == ConstructionPhase.CONSTRUCTING, "construction-not-working")
-            val done = current.workDone + if (current.batches == null) 1 else 0
-            construction = current.copy(workDone = done,
-                workCredit = if (current.payment != null) minOf(BUILDER_SESSION_ROWS, current.workRequired - current.workDone) else null,
-                phase = if (current.batches != null || done == current.workRequired) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING)
+            if (current.payment != null) {
+                check(current.phase in setOf(ConstructionPhase.CONSTRUCTING, ConstructionPhase.READY_TO_PLACE,
+                    ConstructionPhase.PLACING), "construction-not-working")
+                val credit = current.workCredit ?: 0
+                val room = minOf(MAX_BUILDER_WORK_CREDIT, current.workRequired - current.workDone) - credit
+                check(room > 0, "construction-credit-full")
+                construction = current.copy(workCredit = credit + minOf(BUILDER_SESSION_ROWS, room),
+                    phase = if (current.phase == ConstructionPhase.CONSTRUCTING) ConstructionPhase.READY_TO_PLACE else current.phase)
+            } else {
+                check(current.phase == ConstructionPhase.CONSTRUCTING, "construction-not-working")
+                val done = current.workDone + if (current.batches == null) 1 else 0
+                construction = current.copy(workDone = done,
+                    phase = if (current.batches != null || done == current.workRequired) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING)
+            }
         } else {
-            check(productionAvailable(city, building) && slots(building) > 0, "invalid-assignment")
-            val resource = resource(building.type) ?: reject("invalid-assignment")
-            val amount = deliveryAmount(building)
+            check(productionAvailable(city, building) && slots(city, building) > 0, "invalid-assignment")
             if (city.inventory == null) {
+                val resource = resource(building.type) ?: reject("invalid-assignment")
+                val amount = deliveryAmount(building)
                 check(!outputHandled, "invalid-delivery")
                 check(capacity(city) - stock[resource] >= amount, "storage-full")
                 stock = stock.with(resource, add(stock[resource], amount))
             } else check(outputHandled, "materials-required")
         }
-        val interval = if (isBuilder(building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(building.type)
+        val interval = if (isBuilder(city, building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(city, building)
         val updated = CivsResidents.trained(worker.copy(completedCycles = add(worker.completedCycles, 1),
-            nextDeliveryAt = add(now, interval)), building.type)
+            nextDeliveryAt = add(now, interval)), effectiveWorkType(city, building))
         return changed(city, city.copy(stock = stock, construction = construction,
             workers = city.workers.map { if (it.id == workerId) updated else it }))
     }
@@ -523,7 +568,7 @@ object CivsRules {
                 snapshot(target.type == BuildingType.TOWN_HALL || target.level <= city.level())
                 snapshot(founding || target.type != BuildingType.TOWN_HALL || target.level > 1 || order.batches != null)
                 snapshot(validConstructionPrice(order, target))
-                order.workCredit?.let { credit -> snapshot(order.payment != null && credit in 0..BUILDER_SESSION_ROWS &&
+                order.workCredit?.let { credit -> snapshot(order.payment != null && credit in 0..MAX_BUILDER_WORK_CREDIT &&
                     credit <= order.workRequired - order.workDone && (order.phase != ConstructionPhase.CONSTRUCTING || credit == 0)) }
                 snapshot(if (order.batches == null) order.workDone in 0..order.workRequired else order.workDone in 0 until order.workRequired)
                 snapshot(when (order.phase) {
@@ -546,17 +591,20 @@ object CivsRules {
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
             snapshot(city.workers.size in 0..MAX_POPULATION &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
+            val shipments = city.workers.mapNotNull { it.cargo?.id }
+            snapshot(shipments.distinct().size == shipments.size)
             city.immigration?.let { snapshot(it.remaining in 0..4 && it.nextArrivalAt >= city.createdAt) }
             snapshot(city.workers.all { worker ->
                 CivsResidents.validated(worker)
                 present(worker.id) && validText(worker.name, 32) && worker.completedCycles >= 0 && worker.nextDeliveryAt >= 0 &&
+                    CivsLogistics.validCargo(city, worker.cargo) &&
                     (worker.assignment == null || worker.nextDeliveryAt > 0 && city.building(worker.assignment)?.let {
-                        slots(it) > 0 || (it.type == BuildingType.TOWN_HALL && (it.phase == BuildingPhase.ACTIVE || isFounding(city)))
+                        slots(city, it) > 0 || (it.type == BuildingType.TOWN_HALL && isFounding(city))
                     } == true)
             })
             snapshot(city.buildings.all { building ->
                 city.workers.count { it.assignment == building.id } <=
-                    if (building.type == BuildingType.TOWN_HALL && (building.phase == BuildingPhase.ACTIVE || isFounding(city))) 1 else slots(building)
+                    if (building.type == BuildingType.TOWN_HALL && isFounding(city)) 1 else slots(city, building)
             })
             // Retiring housing/storage does not evict residents or erase stock. New intake still checks current capacity.
             snapshot(city.workers.size <= populationLimit(city))
@@ -618,8 +666,12 @@ object CivsRules {
     }
 
     private fun validConstructionPrice(order: CivConstruction, building: CivBuilding): Boolean {
+        if (building.type in setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH,
+                BuildingType.STONEMASON, BuildingType.LIBRARY) && order.payment == null) return false
         val batches = order.batches
-        if (batches == null) return order.payment == null && building.type != BuildingType.BUILDER_HUT && order.materials == null && order.cost == cost(building.type, building.level) &&
+        if (batches == null) return order.payment == null && building.type in setOf(BuildingType.TOWN_HALL,
+            BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM) &&
+            order.materials == null && order.cost == cost(building.type, building.level) &&
             order.workRequired == workRequired(building.type, building.level)
         val materials = order.materials ?: return false
         return batches.total in 1..75_000 && batches.size in 1..256 && order.workRequired == batches.total &&

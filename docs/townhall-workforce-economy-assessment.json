@@ -1,0 +1,175 @@
+{
+  "version": 1,
+  "title": "ArcCivs town-hall scribes and level-scaled builder workforce",
+  "assumptions": [
+    "Baseline is the current ArcCivs rule set and adjacent assessments: FORESTER, QUARRY and FARM already assign 1/2/3 workers at levels 1/2/3. Their per-completed-cycle outputs stay unchanged: 4×level logs, 3×level stone, 3×level raw crops (which yield 1×level bread through the existing wheat recipe). Producers complete work at their own workplace on the unchanged 60-second work interval; warehouse couriers collect output, with no personal return to a common depot. Removing the old return leg may increase realized output rate, but that effect is unquantified; per-cycle quantities are unchanged, not a claim that measured hourly throughput is unchanged. Recruitment remains 12 BREAD; construction material rows and their exact item costs remain unchanged.",
+    "Low/base/high are illustrative activity cases, not telemetry: 1/10/16 participating cities at hall levels 1/2/3, with 1/5/10 successful completed scribe cycles per city-day. Each cycle is one book and one point, and spends 3 PAPER plus 1 LEATHER atomically through one durable receipt. Missing ingredients or output room means no receipt, no input consumption, no book and no XP. These activity cases do not assume full worker utilization.",
+    "Normal hall staffing changes from 0 to 1/2/3 scribes by level. Builder-hut staffing changes from 1 to 1/2/3 workers by level. A level-3 city using both roles allocates 6 of its maximum 12 workers to the hall and hut; remaining producer and resident roles share the remaining population. Worker assignments are exclusive, and this assessment does not add the same worker's production to the hall scenario.",
+    "The theoretical scribe work cadence is one cycle per worker per 60-second interval at the hall workplace: up to 60 books/worker-hour and 180 books/hour for three level-3 scribes, consuming 540 PAPER and 180 LEATHER/hour. This is not measured throughput. Courier trips to supply the hall and collect books, storage capacity and missing inputs can reduce completed shipments; they do not add a personal return leg to the scribe work interval. The low/base/high item-flow calculation instead uses 1/5/10 successful city cycles per day.",
+    "Scribe training adds 1 internal ArcCivs skill point per successful cycle. Points are profession-specific, each worker-profession pair stops at 40 lifetime points, levels are 1..5, and each level above 1 adds 2 max health up to 28. The illustrative weekly scribe allocation can be distributed across the 1/2/3 scribes so no pair exceeds 40 points. Other workers, professions and replacements have their own progression; there is no network-wide or weekly XP cap. These points are not player XP, Vault, tokens or a redeemable entitlement.",
+    "Each builder worker retains the existing 2-second work session authorizing at most 8 already-paid rows; total stored work credit is bounded at 96 and one placer remains serial. Exact row debits and total material bill are unchanged. More workers can reduce completion time by at most 3× under the proposed staffing, with no item reward or discount. No construction-row volume is projected because concurrent session utilization and order throughput are not measured.",
+    "TRAILS uses its existing walking wear, normal NPC weight and native protections. Terrain conversion and decay retain existing behavior; no trail drops, reward items or extra materials are added. Default skin props are cosmetic and are not items. Any native durability/repair effect is not assigned an invented item rate here.",
+    "Vault, tokens and player XP remain zero direct delta. Physical item units are reported separately and are not valued or converted to currency. EconomyShopGUI SELL remains current in the inventory baseline and the SELL-to-contract transition remains future; no book sell price, contract redemption or item-to-currency exchange is assumed. No new prices or direct monetary income are introduced.",
+    "Decision: permit the level-scaled scribe and builder staffing while retaining exact input debits, durable receipt atomicity, population exclusivity, the existing serial placer and existing per-cycle producer quantities. Removing producer return trips may change realized cycles per hour, but that effect is unmeasured and is not modeled as unchanged. The evaluator captures item conversion and internal points only; it does not establish production telemetry, delivery, activation or native client acceptance. After separately authorized delivery, verify level slots, 12-worker enforcement, missing-input/full-storage behavior, exactly-once 3 PAPER/1 LEATHER debit and book receipt, per-worker skill cap, and one-at-a-time paid placement."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "item_books": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "scribe_book_output",
+          "kind": "item",
+          "source": "ArcCivs town-hall scribe completed-cycle receipt",
+          "basis": "One existing BOOK item is produced per successful scribe cycle. Low/base/high assume 1/5/10 successful city cycles per day for 1/10/16 participating cities; no item-to-currency value is assumed.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "item_paper": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "scribe_paper_input_consumed",
+          "kind": "item",
+          "source": "ArcCivs town-hall scribe completed-cycle receipt",
+          "basis": "Each successful BOOK conversion consumes 3 existing PAPER; the same 1/5/10 city cycles per day used for book output are used here. Missing inputs or output room causes zero debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "item_leather": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "scribe_leather_input_consumed",
+          "kind": "item",
+          "source": "ArcCivs town-hall scribe completed-cycle receipt",
+          "basis": "Each successful BOOK conversion consumes 1 existing LEATHER; the same 1/5/10 city cycles per day used for book output are used here. Missing inputs or output room causes zero debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "internal_scribe_skill_points": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "successful_scribe_cycle",
+          "kind": "item",
+          "source": "ArcCivs town-hall scribe skill progression",
+          "basis": "One internal scribe point per successful cycle, only when the atomic item receipt succeeds. Scenarios use 1/5/10 cycles per city-day across 1/10/16 cities; the weekly points can be distributed among each city's 1/2/3 scribes and remain under each pair's 40 lifetime-point cap. No global or weekly network cap applies.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

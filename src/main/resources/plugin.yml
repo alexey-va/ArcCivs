@@ -5,7 +5,7 @@ api-version: '1.21.11'
 authors: [RusCrafting]
 description: Player settlements, construction and working citizens
 depend: [ArcCore, packetevents, WorldEdit, Citizens]
-softdepend: [Lands]
+softdepend: [Lands, Trails]
 commands:
   civs:
     aliases: [city]

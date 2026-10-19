@@ -56,7 +56,7 @@ class CivsBoundaryRendererTest : FunSpec({
             h.labelHandles.size shouldBe 1
             val label = h.labelHandles.single()
             h.player.world.entities.size shouldBe entities
-            plainText(h.labelText.getValue(label)) shouldBe "Town hall\nLevel 1\nReady"
+            plainText(h.labelText.getValue(label)) shouldBe "Town hall\nLevel 1\nNo workers"
             verify(exactly = 1) { label.isVisibleByDefault = false; label.showTo(h.player); label.isSeeThrough = false }
             h.renderer.pulse(h.player, city); h.paper.performTicks(2)
             verify(exactly = 0) { label.text(any()); label.teleport(any()) }

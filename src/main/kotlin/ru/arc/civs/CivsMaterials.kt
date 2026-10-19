@@ -150,6 +150,7 @@ internal object CivsMaterials {
 
     private val TALL_PLANTS = setOf("TALL_GRASS", "LARGE_FERN", "SUNFLOWER", "LILAC", "ROSE_BUSH", "PEONY", "TALL_SEAGRASS", "PITCHER_PLANT")
     private val ITEM_ALIASES = mapOf(
+        "FIRE" to "FIRE_CHARGE", "SOUL_FIRE" to "FIRE_CHARGE",
         "WATER" to "WATER_BUCKET", "LAVA" to "LAVA_BUCKET", "FARMLAND" to "DIRT", "DIRT_PATH" to "DIRT",
         "WHEAT" to "WHEAT_SEEDS", "CARROTS" to "CARROT", "POTATOES" to "POTATO", "BEETROOTS" to "BEETROOT_SEEDS",
         "COCOA" to "COCOA_BEANS", "PUMPKIN_STEM" to "PUMPKIN_SEEDS", "ATTACHED_PUMPKIN_STEM" to "PUMPKIN_SEEDS",
@@ -162,14 +163,35 @@ internal object CivsMaterials {
 
 internal object CivsProduction {
     fun options(type: BuildingType): List<String> = when (type) {
+        BuildingType.TOWN_HALL -> listOf("BOOK")
         BuildingType.FORESTER -> listOf("OAK_LOG", "SPRUCE_LOG", "BIRCH_LOG", "JUNGLE_LOG", "ACACIA_LOG", "DARK_OAK_LOG")
         BuildingType.QUARRY -> listOf("COBBLESTONE", "STONE", "COBBLED_DEEPSLATE")
         BuildingType.FARM -> listOf("BREAD", "WHEAT", "CARROT", "POTATO")
+        BuildingType.SAWMILL -> listOf("OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS")
+        BuildingType.BLACKSMITH -> listOf("IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE")
+        BuildingType.STONEMASON -> listOf("STONE_BRICKS")
+        BuildingType.LIBRARY -> listOf("WRITABLE_BOOK")
         else -> emptyList()
     }
 
-    fun amount(building: CivBuilding): Long = if (material(building) == "BREAD") building.level.toLong()
-        else CivsRules.deliveryAmount(building)
+    fun amount(building: CivBuilding): Long = when (material(building)) {
+        "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE" -> 1L
+        "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS", "STONE_BRICKS" -> 4L
+        "BREAD" -> building.level.toLong()
+        else -> CivsRules.deliveryAmount(building)
+    }
+
+    fun inputs(building: CivBuilding): Map<String, Long> = when (val material = material(building)) {
+        "BOOK" -> mapOf("PAPER" to 3L, "LEATHER" to 1L)
+        "WRITABLE_BOOK" -> mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L)
+        "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS" ->
+            mapOf(material.removeSuffix("_PLANKS") + "_LOG" to 1L)
+        "STONE_BRICKS" -> mapOf("STONE" to 4L)
+        "IRON_SHOVEL" -> mapOf("IRON_INGOT" to 1L, "STICK" to 2L)
+        "IRON_AXE", "IRON_PICKAXE" -> mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
+        "IRON_HOE" -> mapOf("IRON_INGOT" to 2L, "STICK" to 2L)
+        else -> emptyMap()
+    }
 
     fun material(building: CivBuilding): String? = options(building.type).let { choices ->
         building.production?.takeIf { it in choices } ?: choices.firstOrNull()

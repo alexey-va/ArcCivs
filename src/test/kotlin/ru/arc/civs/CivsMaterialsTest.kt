@@ -10,6 +10,26 @@ class CivsMaterialsTest : FunSpec({
     beforeEach { paper = ru.arc.paper.testing.MockBukkitTestRuntime.open() }
     afterEach { paper.close() }
 
+    test("workshop recipes consume vanilla ingredients and level only adds workplaces") {
+        fun recipe(type: BuildingType, material: String, inputs: Map<String, Long>, amount: Long) {
+            for (level in 1..3) {
+                val building = CivBuilding(java.util.UUID.randomUUID(), type, level, CivPosition(0, 64, 0), 0, "test",
+                    CivBox(CivPosition(0, 64, 0), CivPosition(2, 68, 2)), CivPosition(0, 64, -1), BuildingPhase.ACTIVE,
+                    production = material)
+                (material in CivsProduction.options(type)) shouldBe true
+                CivsProduction.inputs(building) shouldBe inputs
+                CivsProduction.amount(building) shouldBe amount
+            }
+        }
+        for (wood in listOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK"))
+            recipe(BuildingType.SAWMILL, "${wood}_PLANKS", mapOf("${wood}_LOG" to 1L), 4)
+        for ((tool, iron) in mapOf("SHOVEL" to 1L, "AXE" to 3L, "PICKAXE" to 3L, "HOE" to 2L))
+            recipe(BuildingType.BLACKSMITH, "IRON_$tool", mapOf("IRON_INGOT" to iron, "STICK" to 2L), 1)
+        recipe(BuildingType.STONEMASON, "STONE_BRICKS", mapOf("STONE" to 4L), 4)
+        recipe(BuildingType.LIBRARY, "WRITABLE_BOOK", mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L), 1)
+        recipe(BuildingType.TOWN_HALL, "BOOK", mapOf("PAPER" to 3L, "LEATHER" to 1L), 1)
+    }
+
     test("real building materials account for paired blocks and variants") {
         CivsMaterials.requirements("minecraft:spruce_door[half=lower]") shouldBe mapOf("SPRUCE_DOOR" to 1L)
         CivsMaterials.requirements("minecraft:spruce_door[half=upper]") shouldBe emptyMap()
@@ -20,6 +40,8 @@ class CivsMaterialsTest : FunSpec({
         CivsMaterials.requirements("minecraft:wheat[age=7]") shouldBe mapOf("WHEAT_SEEDS" to 1L)
         CivsMaterials.requirements("minecraft:oak_stairs[waterlogged=true]") shouldBe mapOf("OAK_STAIRS" to 1L, "WATER_BUCKET" to 1L)
         CivsMaterials.requirements("minecraft:structure_void") shouldBe emptyMap()
+        CivsMaterials.requirements("minecraft:fire[age=15,east=false,north=false,south=false,up=false,west=false]") shouldBe
+            mapOf("FIRE_CHARGE" to 1L)
         shouldThrow<CivsRejection> { CivsMaterials.requirements("minecraft:nether_portal") }.reason shouldBe "unsupported-material"
     }
 

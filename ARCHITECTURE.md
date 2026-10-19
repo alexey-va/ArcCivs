@@ -20,7 +20,7 @@ damage by ten percent. Props alone confer no bonus. Residents start with 20 heal
 each new completed profession cycle earns one internal point, with ten points per
 level and a level-five cap. The highest profession level adds two maximum health
 per extra level, up to 28. Old cycles grant no retroactive points. Production
-amounts and work intervals are unchanged.
+amounts and work intervals for existing producers are unchanged.
 
 Damage from players, monsters and the environment is intercepted before native
 death. The actor stops work while its injury waits for the current city write;
@@ -40,6 +40,14 @@ route may teleport to a safe loaded point near its target, as explicitly request
 by the owner; the same arrival, work and cycle-token checks still apply. There is
 no Core packet-NPC API. No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
+
+With Trails 2.3.18 enabled, actual grounded NPC block crossings use its optional
+Java service. Spawn, teleport, route recovery and stationary samples never count.
+ArcCivs submits only current residents moving inside their city with a real online
+owner/member in the same world as protection authority. Trails retains its normal
+world/permission, progression, widening, persistence and protection pipeline, and
+suppresses player feedback for NPC steps. Missing Trails or an online authority
+simply skips the step. The API is compile-only and is packaged solely by Trails.
 
 ## Network authority
 
@@ -75,8 +83,9 @@ to the city. Empty allowed-worlds makes a backend view-only.
 
 ## Domain
 
-Seven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
-QUARRY, FARM; levels1..3. The curated catalog remains63 assets across21
+Eleven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
+QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY; levels1..3.
+The curated catalog contains99 assets across33
 style/type families. Each schematic has one `minecraft:structure_void` primary-hut
 marker inside the building; it is the physical control position, not the authored
 anchor or visual entrance. A selected block's X/Y/Z is the schematic anchor without
@@ -99,12 +108,28 @@ then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. Idle residents choose bounded safe loaded wander targets.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
-builder first. Existing assignments, delivery rates and completed-cycle tokens
+builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.
 
 The SITE hall supplies the initial four beds and a depot. A SITE builder hut
 has one assignable slot: its builder can construct that same hut first, then
-other buildings. New worker assignments never use the hall as a workshop.
+other buildings. Completed builder huts and ordinary town halls have one/two/three
+worker slots at levels one/two/three, as existing production buildings already do.
+Ordinary hall workers are scribes: one observed 60-second work session at the
+workplace converts three plain PAPER and one LEATHER into one BOOK. Inputs,
+output, cycle token and internal profession point commit in the same receipt.
+SAWMILL converts one matching log into four planks; BLACKSMITH crafts one plain
+iron tool with its ordinary ingot/stick recipe; STONEMASON converts four STONE
+into four STONE_BRICKS; LIBRARY converts BOOK, FEATHER and INK_SAC into one
+WRITABLE_BOOK. All use 60-second observed work, fixed per-cycle
+recipes and one/two/three slots. The same receipt consumes inputs, credits output
+and commits the cycle and profession point for all processors.
+Missing inputs or a full warehouse
+retain the completed trip and retry after five seconds, without granting output
+or points. Houses have no work slots. Active item-storage warehouses have one/two/three
+courier slots; autoassignment fills one courier before producers and leaves extra
+warehouse slots for explicit assignment. Legacy stock-only cities
+retain hall builders; so do migrated full cities without room for a hut.
 Population remains4/8/12 by hall level,12maximum; houses add2/4/6beds. Building
 limit16 and native NPC limit48 remain. Completed hall upgrades expand the actual
 persisted radius by32, including96→128→160 for new default cities. New founding
@@ -164,16 +189,46 @@ Deposit in VIRTUAL moves actual control-barrel cargo to that building's
 warehouse; withdrawal moves up to64 items to its barrel, using its own warehouse
 then the common initial/legacy reserve. No direct player-inventory automation.
 
-Production requires an observed completed NPC round trip and the old60s work
-period plus travel. Logs yield4×level, stone and raw crops3×level; bread applies
+Production requires an observed completed 60-second NPC work session at the
+building. Item-storage producers use only their own control barrel or virtual
+building map for both ingredients and output; couriers move their goods. Legacy
+abstract-stock producers retain their old return trip. Logs yield4×level, stone and raw crops3×level; bread applies
 the vanilla3-wheat recipe and yields1×level. The chosen output is persisted per
 building. Physical mode inserts real items without drops, virtual mode credits
 that producer's bounded warehouse. A full destination pauses delivery. Recruitment
 consumes12BREAD after all population/bed checks. No offline production/catch-up.
 
+## Warehouse logistics
+
+Orders are derived from local ingredient shortages: one recipe cycle per assigned
+worker, less local stock and incoming cargo. Construction orders cover only the
+current `payment.awaiting` row; a site spends its own control-barrel stock. Active
+warehouse upgrades may use all their own internal containers. Couriers prefer
+construction requests, then rotate ingredient deliveries and collection of the currently
+selected output from other buildings by completed shipment count. Source-to-destination entrances must be within the existing
+88-block work-route bound. Warehouses use their own indexed native containers;
+ordinary producer sources and destinations are strictly their control barrels.
+
+`CivWorker.cargo` records one material, at most64 items, original source entrance
+and stable shipment identity. Pickup journals source debit and cargo together;
+the actor waits for that receipt before travelling. Unload journals destination
+credit, cargo removal, one completed cycle and one WAREHOUSE profession point.
+Planning revalidates demand and actual stock at pickup; incoming cargo prevents
+duplicate orders. A pending receipt retains the actor's shipment plan. Couriers
+never use teleport recovery and restart at the recorded source before travelling
+to the destination. Missing destinations return to a reachable surviving warehouse
+or hall, within the same route bound. Reassignment
+does not discard carried goods; death intentionally destroys cargo without drops.
+Full destinations keep cargo and retry, and ordinary open containers remain open.
+
 All item movement uses exact native slot before/after receipts stored by Core
-AtomicFileStore on the I/O executor before native writes. One locked city transaction
-closes container viewers and blocks inventory edits while in flight. It checks all
+AtomicFileStore on the I/O executor before native writes. Synchronous planning
+freezes source membership, then only native containers changed by the exact receipt
+stay locked through journal retirement. Unaffected containers remain open and
+interactive. Explicit transfers close affected viewers; NPC/background transfers
+use open containers immediately and keep their views open, with only receipt
+containers' item edits briefly fenced until retirement. A source player's inventory remains locked
+through its item receipt. It checks all
 changed slots before any writes; restart may finish only known before/after states.
 Drift is an explicit conflict. The city revision commits after native application;
 only an exact same-revision retry is accepted. Unknown outcomes retain the receipt,
@@ -185,12 +240,14 @@ a platform persistence boundary. No blind repeat after an unknown result.
 Construction starts without requiring the complete material list. New orders split the
 immutable captured before/after plan into deterministic horizontal rows of at most16
 adjacent cells with identical per-cell material requirements. One observed builder
-session authorizes at most eight existing rows after two seconds of work. Durable
-work credit preserves the remaining authorization across pause/restart; it does
+session adds at most eight existing rows after two seconds of work. Concurrent
+builders add once-only durable credit, bounded by remaining rows and 96 total rows;
+one placer still charges and installs each row serially. Durable work credit
+preserves the remaining authorization across pause/restart; it does
 not change row indices or charge already paid rows again. Only that row's exact obtainable items are debited, in the existing
 durable inventory receipt together with the READY→PLACING transition and `reservedBatch`.
 Missing items persist WAITING_MATERIALS without any debit; one waiting city is retried
-per5s in round-robin order, while open warehouse viewers defer that city's retry. Adding
+per5s in round-robin order. Open warehouse viewers do not defer it. Adding
 the required items resumes automatically. `materials` holds the unpaid remainder.
 Paid rows retain their reservation across pause, retry and restart, so replay cannot charge
 twice. Completing the row clears its reservation and advances within the bounded
@@ -302,6 +359,13 @@ then production deployment and full native player journey. Lab/production
 fixtures must preserve existing users and have an explicit cleanup record.
 
 ## Migration and recovery visibility
+
+Ordinary in-flight city saves leave menus available. Mutating player actions wait
+for the city's current write and re-read membership, online status, distance and
+operation-specific state before executing; no stale snapshot is replayed. Waiting
+actions resume before new NPC work on the owning server tick. Unknown writes and
+actual recovery retain their hard barriers. Administrative reload still requires
+all writes and placements to drain.
 
 All loaded inventory receipts acquire native container locks before the service
 publishes readiness. Recovery may process one receipt per pulse, but players

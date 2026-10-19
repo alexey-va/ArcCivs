@@ -28,12 +28,16 @@ internal fun loadCitizenSkins(): List<CitizenSkin> {
 internal fun citizenSkin(skins: List<CitizenSkin>, workerId: UUID): CitizenSkin =
     skins[Math.floorMod(workerId.hashCode(), skins.size)]
 
-internal fun citizenTool(plan: CitizenPlan): Material? = when (plan.type) {
-    BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT ->
+internal fun citizenTool(plan: CitizenPlan): Material? = plan.courier?.takeIf { it.carrying }?.cargo?.material
+    ?.let(Material::getMaterial) ?: when (plan.type) {
+    BuildingType.TOWN_HALL -> Material.BOOK
+    BuildingType.BUILDER_HUT ->
         if (plan.idleReason == "placing") Material.BRICKS else Material.IRON_SHOVEL
-    BuildingType.FORESTER -> Material.IRON_AXE
-    BuildingType.QUARRY -> Material.IRON_PICKAXE
+    BuildingType.FORESTER, BuildingType.SAWMILL -> Material.IRON_AXE
+    BuildingType.QUARRY, BuildingType.BLACKSMITH, BuildingType.STONEMASON -> Material.IRON_PICKAXE
     BuildingType.FARM -> Material.IRON_HOE
+    BuildingType.LIBRARY -> Material.FEATHER
+    BuildingType.WAREHOUSE -> null
     else -> null
 }
 
@@ -41,8 +45,9 @@ internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase, construction
     phase != CitizenPhase.CLOSED && (plan.idleReason == null && phase == CitizenPhase.WORKING ||
         plan.idleReason == "placing" && construction == ConstructionPhase.PLACING)
 
-internal fun citizenWorkBuilding(city: Settlement, plan: CitizenPlan): CivBuilding? = when (plan.type) {
-    BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT ->
+internal fun citizenWorkBuilding(city: Settlement, plan: CitizenPlan): CivBuilding? =
+    plan.courier?.let { city.building(it.cargo.sourceBuildingId) } ?: when (plan.type) {
+    BuildingType.BUILDER_HUT ->
         city.construction?.let { it.plannedBuilding ?: city.building(it.buildingId) }
     else -> plan.token.assignmentId?.let(city::building)
 }

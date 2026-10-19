@@ -29,12 +29,16 @@ class CivsCitizenAppearanceTest : FunSpec({
     }
 
     test("each profession carries a recognizable tool and an unassigned resident has an empty hand") {
-        citizenTool(appearancePlan(BuildingType.TOWN_HALL)) shouldBe Material.IRON_SHOVEL
+        citizenTool(appearancePlan(BuildingType.TOWN_HALL)) shouldBe Material.BOOK
         citizenTool(appearancePlan(BuildingType.BUILDER_HUT)) shouldBe Material.IRON_SHOVEL
         citizenTool(appearancePlan(BuildingType.BUILDER_HUT, "placing")) shouldBe Material.BRICKS
         citizenTool(appearancePlan(BuildingType.FORESTER)) shouldBe Material.IRON_AXE
         citizenTool(appearancePlan(BuildingType.QUARRY)) shouldBe Material.IRON_PICKAXE
         citizenTool(appearancePlan(BuildingType.FARM)) shouldBe Material.IRON_HOE
+        citizenTool(appearancePlan(BuildingType.SAWMILL)) shouldBe Material.IRON_AXE
+        citizenTool(appearancePlan(BuildingType.BLACKSMITH)) shouldBe Material.IRON_PICKAXE
+        citizenTool(appearancePlan(BuildingType.STONEMASON)) shouldBe Material.IRON_PICKAXE
+        citizenTool(appearancePlan(BuildingType.LIBRARY)) shouldBe Material.FEATHER
         citizenTool(appearancePlan(null, "unassigned")) shouldBe null
     }
 

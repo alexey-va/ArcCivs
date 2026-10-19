@@ -167,6 +167,10 @@ class CivsBlueprints(
                 BuildingType.QUARRY -> "fundamentals/miner"
                 BuildingType.FARM -> "agriculture/horticulture/farmer"
                 BuildingType.WAREHOUSE -> "craftsmanship/storage/warehouse"
+                BuildingType.SAWMILL -> "craftsmanship/carpentry/sawmill"
+                BuildingType.BLACKSMITH -> "craftsmanship/metallurgy/blacksmith"
+                BuildingType.STONEMASON -> "craftsmanship/masonry/stonemason"
+                BuildingType.LIBRARY -> "education/library"
             }
             return "civs/minecolonies/$style/$name$level"
         }

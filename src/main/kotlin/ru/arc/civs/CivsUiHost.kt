@@ -109,6 +109,8 @@ interface CivsUiHost {
     fun supplyConstruction(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
     fun grantConstructionMaterials(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
     fun availableMaterials(player: Player): Map<String, Long>
+    fun localMaterials(player: Player, buildingId: UUID): Map<String, Long>
+    fun supplyRequests(player: Player): List<CivSupplyRequest>
     fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>
     fun relocateControl(player: Player, buildingId: UUID, expectedTarget: CivPosition): CompletableFuture<Unit>

@@ -19,6 +19,142 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
+    test("a courier waits for durable pickup before walking to unload and retries full storage without losing cargo") {
+        val cycle = CitizenCycle(token(90_000), 1_000, pickupAtWorkplace = true)
+        cycle.start()
+        cycle.phase shouldBe CitizenPhase.TO_WORK
+        cycle.beginPickup() shouldBe null
+        cycle.arrive(0)
+        cycle.work(1_000)
+        cycle.phase shouldBe CitizenPhase.PICKUP_READY
+        val pickup = requireNotNull(cycle.beginPickup())
+        cycle.beginPickup() shouldBe null
+        cycle.arrive(2_000)
+        cycle.phase shouldBe CitizenPhase.PICKING_UP
+        cycle.acceptsPickup(UUID.randomUUID()) shouldBe false
+        cycle.acceptsPickup(pickup) shouldBe true
+        cycle.pickedUp()
+        cycle.phase shouldBe CitizenPhase.RETURNING
+        cycle.beginDelivery(3_000) shouldBe null
+        cycle.pause("route-unreachable", 3_000, false)
+        cycle.retry(8_000)
+        cycle.phase shouldBe CitizenPhase.RETURNING
+        cycle.arrive(9_000)
+        cycle.beginDelivery(9_000)?.let(cycle::acceptsCompletion) shouldBe true
+        cycle.failDelivery("storage-full", 9_000)
+        cycle.retry(13_999)
+        cycle.phase shouldBe CitizenPhase.PAUSED
+        cycle.retry(14_000)
+        cycle.phase shouldBe CitizenPhase.READY
+        cycle.failedAttempts shouldBe 1 // Only the genuine route failure consumed a navigation attempt.
+        cycle.beginDelivery(14_000)?.let(cycle::acceptsCompletion) shouldBe true
+    }
+
+    test("pickup shortages retry at the source and a persisted shipment resumes only its destination leg") {
+        val fresh = CitizenCycle(token(), 1_000, pickupAtWorkplace = true)
+        fresh.start(); fresh.arrive(0); fresh.work(1_000)
+        repeat(10) { attempt ->
+            requireNotNull(fresh.beginPickup())
+            val now = 1_000 + attempt * 5_000L
+            fresh.failPickup("materials-missing", now)
+            fresh.retry(now + 4_999)
+            fresh.phase shouldBe CitizenPhase.PAUSED
+            fresh.retry(now + 5_000)
+            fresh.phase shouldBe CitizenPhase.PICKUP_READY
+        }
+        fresh.failedAttempts shouldBe 0
+        val resumed = CitizenCycle(token(), 1_000, pickupAtWorkplace = true, carrying = true)
+        resumed.start()
+        resumed.phase shouldBe CitizenPhase.RETURNING
+        resumed.beginPickup() shouldBe null
+        resumed.beginDelivery(100_000) shouldBe null
+        resumed.arrive(100_000)
+        resumed.beginDelivery(100_000)?.let(resumed::acceptsCompletion) shouldBe true
+    }
+
+    test("shipment plans retain their source spawn and identity across pickup quantity and reassignment") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val warehouse = building(BuildingType.WAREHOUSE, CivPosition(8, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Кладовщик", warehouse.id, nextDeliveryAt = 60_000)
+        val city = city(listOf(hall, warehouse), worker, null).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+        val cargo = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, hall.id, warehouse.entrance, "PAPER", 3)
+        val requested = CivCourierPlan(cargo, hall.id, hall.entrance, false)
+        val before = requireNotNull(citizenPlan(city, worker, requested))
+        val carrying = worker.copy(assignment = hall.id, nextDeliveryAt = 99_000, cargo = cargo.copy(amount = 2))
+        val after = requireNotNull(citizenPlan(city, carrying, requested.copy(cargo = carrying.cargo!!, carrying = true)))
+        citizenPlansContinue(before, after) shouldBe true
+        // A native debit can empty the source before the canonical cargo publication; do not select another task yet.
+        citizenCurrentPlan(before, CitizenPhase.PICKING_UP) { error("Must not reread a pending source") } shouldBe before
+        citizenCurrentPlan(after, CitizenPhase.DELIVERING) { error("Must await the unload receipt") } shouldBe after
+        citizenCurrentPlan(after, CitizenPhase.RETURNING) { null } shouldBe null
+        after.spawnOrigin shouldBe warehouse.entrance
+        after.storage shouldBe hall.entrance
+        after.type shouldBe BuildingType.WAREHOUSE
+        citizenPlansContinue(after, after.copy(storage = CivPosition(20, 64, 0))) shouldBe false
+        citizenPlan(city, carrying) shouldBe null // A missing logistics plan cannot start the newly assigned job.
+    }
+
+    test("item production finishes at its own building without sending a worker to the shared depot") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val factory = building(BuildingType.SAWMILL, CivPosition(20, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Плотник", factory.id, nextDeliveryAt = 60_000)
+        val city = city(listOf(hall, factory), worker, null).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
+        val plan = requireNotNull(citizenPlan(city, worker))
+        plan.storage shouldBe factory.entrance
+        plan.workplace shouldBe factory.entrance
+        plan.completeAtWorkplace shouldBe true
+        val cycle = plan.cycle()
+        reachWork(cycle)
+        repeat(60) { cycle.work((it + 1) * 1_000L) }
+        cycle.phase shouldBe CitizenPhase.READY
+    }
+
+    test("footsteps use actual short grounded moves and reset across teleport spawn and world changes") {
+        val world = mockk<World> { every { uid } returns UUID.randomUUID() }
+        val other = mockk<World> { every { uid } returns UUID.randomUUID() }
+        val steps = CitizenFootsteps()
+        val start = Location(world, 0.5, 65.0, 0.5)
+        steps.observe(start, true) shouldBe null
+        steps.observe(start.clone(), true) shouldBe null
+        val moved = start.clone().add(0.2, 0.0, 0.0)
+        val actual = requireNotNull(steps.observe(moved, true))
+        actual.first shouldBe start
+        actual.second shouldBe moved
+        moved.x = 100.0 // The caller cannot mutate the tracker's stored sample.
+        steps.observe(start.clone().add(0.4, 0.0, 0.0), true)?.first shouldBe actual.second
+        steps.observe(Location(world, 30.5, 65.0, 0.5), true) shouldBe null
+        steps.reset()
+        steps.observe(Location(world, 30.7, 65.0, 0.5), true) shouldBe null
+        steps.observe(Location(other, 30.9, 65.0, 0.5), true) shouldBe null
+        steps.observe(Location(other, 31.1, 65.1, 0.5), false) shouldBe null
+        steps.observe(Location(other, 31.3, 65.0, 0.5), true) shouldBe null
+        steps.observe(Location(other, Double.NaN, 65.0, 0.5), true) shouldBe null
+        steps.observe(Location(other, 31.5, 65.0, 0.5), true) shouldBe null
+    }
+
+    test("completed trips wait indefinitely for inputs storage commits and bounded builder credit") {
+        for ((reason, status) in mapOf("materials-missing" to "waiting-inputs",
+            "storage-busy" to "storage-busy", "city-busy" to "waiting", "construction-credit-full" to "waiting")) {
+            val cycle = CitizenCycle(token(), 1_000)
+            reachWork(cycle)
+            cycle.work(1_000)
+            cycle.arrive(1_000)
+            var now = 1_000L
+            repeat(20) {
+                (cycle.beginDelivery(now) != null) shouldBe true
+                cycle.failDelivery(reason, now)
+                cycle.status() shouldBe status
+                cycle.failedAttempts shouldBe 0
+                cycle.retry(now + 4_999)
+                cycle.phase shouldBe CitizenPhase.PAUSED
+                now += 5_000
+                cycle.retry(now)
+                cycle.phase shouldBe CitizenPhase.READY
+            }
+            (cycle.beginDelivery(now) != null) shouldBe true
+        }
+    }
+
     test("external activation only ticks our spawned moving NPC with a viewer and an entity ticking route") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("vanilla")

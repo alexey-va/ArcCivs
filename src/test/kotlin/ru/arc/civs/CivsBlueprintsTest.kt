@@ -12,17 +12,23 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
-    test("catalog selects all 63 levels only from the private upgrade-aligned namespace") {
+    test("catalog selects all 99 levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
             BuildingType.entries.flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
-        ids.size shouldBe 63
-        ids.toSet().size shouldBe 63
+        ids.size shouldBe 99
+        ids.toSet().size shouldBe 99
         ids.all { it.startsWith("civs/minecolonies/") } shouldBe true
         CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 1) shouldBe
             "civs/minecolonies/nordic/fundamentals/townhall1"
         CivsBlueprints.schematicId("caledonia", BuildingType.FARM, 3) shouldBe
             "civs/minecolonies/caledonia/agriculture/horticulture/farmer3"
+        for ((type, family) in mapOf(BuildingType.SAWMILL to "craftsmanship/carpentry/sawmill",
+            BuildingType.BLACKSMITH to "craftsmanship/metallurgy/blacksmith",
+            BuildingType.STONEMASON to "craftsmanship/masonry/stonemason", BuildingType.LIBRARY to "education/library")) {
+            for (style in CivsBlueprints.STYLES) for (level in 1..3)
+                CivsBlueprints.schematicId(style, type, level) shouldBe "civs/minecolonies/$style/$family$level"
+        }
         shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("../nordic", BuildingType.HOUSE, 1) }
         shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("nordic", BuildingType.HOUSE, 4) }
     }

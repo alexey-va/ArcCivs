@@ -17,6 +17,7 @@ FORBIDDEN_CLASS_PREFIXES = (
     "net/kyori/adventure/",
     "org/slf4j/",
     "com/sk89q/",
+    "ru/ruscrafting/trails/api/",
     "ru/arc/paper/api/",
     "ru/arc/paper/schematics/",
     "ru/arc/paper/sql/PaperSqlServiceProvider",

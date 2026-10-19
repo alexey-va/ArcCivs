@@ -84,6 +84,252 @@ class CivsStorageTest : FunSpec({
     }
     afterEach { storage.close(); paper.close() }
 
+    fun addLocalBuilding(type: BuildingType, x: Int = 6): CivBuilding {
+        val position = CivPosition(x, 64, 0)
+        val building = city.buildings.first().copy(id = UUID.randomUUID(), type = type, phase = BuildingPhase.ACTIVE,
+            anchor = position, entrance = position.copy(z = 3), control = position,
+            bounds = CivBox(position, position.copy(x = x + 2, y = 65, z = 2)))
+        world.getBlockAt(x, 64, 0).type = Material.BARREL
+        city = city.copy(buildings = city.buildings + building)
+        return building
+    }
+
+    test("local physical stock includes warehouse holders but excludes other buildings and outside registration") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val interior = world.getBlockAt(7, 64, 0).also { it.type = Material.CHEST }
+        val processorInterior = world.getBlockAt(2, 64, 0).also { it.type = Material.BARREL }
+        indexedBlocks += listOf(interior, processorInterior)
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 2))
+        chest.setItem(0, ItemStack(Material.OAK_LOG, 64))
+        cargo(interior).setItem(0, ItemStack(Material.OAK_LOG, 3))
+        cargo(processorInterior).setItem(0, ItemStack(Material.OAK_LOG, 32))
+        cargo(world.getBlockAt(6, 64, 0)).setItem(0, ItemStack(Material.OAK_LOG, 4))
+        storage.buildingAvailable(city, city.buildings.first().id) shouldBe mapOf("OAK_LOG" to 2L)
+        storage.buildingAvailable(city, warehouse.id) shouldBe mapOf("OAK_LOG" to 7L)
+        storage.available(city) shouldBe mapOf("OAK_LOG" to 105L)
+    }
+
+    test("local construction debit cannot spend a warehouse or registered chest before delivery") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        chest.setItem(0, ItemStack(Material.STONE, 64))
+        cargo(world.getBlockAt(6, 64, 0)).setItem(0, ItemStack(Material.STONE, 64))
+        val first = UUID.randomUUID()
+        storage.reserve(city, first)
+        storage.prepareDebitBackground(city, mapOf("STONE" to 1L), city.buildings.first().id) shouldBe null
+        storage.unlock(first)
+        barrel.setItem(0, ItemStack(Material.STONE, 2))
+        val second = UUID.randomUUID()
+        storage.reserve(city, second)
+        val plan = requireNotNull(storage.prepareDebitBackground(city, mapOf("STONE" to 1L), city.buildings.first().id))
+        plan.changes.map { it.container }.toSet() shouldBe setOf(control)
+        storage.apply(transaction(second, city, plan)) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0) shouldBe ItemStack(Material.STONE, 1)
+        storage.buildingAvailable(city, warehouse.id) shouldBe mapOf("STONE" to 64L)
+        chest.getItem(0) shouldBe ItemStack(Material.STONE, 64)
+    }
+
+    test("manual construction supply fills its target despite enough materials elsewhere") {
+        val player = paper.addPlayer("LocalSupplier")
+        player.openInventory(paper.server.createInventory(player, 9))
+        city = city.copy(owner = player.uniqueId)
+        chest.setItem(0, ItemStack(Material.OAK_LOG, 64))
+        player.inventory.setItem(0, ItemStack(Material.OAK_LOG, 4))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val supplied = storage.prepareConstructionSupply(city, city.buildings.single().id, mapOf("OAK_LOG" to 4L), player)
+        supplied.result shouldBe CivsSupplyResult(4, 0, false)
+        barrel.isEmpty shouldBe true
+        storage.apply(transaction(id, city, supplied.plan)) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe null
+        barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 4)
+        chest.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 64)
+    }
+
+    test("physical cargo pickup and dropoff conserve exact local stock across receipt replays") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val warehouseControl = cargo(world.getBlockAt(6, 64, 0))
+        val interior = world.getBlockAt(7, 64, 0).also { it.type = Material.CHEST }
+        indexedBlocks += interior
+        warehouseControl.setItem(0, ItemStack(Material.OAK_LOG, 2))
+        cargo(interior).setItem(0, ItemStack(Material.OAK_LOG, 3))
+        chest.setItem(0, ItemStack(Material.OAK_LOG, 64))
+        val shipment = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, city.buildings.first().id,
+            warehouse.entrance, "OAK_LOG", 4)
+        val pickupId = UUID.randomUUID()
+        storage.reserve(city, pickupId)
+        val picked = transaction(pickupId, city, storage.prepareCargoPickup(city, shipment))
+        picked.changes.map { it.container }.toSet() shouldBe setOf(warehouse.control, CivPosition(7, 64, 0))
+        warehouseControl.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 2)
+        storage.seal(picked, keepViewersOpen = true)
+        storage.apply(picked) shouldBe CivInventoryApplyResult.Applied
+        storage.apply(picked) shouldBe CivInventoryApplyResult.Applied
+        warehouseControl.isEmpty shouldBe true
+        cargo(interior).getItem(0) shouldBe ItemStack(Material.OAK_LOG, 1)
+        barrel.isEmpty shouldBe true
+        chest.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 64)
+        storage.unlock(pickupId)
+        city = picked.after
+        val dropId = UUID.randomUUID()
+        storage.reserve(city, dropId)
+        val dropped = transaction(dropId, city, storage.prepareCargoDropoff(city, shipment, shipment.targetBuildingId))
+        dropped.changes.map { it.container }.toSet() shouldBe setOf(control)
+        barrel.isEmpty shouldBe true
+        storage.seal(dropped, keepViewersOpen = true)
+        storage.apply(dropped) shouldBe CivInventoryApplyResult.Applied
+        storage.apply(dropped) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 4)
+        storage.available(city)["OAK_LOG"] shouldBe 69L
+    }
+
+    test("cargo cannot overflow its target into unrelated free storage") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val shipment = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, city.buildings.first().id,
+            warehouse.entrance, "OAK_LOG", 4)
+        repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> { storage.prepareCargoDropoff(city, shipment, shipment.targetBuildingId) }
+            .reason shouldBe "storage-full"
+        chest.isEmpty shouldBe true
+        barrel.getItem(0) shouldBe ItemStack(Material.STONE, 64)
+        barrel.setItem(0, null)
+        val receipt = transaction(id, city, storage.prepareCargoDropoff(city, shipment, shipment.targetBuildingId))
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 4)
+        chest.isEmpty shouldBe true
+    }
+
+    test("virtual cargo only debits and credits its endpoint maps without spending the shared reserve") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val target = city.buildings.first()
+        city = city.copy(inventory = requireNotNull(city.inventory).copy(mode = CivStorageMode.VIRTUAL,
+            materials = mapOf("OAK_LOG" to 100L), buildingMaterials = mapOf(
+                target.id.toString() to mapOf("OAK_LOG" to 2L), warehouse.id.toString() to mapOf("OAK_LOG" to 5L))))
+        storage.buildingAvailable(city, target.id) shouldBe mapOf("OAK_LOG" to 2L)
+        storage.buildingAvailable(city, warehouse.id) shouldBe mapOf("OAK_LOG" to 5L)
+        val shipment = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, target.id, warehouse.entrance, "OAK_LOG", 4)
+        val pickupId = UUID.randomUUID()
+        storage.reserve(city, pickupId)
+        val picked = transaction(pickupId, city, storage.prepareCargoPickup(city, shipment))
+        picked.changes shouldBe emptyList()
+        picked.after.inventory!!.buildingStock(warehouse.id) shouldBe mapOf("OAK_LOG" to 1L)
+        picked.after.inventory!!.buildingStock(target.id) shouldBe mapOf("OAK_LOG" to 2L)
+        picked.after.inventory!!.materials shouldBe mapOf("OAK_LOG" to 100L)
+        storage.unlock(pickupId)
+        city = picked.after
+        val dropId = UUID.randomUUID()
+        storage.reserve(city, dropId)
+        val dropped = storage.prepareCargoDropoff(city, shipment, target.id)
+        dropped.changes shouldBe emptyList()
+        dropped.inventoryAfter.buildingStock(target.id) shouldBe mapOf("OAK_LOG" to 6L)
+        dropped.inventoryAfter.buildingStock(warehouse.id) shouldBe mapOf("OAK_LOG" to 1L)
+        dropped.inventoryAfter.materials shouldBe mapOf("OAK_LOG" to 100L)
+    }
+
+    test("production cannot borrow recipe ingredients from other local stores or registered containers") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val hall = city.buildings.first().copy(phase = BuildingPhase.ACTIVE)
+        city = city.copy(buildings = listOf(hall, warehouse))
+        barrel.setItem(0, ItemStack(Material.PAPER, 3))
+        chest.setItem(0, ItemStack(Material.LEATHER, 1))
+        cargo(world.getBlockAt(6, 64, 0)).setItem(0, ItemStack(Material.LEATHER, 1))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> { storage.prepareProduction(city, hall) }.reason shouldBe "materials-missing"
+        barrel.getItem(0) shouldBe ItemStack(Material.PAPER, 3)
+        chest.getItem(0) shouldBe ItemStack(Material.LEATHER, 1)
+        storage.buildingAvailable(city, warehouse.id) shouldBe mapOf("LEATHER" to 1L)
+    }
+
+    test("virtual production spends only its local recipe and leaves reserves and other stores unchanged") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val hall = city.buildings.first().copy(phase = BuildingPhase.ACTIVE)
+        val recipe = mapOf("PAPER" to 3L, "LEATHER" to 1L)
+        city = city.copy(buildings = listOf(hall, warehouse), inventory = requireNotNull(city.inventory).copy(
+            mode = CivStorageMode.VIRTUAL, materials = recipe, buildingMaterials = mapOf(warehouse.id.toString() to recipe)))
+        val first = UUID.randomUUID()
+        storage.reserve(city, first)
+        shouldThrow<CivsRejection> { storage.prepareProduction(city, hall) }.reason shouldBe "materials-missing"
+        storage.unlock(first)
+        city = city.copy(inventory = requireNotNull(city.inventory).copy(buildingMaterials =
+            mapOf(warehouse.id.toString() to recipe, hall.id.toString() to recipe)))
+        world.unloadChunk(0, 0)
+        val second = UUID.randomUUID()
+        storage.reserve(city, second)
+        val plan = storage.prepareProduction(city, hall)
+        plan.changes shouldBe emptyList()
+        plan.inventoryAfter.buildingStock(hall.id) shouldBe mapOf("BOOK" to 1L)
+        plan.inventoryAfter.buildingStock(warehouse.id) shouldBe recipe
+        plan.inventoryAfter.materials shouldBe recipe
+        world.isChunkLoaded(0, 0) shouldBe false
+    }
+
+    for (active in listOf(false, true)) test("warehouse construction uses interior stock only after activation active=$active") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE).copy(phase = if (active) BuildingPhase.ACTIVE else BuildingPhase.SITE)
+        city = city.copy(buildings = city.buildings.map { if (it.id == warehouse.id) warehouse else it })
+        val interior = world.getBlockAt(7, 64, 0).also { it.type = Material.CHEST }
+        indexedBlocks += interior
+        cargo(interior).setItem(0, ItemStack(Material.STONE, 1))
+        chest.setItem(0, ItemStack(Material.STONE, 64))
+        storage.buildingAvailable(city, warehouse.id) shouldBe if (active) mapOf("STONE" to 1L) else emptyMap()
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareDebitBackground(city, mapOf("STONE" to 1L), warehouse.id)
+        if (active) {
+            requireNotNull(plan).changes.map { it.container }.toSet() shouldBe setOf(CivPosition(7, 64, 0))
+            storage.apply(transaction(id, city, plan)) shouldBe CivInventoryApplyResult.Applied
+            cargo(interior).getItem(0) shouldBe null
+        } else {
+            plan shouldBe null
+            cargo(interior).getItem(0) shouldBe ItemStack(Material.STONE, 1)
+        }
+        chest.getItem(0) shouldBe ItemStack(Material.STONE, 64)
+    }
+
+    for (ownFull in listOf(false, true)) test("materialization uses the active warehouse and pending own control first ownFull=$ownFull") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val hall = city.buildings.first()
+        city = city.copy(inventory = requireNotNull(city.inventory).copy(buildingMaterials =
+            mapOf(hall.id.toString() to mapOf("BREAD" to 2L))))
+        if (ownFull) repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareMaterialization(city)
+        plan.inventoryAfter.materials shouldBe emptyMap()
+        plan.inventoryAfter.buildingStock(hall.id) shouldBe emptyMap()
+        barrel.getItem(0)?.type shouldBe if (ownFull) Material.STONE else null
+        storage.apply(transaction(id, city, plan)) shouldBe CivInventoryApplyResult.Applied
+        storage.buildingAvailable(city, warehouse.id) shouldBe if (ownFull)
+            mapOf("OAK_LOG" to 3L, "BREAD" to 2L) else mapOf("OAK_LOG" to 3L)
+        if (!ownFull) barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 2)
+        chest.isEmpty shouldBe true
+    }
+
+    test("a full active warehouse retains shared reserves even when the hall and registered chest are empty") {
+        addLocalBuilding(BuildingType.WAREHOUSE)
+        val warehouse = cargo(world.getBlockAt(6, 64, 0))
+        repeat(warehouse.size) { warehouse.setItem(it, ItemStack(Material.STONE, 64)) }
+        storage.reserve(city, UUID.randomUUID())
+        val plan = storage.prepareMaterialization(city)
+        plan.inventoryAfter shouldBe city.inventory
+        plan.changes shouldBe emptyList()
+        barrel.isEmpty shouldBe true
+        chest.isEmpty shouldBe true
+    }
+
+    for (type in listOf(BuildingType.FORESTER, BuildingType.SAWMILL)) test("$type output stays in its own full barrel") {
+        val producer = addLocalBuilding(type)
+        val output = cargo(world.getBlockAt(6, 64, 0))
+        repeat(output.size) { output.setItem(it, ItemStack(Material.STONE, 64)) }
+        if (type == BuildingType.SAWMILL) output.setItem(0, ItemStack(Material.OAK_LOG, 64))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> { storage.prepareProduction(city, producer) }.reason shouldBe "storage-full"
+        chest.isEmpty shouldBe true
+        barrel.isEmpty shouldBe true
+        output.getItem(0) shouldBe ItemStack(if (type == BuildingType.SAWMILL) Material.OAK_LOG else Material.STONE, 64)
+    }
+
     test("construction supplies transfer only missing plain storage cargo and preserve custom items and offhand") {
         val player = paper.addPlayer("Supplier")
         city = city.copy(owner = player.uniqueId)
@@ -98,18 +344,19 @@ class CivsStorageTest : FunSpec({
         storage.lock(city, id, player)
         val supplied = storage.prepareConstructionSupply(city, city.buildings.single().id,
             mapOf("OAK_LOG" to 10L, "BREAD" to 5L), player)
-        supplied.result shouldBe CivsSupplyResult(6, 3, false)
+        supplied.result shouldBe CivsSupplyResult(8, 3, false)
         player.inventory.getItem(0)!!.amount shouldBe 10
         barrel.getItem(0)!!.amount shouldBe 4
         val receipt = transaction(id, city, supplied.plan).validated()
         storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
         storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
-        player.inventory.getItem(0)!!.amount shouldBe 6
+        player.inventory.getItem(0)!!.amount shouldBe 4
         player.inventory.getItem(1) shouldBe custom
         player.inventory.getItem(2) shouldBe null
         player.inventory.itemInOffHand.amount shouldBe 20
-        barrel.getItem(0)!!.amount shouldBe 8
-        storage.available(city) shouldBe mapOf("BREAD" to 2L, "OAK_LOG" to 10L)
+        barrel.getItem(0)!!.amount shouldBe 10
+        chest.getItem(0)!!.amount shouldBe 2
+        storage.available(city) shouldBe mapOf("BREAD" to 2L, "OAK_LOG" to 12L)
         supplied.plan.inventoryAfter.materials shouldBe mapOf("OAK_LOG" to 3L)
         (paper.playerDataSaveCount(player) > 0) shouldBe true
     }
@@ -504,6 +751,117 @@ class CivsStorageTest : FunSpec({
         world.isChunkLoaded(0, 0) shouldBe false
     }
 
+    test("sealing a receipt keeps unrelated containers open and interactive") {
+        val touched = paper.addPlayer("TouchedViewer")
+        val unrelated = paper.addPlayer("UnrelatedViewer")
+        val touchedView = requireNotNull(touched.openInventory(barrel))
+        val unrelatedView = requireNotNull(unrelated.openInventory(chest))
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 4))
+        chest.setItem(0, ItemStack(Material.STONE, 7))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        (touched.openInventory.topInventory === barrel) shouldBe true
+        val receipt = transaction(id, city, storage.prepareDebit(city, mapOf("OAK_LOG" to 1L)))
+        storage.seal(receipt)
+        (touched.openInventory.topInventory === barrel) shouldBe false
+        (unrelated.openInventory.topInventory === chest) shouldBe true
+        val blocked = InventoryClickEvent(touchedView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        val allowed = InventoryClickEvent(unrelatedView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        storage.onClick(blocked); storage.onClick(allowed)
+        blocked.isCancelled shouldBe true
+        allowed.isCancelled shouldBe false
+        storage.available(city)["STONE"] shouldBe 7L
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.amount shouldBe 3
+        chest.getItem(0)!!.amount shouldBe 7
+    }
+
+    for (debit in listOf(true, false)) test("background debit=$debit updates an open viewer and fences only its receipt until unlock") {
+        val viewer = paper.addPlayer("BackgroundViewer")
+        val unrelated = paper.addPlayer("UnrelatedBackgroundViewer")
+        val openView = requireNotNull(viewer.openInventory(barrel))
+        val unrelatedView = requireNotNull(unrelated.openInventory(chest))
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 4))
+        chest.setItem(0, ItemStack(Material.STONE, 7))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = if (debit) storage.prepareDebit(city, mapOf("OAK_LOG" to 1L))
+            else storage.prepareCredit(city, "OAK_LOG", 1, city.buildings.single().id)
+        val receipt = transaction(id, city, plan)
+        storage.seal(receipt, keepViewersOpen = true)
+        (viewer.openInventory.topInventory === barrel) shouldBe true
+        (unrelated.openInventory.topInventory === chest) shouldBe true
+        val pending = InventoryClickEvent(openView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        val allowed = InventoryClickEvent(unrelatedView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        val hopper = InventoryMoveItemEvent(barrel, ItemStack(Material.OAK_LOG), chest, true)
+        storage.onClick(pending); storage.onClick(allowed); storage.onMove(hopper)
+        pending.isCancelled shouldBe true
+        allowed.isCancelled shouldBe false
+        hopper.isCancelled shouldBe true
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        (viewer.openInventory.topInventory === barrel) shouldBe true
+        viewer.openInventory.topInventory.getItem(0) shouldBe ItemStack(Material.OAK_LOG, if (debit) 3 else 5)
+        unrelated.openInventory.topInventory.getItem(0) shouldBe ItemStack(Material.STONE, 7)
+        val applied = InventoryClickEvent(openView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        storage.onClick(applied)
+        applied.isCancelled shouldBe true
+        storage.unlock(id)
+        val unlocked = InventoryClickEvent(openView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+        val unlockedHopper = InventoryMoveItemEvent(barrel, ItemStack(Material.OAK_LOG), chest, true)
+        storage.onClick(unlocked); storage.onMove(unlockedHopper)
+        unlocked.isCancelled shouldBe false
+        unlockedHopper.isCancelled shouldBe false
+        (viewer.openInventory.topInventory === barrel) shouldBe true
+    }
+
+    test("book production uses the same input and output snapshots including newly freed slots") {
+        city = city.copy(buildings = city.buildings.map { it.copy(phase = BuildingPhase.ACTIVE) })
+        repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        repeat(chest.size) { chest.setItem(it, ItemStack(Material.STONE, 64)) }
+        barrel.setItem(0, ItemStack(Material.PAPER, 3))
+        barrel.setItem(1, ItemStack(Material.LEATHER, 1))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val receipt = transaction(id, city, storage.prepareProduction(city, city.buildings.single())).validated()
+        receipt.changes.size shouldBe 2
+        barrel.getItem(0)!!.type shouldBe Material.PAPER
+        barrel.getItem(1)!!.type shouldBe Material.LEATHER
+        storage.seal(receipt)
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.type shouldBe Material.BOOK
+        barrel.getItem(0)!!.amount shouldBe 1
+        barrel.getItem(1) shouldBe null
+        chest.getItem(0) shouldBe ItemStack(Material.STONE, 64)
+    }
+
+    test("missing book inputs or output capacity cannot consume any physical items") {
+        city = city.copy(buildings = city.buildings.map { it.copy(phase = BuildingPhase.ACTIVE) })
+        repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        repeat(chest.size) { chest.setItem(it, ItemStack(Material.STONE, 64)) }
+        barrel.setItem(0, ItemStack(Material.PAPER, 64))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> { storage.prepareProduction(city, city.buildings.single()) }.reason shouldBe "materials-missing"
+        barrel.setItem(1, ItemStack(Material.LEATHER, 64))
+        shouldThrow<CivsRejection> { storage.prepareProduction(city, city.buildings.single()) }.reason shouldBe "storage-full"
+        barrel.getItem(0)!!.amount shouldBe 64
+        barrel.getItem(1)!!.amount shouldBe 64
+    }
+
+    test("virtual book production conserves its recipe in one plan") {
+        val hall = city.buildings.single().copy(phase = BuildingPhase.ACTIVE)
+        city = city.copy(buildings = listOf(hall), inventory = requireNotNull(city.inventory).copy(
+            mode = CivStorageMode.VIRTUAL, materials = emptyMap(),
+            buildingMaterials = mapOf(hall.id.toString() to mapOf("PAPER" to 3L, "LEATHER" to 1L))))
+        storage.reserve(city, UUID.randomUUID())
+        val plan = storage.prepareProduction(city, hall)
+        plan.changes shouldBe emptyList()
+        plan.inventoryAfter.buildingMaterials shouldBe mapOf(hall.id.toString() to mapOf("BOOK" to 1L))
+        city.inventory!!.buildingMaterials shouldBe mapOf(hall.id.toString() to mapOf("PAPER" to 3L, "LEATHER" to 1L))
+    }
+
     test("locking closes viewers and blocks clicks and hopper moves until explicit unlock") {
         val player = paper.addPlayer("StorageViewer")
         player.teleport(Location(world, 0.5, 65.0, 0.5))
@@ -623,15 +981,15 @@ class CivsStorageTest : FunSpec({
         storage.lock(city, id)
         val plan = storage.prepareMaterialization(city)
         plan.inventoryAfter.materials shouldBe mapOf("OAK_LOG" to 2L)
-        plan.inventoryAfter.buildingStock(building.id) shouldBe mapOf("BREAD" to 1L)
-        plan.changes.size shouldBe 2
+        plan.inventoryAfter.buildingStock(building.id) shouldBe mapOf("BREAD" to 5L)
+        plan.changes.size shouldBe 1
         barrel.getItem(0)?.amount shouldBe 63
         chest.getItem(0)?.amount shouldBe 60
         val receipt = transaction(id, city, plan).validated()
         storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
         storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
         barrel.getItem(0)?.amount shouldBe 64
-        chest.getItem(0)?.amount shouldBe 64
+        chest.getItem(0)?.amount shouldBe 60
         storage.unlock(id)
         city = receipt.after
         storage.lock(city, UUID.randomUUID())
@@ -658,7 +1016,11 @@ class CivsStorageTest : FunSpec({
     }
 
     test("materialization stops at 1024 changed slots and keeps every untransferred item") {
-        city = city.copy(buildings = listOf(city.buildings.single().copy(bounds = CivBox(CivPosition(2, 64, 0), CivPosition(11, 65, 3)))),
+        val hall = city.buildings.single().copy(anchor = CivPosition(-3, 64, 0), entrance = CivPosition(-3, 64, 3), control = null,
+            bounds = CivBox(CivPosition(-4, 64, 0), CivPosition(-2, 65, 2)))
+        val warehouse = city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE,
+            bounds = CivBox(CivPosition(2, 64, 0), CivPosition(11, 65, 3)))
+        city = city.copy(buildings = listOf(hall, warehouse),
             inventory = requireNotNull(city.inventory).copy(materials = mapOf("OAK_LOG" to 100_000L)))
         repeat(40) { i -> indexedBlocks += world.getBlockAt(2 + i % 10, 64, i / 10).also { it.type = Material.BARREL } }
         val id = UUID.randomUUID()
@@ -672,10 +1034,13 @@ class CivsStorageTest : FunSpec({
     }
 
     test("materialization examines at most 128 containers once and advances past a full no-op window") {
-        city = city.copy(buildings = listOf(city.buildings.single().copy(
-            bounds = CivBox(CivPosition(2, 64, 0), CivPosition(15, 65, 9)))),
+        val hall = city.buildings.single().copy(anchor = CivPosition(-3, 64, 0), entrance = CivPosition(-3, 64, 3), control = null,
+            bounds = CivBox(CivPosition(-4, 64, 0), CivPosition(-2, 65, 2)))
+        val warehouse = city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE,
+            bounds = CivBox(CivPosition(2, 64, 0), CivPosition(15, 65, 9)))
+        city = city.copy(buildings = listOf(hall, warehouse),
             inventory = requireNotNull(city.inventory).copy(materials = mapOf("OAK_LOG" to 3L, "BREAD" to 5L, "COBBLESTONE" to 7L),
-                buildingMaterials = mapOf(city.buildings.single().id.toString() to mapOf("WHEAT" to 2L))))
+                buildingMaterials = mapOf(warehouse.id.toString() to mapOf("WHEAT" to 2L))))
         val automatic = (2..15).flatMap { x -> (0..9).map { z -> CivPosition(x, 64, z) } }
         val positions = listOf(control) + automatic + registered
         val free = automatic.last()
@@ -746,7 +1111,7 @@ class CivsStorageTest : FunSpec({
             bounded.lock(city, id)
             val next = bounded.prepareMaterialization(city)
             next.inventoryAfter.materials shouldBe emptyMap()
-            next.inventoryAfter.buildingStock(city.buildings.single().id) shouldBe emptyMap()
+            next.inventoryAfter.buildingStock(warehouse.id) shouldBe emptyMap()
             next.changes.map { it.container }.distinct() shouldBe listOf(free)
             (resolveReads.size <= 128) shouldBe true
             resolveReads[control] shouldBe 1

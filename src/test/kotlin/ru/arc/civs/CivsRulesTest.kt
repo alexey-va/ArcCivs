@@ -83,13 +83,14 @@ class CivsRulesTest : FunSpec({
         val hut = building(3, BuildingType.BUILDER_HUT, 16, phase = BuildingPhase.SITE)
         val quarry = building(4, BuildingType.QUARRY, 24, phase = BuildingPhase.ACTIVE)
         val unavailable = building(5, BuildingType.FORESTER, 32, phase = BuildingPhase.SITE)
-        val city = activeCity().let { it.copy(buildings = it.buildings + listOf(farm, hut, quarry, unavailable),
+        val city = activeCity().let { it.copy(stock = Stock(), inventory = CivInventory.starting(it.stock),
+            buildings = it.buildings + listOf(farm, hut, quarry, unavailable),
             workers = it.workers.mapIndexed { index, worker -> worker.copy(assignment = if (index == 3) farm.id else null,
                 nextDeliveryAt = if (index == 3) 1_000 else worker.nextDeliveryAt) }) }
         CivsRules.needsAutoAssignment(city) shouldBe true
         val assigned = CivsRules.autoAssign(city, owner, 20_000)
         assigned.revision shouldBe city.revision + 1
-        assigned.workers.map { it.assignment } shouldBe listOf(hut.id, quarry.id, null, farm.id)
+        assigned.workers.map { it.assignment } shouldBe listOf(hut.id, quarry.id, city.buildings.first().id, farm.id)
         assigned.workers[3] shouldBe city.workers[3]
         assigned.workers[0].nextDeliveryAt shouldBe 20_000 + CivsRules.deliveryInterval(hut.type)
         assigned.workers[1].nextDeliveryAt shouldBe 20_000 + CivsRules.deliveryInterval(quarry.type)
@@ -278,7 +279,7 @@ class CivsRulesTest : FunSpec({
         var city = construct(activeCity(), building(3, BuildingType.FORESTER, x = 10))
         city = CivsRules.assign(city, owner, uuid(101), uuid(3), 1_000)
         rejects("workplace-full") { CivsRules.assign(city, owner, uuid(102), uuid(3), 1_000) }
-        rejects("invalid-assignment") { CivsRules.assign(city, owner, uuid(102), hallId, 1_000) }
+        rejects("workplace-full") { CivsRules.assign(city, owner, uuid(102), hallId, 1_000) }
         rejects("invalid-building") { CivsRules.reserveBuild(city, owner, building(4, BuildingType.HOUSE, x = 10), orderFor(building(4, BuildingType.HOUSE, x = 10))) }
         rejects("invalid-building") { CivsRules.reserveBuild(city, owner, building(4, BuildingType.HOUSE, x = 101), orderFor(building(4, BuildingType.HOUSE, x = 101))) }
         val house = building(4, BuildingType.HOUSE, x = 20)

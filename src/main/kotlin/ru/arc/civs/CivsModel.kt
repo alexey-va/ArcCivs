@@ -3,7 +3,7 @@ package ru.arc.civs
 import java.util.UUID
 
 enum class Resource { WOOD, STONE, FOOD }
-enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM }
+enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }
 
@@ -53,6 +53,8 @@ data class CivWorker(
     val health: Double? = null,
     val skills: Map<String, Long>? = null,
     val inventory: Map<String, Long>? = null,
+    /** A separately journalled shipment; these items have already left their source container. */
+    val cargo: CivCargo? = null,
 )
 
 /** Captured placement bytes live under this order's UUID, independently of mutable source files. */
@@ -70,7 +72,7 @@ data class CivConstruction(
     val materials: Map<String, Long>? = null,
     /** Null identifies an old order whose complete price was already paid. */
     val payment: CivConstructionPayment? = null,
-    /** Remaining rows authorized by one observed builder session; null is a legacy single-row session. */
+    /** Remaining rows authorized by observed builder sessions; null is a legacy single-row session. */
     val workCredit: Int? = null,
 )
 

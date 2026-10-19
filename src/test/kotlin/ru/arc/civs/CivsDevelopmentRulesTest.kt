@@ -7,6 +7,78 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsDevelopmentRulesTest : FunSpec({
+    test("automatic staffing fills one courier before producers while extra warehouse places remain manual") {
+        val warehouse = building(3, BuildingType.WAREHOUSE, 20, BuildingPhase.ACTIVE).copy(level = 3)
+        val forest = building(4, BuildingType.FORESTER, 30, BuildingPhase.ACTIVE).copy(level = 2)
+        var city = builderCity().let { base -> base.copy(buildings = base.buildings.map { b ->
+            b.copy(phase = BuildingPhase.ACTIVE, level = if (b.type == BuildingType.TOWN_HALL) 3 else b.level)
+        } + warehouse + forest, workers = base.workers + (101..103).map { CivWorker(id(it), "Житель$it", null) }) }
+        city = CivsRules.autoAssign(city, city.owner, 40_000)
+        city.workers.count { it.assignment == warehouse.id } shouldBe 1
+        city.workers.count { it.assignment == forest.id } shouldBe 2
+        CivsRules.slots(city, warehouse) shouldBe 3
+        CivsRules.slots(city.copy(inventory = null), warehouse) shouldBe 0
+        val extra = city.workers.first { it.assignment == forest.id }
+        city = CivsRules.assign(city, city.owner, extra.id, warehouse.id, 50_000)
+        city.workers.count { it.assignment == warehouse.id } shouldBe 2
+        CivsRules.needsAutoAssignment(city) shouldBe false
+    }
+
+    test("cargo validates on restart and prevents a reassigned carrier from doing ordinary work before delivery") {
+        val warehouse = building(3, BuildingType.WAREHOUSE, 20, BuildingPhase.ACTIVE)
+        val base = builderCity().let { it.copy(buildings = it.buildings.map { b -> b.copy(phase = BuildingPhase.ACTIVE) } + warehouse) }
+        val cargo = CivCargo(id(500), warehouse.id, warehouse.id, base.buildings.first().id, warehouse.entrance, "PAPER", 3)
+        val carrier = base.workers.single().copy(cargo = cargo)
+        val city = roundTrip(base.copy(workers = listOf(carrier)))
+        city.workers.single().cargo shouldBe cargo
+        denied("stale-delivery") { CivsRules.deliver(city, city.owner, carrier.id, carrier.assignment!!,
+            carrier.completedCycles, carrier.nextDeliveryAt, carrier.nextDeliveryAt) }
+        denied("invalid-state") { roundTrip(city.copy(workers = listOf(carrier.copy(cargo = cargo.copy(amount = 65))))) }
+        denied("invalid-state") { roundTrip(city.copy(workers = listOf(carrier,
+            carrier.copy(id = id(101), name = "Дубль", assignment = null)))) }
+        // Retiring a source never strands the entire persisted city; the logistics owner chooses a return destination.
+        roundTrip(city.copy(buildings = city.buildings.filterNot { it.id == warehouse.id })).workers.single().cargo shouldBe cargo
+    }
+
+    test("new workshop captures require row payment even when an old JSON omits the payment field") {
+        for (type in listOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY)) {
+            val site = building(3, type, 20)
+            val city = builderCity().let { CivsRules.placeSite(it, it.owner, site) }
+            val order = batches(site, 2).copy(batches = CivConstructionBatches(2, 16), payment = CivConstructionPayment())
+            denied("invalid-construction") { CivsRules.startSite(city, city.owner, site, order.copy(payment = null)) }
+            val working = roundTrip(CivsRules.startSite(city, city.owner, site, order))
+            working.construction!!.payment shouldBe CivConstructionPayment()
+            val json = Gson().toJsonTree(working).asJsonObject
+            json.getAsJsonObject("construction").remove("payment")
+            denied("invalid-state") { CivsRules.validate(Gson().fromJson(json, Settlement::class.java)) }
+        }
+    }
+
+    test("workshops award their own skill only after a handled delivery and reject replay") {
+        for (type in listOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY)) {
+            val workshop = building(3, type, 20, BuildingPhase.ACTIVE)
+            var city = builderCity().let { it.copy(buildings = it.buildings.map { b -> b.copy(phase = BuildingPhase.ACTIVE) } + workshop) }
+            city = CivsRules.assign(city, city.owner, id(100), workshop.id, 40_000)
+            val worker = city.workers.single()
+            worker.skills shouldBe null
+            denied("materials-required") { CivsRules.deliver(city, city.owner, worker.id, workshop.id,
+                worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt) }
+            val delivered = roundTrip(CivsRules.deliver(city, city.owner, worker.id, workshop.id,
+                worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt, outputHandled = true))
+            delivered.workers.single().skills shouldBe mapOf(type.name to 1L)
+            delivered.stock shouldBe city.stock
+            delivered.inventory shouldBe city.inventory
+            denied("stale-delivery") { CivsRules.deliver(delivered, city.owner, worker.id, workshop.id,
+                worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt, outputHandled = true) }
+            for (level in 1..3) {
+                CivsRules.slots(city, workshop.copy(level = level)) shouldBe level
+                CivsRules.deliveryInterval(city, workshop.copy(level = level)) shouldBe 60_000L
+            }
+            val master = worker.copy(skills = CivsResidents.professions.associateWith { 40L })
+            CivsResidents.maxHealth(master) shouldBe 28.0
+        }
+    }
+
     test("incremental orders can start empty and pay a row exactly once across wait pause and reload") {
         var city = builderCity().let { it.copy(inventory = it.inventory!!.copy(materials = emptyMap())) }
         val hut = city.building(id(2))!!
@@ -250,7 +322,7 @@ class CivsDevelopmentRulesTest : FunSpec({
         old.buildings.single().control shouldBe null
         old.buildings.single().production shouldBe null
         CivsRules.immigrate(old, old.owner, id(104), "Не повторять", 50_000) shouldBe old
-        denied("invalid-assignment") { CivsRules.assign(old, old.owner, id(101), legacyHall.id, 50_000) }
+        denied("workplace-full") { CivsRules.assign(old, old.owner, id(101), legacyHall.id, 50_000) }
         val freeHut = building(2, BuildingType.BUILDER_HUT, 10)
         denied("invalid-construction") { CivsRules.reserveBuild(old, old.owner, freeHut,
             batches(freeHut, 3).copy(batches = null, materials = null)) }

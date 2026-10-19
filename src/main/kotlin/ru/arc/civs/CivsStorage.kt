@@ -189,7 +189,7 @@ class CivsStorage(private val plugin: Plugin,
         index.refresh(city, building)
     }
 
-    /** Background materialization waits until players finish managing their native containers. */
+    /** Report native viewers within the settlement's current source membership. */
     fun hasViewers(city: Settlement): Boolean {
         checkMain(); requireOpen()
         val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
@@ -206,6 +206,28 @@ class CivsStorage(private val plugin: Plugin,
         lock(city, transactionId, index.positions(city), player?.uniqueId)
     }
 
+    /** Reserve membership for synchronous planning; seal keeps only the receipt's native containers locked. */
+    fun reserve(city: Settlement, transactionId: UUID, player: Player? = null) {
+        checkMain(); requireOpen()
+        if (player != null) reject(!player.isOnline || !city.canManage(player.uniqueId), "not-authorized")
+        lock(city, transactionId, index.positions(city), player?.uniqueId, closeViewers = false)
+    }
+
+    fun seal(transaction: CivInventoryTransaction, keepViewersOpen: Boolean = false) {
+        checkMain(); requireOpen(); transaction.validated()
+        val claim = claims[transaction.id] ?: throw CivsRejection("storage-busy")
+        val positions = transaction.changes.associate { it.container to it.containerType }
+        require(claim.city.id == transaction.cityId && claim.city.revision == transaction.beforeRevision &&
+            claim.playerId == transaction.playerDebit?.playerId && positions.all { (position, type) ->
+                position in claim.positions && (claim.positions[position] == null || claim.positions[position] == type)
+            }) { "Prepared inventory receipt does not match its reservation" }
+        claim.positions.keys.filterNot { it in positions }.forEach {
+            locked.remove(Key(claim.city.worldId, it), transaction.id)
+        }
+        // Retain full frozen source membership for stock reads; native locks cover only receipt coordinates.
+        if (!keepViewersOpen) closeViewers(transaction.id, claim.playerId)
+    }
+
     /** Exact receipt coordinates remain locked even if their chunks or current index entries are absent. */
     fun lock(transaction: CivInventoryTransaction) {
         checkMain(); requireOpen()
@@ -214,7 +236,7 @@ class CivsStorage(private val plugin: Plugin,
         lock(transaction.after, transaction.id, positions, transaction.playerDebit?.playerId)
     }
 
-    private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>, playerId: UUID?) {
+    private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>, playerId: UUID?, closeViewers: Boolean = true) {
         val existing = claims[transactionId]
         if (existing != null) {
             require(existing.city.id == city.id && existing.city.owner == city.owner && existing.city.worldId == city.worldId && existing.playerId == playerId &&
@@ -232,12 +254,18 @@ class CivsStorage(private val plugin: Plugin,
         positions.keys.forEach { locked[Key(city.worldId, it)] = transactionId }
         try {
             // Closing current viewers scales with players, not every container in a large settlement.
-            plugin.server.onlinePlayers.forEach { player ->
-                if (player.uniqueId == playerId || exactLocked(player.openInventory.topInventory)) player.closeInventory()
-            }
+            if (closeViewers) closeViewers(transactionId, playerId)
         } catch (error: Exception) {
             unlock(transactionId)
             throw error
+        }
+    }
+
+    private fun closeViewers(transactionId: UUID, playerId: UUID?) {
+        plugin.server.onlinePlayers.forEach { player ->
+            if (player.uniqueId == playerId || holderPositions(player.openInventory.topInventory.holder).any {
+                    locked[Key(it.worldId, it.position)] == transactionId
+                }) player.closeInventory()
         }
     }
 
@@ -265,6 +293,19 @@ class CivsStorage(private val plugin: Plugin,
         return totals.toSortedMap()
     }
 
+    /** Only this building's buffer; active warehouses also include holders inside their own bounds. */
+    fun buildingAvailable(city: Settlement, buildingId: UUID): Map<String, Long> {
+        checkMain(); requireOpen()
+        val inventory = requireNotNull(city.inventory).validated()
+        if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
+        if (inventory.mode == CivStorageMode.VIRTUAL) return inventory.buildingStock(buildingId).toSortedMap()
+        val totals = mutableMapOf<String, Long>()
+        localSources(city, buildingId).forEach { source -> source.inventory.storageContents.forEach { item ->
+            plain(item)?.let { totals.merge(it.material, it.amount.toLong(), Math::addExact) }
+        } }
+        return totals.toSortedMap()
+    }
+
     fun prepareDebit(city: Settlement, required: Map<String, Long>): CivStoragePlan =
         prepareDebit(city, required, null, null)
 
@@ -272,10 +313,17 @@ class CivsStorage(private val plugin: Plugin,
      * Small construction rows search at most 128 containers, including rechecked candidates.
      * Null keeps the order waiting: no native changes or partial receipt. Only coordinates survive
      * between attempts; each accepted slot is freshly captured under the current transaction lock.
+     * An explicit building reads its local buffer; the omitted target preserves the global search.
      */
-    fun prepareDebitBackground(city: Settlement, required: Map<String, Long>): CivStoragePlan? {
+    fun prepareDebitBackground(city: Settlement, required: Map<String, Long>, buildingId: UUID? = null): CivStoragePlan? {
         checkClaim(city)
         validateAmounts(required)
+        if (buildingId != null) {
+            debitSearches.remove(city.id)
+            return try { prepareBuildingDebit(city, buildingId, required) } catch (failure: CivsRejection) {
+                if (failure.reason == "materials-missing") null else throw failure
+            }
+        }
         if (city.inventory?.mode != CivStorageMode.PHYSICAL || required.isEmpty()) {
             debitSearches.remove(city.id)
             return try { prepareDebit(city, required) } catch (failure: CivsRejection) {
@@ -319,7 +367,7 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     private fun prepareDebit(city: Settlement, required: Map<String, Long>,
-        physicalSources: Sequence<Source>?, candidate: ((CivPosition) -> Boolean)?,
+        physicalSources: Sequence<Source>?, candidate: ((CivPosition) -> Boolean)?, buildingId: UUID? = null,
     ): CivStoragePlan {
         checkClaim(city)
         validateAmounts(required)
@@ -329,34 +377,16 @@ class CivsStorage(private val plugin: Plugin,
         val snapshots = mutableListOf<Snapshot>()
         val missing = required.toSortedMap()
         if (inventory.mode == CivStorageMode.PHYSICAL) {
-            var changedSlots = 0
-            val native = (physicalSources ?: sources(city)).iterator()
-            while (missing.isNotEmpty() && native.hasNext()) {
-                val source = native.next()
-                val snapshot = snapshot(source)
-                snapshots += snapshot
-                var contributed = false
-                snapshot.after.indices.forEach { slot ->
-                    val item = plain(snapshot.after[slot])
-                    val remaining = item?.let { missing[it.material] } ?: 0L
-                    if (remaining > 0 && item != null) {
-                        reject(changedSlots == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
-                        val taken = minOf(remaining, item.amount.toLong()).toInt()
-                        putAmount(missing, item.material, remaining - taken)
-                        snapshot.after[slot] = stack(item.material, item.amount - taken)
-                        changedSlots++
-                        contributed = true
-                    }
-                }
-                if (contributed) candidate?.invoke(source.position)
-            }
+            debit((physicalSources ?: sources(city)).map { snapshot(it).also(snapshots::add) }, missing, candidate)
         } else {
             required.toSortedMap().forEach { (material, requested) ->
                 var remaining = requested
-                val taken = minOf(remaining, virtual[material] ?: 0)
+                val taken = if (buildingId == null) minOf(remaining, virtual[material] ?: 0) else 0L
                 putAmount(virtual, material, (virtual[material] ?: 0) - taken)
                 remaining -= taken
-                warehouses.toSortedMap().values.forEach { warehouse ->
+                val selected = if (buildingId == null) warehouses.toSortedMap().values
+                    else listOf(warehouses.getOrPut(buildingId.toString(), ::linkedMapOf))
+                selected.forEach { warehouse ->
                     val amount = minOf(remaining, warehouse[material] ?: 0)
                     putAmount(warehouse, material, (warehouse[material] ?: 0) - amount)
                     remaining -= amount
@@ -371,17 +401,85 @@ class CivsStorage(private val plugin: Plugin,
         return plan(inventory.copy(materials = virtual.toMap(), buildingMaterials = freeze(inventory, warehouses)), snapshots)
     }
 
+    private fun prepareBuildingDebit(city: Settlement, buildingId: UUID, required: Map<String, Long>): CivStoragePlan {
+        checkClaim(city)
+        if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
+        val physical = if (city.inventory?.mode == CivStorageMode.PHYSICAL) localSources(city, buildingId) else null
+        return prepareDebit(city, required, physical, null, buildingId)
+    }
+
+    fun prepareCargoPickup(city: Settlement, cargo: CivCargo): CivStoragePlan {
+        require(cargo.amount in 1L..64L)
+        return prepareBuildingDebit(city, cargo.sourceBuildingId, mapOf(cargo.material to cargo.amount))
+    }
+
+    fun prepareCargoDropoff(city: Settlement, cargo: CivCargo, destinationBuildingId: UUID): CivStoragePlan {
+        require(cargo.amount in 1L..64L)
+        return prepareBuildingCredit(city, destinationBuildingId, cargo.material, cargo.amount)
+    }
+
+    private fun debit(snapshots: Sequence<Snapshot>, missing: MutableMap<String, Long>, candidate: ((CivPosition) -> Boolean)? = null) {
+        var changedSlots = 0
+        val iterator = snapshots.iterator()
+        while (missing.isNotEmpty() && iterator.hasNext()) {
+            val snapshot = iterator.next()
+            var contributed = false
+            snapshot.after.indices.forEach { slot ->
+                val item = plain(snapshot.after[slot])
+                val remaining = item?.let { missing[it.material] } ?: 0L
+                if (remaining > 0 && item != null) {
+                    reject(changedSlots == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
+                    val taken = minOf(remaining, item.amount.toLong()).toInt()
+                    putAmount(missing, item.material, remaining - taken)
+                    snapshot.after[slot] = stack(item.material, item.amount - taken)
+                    changedSlots++
+                    contributed = true
+                }
+            }
+            if (contributed) candidate?.invoke(snapshot.source.position)
+        }
+    }
+
+    /** Consume local recipe inputs and insert local output in the same snapshots and durable receipt. */
+    fun prepareProduction(city: Settlement, building: CivBuilding): CivStoragePlan {
+        checkClaim(city)
+        reject(city.building(building.id) != building, "not-authorized")
+        val material = CivsProduction.material(building) ?: throw CivsRejection("invalid-production")
+        val amount = CivsProduction.amount(building)
+        val inputs = CivsProduction.inputs(building)
+        if (inputs.isEmpty()) return prepareBuildingCredit(city, building.id, material, amount)
+        validateAmounts(inputs)
+        val inventory = requireNotNull(city.inventory)
+        if (inventory.mode == CivStorageMode.VIRTUAL) {
+            val debited = prepareBuildingDebit(city, building.id, inputs).inventoryAfter
+            return creditVirtual(city.copy(inventory = debited), material, amount, building.id)
+        }
+        val captured = linkedMapOf<CivPosition, Snapshot>()
+        fun snapshots() = localSources(city, building.id).map { source -> captured.getOrPut(source.position) { snapshot(source) } }
+        val missing = inputs.toSortedMap()
+        debit(snapshots(), missing)
+        if (missing.isNotEmpty()) throw CivsRejection("materials-missing", mapOf(
+            "material" to missing.firstKey(), "count" to missing.getValue(missing.firstKey()).toString()))
+        reject(insert(snapshots(), material, amount) != 0L, "storage-full")
+        return plan(inventory, captured.values.toList())
+    }
+
+    private fun prepareBuildingCredit(city: Settlement, buildingId: UUID, material: String, count: Long): CivStoragePlan {
+        checkClaim(city)
+        validateAmounts(mapOf(material to count))
+        if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
+        if (city.inventory?.mode == CivStorageMode.VIRTUAL) return creditVirtual(city, material, count, buildingId)
+        val prepared = mutableListOf<Snapshot>()
+        reject(insert(localSources(city, buildingId).map { snapshot(it).also(prepared::add) }, material, count) != 0L, "storage-full")
+        return plan(requireNotNull(city.inventory), prepared)
+    }
+
     fun prepareCredit(city: Settlement, material: String, count: Long, buildingId: UUID? = null): CivStoragePlan {
         checkClaim(city)
         validateAmounts(mapOf(material to count))
         val inventory = requireNotNull(city.inventory)
         if (inventory.mode == CivStorageMode.VIRTUAL) {
-            val id = buildingId ?: throw CivsRejection("storage-building-required")
-            reject(count > warehouseSpace(city, id), "storage-full")
-            val warehouses = warehouses(inventory)
-            val warehouse = warehouses.getOrPut(id.toString(), ::linkedMapOf)
-            putAmount(warehouse, material, Math.addExact(warehouse[material] ?: 0, count))
-            return CivStoragePlan(inventory.copy(buildingMaterials = freeze(inventory, warehouses)).validated(), emptyList())
+            return creditVirtual(city, material, count, buildingId ?: throw CivsRejection("storage-building-required"))
         }
         val prepared = mutableListOf<Snapshot>()
         val snapshots = sources(city, buildingId).map { snapshot(it).also(prepared::add) }
@@ -389,7 +487,16 @@ class CivsStorage(private val plugin: Plugin,
         return plan(inventory, prepared)
     }
 
-    /** One explicit supply action reads each holder once; only plain cargo and the current shortage can move. */
+    private fun creditVirtual(city: Settlement, material: String, count: Long, buildingId: UUID): CivStoragePlan {
+        val inventory = requireNotNull(city.inventory)
+        reject(count > warehouseSpace(city, buildingId), "storage-full")
+        val warehouses = warehouses(inventory)
+        val warehouse = warehouses.getOrPut(buildingId.toString(), ::linkedMapOf)
+        putAmount(warehouse, material, Math.addExact(warehouse[material] ?: 0, count))
+        return CivStoragePlan(inventory.copy(buildingMaterials = freeze(inventory, warehouses)).validated(), emptyList())
+    }
+
+    /** Explicit supply reads and fills the target's local buffer, moving plain cargo up to its shortage. */
     fun prepareConstructionSupply(city: Settlement, buildingId: UUID, required: Map<String, Long>, player: Player? = null): CivStorageSupplyPlan {
         checkClaim(city)
         validateAmounts(required)
@@ -399,7 +506,7 @@ class CivsStorage(private val plugin: Plugin,
         require(claim.playerId == player?.uniqueId) { "Player supply does not match its inventory lock" }
         if (player != null) reject(!player.isOnline || !city.canManage(player.uniqueId), "not-authorized")
         if (required.isEmpty()) return CivStorageSupplyPlan(CivStoragePlan(inventory, emptyList()), CivsSupplyResult(0, 0, false))
-        val snapshots = sources(city, buildingId).map(::snapshot).toList()
+        val snapshots = localSources(city, buildingId).map(::snapshot).toList()
         val available = mutableMapOf<String, Long>()
         snapshots.forEach { source -> source.before.forEach { stack ->
             plain(stack)?.let { if (it.material in required) available.merge(it.material, it.amount.toLong(), Math::addExact) }
@@ -446,12 +553,21 @@ class CivsStorage(private val plugin: Plugin,
         val inventory = requireNotNull(city.inventory)
         val virtual = inventory.materials.toMutableMap()
         val warehouses = warehouses(inventory)
-        val positions = materializationWindow(city)
+        val depot = city.buildings.firstOrNull { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE }
+            ?: city.buildings.first { it.type == BuildingType.TOWN_HALL }
+        val sharedDestinations = buildingPositions(city, depot.id)
+        val buildingDestinations = warehouses.keys.associateWith { id ->
+            buildingPositions(city, UUID.fromString(id), controlOnly = true).keys + sharedDestinations.keys
+        }
+        val eligible = sharedDestinations.keys + buildingDestinations.values.flatten()
+        val positions = materializationWindow(city, eligible)
         val prepared = linkedMapOf<CivPosition, Snapshot?>()
         val changed = hashSetOf<Pair<CivPosition, Int>>()
         fun move(amounts: MutableMap<String, Long>, buildingId: UUID?) {
             val preferred = buildingId?.let { city.building(it)?.control }
-            val ordered = if (preferred == null) positions else positions.filter { it.first == preferred } + positions.filter { it.first != preferred }
+            val allowed = if (buildingId == null) sharedDestinations.keys else buildingDestinations.getValue(buildingId.toString())
+            val selected = positions.filter { it.first in allowed }
+            val ordered = if (preferred == null) selected else selected.filter { it.first == preferred } + selected.filter { it.first != preferred }
             for ((material, count) in amounts.toSortedMap()) {
                 if (changed.size >= MATERIALIZATION_SLOT_CHANGES) break
                 val snapshots = ordered.asSequence().mapNotNull { (position, type) ->
@@ -472,8 +588,8 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     /** Select before native reads; advance even when this whole window is full or unloaded. */
-    private fun materializationWindow(city: Settlement): List<Pair<CivPosition, String?>> {
-        val positions = claims.getValue(cityClaims.getValue(city.id)).positions
+    private fun materializationWindow(city: Settlement, eligible: Set<CivPosition>): List<Pair<CivPosition, String?>> {
+        val positions = claims.getValue(cityClaims.getValue(city.id)).positions.filterKeys { it in eligible }
         val controls = city.buildings.mapNotNull(CivBuilding::control).distinct().filter { it in positions }
         val others = positions.keys.filter { it !in controls }
         val count = minOf(MATERIALIZATION_CONTAINERS - controls.size, others.size)
@@ -661,12 +777,33 @@ class CivsStorage(private val plugin: Plugin,
             if (preferred != null && preferred in positions) yield(preferred to positions[preferred])
             positions.forEach { (position, type) -> if (position != preferred) yield(position to type) }
         }
-        return ordered.mapNotNull { (position, type) ->
+        return resolveSources(city, ordered)
+    }
+
+    private fun buildingPositions(city: Settlement, buildingId: UUID, controlOnly: Boolean = false): Map<CivPosition, String?> {
+        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
+        val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
+        return linkedMapOf<CivPosition, String?>().also { selected ->
+            building.control?.takeIf { it in positions }?.let { selected[it] = positions[it] }
+            if (!controlOnly && building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE) {
+                val foreignControls = city.buildings.filter { it.id != buildingId }.mapNotNull(CivBuilding::control).toSet()
+                positions.forEach { (position, type) ->
+                    if (position !in foreignControls && building.bounds.contains(position.x, position.y, position.z))
+                        selected.putIfAbsent(position, type)
+                }
+            }
+        }
+    }
+
+    private fun localSources(city: Settlement, buildingId: UUID): Sequence<Source> =
+        resolveSources(city, buildingPositions(city, buildingId).asSequence().map { it.key to it.value })
+
+    private fun resolveSources(city: Settlement, positions: Sequence<Pair<CivPosition, String?>>): Sequence<Source> =
+        positions.mapNotNull { (position, type) ->
             try { resolve(city, position, type) } catch (failure: CivsRejection) {
                 if (failure.reason == "storage-unavailable") null else throw failure
             }
         }
-    }
 
     private fun control(city: Settlement, building: CivBuilding): Source {
         reject(city.building(building.id) != building, "not-authorized")

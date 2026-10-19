@@ -1,0 +1,471 @@
+{
+  "version": 1,
+  "title": "ArcCivs warehouse logistics: current-wave item transfers and internal profession points",
+  "assumptions": [
+    "This is an illustrative proposed logistics model, not telemetry or evidence of delivery/activation. Low/base/high use 1/10/16 participating cities, respectively at matched warehouse and sawmill levels 1/2/3, with 1/4/8 production waves per city-day. One wave means one completed current recipe cycle by each worker assigned to the selected SAWMILL building; activity counts are explicit assumptions, not measured utilization.",
+    "The concrete order example uses only the current SAWMILL OAK recipe: each producer cycle consumes 1 OAK_LOG and yields 4 OAK_PLANKS. One wave therefore requests 1/2/3 OAK_LOG for 1/2/3 assigned sawmill workers and later returns 4/8/12 currently completed OAK_PLANKS. Each order is max(0, current recipe quantity × assigned workers − stock in that factory’s own barrel − already-carried incoming cargo). This example assumes zero local stock and zero incoming cargo so it exposes the maximum current-wave request; actual orders shrink with either balance.",
+    "Goods move physically from the city warehouse to the target factory’s own barrel; factories consume inputs and place outputs only in their own barrel; a courier collects only current produced output back to the warehouse. Pickup debits warehouse stock and persists cargo in one receipt. Destination unload credits the factory/warehouse barrel, clears cargo and awards the second-receipt shipment point exactly once. These transfers conserve the item; the SAWMILL input-to-output recipe conversion is already assessed separately and is not counted as a warehouse mint.",
+    "The current recipe cycle is the only producer request. A construction request covers only the current unpaid material row, less stock already in the builder’s own barrel and matching incoming cargo; queued or later rows and full-schematic totals are not forecast. Exact material and quantity depend on the active unpaid row, so no illustrative construction item count is invented here.",
+    "Warehouse staffing is 1/2/3 courier slots at levels 1/2/3. One carrier shipment contains at most 64 items of one material. The selected OAK_LOG and OAK_PLANKS batches are each one material and at most 12 items, below that cap; no mixed-material cargo or free item is assumed. Existing personal inventory is separate from persisted logistics cargo.",
+    "Each successful unload awards 1 internal WAREHOUSE profession point; pickup alone does not. Each selected sawmill wave has an incoming-material shipment and a later output-return shipment, so the model counts 2 points per wave. The resulting city-week totals are 14/56/112 points in the low/base/high cases; they can be distributed across the corresponding 1/2/3 warehouse workers as 14/28/37.3 points per worker in one illustrative week. The tenth ArcCivs profession uses the existing 40 lifetime-point cap per worker-profession pair, ten points per level across levels 1..5, and +2 max health per level above 1 up to the unchanged overall 28. Other workers/professions/replacements can train; there is no global or network-weekly cap. These points are not player XP, Vault, tokens or redeemable entitlement.",
+    "Death destroys a worker’s persisted cargo and separate personal carried items, with no ground drops or skill point for an uncompleted shipment. Cargo survives NPC retirement and server restart; reassignment unloads it first. If its target building was removed, it routes to the warehouse or hall fallback instead of disappearing. No offline catch-up is assumed. Cargo-loss sensitivity is shown only for one full 64-item OAK_LOG carrier cargo, at illustrative 0/0.1/1 deaths per city-day; this is not a measured death rate. Personal inventory is not mixed into that OAK_LOG total and remains separately covered by resident rules.",
+    "Existing FORESTER, QUARRY, FARM and artisan workers now finish the same fixed-quantity recipes at their workplace on the unchanged 60-second work interval; they do not personally return to a common depot and couriers collect their output. This removes the former producer return leg, so realized item rates may increase, but the size of the increase is unmeasured. Sixty work cycles per worker-hour (180 for three workers) remains a theoretical ceiling, not observed throughput; it does not establish courier route capacity.",
+    "ArcCivs has zero direct Vault, token and player-XP delta. Physical inventory movements and the one OAK_LOG death sink are reported separately; transfers are not item creation. The canonical inventory continues to show EconomyShopGUI SELL as current and its SELL-to-contract removal as a future transition. No item sell price, contract redemption or currency exchange is assigned to this logistics flow.",
+    "Decision represented: enable the 1/2/3-slot warehouse courier route using current recipe and unpaid-row demand, per-building barrels, durable pickup/unload receipts, single-material capacity, and existing cargo/death/reassignment rules. The assessment does not claim measured traffic, item stock availability, route completion speed, simultaneous multi-building staffing, activation or native-player acceptance. After separately authorized delivery, verify exact order subtraction, pickup debit/persistence, destination credit/cargo clearing/once-only XP, 64-item single-material limit, restart/death/reassignment behavior, destination fallback, and zero Vault/token/player-XP changes."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "item_oak_log": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "warehouse_to_cargo_oak_log_l1",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse pickup debit and persistent-cargo receipt",
+          "basis": "Matched L1 warehouse and SAWMILL; 1 illustrative production waves/city-day; 1 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "warehouse_to_cargo_oak_log_l2",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse pickup debit and persistent-cargo receipt",
+          "basis": "Matched L2 warehouse and SAWMILL; 4 illustrative production waves/city-day; 2 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "warehouse_to_cargo_oak_log_l3",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse pickup debit and persistent-cargo receipt",
+          "basis": "Matched L3 warehouse and SAWMILL; 8 illustrative production waves/city-day; 3 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_factory_barrel_oak_log_l1",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory-barrel unload credit and cargo-clear receipt",
+          "basis": "Matched L1 warehouse and SAWMILL; 1 illustrative production waves/city-day; 1 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_factory_barrel_oak_log_l2",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory-barrel unload credit and cargo-clear receipt",
+          "basis": "Matched L2 warehouse and SAWMILL; 4 illustrative production waves/city-day; 2 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_factory_barrel_oak_log_l3",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory-barrel unload credit and cargo-clear receipt",
+          "basis": "Matched L3 warehouse and SAWMILL; 8 illustrative production waves/city-day; 3 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          }
+        },
+        {
+          "id": "full_cargo_lost_on_worker_death",
+          "kind": "item",
+          "source": "ArcCivs proposed warehouse persisted-cargo death handling",
+          "basis": "One full carrier load of a single material, OAK_LOG only; 0/0.1/1 deaths per city-day are illustrative loss sensitivities, not observed mortality. Personal carried items are separate and excluded.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "64",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              "0.1",
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "64",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              "0.1",
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "item_oak_planks": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "factory_to_cargo_oak_planks_l1",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory output pickup and persistent-cargo receipt",
+          "basis": "Matched L1 warehouse and SAWMILL; 1 illustrative production waves/city-day; 1 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "factory_to_cargo_oak_planks_l2",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory output pickup and persistent-cargo receipt",
+          "basis": "Matched L2 warehouse and SAWMILL; 4 illustrative production waves/city-day; 2 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "factory_to_cargo_oak_planks_l3",
+          "kind": "transfer",
+          "source": "ArcCivs proposed factory output pickup and persistent-cargo receipt",
+          "basis": "Matched L3 warehouse and SAWMILL; 8 illustrative production waves/city-day; 3 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_warehouse_oak_planks_l1",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse output-unload credit and cargo-clear receipt",
+          "basis": "Matched L1 warehouse and SAWMILL; 1 illustrative production waves/city-day; 1 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_warehouse_oak_planks_l2",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse output-unload credit and cargo-clear receipt",
+          "basis": "Matched L2 warehouse and SAWMILL; 4 illustrative production waves/city-day; 2 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "cargo_to_warehouse_oak_planks_l3",
+          "kind": "transfer",
+          "source": "ArcCivs proposed warehouse output-unload credit and cargo-clear receipt",
+          "basis": "Matched L3 warehouse and SAWMILL; 8 illustrative production waves/city-day; 3 assigned sawmill worker(s), zero own-barrel stock and zero matching incoming cargo. One selected material only.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              8
+            ]
+          }
+        }
+      ]
+    },
+    "internal_warehouse_profession_points": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "successful_shipment_unload",
+          "kind": "item",
+          "source": "ArcCivs proposed warehouse unload second receipt",
+          "basis": "One point per successful unload after the durable pickup receipt. Each 1/4/8-wave city-day has one OAK_LOG supply shipment and one current OAK_PLANKS return shipment per wave; points may be distributed among 1/2/3 warehouse workers. The one-week totals stay below each pair’s 40 lifetime-point cap when distributed as described.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              16
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              16
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

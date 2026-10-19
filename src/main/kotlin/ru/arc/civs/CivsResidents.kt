@@ -2,7 +2,7 @@ package ru.arc.civs
 
 /** Small personal stores contain only explicitly supplied plain items, never native NPC copies. */
 object CivsResidents {
-    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM")
+    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE")
     val catalog = listOf("BREAD", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE",
         "LEATHER_HELMET", "LEATHER_CHESTPLATE", "LEATHER_LEGGINGS", "LEATHER_BOOTS",
         "IRON_HELMET", "IRON_CHESTPLATE", "IRON_LEGGINGS", "IRON_BOOTS")
@@ -12,11 +12,11 @@ object CivsResidents {
     fun skillLevel(worker: CivWorker, profession: String): Int =
         1 + (skillExperience(worker, profession) / 10).toInt().coerceIn(0, 4)
     fun maxHealth(worker: CivWorker): Double = 20.0 + 2 * professions.maxOf { skillLevel(worker, it) - 1 }
-    fun profession(type: BuildingType): String = if (type == BuildingType.TOWN_HALL) "BUILDER_HUT" else type.name
+    fun profession(type: BuildingType): String = type.name
     fun tool(type: BuildingType): String? = when (type) {
-        BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT -> "IRON_SHOVEL"
-        BuildingType.FORESTER -> "IRON_AXE"
-        BuildingType.QUARRY -> "IRON_PICKAXE"
+        BuildingType.BUILDER_HUT -> "IRON_SHOVEL"
+        BuildingType.FORESTER, BuildingType.SAWMILL -> "IRON_AXE"
+        BuildingType.QUARRY, BuildingType.BLACKSMITH, BuildingType.STONEMASON -> "IRON_PICKAXE"
         BuildingType.FARM -> "IRON_HOE"
         else -> null
     }
