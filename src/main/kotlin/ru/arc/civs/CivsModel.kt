@@ -55,6 +55,8 @@ data class CivWorker(
     val inventory: Map<String, Long>? = null,
     /** A separately journalled shipment; these items have already left their source container. */
     val cargo: CivCargo? = null,
+    /** Six equipment slots followed by 27 bag slots; null migrates the old plain personal store. */
+    val items: List<CivResidentItem?>? = null,
 )
 
 /** Captured placement bytes live under this order's UUID, independently of mutable source files. */
@@ -74,6 +76,8 @@ data class CivConstruction(
     val payment: CivConstructionPayment? = null,
     /** Remaining rows authorized by observed builder sessions; null is a legacy single-row session. */
     val workCredit: Int? = null,
+    val blocksRequired: Int? = null,
+    val blocksPlaced: Int? = null,
 )
 
 data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)
@@ -108,6 +112,8 @@ data class Settlement(
     val pendingControls: List<CivControlPlacement>? = null,
     val constructionQueue: List<UUID>? = null,
     val pendingDeletion: CivDeletion? = null,
+    /** Next shaft/tunnel operation per mine; actual terrain and drops remain in the item journal. */
+    val mineProgress: Map<String, Long>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

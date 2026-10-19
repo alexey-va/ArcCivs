@@ -1,0 +1,4804 @@
+{
+  "title": "ArcCivs .24 timer production vs physical farm, forest and mine work",
+  "assumptions": [
+    "Source comparison only: .24 timer baseline versus the current uncommitted worksite implementation. No build, delivery, activation or player acceptance is claimed.",
+    "Low/base/high use 1/10/16 participating cities. Each city selects one active FARM, FORESTER or QUARRY site at L1/L2/L3 with 1/2/3 assigned workers; worksite choices are alternatives and not stacked. The high case is 48 NPCs for 16 three-worker sites if on one runtime, matching its 48-actor ceiling; any other jobs reduce realized activity.",
+    "Before timer activity assumes 1/5/10 completed site cycles per city-day at L1/L2/L3; each cycle retains its 60s interval plus travel. This is illustrative, not measured. Existing outputs remain 4/8/12 selected logs, 3/6/9 selected quarry blocks, and 3/6/9 raw crops or 1/2/3 bread with 3/6/9 wheat input.",
+    "After activity assumes 1/4/9 mature crop harvests per active city-day, 1/2/3 complete tree cuts, and 5/10/15 changed mine cells (five per worker/day). These are explicit scenario assumptions after travel and waiting, not a conversion from action seconds to a precise clock. Nominal work portions are 3s for till/plant/harvest or bread recipe, max(6s, 1s per removed log) for tree cuts up to 128 logs, and 4s per mine cell.",
+    "Farm assumes selected crop already planted, only the listed number of crops reaches native maturity, and field chunks stay loaded during enough eligible growth ticks. Work is unavailable while world time is 12000..23000. Actual maturity also depends on native growth, loaded chunks, viewer presence, daytime, travel, route, stock and space; loaded hours do not guarantee a fixed harvest count.",
+    "Forestry assumes a loaded, safe, reachable area has 1/2/3 mature connected leaf-bearing selected trees per city-day, sizes 4/12/128 logs. The L3 128-log tree is a finite-world maximum-size stress case, not telemetry or a renewable daily rate. Each cut uses real matching logs and consumes one matching paid sapling for ordinary one-root species; DARK_OAK requires a supported native 2x2 plot and four paid saplings to replant. Missing/insufficient saplings means no replant; no mature trees or saplings are minted.",
+    "Mining assumes 5/10/15 safe changed-cell steps per city-day with pick and stock. A cell receipt may dig actual world block or place support; only the former yields actual native drops, whose item type/count depend on the block and tool. Mine layouts have at most 231/462/693 planned positions for L1/L2/L3; already-correct/air steps skip, and mined deposits do not regenerate. High illustrative week clears 105 of 693 positions.",
+    "Outputs and supports are paid/credited through the existing durable work receipt. Initial crop planting consumes one matching seed per field plot. medievaloak irrigation is authored; nordic/caledonia each require one WATER_BUCKET to add the water source and return one BUCKET. Warehouse requests are deficit-based transfers: only the selected farm seed is requested, and matching IRON_HOE/IRON_AXE/IRON_PICKAXE demand is one per assigned worker (1/2/3 by headcount), not a wooden tool or squared worker count. Tools are not issued for free; the used damageable tool takes native durability only from actual non-air source blocks; the held tool’s native Unbreaking chance applies. Full-layout one-time maximum support bill is 59/118/177 COBBLESTONE, 6/12/18 LADDER, 7/14/21 TORCH for L1/L2/L3; cells already correct lower it. Setup and tool replacement frequency are not amortized.",
+    "Internal skill: one point per completed old timer cycle; after, one only per committed action with world changes (farm till/plant/harvest, one tree cut regardless of logs, or one changed mine cell). Bread-only recipe and tool transfer award none. Each worker-profession caps at 40 lifetime points; levels 1..5 advance every 10, and NPC max health remains 20..28. Points are internal NPC progression, not player XP, and there is no global/network weekly cap.",
+    "The physical worksite requires an eligible loaded world, active nearby viewer, valid path, worker slot, local tool/input/output space and a non-protected change. Missing crop maturity, safe tree, mine cells or supplies means no output. There is no offline catch-up.",
+    "Direct Vault, token and player-XP delta is zero. Items remain separate units; no SELL price or item/currency exchange is assumed. EconomyShopGUI SELL remains current and the owner's SELL-to-contract transition remains future. Recruitment, one-time founder stock, 1/2/3 worker slots, max12 population, max16 buildings and exact schematic costs remain unchanged; there is no free pioneer reset.",
+    "Decision: replace timer grants for these three worksite professions with item/world receipts based on mature crops, real trees and actual mine cells, keeping paid inputs and capped internal NPC skill. Native crop/mining item mixtures and indirect SELL exposure require measurement after delivery; this assessment does not assert activation."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "item_selected_logs": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "4",
+              "40",
+              "120"
+            ],
+            "network_weekly": [
+              "28",
+              "2800",
+              "13440"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_logs_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "4",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "28",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "timer_logs_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "40",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "2800",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "timer_logs_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "120"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "13440"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "4",
+              "24",
+              "384"
+            ],
+            "network_weekly": [
+              "28",
+              "1680",
+              "43008"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_logs_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "timer_logs_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "timer_logs_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "4",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "28",
+              "0",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "24",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "1680",
+              "0"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          },
+          {
+            "id": "native_tree_logs_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "384"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "43008"
+            ],
+            "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "item_selected_raw_crop": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "3",
+              "30",
+              "90"
+            ],
+            "network_weekly": [
+              "21",
+              "2100",
+              "10080"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_raw_crop_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "0",
+              "0"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          },
+          {
+            "id": "timer_raw_crop_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "30",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "2100",
+              "0"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          },
+          {
+            "id": "timer_raw_crop_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "90"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "10080"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_raw_crop_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          },
+          {
+            "id": "timer_raw_crop_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          },
+          {
+            "id": "timer_raw_crop_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "item_bread": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "10",
+              "30"
+            ],
+            "network_weekly": [
+              "7",
+              "700",
+              "3360"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_bread_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "timer_bread_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "10",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "700",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "timer_bread_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "30"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "3360"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "4",
+              "9"
+            ],
+            "network_weekly": [
+              "7",
+              "280",
+              "1008"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_bread_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "timer_bread_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "timer_bread_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "0",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "4",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "280",
+              "0"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          },
+          {
+            "id": "physical_bread_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "9"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "1008"
+            ],
+            "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "item_wheat": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "3",
+              "30",
+              "90"
+            ],
+            "network_weekly": [
+              "21",
+              "2100",
+              "10080"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_bread_wheat_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "timer_bread_wheat_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "30",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "2100",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "timer_bread_wheat_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "90"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "10080"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "3",
+              "12",
+              "27"
+            ],
+            "network_weekly": [
+              "21",
+              "840",
+              "3024"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_bread_wheat_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "timer_bread_wheat_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "timer_bread_wheat_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "0",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "12",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "840",
+              "0"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          },
+          {
+            "id": "physical_bread_wheat_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "27"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "3024"
+            ],
+            "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "item_selected_quarry_output": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "3",
+              "30",
+              "90"
+            ],
+            "network_weekly": [
+              "21",
+              "2100",
+              "10080"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_quarry_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "0",
+              "0"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          },
+          {
+            "id": "timer_quarry_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "30",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "2100",
+              "0"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          },
+          {
+            "id": "timer_quarry_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "90"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "10080"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "timer_quarry_l1",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          },
+          {
+            "id": "timer_quarry_l2",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          },
+          {
+            "id": "timer_quarry_l3",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "worksite_crop_harvest_receipts": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "mature_crop_actions",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One unit is one completed mature crop-block harvest action, not the stack count of native drops. Illustrative city-day counts: 1/4/9 at L1/L2/L3. Field setup actions are separate."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "4",
+              "9"
+            ],
+            "network_weekly": [
+              "7",
+              "280",
+              "1008"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "mature_crop_actions",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "4",
+              "9"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "280",
+              "1008"
+            ],
+            "basis": "One unit is one completed mature crop-block harvest action, not the stack count of native drops. Illustrative city-day counts: 1/4/9 at L1/L2/L3. Field setup actions are separate."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "worksite_tree_cut_receipts": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "tree_cut_actions",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One unit is a completed tree-cut receipt, not one log. Assumed 1/2/3 cuts per city-day; assumed trees contain 4/12/128 logs, with the L3 tree at the 128-log bound; each action awards one point for the whole action."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly": [
+              "7",
+              "140",
+              "336"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "tree_cut_actions",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "140",
+              "336"
+            ],
+            "basis": "One unit is a completed tree-cut receipt, not one log. Assumed 1/2/3 cuts per city-day; assumed trees contain 4/12/128 logs, with the L3 tree at the 128-log bound; each action awards one point for the whole action."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "item_saplings": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "paid_saplings_for_replant",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Evaluator rows assume a selected non-dark-oak species and one matching paid sapling per replanted tree: 1/2/3 per city-day. DARK_OAK is an alternative requiring four paid saplings per replant (4/8/12 per city-day with the same 1/2/3 cut assumptions); if all four are unavailable, the cut proceeds without replanting. No free sapling drops are included."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly": [
+              "7",
+              "140",
+              "336"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "paid_saplings_for_replant",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "140",
+              "336"
+            ],
+            "basis": "Evaluator rows assume a selected non-dark-oak species and one matching paid sapling per replanted tree: 1/2/3 per city-day. DARK_OAK is an alternative requiring four paid saplings per replant (4/8/12 per city-day with the same 1/2/3 cut assumptions); if all four are unavailable, the cut proceeds without replanting. No free sapling drops are included."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "worksite_mine_cell_receipts": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "changed_mine_cells",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One unit is one committed world-cell change, not one ore/item. Assumes 5/10/15 changed cells per city-day at L1/L2/L3 (five per assigned worker/day), nominal 4s per action plus travel. Cells may be actual digs or paid support placement; only real removed blocks yield native drops."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "5",
+              "10",
+              "15"
+            ],
+            "network_weekly": [
+              "35",
+              "700",
+              "1680"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "changed_mine_cells",
+            "kind": "item",
+            "player_daily_potential": [
+              "5",
+              "10",
+              "15"
+            ],
+            "network_weekly_after_cap": [
+              "35",
+              "700",
+              "1680"
+            ],
+            "basis": "One unit is one committed world-cell change, not one ore/item. Assumes 5/10/15 changed cells per city-day at L1/L2/L3 (five per assigned worker/day), nominal 4s per action plus travel. Cells may be actual digs or paid support placement; only real removed blocks yield native drops."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "internal_farmer_skill_points": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly": [
+              "7",
+              "350",
+              "1120"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "farmer_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "350",
+              "1120"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "farmer_mature_harvest",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. Physical scenario assumes 1/4/9 crop actions/day. Bread-only recipe does not change a block and grants no point."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "4",
+              "9"
+            ],
+            "network_weekly": [
+              "7",
+              "280",
+              "1008"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "farmer_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "farmer_mature_harvest",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "4",
+              "9"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "280",
+              "1008"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. Physical scenario assumes 1/4/9 crop actions/day. Bread-only recipe does not change a block and grants no point."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "internal_forester_skill_points": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly": [
+              "7",
+              "350",
+              "1120"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "forester_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "350",
+              "1120"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "forester_tree_cut",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One cut action grants one point regardless of the number of logs removed; 1/2/3 cuts/day."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly": [
+              "7",
+              "140",
+              "336"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "forester_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "forester_tree_cut",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "2",
+              "3"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "140",
+              "336"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One cut action grants one point regardless of the number of logs removed; 1/2/3 cuts/day."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "internal_miner_skill_points": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly": [
+              "7",
+              "350",
+              "1120"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "miner_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "1",
+              "5",
+              "10"
+            ],
+            "network_weekly_after_cap": [
+              "7",
+              "350",
+              "1120"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "miner_changed_cells",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One changed cell is one physical action; 5/10/15 per city-day, five per assigned worker/day. The high case is 35 points per worker in the first modeled week from zero skill."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "5",
+              "10",
+              "15"
+            ],
+            "network_weekly": [
+              "35",
+              "700",
+              "1680"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "miner_timer",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap."
+          },
+          {
+            "id": "miner_changed_cells",
+            "kind": "item",
+            "player_daily_potential": [
+              "5",
+              "10",
+              "15"
+            ],
+            "network_weekly_after_cap": [
+              "35",
+              "700",
+              "1680"
+            ],
+            "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One changed cell is one physical action; 5/10/15 per city-day, five per assigned worker/day. The high case is 35 points per worker in the first modeled week from zero skill."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "vault": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "player_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prices": []
+}

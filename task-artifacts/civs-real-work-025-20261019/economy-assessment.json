@@ -1,0 +1,1118 @@
+{
+  "version": 1,
+  "title": "ArcCivs .24 timer production vs physical farm, forest and mine work",
+  "assumptions": [
+    "Source comparison only: .24 timer baseline versus the current uncommitted worksite implementation. No build, delivery, activation or player acceptance is claimed.",
+    "Low/base/high use 1/10/16 participating cities. Each city selects one active FARM, FORESTER or QUARRY site at L1/L2/L3 with 1/2/3 assigned workers; worksite choices are alternatives and not stacked. The high case is 48 NPCs for 16 three-worker sites if on one runtime, matching its 48-actor ceiling; any other jobs reduce realized activity.",
+    "Before timer activity assumes 1/5/10 completed site cycles per city-day at L1/L2/L3; each cycle retains its 60s interval plus travel. This is illustrative, not measured. Existing outputs remain 4/8/12 selected logs, 3/6/9 selected quarry blocks, and 3/6/9 raw crops or 1/2/3 bread with 3/6/9 wheat input.",
+    "After activity assumes 1/4/9 mature crop harvests per active city-day, 1/2/3 complete tree cuts, and 5/10/15 changed mine cells (five per worker/day). These are explicit scenario assumptions after travel and waiting, not a conversion from action seconds to a precise clock. Nominal work portions are 3s for till/plant/harvest or bread recipe, max(6s, 1s per removed log) for tree cuts up to 128 logs, and 4s per mine cell.",
+    "Farm assumes selected crop already planted, only the listed number of crops reaches native maturity, and field chunks stay loaded during enough eligible growth ticks. Work is unavailable while world time is 12000..23000. Actual maturity also depends on native growth, loaded chunks, viewer presence, daytime, travel, route, stock and space; loaded hours do not guarantee a fixed harvest count.",
+    "Forestry assumes a loaded, safe, reachable area has 1/2/3 mature connected leaf-bearing selected trees per city-day, sizes 4/12/128 logs. The L3 128-log tree is a finite-world maximum-size stress case, not telemetry or a renewable daily rate. Each cut uses real matching logs and consumes one matching paid sapling for ordinary one-root species; DARK_OAK requires a supported native 2x2 plot and four paid saplings to replant. Missing/insufficient saplings means no replant; no mature trees or saplings are minted.",
+    "Mining assumes 5/10/15 safe changed-cell steps per city-day with pick and stock. A cell receipt may dig actual world block or place support; only the former yields actual native drops, whose item type/count depend on the block and tool. Mine layouts have at most 231/462/693 planned positions for L1/L2/L3; already-correct/air steps skip, and mined deposits do not regenerate. High illustrative week clears 105 of 693 positions.",
+    "Outputs and supports are paid/credited through the existing durable work receipt. Initial crop planting consumes one matching seed per field plot. medievaloak irrigation is authored; nordic/caledonia each require one WATER_BUCKET to add the water source and return one BUCKET. Warehouse requests are deficit-based transfers: only the selected farm seed is requested, and matching IRON_HOE/IRON_AXE/IRON_PICKAXE demand is one per assigned worker (1/2/3 by headcount), not a wooden tool or squared worker count. Tools are not issued for free; the used damageable tool takes native durability only from actual non-air source blocks; the held tool’s native Unbreaking chance applies. Full-layout one-time maximum support bill is 59/118/177 COBBLESTONE, 6/12/18 LADDER, 7/14/21 TORCH for L1/L2/L3; cells already correct lower it. Setup and tool replacement frequency are not amortized.",
+    "Internal skill: one point per completed old timer cycle; after, one only per committed action with world changes (farm till/plant/harvest, one tree cut regardless of logs, or one changed mine cell). Bread-only recipe and tool transfer award none. Each worker-profession caps at 40 lifetime points; levels 1..5 advance every 10, and NPC max health remains 20..28. Points are internal NPC progression, not player XP, and there is no global/network weekly cap.",
+    "The physical worksite requires an eligible loaded world, active nearby viewer, valid path, worker slot, local tool/input/output space and a non-protected change. Missing crop maturity, safe tree, mine cells or supplies means no output. There is no offline catch-up.",
+    "Direct Vault, token and player-XP delta is zero. Items remain separate units; no SELL price or item/currency exchange is assumed. EconomyShopGUI SELL remains current and the owner's SELL-to-contract transition remains future. Recruitment, one-time founder stock, 1/2/3 worker slots, max12 population, max16 buildings and exact schematic costs remain unchanged; there is no free pioneer reset.",
+    "Decision: replace timer grants for these three worksite professions with item/world receipts based on mature crops, real trees and actual mine cells, keeping paid inputs and capped internal NPC skill. Native crop/mining item mixtures and indirect SELL exposure require measurement after delivery; this assessment does not assert activation."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "item_selected_logs": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "timer_logs_l1",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_logs_l2",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              5,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_logs_l3",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "native_tree_logs_l1",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "native_tree_logs_l2",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              2,
+              0
+            ]
+          }
+        },
+        {
+          "id": "native_tree_logs_l3",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One selected matching timber only: OAK/SPRUCE/BIRCH/JUNGLE/ACACIA/DARK_OAK. Timer rows use fixed 4/8/12 logs per L1/L2/L3 cycle. Physical rows assume one/two/three cuts per city-day of a 4/12/128-log connected tree respectively; native same-log drop assumed 1:1 with no bonus enchantment. The L3 128-log case is a maximum-size finite-world stress assumption, not a sustainable daily yield; connected trees over 128 logs are rejected. Illustrative, not observed.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "128",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "item_selected_raw_crop": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "timer_raw_crop_l1",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_raw_crop_l2",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              5,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_raw_crop_l3",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One raw FARM selection only: WHEAT, CARROT or POTATO, not summed. Timer quantity is 3/6/9 crop items per L1/L2/L3 cycle. Physical action emits native Block.getDrops for a fully mature crop and actual held hoe; exact item types/counts are world/tool dependent and are represented separately as harvest receipts.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "timer_bread_l1",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.amount/inputs",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_bread_l2",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.amount/inputs",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              5,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_bread_l3",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.amount/inputs",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_l1",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_l2",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_l3",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "BREAD is an alternative FARM mode, not additive with raw-crop output. Timer baseline is 1/2/3 BREAD per L1/L2/L3 cycle, consuming 3/6/9 WHEAT. Physical mode assumes 1/4/9 successful one-BREAD actions per city-day and 3 WHEAT per action; each takes 3s. Bread recipe has no block changes and awards no internal profession point.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "item_wheat": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "timer_bread_wheat_l1",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.inputs",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_bread_wheat_l2",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.inputs",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              5,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_bread_wheat_l3",
+          "kind": "item",
+          "source": "ArcCivs prior recipe: CivsMaterials.CivsProduction.inputs",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_wheat_l1",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_wheat_l2",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              4,
+              0
+            ]
+          }
+        },
+        {
+          "id": "physical_bread_wheat_l3",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites.farm; CivsStorage.prepareWork",
+          "basis": "Only the selected BREAD recipe is modeled. Each BREAD consumes 3 WHEAT. Timer cycles are 1/5/10 per city-day; physical recipe completions are 1/4/9 per city-day. This is an item input from local stock, not currency burn or assumed crop yield.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "item_selected_quarry_output": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "timer_quarry_l1",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_quarry_l2",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              5,
+              0
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "timer_quarry_l3",
+          "kind": "item",
+          "source": "ArcCivs prior timer rules: CivsRules.deliveryAmount / CivsRules.PRODUCTION_INTERVAL",
+          "basis": "One selected timer material only: COBBLESTONE, STONE or COBBLED_DEEPSLATE. Prior timer quantity is 3/6/9 items per L1/L2/L3 cycle. Physical output is actual native Block.getDrops using the held pick; source block, drop quantity and route are not fixed by this assessment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_crop_harvest_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "mature_crop_actions",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One unit is one completed mature crop-block harvest action, not the stack count of native drops. Illustrative city-day counts: 1/4/9 at L1/L2/L3. Field setup actions are separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_tree_cut_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "tree_cut_actions",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One unit is a completed tree-cut receipt, not one log. Assumed 1/2/3 cuts per city-day; assumed trees contain 4/12/128 logs, with the L3 tree at the 128-log bound; each action awards one point for the whole action.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "item_saplings": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "paid_saplings_for_replant",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "Evaluator rows assume a selected non-dark-oak species and one matching paid sapling per replanted tree: 1/2/3 per city-day. DARK_OAK is an alternative requiring four paid saplings per replant (4/8/12 per city-day with the same 1/2/3 cut assumptions); if all four are unavailable, the cut proceeds without replanting. No free sapling drops are included.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_mine_cell_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "changed_mine_cells",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm/forest/mine; CivsRules.finishWorldWork; CivsStorage.prepareWork",
+          "basis": "One unit is one committed world-cell change, not one ore/item. Assumes 5/10/15 changed cells per city-day at L1/L2/L3 (five per assigned worker/day), nominal 4s per action plus travel. Cells may be actual digs or paid support placement; only real removed blocks yield native drops.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              10,
+              15
+            ]
+          }
+        }
+      ]
+    },
+    "internal_farmer_skill_points": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "farmer_timer",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "farmer_mature_harvest",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. Physical scenario assumes 1/4/9 crop actions/day. Bread-only recipe does not change a block and grants no point.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "internal_forester_skill_points": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "forester_timer",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "forester_tree_cut",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One cut action grants one point regardless of the number of logs removed; 1/2/3 cuts/day.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "internal_miner_skill_points": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "miner_timer",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "miner_changed_cells",
+          "kind": "item",
+          "source": "ArcCivs CivsResidents.trained; CivsRules.deliver / finishWorldWork",
+          "basis": "One internal point per completed timer cycle before and one per committed world-changing action after. Timer cases assume 1/5/10 site cycles per city-day, distributed among 1/2/3 assigned workers. Each worker-profession has its own 40 lifetime-point cap and levels every ten points through level 5; weekly results are illustrative activity potential, not money or a global weekly cap. One changed cell is one physical action; 5/10/15 per city-day, five per assigned worker/day. The high case is 35 points per worker in the first modeled week from zero skill.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              10,
+              15
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

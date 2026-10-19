@@ -80,6 +80,26 @@ class CivsBlueprints(
     private val source = service.open("arccivs-library", sourceRoot)
     private val captured = service.open("arccivs-construction", capturedRoot)
 
+    /** A marker lookup needs no captured bytes, material bill, transformed block palette or preview surface. */
+    fun controlPosition(building: CivBuilding): CompletableFuture<CivPosition> =
+        source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenApplyAsync({ original ->
+            requireVolume(original)
+            val aligned = CivsBlueprintGeometry.alignment(original, building.anchor, building.rotation / 90,
+                building.rotation, building.entrance)
+            val corners = listOf(original.minimum.x, original.maximum.x).flatMap { x ->
+                listOf(original.minimum.z, original.maximum.z).map { z ->
+                    CivsBlueprintGeometry.rotate(ArcSchematicPoint(x - original.origin.x, 0, z - original.origin.z), aligned.quarterTurns)
+                }
+            }
+            val bounds = CivBox(CivPosition(aligned.anchor.x + corners.minOf { it.x }, aligned.anchor.y + original.minimum.y - original.origin.y,
+                aligned.anchor.z + corners.minOf { it.z }),
+                CivPosition(aligned.anchor.x + corners.maxOf { it.x }, aligned.anchor.y + original.maximum.y - original.origin.y,
+                    aligned.anchor.z + corners.maxOf { it.z }))
+            if (aligned.anchor != building.anchor || aligned.entrance != building.entrance || bounds != building.bounds)
+                throw CivsRejection("control-location-changed")
+            aligned.control
+        }, executor)
+
     fun prepare(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
         placement: CivPosition, facing: Int, exactRotation: Int? = null,

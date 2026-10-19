@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.destroystokyo.paper.event.block.BlockDestroyEvent
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -12,6 +13,7 @@ import org.bukkit.World
 import org.bukkit.block.BlockFace
 import org.bukkit.block.Container
 import org.bukkit.block.DoubleChest
+import org.bukkit.block.data.Ageable
 import org.bukkit.entity.Player
 import org.bukkit.event.Event
 import org.bukkit.event.block.Action
@@ -19,10 +21,13 @@ import org.bukkit.event.block.BlockBreakEvent
 import org.bukkit.event.block.BlockDropItemEvent
 import org.bukkit.event.block.BlockExplodeEvent
 import org.bukkit.event.block.BlockFromToEvent
+import org.bukkit.event.block.BlockGrowEvent
 import org.bukkit.event.block.BlockMultiPlaceEvent
 import org.bukkit.event.block.BlockPistonExtendEvent
 import org.bukkit.event.block.BlockPistonRetractEvent
 import org.bukkit.event.block.BlockPlaceEvent
+import org.bukkit.event.block.BlockPhysicsEvent
+import org.bukkit.event.block.LeavesDecayEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
@@ -166,6 +171,110 @@ class CivsProtectionTest : FunSpec({
             paper.callEvent(BlockFromToEvent(inside, outside)).isCancelled shouldBe true
             val explosion = BlockExplodeEvent(outside, outside.state, mutableListOf<org.bukkit.block.Block>(outside, inside), 1f, ExplosionResult.DESTROY)
             paper.callEvent(explosion).blockList() shouldBe listOf(outside)
+        }
+    }
+
+    test("finished doors vines and leaves receive native physics while their footprint stays protected") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("finished-physics")
+            val city = protectionCity(world.uid, UUID.randomUUID(), protectionBuilding(0, 3))
+            val listener = CivsProtection({ listOf(city) })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("FinishedPhysicsTest"))
+            val lower = world.getBlockAt(0, 64, 1).also {
+                it.blockData = org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=lower,open=true]")
+            }
+            val upper = world.getBlockAt(0, 65, 1).also {
+                it.blockData = org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=upper,open=false]")
+            }
+            val vine = world.getBlockAt(1, 65, 1).also { it.type = Material.VINE }
+            val leaves = world.getBlockAt(2, 65, 1).also { it.type = Material.OAK_LEAVES }
+            for (block in listOf(lower, upper, vine)) {
+                listener.isProtected(world.uid, block.x, block.y, block.z) shouldBe true
+                paper.callEvent(BlockPhysicsEvent(block, lower.blockData, lower)).isCancelled shouldBe false
+                paper.callEvent(BlockDestroyEvent(block, Material.AIR.createBlockData(), block.blockData, 0, true))
+                    .isCancelled shouldBe false
+            }
+            paper.callEvent(LeavesDecayEvent(leaves)).isCancelled shouldBe false
+            val alreadyDenied = BlockPhysicsEvent(upper, lower.blockData, lower).also { it.isCancelled = true }
+            paper.callEvent(alreadyDenied).isCancelled shouldBe true
+        }
+    }
+
+    test("accepted current and planned construction keep physics locked without freezing another finished building") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("construction-physics")
+            val building = protectionBuilding(0, 2).copy(control = CivPosition(1, 64, 1))
+            val unrelated = protectionBuilding(10, 12).copy(type = BuildingType.HOUSE)
+            val planned = building.copy(level = 2, bounds = CivBox(CivPosition(0, 64, 0), CivPosition(4, 66, 3)))
+            var city = protectionCity(world.uid, UUID.randomUUID(), building).copy(buildings = listOf(building, unrelated))
+            val listener = CivsProtection({ listOf(city) })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("ConstructionPhysicsTest"))
+            val currentDoor = world.getBlockAt(0, 65, 1).also { it.type = Material.OAK_DOOR }
+            val plannedVine = world.getBlockAt(4, 65, 1).also { it.type = Material.VINE }
+            val control = world.getBlockAt(1, 64, 1).also { it.type = Material.BARREL }
+            val other = world.getBlockAt(10, 65, 1).also { it.type = Material.OAK_DOOR }
+            for (phase in ConstructionPhase.entries) {
+                city = city.copy(construction = CivConstruction(UUID.randomUUID(), building.id, 2, 3, 0,
+                    phase, Stock(), plannedBuilding = planned))
+                listener.refresh()
+                for (block in listOf(currentDoor, plannedVine, control)) {
+                    paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe true
+                    paper.callEvent(BlockDestroyEvent(block, Material.AIR.createBlockData(), block.blockData, 0, true))
+                        .isCancelled shouldBe true
+                }
+                paper.callEvent(BlockPhysicsEvent(other, other.blockData)).isCancelled shouldBe false
+            }
+            city = city.copy(construction = null)
+            listener.refresh()
+            paper.callEvent(BlockPhysicsEvent(currentDoor, currentDoor.blockData)).isCancelled shouldBe false
+            paper.callEvent(BlockPhysicsEvent(control, control.blockData)).isCancelled shouldBe true
+        }
+    }
+
+    test("only authored farm crops grow and exact journal locks stop growth and physics until release") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("farm-growth")
+            val farm = protectionBuilding(-3, 17).copy(type = BuildingType.FARM, anchor = CivPosition(0, 63, 0),
+                schematicId = "civs/minecolonies/medievaloak/agriculture/horticulture/farmer1",
+                bounds = CivBox(CivPosition(-3, 63, -23), CivPosition(17, 86, -1)), entrance = CivPosition(0, 64, 0))
+            val neighbor = protectionBuilding(30, 32).copy(type = BuildingType.HOUSE)
+            var city = protectionCity(world.uid, UUID.randomUUID(), farm).copy(buildings = listOf(farm, neighbor))
+            val fields = CivsWorksiteLayouts.field(farm)
+            val crop = fields.first().let { it.copy(y = it.y + 1) }
+            val otherCrop = fields[1].let { it.copy(y = it.y + 1) }
+            val points = listOf(crop, otherCrop, CivPosition(0, 65, -2), CivPosition(30, 65, 1), CivPosition(40, 65, 1))
+            points.forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WHEAT }
+            var locked = emptySet<Pair<UUID, CivPosition>>()
+            val listener = CivsProtection({ listOf(city) }, worldLocked = { worldId, point -> (worldId to point) in locked })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("FarmGrowthProtectionTest"))
+            fun grow(point: CivPosition): BlockGrowEvent {
+                val block = world.getBlockAt(point.x, point.y, point.z)
+                val after = block.state
+                after.blockData = (after.blockData as Ageable).also { it.age = it.maximumAge }
+                return paper.callEvent(BlockGrowEvent(block, after))
+            }
+            grow(crop).isCancelled shouldBe false
+            grow(otherCrop).isCancelled shouldBe false
+            grow(CivPosition(0, 65, -2)).isCancelled shouldBe true
+            grow(CivPosition(30, 65, 1)).isCancelled shouldBe true
+            grow(CivPosition(40, 65, 1)).isCancelled shouldBe false
+
+            val block = world.getBlockAt(crop.x, crop.y, crop.z)
+            locked = setOf(world.uid to crop)
+            grow(crop).isCancelled shouldBe true
+            grow(otherCrop).isCancelled shouldBe false
+            paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe true
+            val adjacent = world.getBlockAt(otherCrop.x, otherCrop.y, otherCrop.z)
+            paper.callEvent(BlockPhysicsEvent(adjacent, adjacent.blockData)).isCancelled shouldBe false
+            locked = emptySet()
+            grow(crop).isCancelled shouldBe false
+            paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe false
+
+            // An upgrading farm retains ACTIVE as its current record until the replacement is committed.
+            city = city.copy(construction = CivConstruction(UUID.randomUUID(), farm.id, 2, 3, 0,
+                ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = farm.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)))
+            listener.refresh()
+            grow(crop).isCancelled shouldBe true
         }
     }
 

@@ -283,8 +283,8 @@ class CivsCitizensTest : FunSpec({
         citizenNavigationOutcome(completed, false, 1_000, 10_000, false) shouldBe
             CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
         citizenNavigationOutcome(completed, true, 1_000, 10_000, false) shouldBe CitizenNavigationOutcome.ARRIVED
-        citizenNavigationOutcome(null, true, 1_000, 10_000, false) shouldBe CitizenNavigationOutcome.STOPPED
-        citizenNavigationOutcome(null, true, 1_000, 10_000, true) shouldBe CitizenNavigationOutcome.PENDING
+        citizenNavigationOutcome(null, true, 1_000, 10_000, false) shouldBe CitizenNavigationOutcome.ARRIVED
+        citizenNavigationOutcome(null, true, 1_000, 10_000, true) shouldBe CitizenNavigationOutcome.ARRIVED
     }
 
     test("Citizens cancellation retains its reason and cannot count as an arrival") {
@@ -641,7 +641,7 @@ class CivsCitizensTest : FunSpec({
         wander.ready(0) shouldBe true
         val targets = (0..39).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
         targets.distinct().size shouldBe 40
-        targets.all { city.contains(it.x, it.z) && kotlin.math.abs(it.x) <= 4 && kotlin.math.abs(it.z) <= 4 && it.y in 62..66 } shouldBe true
+        targets.all { city.contains(it.x, it.z) && kotlin.math.abs(it.x) <= 16 && kotlin.math.abs(it.z) <= 16 && it.y in 62..66 } shouldBe true
         targets.take(5).map { it.x to it.z }.distinct().size shouldBe 1
         targets.take(5).map { it.y } shouldBe listOf(64, 65, 63, 66, 62)
         targets[5].let { it.x to it.z } shouldBe targets[9].let { it.x to it.z }
@@ -652,11 +652,11 @@ class CivsCitizensTest : FunSpec({
         wander.step shouldBe 1
         wander.finish(1_000, true)
         wander.step shouldBe 5
-        wander.ready(5_999) shouldBe false
-        wander.ready(6_000) shouldBe true
-        wander.finish(6_000, false)
-        wander.ready(20_999) shouldBe false
-        wander.ready(21_000) shouldBe true
+        wander.ready(2_999) shouldBe false
+        wander.ready(3_000) shouldBe true
+        wander.finish(3_000, false)
+        wander.ready(10_999) shouldBe false
+        wander.ready(11_000) shouldBe true
         cycle.phase shouldBe CitizenPhase.IDLE
         cycle.beginDelivery(Long.MAX_VALUE) shouldBe null
         worker.completedCycles shouldBe 0L

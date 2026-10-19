@@ -43,16 +43,22 @@ class CivsProtection(
     private val cities: () -> Collection<Settlement>,
     private val available: () -> Boolean = { true },
     private val protectedWorlds: Set<String> = emptySet(),
+    private val worldLocked: (UUID, CivPosition) -> Boolean = { _, _ -> false },
 ) : Listener {
     internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>,
         val barrelRestorers: Set<UUID> = emptySet())
     internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
-        val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>)
+        val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>,
+        val cropCells: Set<Pair<UUID, CivPosition>>)
     internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
         fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false): Boolean = bounds.contains(x, y, z) &&
             (boxes.any { it.bounds.contains(x, y, z) &&
                 (actor == null || actor !in it.editors && (!restoringBarrel || actor !in it.barrelRestorers)) } ||
                 left?.contains(x, y, z, actor, restoringBarrel) == true || right?.contains(x, y, z, actor, restoringBarrel) == true)
+
+        fun lockedPhysics(x: Int, y: Int, z: Int): Boolean = bounds.contains(x, y, z) &&
+            (boxes.any { it.editors.isEmpty() && it.bounds.contains(x, y, z) } ||
+                left?.lockedPhysics(x, y, z) == true || right?.lockedPhysics(x, y, z) == true)
     }
     private var snapshot = prepare(emptyList())
 
@@ -74,6 +80,7 @@ class CivsProtection(
     companion object {
         /** Pure index construction over detached immutable city records. */
         internal fun prepare(cities: Collection<Settlement>): Snapshot {
+            val crops = mutableSetOf<Pair<UUID, CivPosition>>()
             val current = cities.flatMap { city ->
                 val editors = (city.members + city.owner).toSet()
                 buildList {
@@ -84,6 +91,13 @@ class CivsProtection(
                     city.buildings.forEach { building ->
                         val locked = city.pendingDeletion != null || building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id
                         add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
+                        if (building.type == BuildingType.FARM && building.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null) {
+                            CivsWorksiteLayouts.field(building).forEach { soil ->
+                                val crop = soil.copy(y = soil.y + 1)
+                                crops += city.worldId to crop
+                                add(Footprint(city.worldId, CivBox(soil, crop), editors))
+                            }
+                        }
                     }
                     city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
                     civsProtectedBuildings(city).forEach { building ->
@@ -96,7 +110,7 @@ class CivsProtection(
             }.distinct()
             return Snapshot(current, current.groupBy { it.worldId }.mapValues { (_, footprints) ->
                 index(footprints)
-            }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap())
+            }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap(), crops)
         }
 
         /** Area-independent memory preserves old large footprints without enumerating their chunks. */
@@ -209,7 +223,13 @@ class CivsProtection(
     fun entityInteract(event: EntityInteractEvent) { if (protected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun grow(event: BlockGrowEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun grow(event: BlockGrowEvent) {
+        val block = event.block
+        if (physicsProtected(block)) { event.isCancelled = true; return }
+        if ((block.world.uid to CivPosition(block.x, block.y, block.z)) in snapshot.cropCells &&
+            block.blockData is org.bukkit.block.data.Ageable) return
+        if (protected(block)) event.isCancelled = true
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun spread(event: BlockSpreadEvent) {
@@ -226,13 +246,17 @@ class CivsProtection(
     fun fade(event: BlockFadeEvent) { if (protected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun leaves(event: LeavesDecayEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun leaves(event: LeavesDecayEvent) { if (physicsProtected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun physics(event: BlockPhysicsEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun physics(event: BlockPhysicsEvent) { if (physicsProtected(event.block)) event.isCancelled = true }
+
+    private fun physicsProtected(block: Block): Boolean =
+        (!available() && block.world.name in protectedWorlds) || worldLocked(block.world.uid, CivPosition(block.x, block.y, block.z)) ||
+            snapshot.worlds[block.world.uid]?.lockedPhysics(block.x, block.y, block.z) == true
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun destroy(event: BlockDestroyEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun destroy(event: BlockDestroyEvent) { if (physicsProtected(event.block)) event.isCancelled = true }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun drops(event: BlockDropItemEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }

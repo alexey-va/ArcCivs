@@ -6,21 +6,23 @@ recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management; unrelated players cannot build, break or loot city structures.
 
-Core 2.7.41 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
+ArcCore host 0.1.18 with Core 2.7.44 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use transient Citizens PLAYER actors with
 bundled signed skins, native hand equipment and work-only arm swings. Skins are
 stable per worker UUID; lookup/update is disabled. Work props never enter city
 storage and NPC item pickup/drops are disabled. Supplied personal tools, armor and
-bread are recorded separately in the city snapshot, transferred one item at a time
-through the existing inventory receipt. One bread heals six health points; up to
-16 may be carried. Returning an item requires warehouse space. Plain leather/iron
-armor equips native slots; a supplied matching iron work tool reduces incoming
+bread are recorded separately in the city snapshot. Residents have a native
+33-slot inventory: six equipment slots and 27 bag slots. Quick transfers preserve
+item metadata and use the same inventory journal; returned items go to the player's
+inventory, not the warehouse. One bread heals six health points. The legacy supply
+action offers up to 16 bread; the native bag uses its actual slot capacity. Armor
+equips native slots; a supplied matching iron work tool reduces incoming
 damage by ten percent. Props alone confer no bonus. Residents start with 20 health;
 each new completed profession cycle earns one internal point, with ten points per
 level and a level-five cap. The highest profession level adds two maximum health
 per extra level, up to 28. Old cycles grant no retroactive points. Production
-amounts and work intervals for existing producers are unchanged.
+recipes consume actual inputs; gathering requires the corresponding world work.
 
 Damage from players, monsters and the environment is intercepted before native
 death. The actor stops work while its injury waits for the current city write;
@@ -35,10 +37,10 @@ still costs 12 bread and also works before hall completion, so losing the first
 builder does not permanently strand the settlement. Arrival receipts are never
 replenished by death or recruitment. NPCs use Citizens native Minecraft
 bounded point-to-point navigation, with ArcCivs checking actual arrival separately
-from the navigator's completion callback. A failed or stuck
-route may teleport to a safe loaded point near its target, as explicitly requested
-by the owner; the same arrival, work and cycle-token checks still apply. There is
-no Core packet-NPC API. No duplicated pools, schematic cache or display
+from the navigator's completion callback. A failed or stuck route is retried on
+foot through a safe nearby endpoint; route recovery does not teleport. The same
+arrival, work and cycle-token checks still apply. There is no Core packet-NPC API.
+No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
 
 With Trails 2.3.18 enabled, actual grounded NPC block crossings use its optional
@@ -66,6 +68,8 @@ and multi-city imports; each save still enforces home and revision CAS. The only
 successful same-revision retry is the exact committed state. Membership conflict
 rolls the transaction back before any publication, world changes or start grant.
 An unknown commit result suspends the affected authority until canonical reload.
+`CivsStore` owns the one defensive snapshot copy before async admission;
+`CivsNetworkStore` persists that same immutable revision without making a second copy.
 
 Existing city JSON imports atomically, preserving originals. An existing SQL
 city with the same home/owner wins over its stale JSON; conflicting identity or
@@ -92,6 +96,8 @@ anchor or visual entrance. A selected block's X/Y/Z is the schematic anchor with
 an added height offset. The authored marker is transformed independently from that
 anchor and rotation. Clicking a BARREL uses the same selected-block contract as any
 other material; it does not align the internal marker to the clicked barrel.
+Control-position lookup reads lightweight schematic marker metadata rather than
+preparing full placement geometry.
 The visible entrance is independent. Confirming a SITE grants one BARREL at that authored marker for free,
 without pasting the completed building or charging a barrel as construction material.
 The same city commit records its expected prior block in `pendingControls` and protects
@@ -106,7 +112,10 @@ requires restoring the missing barrel. A conflicting block is retained and repor
 The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
-up multiple arrivals. Idle residents choose bounded safe loaded wander targets.
+up multiple arrivals. At night, residents shelter in their active house when
+available and otherwise use the town hall. Idle residents choose safe loaded
+wandering targets 6–16 blocks away. Routes avoid horizontal footprints of foreign
+buildings and farm fields; movement speed follows the actual surface speed.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
 builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.
@@ -189,14 +198,24 @@ Deposit in VIRTUAL moves actual control-barrel cargo to that building's
 warehouse; withdrawal moves up to64 items to its barrel, using its own warehouse
 then the common initial/legacy reserve. No direct player-inventory automation.
 
-Production requires an observed completed 60-second NPC work session at the
-building. Item-storage producers use only their own control barrel or virtual
-building map for both ingredients and output; couriers move their goods. Legacy
-abstract-stock producers retain their old return trip. Logs yield4×level, stone and raw crops3×level; bread applies
-the vanilla3-wheat recipe and yields1×level. The chosen output is persisted per
-building. Physical mode inserts real items without drops, virtual mode credits
-that producer's bounded warehouse. A full destination pauses delivery. Recruitment
-consumes12BREAD after all population/bed checks. No offline production/catch-up.
+Scribes and the four processors remain observed 60-second work sessions with
+real ingredients and outputs. FARM, FORESTER and QUARRY are physical worksites,
+not timed item grants: FARM tills real soil, plants and waits for mature crops
+before harvesting native drops (3 seconds per action); its bread recipe consumes
+3 actual WHEAT for 1 BREAD. FORESTER fells a real tree of at most 128 logs per
+action, taking max(6 seconds, 1 second per log), yields native tool drops and
+replants only after spending locally stocked saplings: one for ordinary trees,
+four in a 2×2 plot for dark oak. Each tree receipt records at most 128 exact
+physical block changes. Native Unbreaking durability applies only to changed
+non-air source blocks.
+QUARRY advances an authored real shaft across multiple floors, spending local
+ladders, cobblestone and torches and harvesting native drops one block per
+4-second action. The three worksites therefore do not mint resources on a timer.
+Item-storage processors use only their own control barrel or virtual building map
+for ingredients and output; couriers move their goods. Legacy abstract-stock
+producers retain their old return trip. The chosen processor output is persisted
+per building; a full destination pauses delivery. Recruitment consumes12BREAD
+after all population/bed checks. No offline production/catch-up.
 
 ## Warehouse logistics
 
@@ -208,6 +227,8 @@ construction requests, then rotate ingredient deliveries and collection of the c
 selected output from other buildings by completed shipment count. Source-to-destination entrances must be within the existing
 88-block work-route bound. Warehouses use their own indexed native containers;
 ordinary producer sources and destinations are strictly their control barrels.
+Worksite orders include one spare IRON_HOE, IRON_AXE or IRON_PICKAXE per assigned
+worker, according to job; FARM requests only its selected seed type.
 
 `CivWorker.cargo` records one material, at most64 items, original source entrance
 and stable shipment identity. Pickup journals source debit and cargo together;
@@ -253,7 +274,8 @@ Paid rows retain their reservation across pause, retry and restart, so replay ca
 twice. Completing the row clears its reservation and advances within the bounded
 session while credit remains; the next trip is required when that credit ends. Legacy
 orders with null payment state retain their already-paid 256-cell tile algorithm.
-The unique marker cell is omitted from new paste plans;
+New SITE plans and accepted ACTIVE-building upgrades for the next level share a
+persistent FIFO queue, with only one active construction. The unique marker cell is omitted from new paste plans;
 matching existing target blocks need no replacement. Core's provider-owned paste
 splits new placement around the control into at most six crops, applied sequentially
 in one batch while preserving the barrel and its inventory. Durable completion
@@ -262,6 +284,13 @@ states. Callback fencing includes the order and expected cursor, not only the UU
 Previously captured paid plans retain their stored snapshots and original algorithm;
 mutable source assets cannot change an accepted design. Full snapshots are released
 after a batch.
+
+Paired and multi-block cells such as doors, beds and double blocks are applied as
+one placement unit, so a build step cannot leave only half of a pair. Finished
+building physics is suppressed except for the currently authorized construction
+cells and exact journal-receipt cells; receipt cells stay locked through commit.
+Native neighbor physics is issued only for the receipt's exact changed cells after
+the durable commit.
 
 World placement validates ownership, loaded chunks, borders, Lands, building boxes
 and foreign controlpoints. It preserves nonempty inventories and registered storage.

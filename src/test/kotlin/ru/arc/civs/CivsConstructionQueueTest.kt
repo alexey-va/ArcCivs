@@ -11,6 +11,8 @@ class CivsConstructionQueueTest : FunSpec({
         val fixture = QueueFixture()
         val active = fixture.start(fixture.city, fixture.first)
         val withSite = CivsRules.placeSite(active, active.owner, fixture.second)
+        withSite.constructionQueue shouldBe listOf(fixture.second.id)
+        withSite.revision shouldBe active.revision + 1
         val queued = CivsRules.enqueue(withSite, active.owner, fixture.second.id)
         CivsRules.enqueue(queued, active.owner, fixture.second.id) shouldBe queued
         val reloaded = CivsRules.validate(Gson().fromJson(Gson().toJson(queued), Settlement::class.java))
@@ -19,6 +21,47 @@ class CivsConstructionQueueTest : FunSpec({
         reloaded.building(fixture.second.id)!!.phase shouldBe BuildingPhase.SITE
         shouldThrow<CivsRejection> { CivsRules.enqueue(queued, active.owner, fixture.first.id) }.reason shouldBe "invalid-building"
         shouldThrow<CivsRejection> { CivsRules.validate(queued.copy(constructionQueue = listOf(fixture.second.id, fixture.second.id))) }.reason shouldBe "invalid-state"
+    }
+
+    test("idle sites wait for a request and new confirmations append behind a waiting head") {
+        val f = QueueFixture()
+        val idle = CivsRules.placeSite(f.city, f.city.owner, f.second)
+        idle.constructionQueue shouldBe null
+        val waiting = CivsRules.enqueue(idle, idle.owner, f.first.id)
+        val confirmed = CivsRules.placeSite(waiting, waiting.owner, f.third)
+        confirmed.constructionQueue shouldBe listOf(f.first.id, f.third.id)
+        CivsRules.placeSite(confirmed, confirmed.owner, f.third) shouldBe confirmed
+        val reloaded = CivsRules.validate(Gson().fromJson(Gson().toJson(confirmed), Settlement::class.java))
+        shouldThrow<CivsRejection> { f.start(reloaded, f.third) }.reason shouldBe "construction-busy"
+        val next = f.start(reloaded, f.first)
+        next.construction!!.buildingId shouldBe f.first.id
+        next.constructionQueue shouldBe listOf(f.third.id)
+        next.building(f.second.id)!!.phase shouldBe BuildingPhase.SITE
+    }
+
+    test("active building upgrades share the persisted FIFO with sites without changing their current level") {
+        val f = QueueFixture()
+        val building = f.first.copy(phase = BuildingPhase.ACTIVE)
+        val city = f.city.copy(buildings = f.city.buildings.map { if (it.id == building.id) building else it })
+        val queued = CivsRules.enqueue(city, city.owner, building.id)
+        val withSite = CivsRules.placeSite(queued, queued.owner, f.second)
+        val reloaded = CivsRules.validate(Gson().fromJson(Gson().toJson(withSite), Settlement::class.java))
+        reloaded.constructionQueue shouldBe listOf(building.id, f.second.id)
+        CivsRules.enqueue(reloaded, reloaded.owner, building.id) shouldBe reloaded
+        shouldThrow<CivsRejection> { f.start(reloaded, f.second) }.reason shouldBe "construction-busy"
+        val target = building.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 2, 1, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(1, 16), materials = mapOf("STONE" to 1L),
+            payment = CivConstructionPayment())
+        val started = CivsRules.reserveBuild(reloaded, reloaded.owner, target, order)
+        started.building(building.id) shouldBe building
+        started.construction!!.targetLevel shouldBe 2
+        started.constructionQueue shouldBe listOf(f.second.id)
+        shouldThrow<CivsRejection> { CivsRules.enqueue(started, started.owner, building.id) }.reason shouldBe "construction-busy"
+        val maxed = city.copy(buildings = city.buildings.map {
+            if (it.id == building.id || it.type == BuildingType.TOWN_HALL) it.copy(level = 3) else it
+        })
+        shouldThrow<CivsRejection> { CivsRules.validate(maxed.copy(constructionQueue = listOf(building.id))) }.reason shouldBe "invalid-state"
     }
 
     test("one observed builder session preserves eight paid row boundaries across shortage pause and restart") {
@@ -107,6 +150,7 @@ private class QueueFixture {
         control = CivPosition(x, 64, 0))
     val first = building(30, BuildingType.HOUSE)
     val second = building(40, BuildingType.FORESTER)
+    val third = building(50, BuildingType.QUARRY)
     private val hut = building(10, BuildingType.BUILDER_HUT, BuildingPhase.ACTIVE)
     val city = CivsRules.validate(Settlement(UUID.randomUUID(), UUID.randomUUID(), "Queue City", UUID.randomUUID(),
         CivPosition(0, 64, 0), 96, "nordic", Stock(),

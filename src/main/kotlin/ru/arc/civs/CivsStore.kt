@@ -160,7 +160,9 @@ class CivsStore(
     /** Immutable write-ahead item receipt; the same UUID can only retry identical bytes/state. */
     fun saveInventoryTransaction(transaction: CivInventoryTransaction): CompletableFuture<CivInventoryTransaction> {
         val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList(),
-            playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) })
+            playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) },
+            residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
+            worldChanges = transaction.worldChanges?.toList())
         return submit {
             snapshot.validated()
             val trustedRoot = trustedRoot()
@@ -174,11 +176,12 @@ class CivsStore(
             require(pending.size < maximumCities && pending.none { it.cityId == snapshot.cityId }) {
                 "City already has an inventory transaction or journal capacity is full"
             }
-            require(snapshot.playerDebit == null || pending.none { it.playerDebit?.playerId == snapshot.playerDebit.playerId }) {
+            require(snapshot.playerId() == null || pending.none { it.playerId() == snapshot.playerId() }) {
                 "Player already has an inventory transaction"
             }
             val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
-            if (gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
+            if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_BYTES ||
+                gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
                 throw CivsRejection("storage-transaction-too-large")
             requireNotNull(store.write(document).transaction)
         }
@@ -333,7 +336,7 @@ class CivsStore(
             }
         }
         require(records.map { it.cityId }.distinct().size == records.size) { "City has multiple pending inventory transactions" }
-        val players = records.mapNotNull { it.playerDebit?.playerId }
+        val players = records.mapNotNull(CivInventoryTransaction::playerId)
         require(players.distinct().size == players.size) { "Player has multiple pending inventory transactions" }
         return records
     }
@@ -404,13 +407,14 @@ class CivsStore(
 
     private fun snapshotCity(city: Settlement): Settlement = city.copy(
         buildings = city.buildings.toList(), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
-            inventory = it.inventory?.toMap()) }, members = city.members.toSet(),
+            inventory = it.inventory?.toMap(), items = it.items?.toList()) }, members = city.members.toSet(),
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
         constructionQueue = city.constructionQueue?.toList(),
+        mineProgress = city.mineProgress?.toMap(),
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {

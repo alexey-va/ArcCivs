@@ -43,7 +43,7 @@ data class CivInventory(
 }
 
 /** Fixed deterministic layer tiles; a completed NPC trip authorizes exactly one tile. */
-data class CivConstructionBatches(val total: Int, val size: Int = 64)
+data class CivConstructionBatches(val total: Int, val size: Int = 64, val atomicPairs: Boolean? = null)
 
 internal data class CivBuildBatch(val minimum: CivPosition, val maximum: CivPosition)
 
@@ -78,12 +78,27 @@ internal fun civsBuildBatches(plan: CivPlacementPlan, size: Int = 256): List<Civ
 }
 
 /** New orders pay short, homogeneous rows instead of requiring a mixed 256-cell tile. */
-internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16): List<CivBuildBatch> {
+internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicPairs: Boolean = false): List<CivBuildBatch> {
     require(size in 1..16)
     val changed = plan.blocks.filter { it.before != it.after }.sortedWith(compareBy({ it.position.y }, { it.position.z }, { it.position.x }))
     val result = mutableListOf<CivBuildBatch>()
     var cost: Map<String, Long>? = null
+    val cells = if (atomicPairs) plan.blocks.associateBy { it.position } else emptyMap()
+    val consumed = hashSetOf<CivPosition>()
     for (cell in changed) {
+        if (!consumed.add(cell.position)) continue
+        val companion = if (atomicPairs) civsPairedPosition(cell.position, cell.after)?.let(cells::get)
+            ?.takeIf { it.after.substringBefore('[') == cell.after.substringBefore('[') &&
+                civsPairedPosition(it.position, it.after) == cell.position } else null
+        if (companion != null) {
+            consumed += companion.position
+            val p = cell.position
+            val q = companion.position
+            result += CivBuildBatch(CivPosition(minOf(p.x, q.x), minOf(p.y, q.y), minOf(p.z, q.z)),
+                CivPosition(maxOf(p.x, q.x), maxOf(p.y, q.y), maxOf(p.z, q.z)))
+            cost = null
+            continue
+        }
         val required = CivsMaterials.requirements(cell.after)
         val previous = result.lastOrNull()
         if (previous != null && required == cost && cell.position.y == previous.maximum.y &&
@@ -98,7 +113,33 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16): List<C
 
 internal fun civsConstructionBatches(plan: CivPlacementPlan, order: CivConstruction): List<CivBuildBatch> =
     if (order.payment == null) civsBuildBatches(plan, requireNotNull(order.batches).size)
-    else civsMaterialBatches(plan, requireNotNull(order.batches).size)
+    else civsMaterialBatches(plan, requireNotNull(order.batches).size, order.batches.atomicPairs == true)
+
+/** Only native two-cell blocks; trapdoors and ordinary bisected-looking states remain single blocks. */
+internal fun civsPairedPosition(p: CivPosition, state: String): CivPosition? {
+    val material = state.substringBefore('[')
+    val properties = state.substringAfter('[', "").substringBefore(']').split(',').mapNotNull {
+        val parts = it.split('=', limit = 2)
+        if (parts.size == 2) parts[0] to parts[1] else null
+    }.toMap()
+    if (material.endsWith("_bed")) {
+        val direction = when (properties["part"]) { "foot" -> 1; "head" -> -1; else -> return null }
+        return when (properties["facing"]) {
+            "north" -> p.copy(z = p.z - direction)
+            "south" -> p.copy(z = p.z + direction)
+            "east" -> p.copy(x = p.x + direction)
+            "west" -> p.copy(x = p.x - direction)
+            else -> null
+        }
+    }
+    if (!material.endsWith("_door") && material.removePrefix("minecraft:") !in setOf(
+            "sunflower", "lilac", "rose_bush", "peony", "tall_grass", "large_fern", "pitcher_plant", "small_dripleaf", "tall_seagrass")) return null
+    return when (properties["half"]) {
+        "lower", "bottom" -> p.copy(y = p.y + 1)
+        "upper", "top" -> p.copy(y = p.y - 1)
+        else -> null
+    }
+}
 
 /** Vanilla obtainability rules, shared by estimates and the final reservation. No creative/OP bypass. */
 internal object CivsMaterials {
@@ -182,6 +223,7 @@ internal object CivsProduction {
     }
 
     fun inputs(building: CivBuilding): Map<String, Long> = when (val material = material(building)) {
+        "BREAD" -> mapOf("WHEAT" to 3L * amount(building))
         "BOOK" -> mapOf("PAPER" to 3L, "LEATHER" to 1L)
         "WRITABLE_BOOK" -> mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L)
         "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS" ->

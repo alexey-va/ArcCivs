@@ -27,6 +27,11 @@ import org.bukkit.entity.Player
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.event.player.PlayerChangedWorldEvent
+import org.bukkit.event.inventory.ClickType
+import org.bukkit.event.inventory.InventoryAction
+import org.bukkit.event.inventory.InventoryClickEvent
+import org.bukkit.event.inventory.InventoryType
+import org.bukkit.inventory.ItemStack
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.network.BackendServerId
@@ -322,7 +327,7 @@ class CivsUiTest : FunSpec({
             h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
             h.ui.openWorker(h.player, base.id, worker.id)
             h.body() shouldContain "11.5 / 28"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "assign", "unassign")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "feed", "assign", "unassign")
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-detail-ru", h.screen, listOf(588, 380)) }
             h.click("skills")
             h.screen.id shouldBe "civs.worker-skills"
@@ -334,24 +339,14 @@ class CivsUiTest : FunSpec({
             h.click("history")
             h.screen.id shouldBe "civs.worker"
             h.click("inventory")
-            h.screen.id shouldBe "civs.worker-inventory"
-            h.body() shouldContain "2 / 16"
-            h.body() shouldContain "личные вещи будут потеряны"
-            plainText(h.screen.buttons.single { it.id.value == "item_iron_shovel" }.label) shouldBe "Железная лопата × 1 ›"
-            h.screen.buttons.map { it.id.value }.contains("feed") shouldBe true
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-inventory-ru", h.screen, listOf(588, 380)) }
-            h.click("next")
-            h.screen.buttons.count { it.id.value.startsWith("item_") } shouldBe 5
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-inventory-last-ru", h.screen, listOf(588, 380)) }
-            h.click("item_iron_chestplate")
-            h.body() shouldContain "Для замены сначала верните"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("return_item")
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-item-ru", h.screen, listOf(588, 380)) }
-            h.click("history")
-            h.screen.id shouldBe "civs.worker-inventory"
-            h.click("history")
+            h.ui.showingDialog(h.player) shouldBe false
+            h.player.openInventory.topInventory.size shouldBe 54
+            h.player.openInventory.topInventory.getItem(6)!!.type shouldBe Material.IRON_SHOVEL
+            h.player.openInventory.topInventory.getItem(2)!!.type shouldBe Material.IRON_CHESTPLATE
+            h.player.openInventory.topInventory.getItem(18)!!.amount shouldBe 2
+            h.nativeClick(45); h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
-            verify(exactly = 0) { h.player.closeDialog() }
+            verify(exactly = 1) { h.player.closeDialog() }
         }
     }
 
@@ -519,66 +514,44 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("resident supply return and feeding submit one action and render its committed quantities") {
+    test("resident feeding remains a guarded worker action beside native equipment") {
         withUi { h ->
             val base = settlement(h.player)
-            val worker = base.workers.first().copy(health = 8.0)
+            val worker = base.workers.first().copy(health = 8.0, inventory = mapOf("BREAD" to 1L))
             h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
-            every { h.host.supplyWorker(h.player, worker.id, "BREAD") } answers {
-                h.city = CivsRules.supplyResident(h.city!!, h.player.uniqueId, worker.id, "BREAD")
-                CompletableFuture.completedFuture(Unit)
-            }
-            every { h.host.returnWorkerItem(h.player, worker.id, "BREAD") } answers {
-                h.city = CivsRules.supplyResident(h.city!!, h.player.uniqueId, worker.id, "BREAD", returning = true)
-                CompletableFuture.completedFuture(Unit)
-            }
             every { h.host.feedWorker(h.player, worker.id) } answers {
                 h.city = CivsRules.feedResident(h.city!!, h.player.uniqueId, worker.id)
                 CompletableFuture.completedFuture(Unit)
             }
-            h.ui.openWorker(h.player, base.id, worker.id); h.click("inventory"); h.click("item_bread")
-            val first = h.screen
-            h.click("supply"); h.click("supply", screen = first); h.paper.performTicks(2)
-            verify(exactly = 1) { h.host.supplyWorker(h.player, worker.id, "BREAD") }
-            h.screen.id shouldBe "civs.worker-item"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "return_item")
-            h.click("return_item"); h.paper.performTicks(2)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
-            h.click("supply"); h.paper.performTicks(2)
-            h.ui.openWorker(h.player, base.id, worker.id); h.click("inventory")
-            val supplies = h.screen
-            h.click("feed"); h.click("feed", screen = supplies); h.paper.performTicks(2)
+            h.ui.openWorker(h.player, base.id, worker.id)
+            val before = h.screen
+            h.click("feed"); h.click("feed", screen = before); h.paper.performTicks(2)
             h.body() shouldContain "14 / 20"
-            h.body() shouldContain "0 / 16"
             h.screen.buttons.map { it.id.value } shouldNotContain "feed"
-            verify(exactly = 1) { h.host.returnWorkerItem(h.player, worker.id, "BREAD"); h.host.feedWorker(h.player, worker.id) }
-            verify(exactly = 0) { h.runtime.close(h.player) }
+            verify(exactly = 1) { h.host.feedWorker(h.player, worker.id) }
         }
     }
 
-    test("resident item details explain empty storage and occupied armor without offering invalid transfers") {
+    test("native resident inventory delegates exact slot clicks and rejects a second pending click") {
         withUi { h ->
             val base = settlement(h.player)
-            val worker = base.workers.first().copy(inventory = mapOf("LEATHER_CHESTPLATE" to 1L, "BREAD" to 16L))
+            val worker = base.workers.first().copy(inventory = mapOf("BREAD" to 8L))
             h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
-            every { h.host.availableMaterials(any()) } returns mapOf("IRON_CHESTPLATE" to 1L, "BREAD" to 5L)
-            h.ui.openWorker(h.player, base.id, worker.id); h.click("inventory")
-            h.screen.buttons.map { it.id.value } shouldNotContain "feed"
-            h.click("item_bread")
-            h.body() shouldContain "already carries 16 bread"
-            h.screen.buttons.map { it.id.value } shouldBe listOf("return_item")
-            h.ui.openWorker(h.player, base.id, worker.id); h.click("inventory"); h.click("item_iron_axe")
-            h.body() shouldContain "Town storage has none"
-            h.screen.buttons shouldBe emptyList()
-            h.ui.openWorker(h.player, base.id, worker.id); h.click("inventory"); h.click("next"); h.click("item_iron_chestplate")
-            h.body() shouldContain "armor slot is occupied"
-            h.screen.buttons shouldBe emptyList()
-            every { h.host.cityBusy(any()) } returns true
+            val pending = CompletableFuture<Unit>()
+            every { h.host.transferResidentItem(h.player, worker.id, 6, null, ClickType.SHIFT_LEFT) } returns pending
             h.ui.openWorker(h.player, base.id, worker.id)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills")
-            h.click("inventory"); h.click("item_bread")
-            h.screen.buttons shouldBe emptyList()
-            verify(exactly = 0) { h.host.supplyWorker(any(), any(), any()); h.host.returnWorkerItem(any(), any(), any()); h.host.feedWorker(any(), any()) }
+            h.click("inventory")
+            val view = h.player.openInventory.topInventory
+            h.nativeClick(18, ClickType.SHIFT_LEFT).isCancelled shouldBe true
+            h.nativeClick(18, ClickType.SHIFT_LEFT)
+            h.player.openInventory.topInventory shouldBe view
+            view.getItem(49)!!.type shouldBe Material.CLOCK
+            verify(exactly = 1) { h.host.transferResidentItem(h.player, worker.id, 6, null, ClickType.SHIFT_LEFT) }
+            pending.complete(Unit); h.paper.performTicks(2)
+            h.player.inventory.setItem(9, ItemStack(Material.IRON_AXE))
+            h.nativeClick(54)
+            verify(exactly = 1) { h.host.transferResidentItem(h.player, worker.id, null, 9, ClickType.LEFT) }
+            verify(exactly = 0) { h.host.supplyWorker(any(), any(), any()); h.host.returnWorkerItem(any(), any(), any()) }
         }
     }
 
@@ -705,7 +678,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("relocation errors retain the destination and busy or constructing settlements cannot confirm") {
+    test("relocation retains errors and allows unrelated construction but blocks busy or same-building changes") {
         withUi { h ->
             val base = settlement(h.player)
             val old = base.buildings.last().let { it.copy(control = it.anchor) }
@@ -733,6 +706,14 @@ class CivsUiTest : FunSpec({
             h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), base.buildings.first().id,
                 3, 100, 20, ConstructionPhase.CONSTRUCTING, Stock()))
             constructionLookup.complete(target); h.paper.performTicks(2)
+            h.screen.buttons.any { it.id.value == "relocate" } shouldBe true
+            h.ui.openBuilding(h.player, base.id, old.id)
+            h.screen.buttons.any { it.id.value == "relocate_control" } shouldBe true
+            val ownConstructionLookup = CompletableFuture<CivPosition>()
+            every { h.host.buildingControl(h.player, old.id) } returns ownConstructionLookup
+            h.click("relocate_control")
+            h.city = h.city!!.copy(construction = h.city!!.construction!!.copy(buildingId = old.id))
+            ownConstructionLookup.complete(target); h.paper.performTicks(2)
             h.screen.buttons.map { it.id.value } shouldBe emptyList()
             h.body() shouldContain "Construction is already in progress"
             h.ui.openBuilding(h.player, base.id, old.id)
@@ -1573,6 +1554,33 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("active buildings can queue upgrades and retain their queue position and target level") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val target = base.buildings.last()
+            val active = base.buildings[1]
+            h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), active.id, 2, 500, 0,
+                ConstructionPhase.CONSTRUCTING, Stock()))
+            every { h.host.prepareUpgrade(h.player, target.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuilding(h.player, base.id, target.id); h.click("upgrade")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
+            h.click("prepare"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.prepareUpgrade(h.player, target.id) }
+            h.city = h.city!!.copy(constructionQueue = listOf(target.id))
+            h.ui.openBuilding(h.player, base.id, target.id)
+            h.body() shouldContain "В очереди · №1"
+            h.screen.buttons.map { it.id.value } shouldNotContain "upgrade"
+            h.click("materials"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building-materials"
+            h.body() shouldContain "Лесорубка · ур. 2"
+            h.body() shouldContain "В очереди · №1"
+            h.screen.buttons.map { it.id.value } shouldNotContain "start"
+            h.ui.openBuilding(h.player, base.id, target.id); h.click("queue")
+            plainText(h.screen.buttons.single { it.id.value == "queue_0" }.label) shouldContain "Лесорубка · ур. 2"
+        }
+    }
+
     test("deleting an ordinary building requires confirmation and binds the exact city and building") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -1900,6 +1908,12 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.preview(any()) } answers { preview }
         every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"
+        every { host.residentItems(any(), any()) } answers {
+            val workerId = secondArg<UUID>()
+            city?.workers?.firstOrNull { it.id == workerId }?.let { worker -> CivsEquipment.slots(worker).map { it?.stack() } }
+                ?: List(33) { null }
+        }
+        every { host.transferResidentItem(any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.buildingStatus(any()) } returns "building-status.active"
         every { host.deleteBuilding(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.confirmPreview(any()) } answers {
@@ -1930,6 +1944,9 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
     }
 
     fun open() { ui.open(player); paper.performTicks(2) }
+    fun nativeClick(raw: Int, click: ClickType = ClickType.LEFT): InventoryClickEvent = InventoryClickEvent(
+        player.openInventory, InventoryType.SlotType.CONTAINER, raw, click, InventoryAction.PICKUP_ALL,
+    ).also { plugin.server.pluginManager.callEvent(it) }
     fun dismiss() = dismissAction()
     fun body(): String = screen.body.joinToString("\n") { plainText(it.text) }
     fun click(id: String, values: Map<String, String> = emptyMap(), screen: PaperDialogScreen = this.screen) {

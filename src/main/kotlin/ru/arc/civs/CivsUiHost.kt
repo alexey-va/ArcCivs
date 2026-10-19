@@ -3,6 +3,8 @@ package ru.arc.civs
 import org.bukkit.entity.Player
 import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
+import org.bukkit.inventory.ItemStack
+import org.bukkit.event.inventory.ClickType
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
@@ -99,6 +101,8 @@ interface CivsUiHost {
     fun supplyWorker(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
     fun returnWorkerItem(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
     fun feedWorker(player: Player, workerId: UUID): CompletableFuture<Unit>
+    fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
+    fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>

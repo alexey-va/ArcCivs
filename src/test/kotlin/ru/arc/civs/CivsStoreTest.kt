@@ -7,6 +7,7 @@ import io.kotest.matchers.shouldBe
 import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
@@ -414,6 +415,32 @@ class CivsStoreTest : FreeSpec({
         reopened.saveInventoryTransaction(second).join() shouldBe second
     }
 
+    "resident and world receipt fields are frozen once and share player custody with legacy debits" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val base = inventoryTransaction(settlement())
+        val workerId = UUID.randomUUID()
+        val before = MutableList<CivResidentItem?>(33) { null }
+        val items = before.toMutableList().apply { this[6] = CivResidentItem("OAK_LOG", 4) }
+        val playerSlots = mutableListOf(CivNativePlayerSlot(0, CivResidentItem("OAK_LOG", 4), null))
+        val world = mutableListOf(CivPlanBlock(CivPosition(2, 64, 1), "minecraft:stone", "minecraft:air"))
+        val transaction = base.copy(changes = emptyList(), after = base.after.copy(workers = listOf(
+            CivWorker(workerId, "Resident", null, items = items))),
+            residentTransfer = CivResidentTransfer(base.after.owner, workerId, before, playerSlots), worldChanges = world)
+        val expected = transaction.copy(after = transaction.after.copy(workers = transaction.after.workers.map { it.copy(items = it.items!!.toList()) }),
+            residentTransfer = transaction.residentTransfer!!.copy(before = before.toList(), changes = playerSlots.toList()), worldChanges = world.toList())
+        val saved = store.saveInventoryTransaction(transaction)
+        before.clear(); items.clear(); playerSlots.clear(); world.clear()
+        queued.runNext()
+        saved.join() shouldBe expected
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
+        val other = inventoryTransaction(settlement(owner = expected.after.owner))
+        val debit = other.copy(changes = listOf(other.changes.single().copy(before = null, after = CivPlainItem("OAK_LOG", 4))),
+            playerDebit = CivPlayerDebit(expected.after.owner, listOf(CivPlayerSlotChange(0, CivPlainItem("OAK_LOG", 4), null))))
+        shouldThrow<CompletionException> { reopened.saveInventoryTransaction(debit).join() }
+    }
+
     "legacy receipts without a player endpoint still load and malformed player endpoints stay preserved" {
         val legacy = inventoryTransaction(settlement())
         val path = root.resolve("inventory-transactions/${legacy.id}.json")
@@ -449,6 +476,27 @@ class CivsStoreTest : FreeSpec({
         Files.writeString(path, "{broken")
         shouldThrow<CompletionException> { store.loadInventoryTransactions().join() }
         Files.readString(path) shouldBe "{broken"
+    }
+
+    "inventory admission rejects an uncommittable city payload before writing its receipt" {
+        val base = inventoryTransaction(settlement())
+        val item = CivResidentItem("IRON_AXE", 1, Base64.getEncoder().encodeToString(ByteArray(22_500) { 7 }))
+        val before = List<CivResidentItem?>(33) { if (it in 6..13) item else null }
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null, items = before)
+        val initial = base.after.copy(revision = 0, workers = listOf(worker))
+        val store = CivsStore(root, directExecutor)
+        store.save(initial).join() shouldBe initial
+        val after = before.toMutableList().apply { this[14] = item }
+        val transaction = base.copy(changes = emptyList(), after = initial.copy(revision = 1,
+            workers = listOf(worker.copy(items = after))), residentTransfer = CivResidentTransfer(
+            initial.owner, worker.id, before, listOf(CivNativePlayerSlot(0, item, null))))
+        transaction.validated() shouldBe transaction
+
+        val failure = shouldThrow<CompletionException> { store.saveInventoryTransaction(transaction).join() }
+        (failure.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
+        Files.exists(root.resolve("inventory-transactions/${transaction.id}.json")) shouldBe false
+        store.loadInventoryTransactions().join() shouldBe emptyList()
+        store.load().join() shouldBe listOf(initial)
     }
 
     "oversized inventory journals fail before decoding and identity mismatch never deletes the receipt" {

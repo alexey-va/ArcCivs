@@ -197,12 +197,12 @@ class CivsServiceTest : FunSpec({
             barrel.getItem(0) shouldBe null
             h.service.city(h.player)!!.workers.last().inventory shouldBe null
             h.commit(); supplied.join()
-            h.service.city(h.player)!!.workers.last().inventory?.get("IRON_HELMET") shouldBe 1L
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "IRON_HELMET") shouldBe 1
             val returned = h.service.returnWorkerItem(h.player, worker, "IRON_HELMET")
             h.tick()
             barrel.getItem(0)!!.type shouldBe Material.IRON_HELMET
             h.commit(); returned.join()
-            h.service.city(h.player)!!.workers.last().inventory.orEmpty() shouldBe emptyMap()
+            CivsEquipment.slots(h.service.city(h.player)!!.workers.last()).all { it == null } shouldBe true
             barrel.getItem(0)!!.amount shouldBe 1
         }
     }
@@ -898,6 +898,7 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val upgraded = CivBlueprint(hall.copy(level = 3, control = target), h.world.uid,
                 mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1))
+            every { h.blueprints.controlPosition(hall) } returns CompletableFuture.completedFuture(target)
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
                 arg<CivPosition>(5) shouldBe hall.anchor
                 arg<CivPosition>(8) shouldBe hall.entrance
@@ -967,9 +968,7 @@ class CivsServiceTest : FunSpec({
                 buildings = listOf(hall) + h.city.buildings.drop(1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.worldAdapter.canModify(any(), any(), any()) } returns true
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
-                CompletableFuture.completedFuture(CivBlueprint(hall.copy(control = target), h.world.uid,
-                    mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1)))
+            every { h.blueprints.controlPosition(hall) } returns CompletableFuture.completedFuture(target)
             h.start()
             val stale = h.service.relocateControl(h.player, hall.id, target.copy(x = target.x + 1)); h.tick()
             (shouldThrow<CompletionException> { stale.join() }.cause as CivsRejection).reason shouldBe "control-location-changed"
@@ -995,9 +994,7 @@ class CivsServiceTest : FunSpec({
             val target = CivPosition(1, 65, 1)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(
                 stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = listOf(hall) + h.city.buildings.drop(1))))
-            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
-                CompletableFuture.completedFuture(CivBlueprint(hall.copy(control = target), h.world.uid,
-                    mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1)))
+            every { h.blueprints.controlPosition(hall) } returns CompletableFuture.completedFuture(target)
             h.start()
             val relocating = h.service.relocateControl(h.player, hall.id, target); h.tick()
             h.world.getBlockAt(1, 65, 1).type shouldBe Material.AIR
@@ -1179,6 +1176,150 @@ class CivsServiceTest : FunSpec({
             h.commit()
             h.service.city(h.player)!!.constructionQueue shouldBe emptyList()
             h.service.city(h.player)!!.construction!!.buildingId shouldBe site.id
+        }
+    }
+
+    test("upgrade confirmation persists its own design behind active construction and duplicate requests keep it immutable") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val building = active.city.buildings[1]
+            val blueprint = h.sitePreview(CivBlueprint(building.copy(level = 2, phase = BuildingPhase.CONSTRUCTING,
+                control = CivPosition(10, 63, 0)), h.world.uid, mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(2)))
+            val captured = CivPlacementPlan(UUID.randomUUID(), active.city.id, h.world.uid, blueprint.building,
+                listOf(CivPlanBlock(CivPosition(10, 64, 1), "minecraft:air", "minecraft:stone")))
+            every { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(captured)
+            var savedPlan: CivPlacementPlan? = null
+            every { h.store.savePlan(any()) } answers {
+                savedPlan = firstArg(); CompletableFuture.completedFuture(firstArg())
+            }
+            h.start()
+            val prepared = h.service.prepareUpgrade(h.player, building.id); h.tick(); prepared.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            h.service.city(h.player)!!.constructionQueue shouldBe null
+            h.saves.single().first.constructionQueue shouldBe listOf(building.id)
+            h.saves.single().first.construction shouldBe active.city.construction
+            h.saves.single().first.building(building.id) shouldBe building
+            h.world.getBlockAt(10, 63, 0).type shouldBe Material.AIR
+            val design = savedPlan!!
+            (design.id != building.id) shouldBe true
+            design.building.level shouldBe 2
+            h.commit(); confirmed.join()
+            every { h.store.loadPlan(design.id) } returns CompletableFuture.completedFuture(design)
+            val materials = h.service.buildingMaterials(h.player, building.id); h.tick()
+            materials.join() shouldBe mapOf("STONE" to 1L)
+            val repeated = h.service.prepareUpgrade(h.player, building.id); h.tick(); repeated.join()
+            h.service.confirmPreview(h.player).join() shouldBe Unit
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.saveSchematic(design.id, any()); h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveSchematic(building.id, any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    for (legacy in listOf(false, true)) test("a reloaded upgrade head defers legacy controls and retains FIFO after a capture failure legacy=$legacy") {
+        serviceScenario { h ->
+            val queued = h.queuedUpgrade(legacy)
+            val viewer = h.paper.addPlayer("UpgradeQueueViewer")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            h.start(); h.paper.performTicks(20)
+            if (legacy) {
+                h.saves.single().first.pendingControls!!.single().buildingId shouldBe queued.building.id
+                verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+                h.commit()
+                h.world.getBlockAt(10, 63, 0).type shouldBe Material.BARREL
+                h.saves.last().first.pendingControls shouldBe emptyList()
+                h.commit()
+            }
+            queued.capture.completeExceptionally(CivsRejection("lands-denied")); h.tick()
+            h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue
+            h.service.buildingStatus(queued.building.id) shouldBe "building-status.lands-denied"
+            verify(exactly = 0) { h.store.deletePlan(queued.design.id) }
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(queued.fresh)
+            h.time += 6_000; h.paper.performTicks(20)
+            h.saves.last().first.construction!!.let {
+                it.id shouldBe queued.fresh.id
+                it.buildingId shouldBe queued.building.id
+                it.targetLevel shouldBe 2
+            }
+            h.saves.last().first.constructionQueue shouldBe queued.city.constructionQueue!!.drop(1)
+            h.service.city(h.player)!!.construction shouldBe null
+            h.service.city(h.player)!!.building(queued.building.id)!!.level shouldBe 1
+            verify(exactly = 0) { h.store.deletePlan(queued.design.id) }
+            h.commit()
+            h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue!!.drop(1)
+            verify(exactly = 1) { h.store.deletePlan(queued.design.id); h.store.deleteSchematic(queued.design.id) }
+            verify(exactly = 0) { h.store.deletePlan(queued.building.id); h.store.deleteSchematic(queued.building.id) }
+        }
+    }
+
+    for (known in listOf(false, true)) test("upgrade admission cleans only a known rejected design and retains an unknown commit known=$known") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val building = active.city.buildings[1]
+            val blueprint = h.sitePreview(CivBlueprint(building.copy(level = 2, phase = BuildingPhase.CONSTRUCTING,
+                control = CivPosition(10, 63, 0)), h.world.uid, mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(2)))
+            every { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(
+                CivPlacementPlan(UUID.randomUUID(), active.city.id, h.world.uid, blueprint.building,
+                    listOf(CivPlanBlock(CivPosition(10, 64, 1), "minecraft:air", "minecraft:stone"))))
+            var savedId: UUID? = null
+            every { h.store.savePlan(any()) } answers {
+                savedId = firstArg<CivPlacementPlan>().id; CompletableFuture.completedFuture(firstArg())
+            }
+            val cleanup = CompletableFuture<Boolean>()
+            every { h.store.deletePlan(any()) } returns cleanup
+            every { h.store.deleteSchematic(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val prepared = h.service.prepareUpgrade(h.player, building.id); h.tick(); prepared.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            h.saves.single().second.completeExceptionally(if (known) CivsRejection("stale-city") else IllegalStateException("acknowledgement lost"))
+            h.tick()
+            if (known) {
+                confirmed.isDone shouldBe false
+                val duplicate = h.service.confirmPreview(h.player)
+                duplicate.isDone shouldBe false
+                h.saves.size shouldBe 1
+                cleanup.complete(true); h.tick()
+                (shouldThrow<CompletionException> { duplicate.join() }.cause as CivsRejection).reason shouldBe "stale-city"
+            }
+            (shouldThrow<CompletionException> { confirmed.join() }.cause as CivsRejection).reason shouldBe
+                if (known) "stale-city" else "storage-unavailable"
+            h.service.city(h.player)!!.constructionQueue shouldBe null
+            verify(exactly = if (known) 1 else 0) { h.store.deletePlan(savedId!!); h.store.deleteSchematic(savedId!!) }
+            verify(exactly = 0) { h.store.deletePlan(building.id); h.store.deleteSchematic(building.id) }
+        }
+    }
+
+    test("deleting a queued upgrade retires only its separate design after the building deletion commits") {
+        serviceScenario { h ->
+            val queued = h.queuedUpgrade()
+            h.start()
+            val deleted = h.service.deleteBuilding(h.player, queued.city.id, queued.building.id); h.tick()
+            h.commit()
+            verify(exactly = 0) { h.store.deletePlan(queued.design.id) }
+            h.commit(); deleted.join()
+            h.service.city(h.player)!!.constructionQueue shouldBe queued.city.constructionQueue!!.drop(1)
+            verify(exactly = 1) { h.store.deletePlan(queued.design.id); h.store.deleteSchematic(queued.design.id) }
+            verify(exactly = 0) { h.store.deletePlan(queued.building.id); h.store.deleteSchematic(queued.building.id) }
+        }
+    }
+
+    test("town hall controls open the settlement overview and other controls open their building") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val home = h.city.buildings.last().copy(control = CivPosition(10, 63, 0))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(buildings = listOf(hall, home))))
+            val ui = mockk<CivsUi>(relaxed = true)
+            h.service.ui = ui
+            h.start()
+            for (building in listOf(hall, home)) {
+                val point = building.control!!
+                val block = h.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.BARREL }
+                val event = org.bukkit.event.player.PlayerInteractEvent(h.player, org.bukkit.event.block.Action.RIGHT_CLICK_BLOCK,
+                    null, block, BlockFace.UP, org.bukkit.inventory.EquipmentSlot.HAND)
+                h.service.controlClicked(event); h.tick()
+                event.useInteractedBlock() shouldBe org.bukkit.event.Event.Result.DENY
+            }
+            verify(exactly = 1) { ui.open(h.player); ui.openBuilding(h.player, h.city.id, home.id) }
+            verify(exactly = 0) { ui.openBuilding(h.player, h.city.id, hall.id) }
         }
     }
 
@@ -1802,6 +1943,7 @@ class CivsServiceTest : FunSpec({
             h.saves.size shouldBe 2
             h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PLACING
             h.saves.last().first.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            h.saves.last().first.constructionQueue shouldBe listOf(blueprint.building.id)
             h.service.city(h.player)!!.building(blueprint.building.id) shouldBe null
             h.world.getBlockAt(5, 64, 0).type shouldBe Material.AIR
             h.commit()
@@ -1817,6 +1959,7 @@ class CivsServiceTest : FunSpec({
             val saved = h.service.city(h.player)!!
             saved.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
             saved.construction shouldBe null
+            saved.constructionQueue shouldBe listOf(blueprint.building.id)
             saved.pendingControls shouldBe emptyList()
             h.saves.map { it.first.revision } shouldBe (1L..4L).map { placement.city.revision + it }
             verify(exactly = 1) { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
@@ -1880,6 +2023,60 @@ class CivsServiceTest : FunSpec({
             h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
             h.saves.size shouldBe 2
             verify(exactly = 0) { h.store.loadPlan(site.id) }
+        }
+    }
+
+    test("successive site requests retain arrival order across pending city writes") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val first = active.city.buildings[1].copy(phase = BuildingPhase.SITE)
+            fun site(x: Int) = first.copy(id = UUID.randomUUID(), anchor = CivPosition(x, 64, 0),
+                bounds = CivBox(CivPosition(x - 2, 63, -2), CivPosition(x + 2, 68, 2)),
+                entrance = CivPosition(x, 64, -2))
+            val second = site(30)
+            val third = site(40)
+            val city = active.city.copy(buildings = active.city.buildings.map { if (it.id == first.id) first else it } + second + third)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start()
+            val assignment = h.service.assign(h.player, city.workers.first().id, city.buildings.first().id)
+            val requested = h.service.startBuilding(h.player, first.id)
+            val next = h.service.startBuilding(h.player, second.id)
+            val duplicate = h.service.startBuilding(h.player, first.id)
+            h.saves.size shouldBe 1
+            h.commit(); assignment.join()
+            h.saves.last().first.constructionQueue shouldBe listOf(first.id)
+            val last = h.service.startBuilding(h.player, third.id)
+            h.commit(); requested.join(); duplicate.join()
+            h.saves.last().first.constructionQueue shouldBe listOf(first.id, second.id)
+            h.commit(); next.join()
+            h.saves.last().first.constructionQueue shouldBe listOf(first.id, second.id, third.id)
+            h.service.city(h.player)!!.constructionQueue shouldBe listOf(first.id, second.id)
+            h.commit(); last.join()
+            h.service.city(h.player)!!.constructionQueue shouldBe listOf(first.id, second.id, third.id)
+            h.saves.size shouldBe 4
+            verify(exactly = 0) { h.store.loadPlan(first.id); h.store.loadPlan(second.id); h.store.loadPlan(third.id) }
+        }
+    }
+
+    test("a rejected queue write releases later requests and allows the failed request to retry") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val first = active.city.buildings[1].copy(phase = BuildingPhase.SITE)
+            val second = first.copy(id = UUID.randomUUID(), anchor = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 63, -2), CivPosition(32, 68, 2)), entrance = CivPosition(30, 64, -2))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(active.city.copy(
+                buildings = active.city.buildings.map { if (it.id == first.id) first else it } + second)))
+            h.start()
+            val rejected = h.service.startBuilding(h.player, first.id)
+            val accepted = h.service.startBuilding(h.player, second.id)
+            h.saves.single().second.completeExceptionally(CivsRejection("stale-city")); h.tick()
+            (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "stale-city"
+            h.saves.last().first.constructionQueue shouldBe listOf(second.id)
+            h.commit(); accepted.join()
+            val retry = h.service.startBuilding(h.player, first.id)
+            h.saves.last().first.constructionQueue shouldBe listOf(second.id, first.id)
+            h.commit(); retry.join()
+            h.service.city(h.player)!!.constructionQueue shouldBe listOf(second.id, first.id)
         }
     }
 
@@ -2346,6 +2543,38 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         return CivBlueprint(hall, world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
     }
     fun commit() { saves.last().let { it.second.complete(it.first) }; tick() }
+    fun queuedUpgrade(legacy: Boolean = false): ServiceQueuedUpgrade {
+        val building = city.buildings.last().copy(entrance = CivPosition(10, 64, 3),
+            control = if (legacy) null else CivPosition(10, 63, 0))
+        val hut = building.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, control = null,
+            anchor = CivPosition(20, 64, 0), bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)), entrance = CivPosition(20, 64, 3))
+        val site = building.copy(id = UUID.randomUUID(), phase = BuildingPhase.SITE, control = CivPosition(30, 63, 0),
+            anchor = CivPosition(30, 64, 0), bounds = CivBox(CivPosition(28, 63, -2), CivPosition(32, 68, 2)), entrance = CivPosition(30, 64, 3))
+        val queued = CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = listOf(city.buildings.first(), building, hut, site), constructionQueue = listOf(building.id, site.id),
+            workers = listOf(city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1))))
+        val target = building.copy(level = 2, phase = BuildingPhase.CONSTRUCTING, control = CivPosition(10, 63, 0))
+        val id = UUID.nameUUIDFromBytes("arccivs-upgrade/${building.id}/2".toByteArray(java.nio.charset.StandardCharsets.UTF_8))
+        val design = CivPlacementPlan(id, queued.id, world.uid, target,
+            listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:air", "minecraft:stone")), "a".repeat(64))
+        val fresh = design.copy(id = UUID.randomUUID(), blocks = design.blocks.map { it.copy(before = "minecraft:oak_planks") })
+        val snapshot = mockk<ArcSchematicSnapshot>()
+        every { snapshot.blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+        val capture = CompletableFuture<CivPlacementPlan>()
+        every { store.load() } returns CompletableFuture.completedFuture(listOf(queued))
+        every { store.loadPlan(id) } returns CompletableFuture.completedFuture(design)
+        every { store.loadSchematic(id) } returns CompletableFuture.completedFuture(byteArrayOf(2))
+        every { blueprints.recover(design) } returns CompletableFuture.completedFuture(snapshot)
+        every { worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns capture
+        every { store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        every { store.deletePlan(any()) } returns CompletableFuture.completedFuture(true)
+        every { store.deleteSchematic(any()) } returns CompletableFuture.completedFuture(true)
+        world.loadChunk(1, 0)
+        world.getBlockAt(10, 63, 3).type = Material.DIRT
+        if (!legacy) world.getBlockAt(10, 63, 0).type = Material.BARREL
+        return ServiceQueuedUpgrade(queued, building, design, fresh, capture)
+    }
     fun incrementalPlacement(phase: ConstructionPhase = ConstructionPhase.READY_TO_PLACE, paid: Boolean = false, stock: Int = 0): ServicePlacement {
         world.getBlockAt(0, 63, 0).type = Material.BARREL
         world.getBlockAt(15, 63, 1).type = Material.BARREL
@@ -2413,6 +2642,9 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     }
     override fun close() { service.close(); tasks.close() }
 }
+
+private data class ServiceQueuedUpgrade(val city: Settlement, val building: CivBuilding, val design: CivPlacementPlan,
+    val fresh: CivPlacementPlan, val capture: CompletableFuture<CivPlacementPlan>)
 
 private class ServicePlacement(val city: Settlement) {
     val validation = CompletableFuture<Unit>()

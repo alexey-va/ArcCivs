@@ -49,7 +49,7 @@ class CivsRulesTest : FunSpec({
         val injured = CivsRules.hurtResident(supplied, owner, id, 10.0)
         val healed = CivsRules.feedResident(injured, owner, id)
         CivsResidents.health(healed.workers.first()) shouldBe 16.0
-        healed.workers.first().inventory?.get("BREAD") shouldBe 15L
+        CivsEquipment.plainCount(healed.workers.first(), "BREAD") shouldBe 15
         CivsRules.hurtResident(healed, owner, id, 100.0).workers.none { it.id == id } shouldBe true
     }
 

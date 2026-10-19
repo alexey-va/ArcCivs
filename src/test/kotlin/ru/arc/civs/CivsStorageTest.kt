@@ -96,6 +96,154 @@ class CivsStorageTest : FunSpec({
         return building
     }
 
+    test("resident transfers retain native metadata in both directions and replay each endpoint once") {
+        val player = paper.addPlayer("EquipmentOwner")
+        player.openInventory(paper.server.createInventory(player, 9))
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        val axe = named(Material.IRON_AXE, 1).apply { editMeta { meta ->
+            (meta as Damageable).damage = 19
+            meta.addEnchant(Enchantment.UNBREAKING, 2, true)
+            meta.persistentDataContainer.set(NamespacedKey("test", "owner"), PersistentDataType.STRING, "resident")
+        } }
+        player.inventory.setItem(0, axe)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, null, 0, ClickType.LEFT)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        receipt.residentTransfer!!.changes.map { it.slot } shouldBe listOf(0)
+        (prepared.worker.items!![4]!!.data != null) shouldBe true
+        player.inventory.getItem(0) shouldBe axe
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe null
+        prepared.worker.items!![4]!!.stack() shouldBe axe
+        (paper.playerDataSaveCount(player) > 0) shouldBe true
+        storage.unlock(id)
+        city = receipt.after
+        val takeId = UUID.randomUUID()
+        storage.reserve(city, takeId, player)
+        val taken = residentTransaction(takeId, city, storage.prepareResidentTransfer(city, worker.id, player, 4, null, ClickType.SHIFT_LEFT))
+        storage.seal(taken, keepViewersOpen = true)
+        storage.reconcile(taken) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(taken) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe axe
+        taken.after.workers.single().items!![4] shouldBe null
+    }
+
+    test("resident receipts wait for rejoin and retry an already applied player change after a failed save") {
+        val player = paper.addPlayer("ReturningEquipmentOwner")
+        player.openInventory(paper.server.createInventory(player, 9))
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.inventory.setItem(0, ItemStack(Material.BREAD, 8))
+        storage.close()
+        var saves = 0
+        val persistence = PaperPlayerDataPersistence { if (++saves == 1) throw java.io.IOException("player save unavailable") }
+        storage = CivsStorage(plugin, persistence) { emptyArray() }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, null, 0, ClickType.RIGHT)
+        val receipt = residentTransaction(id, city, prepared)
+        storage.seal(receipt, keepViewersOpen = true)
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        player.inventory.getItem(0)!!.amount shouldBe 7
+        storage.close()
+        player.disconnect()
+        storage = CivsStorage(plugin, persistence) { emptyArray() }
+        storage.lock(receipt)
+        storage.waitingForPlayer(receipt) shouldBe true
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        player.reconnect()
+        storage.waitingForPlayer(receipt) shouldBe false
+        paper.callEvent(PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe true
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0)!!.amount shouldBe 7
+        CivsEquipment.plainCount(receipt.after.workers.single(), "BREAD") shouldBe 1
+        storage.unlock(id)
+        paper.callEvent(PlayerCommandPreprocessEvent(player, "/sellall")).isCancelled shouldBe false
+    }
+
+    test("resident transfer rejects metadata drift before changing or saving any player slot") {
+        val player = paper.addPlayer("DriftedEquipmentOwner")
+        player.openInventory(paper.server.createInventory(player, 9))
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.inventory.setItem(0, ItemStack(Material.IRON_AXE))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val receipt = residentTransaction(id, city, storage.prepareResidentTransfer(city, worker.id, player, null, 0, ClickType.LEFT))
+        storage.seal(receipt, keepViewersOpen = true)
+        val changed = named(Material.IRON_AXE, 1)
+        player.inventory.setItem(0, changed)
+        val saves = paper.playerDataSaveCount(player)
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "player-slot-drift"
+        player.inventory.getItem(0) shouldBe changed
+        paper.playerDataSaveCount(player) shouldBe saves
+    }
+
+    test("physical work exchanges inputs outputs and exact world cells through one replayable receipt") {
+        city = city.copy(inventory = city.inventory!!.copy(mode = CivStorageMode.PHYSICAL))
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 2))
+        val block = world.getBlockAt(2, 64, 1).also { it.type = Material.STONE }
+        val position = CivPosition(2, 64, 1)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareWork(city, city.buildings.single().id, mapOf("OAK_LOG" to 2L),
+            mapOf("OAK_PLANKS" to 8L, "STICK" to 4L), listOf(CivPlanBlock(position, block.blockData.asString, "minecraft:air")))
+        val receipt = transaction(id, city, plan)
+        storage.isWorldLocked(world.uid, position) shouldBe false
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.isWorldLocked(world.uid, position) shouldBe true
+        storage.isWorldLocked(world.uid, position.copy(x = 3)) shouldBe false
+        block.type shouldBe Material.STONE
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        block.type shouldBe Material.AIR
+        storage.buildingAvailable(city, city.buildings.single().id) shouldBe mapOf("OAK_PLANKS" to 8L, "STICK" to 4L)
+        storage.isWorldLocked(world.uid, position) shouldBe true
+        storage.unlock(id)
+        storage.isWorldLocked(world.uid, position) shouldBe false
+    }
+
+    test("world drift prevents the whole work receipt before input debit or output credit") {
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 2))
+        val block = world.getBlockAt(2, 64, 1).also { it.type = Material.STONE }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val receipt = transaction(id, city, storage.prepareWork(city, city.buildings.single().id,
+            mapOf("OAK_LOG" to 2L), mapOf("OAK_PLANKS" to 8L),
+            listOf(CivPlanBlock(CivPosition(2, 64, 1), block.blockData.asString, "minecraft:air"))))
+        storage.seal(receipt, keepViewersOpen = true)
+        block.type = Material.DIAMOND_BLOCK
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "world-cell-drift"
+        barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 2)
+        block.type shouldBe Material.DIAMOND_BLOCK
+    }
+
+    test("world receipt bootstrap keeps only its exact cells locked while their chunk is absent") {
+        val block = world.getBlockAt(2, 64, 1).also { it.type = Material.STONE }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val receipt = transaction(id, city, storage.prepareWork(city, city.buildings.single().id, emptyMap(), emptyMap(),
+            listOf(CivPlanBlock(CivPosition(2, 64, 1), block.blockData.asString, "minecraft:air"))))
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.close()
+        world.unloadChunk(0, 0)
+        storage = CivsStorage(plugin) { emptyArray() }
+        storage.beginReceiptBootstrap()
+        storage.completeReceiptBootstrap(listOf(receipt))
+        storage.isWorldLocked(world.uid, CivPosition(2, 64, 1)) shouldBe true
+        world.isChunkLoaded(0, 0) shouldBe false
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        world.isChunkLoaded(0, 0) shouldBe false
+        world.loadChunk(0, 0)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        world.getBlockAt(2, 64, 1).type shouldBe Material.AIR
+    }
+
     test("hopper checks skip idle holders but keep bootstrap and right-half receipt locks without snapshots") {
         val idle = mockk<Inventory>()
         fun move(source: Inventory, destination: Inventory) =
@@ -1276,6 +1424,13 @@ class CivsStorageTest : FunSpec({
 
 private fun transaction(id: UUID, city: Settlement, plan: CivStoragePlan) = CivInventoryTransaction(
     id, city.id, city.revision, city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes, plan.playerDebit,
+    plan.residentTransfer, plan.worldChanges,
+)
+
+private fun residentTransaction(id: UUID, city: Settlement, prepared: CivResidentTransferPlan) = CivInventoryTransaction(
+    id, city.id, city.revision, city.copy(workers = city.workers.map { if (it.id == prepared.worker.id) prepared.worker else it },
+        inventory = prepared.plan.inventoryAfter, revision = city.revision + 1), prepared.plan.changes,
+    residentTransfer = prepared.plan.residentTransfer,
 )
 
 private fun named(material: Material, count: Int): ItemStack = ItemStack(material, count).also { item ->

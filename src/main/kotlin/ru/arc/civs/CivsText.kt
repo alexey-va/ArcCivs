@@ -86,11 +86,15 @@ class CivsText private constructor(
             CivsRules.slots(city, building) > 0 -> if (workers > 0) "workers" else "vacant"
             else -> "ready"
         }
-        return render(player, "hologram.label",
+        val label = render(player, "hologram.label",
             "name" to this.building(player, building.type).color(TextColor.color(0x9BD48D)),
             "level" to render(player, "hologram.level", "level" to building.level),
             "state" to render(player, "hologram.$state", "count" to workers).color(TextColor.color(
                 if (state in setOf("waiting", "paused", "vacant")) 0xE4BB75 else 0x92BED8)))
+        val placed = order?.blocksPlaced
+        val total = order?.blocksRequired
+        return if (placed != null && total != null && total > 0 && placed in 0..total) label.append(Component.newline())
+            .append(render(player, "hologram.blocks", "placed" to placed, "total" to total).color(INFO)) else label
     }
 
     fun resource(player: Player, resource: Resource): Component = render(player, "resource.${resource.name.lowercase(Locale.ROOT)}")
@@ -98,7 +102,7 @@ class CivsText private constructor(
     fun style(player: Player, style: String): Component =
         if ("style.$style" in messages.getValue("ru")) render(player, "style.$style") else literal(style)
 
-    fun status(player: Player, status: String): Component = render(player,
+    fun status(player: Player?, status: String): Component = render(player,
         (if (status.startsWith("workers.status.")) status else "workers.status.$status")
             .takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable")
 

@@ -97,8 +97,9 @@ class CivsNetworkStore internal constructor(
         }
     }
 
-    fun save(city: Settlement): CompletableFuture<Settlement> {
-        val snapshot = snapshotCity(city)
+    /** CivsStore owns the one defensive copy before asynchronous SQL admission. */
+    internal fun save(city: Settlement): CompletableFuture<Settlement> {
+        val snapshot = city
         return admit("save", "city" to snapshot.id, "revision" to snapshot.revision,
             "owner" to snapshot.owner, "members" to snapshot.members.size, "construction" to snapshot.construction?.id) { runtime ->
             runtime.executor.transaction { connection ->
@@ -109,8 +110,8 @@ class CivsNetworkStore internal constructor(
     }
 
     /** Deletes only the complete expected home snapshot; retries retain the durable deletion fence. */
-    fun delete(city: Settlement): CompletableFuture<Unit> {
-        val snapshot = snapshotCity(city)
+    internal fun delete(city: Settlement): CompletableFuture<Unit> {
+        val snapshot = city
         return admit("delete", "city" to snapshot.id, "revision" to snapshot.revision, "owner" to snapshot.owner) { runtime ->
             runtime.executor.transaction { connection ->
                 CivsRules.validate(snapshot)
@@ -227,16 +228,6 @@ class CivsNetworkStore internal constructor(
             check(it.executeUpdate() == 1)
         }
     }
-
-    private fun snapshotCity(city: Settlement): Settlement = city.copy(
-        buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet(),
-        inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
-            buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
-        construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
-            payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
-        pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
-        constructionQueue = city.constructionQueue?.toList(),
-    )
 
     private fun findCity(connection: Connection, id: UUID): CivsNetworkCity? =
         connection.prepareStatement("SELECT * FROM arc_civs_city WHERE city_id = ?").use { statement ->

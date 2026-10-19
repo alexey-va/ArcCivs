@@ -1,6 +1,6 @@
 package ru.arc.civs
 
-/** Small personal stores contain only explicitly supplied plain items, never native NPC copies. */
+/** Personal stores are authoritative persisted items; native NPC equipment is only a view. */
 object CivsResidents {
     val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE")
     val catalog = listOf("BREAD", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE",
@@ -28,10 +28,11 @@ object CivsResidents {
         else -> material
     }
     fun canCarry(worker: CivWorker, material: String): Boolean = material in catalog &&
-        (worker.inventory.orEmpty()[material] ?: 0) < (if (material == "BREAD") 16 else 1) &&
-        worker.inventory.orEmpty().keys.none { it != material && slot(it) == slot(material) }
+        CivsEquipment.plainCount(worker, material) < (if (material == "BREAD") 16 else 1) &&
+        CivsEquipment.armorSlot(material)?.let { CivsEquipment.slots(worker)[it] == null } != false &&
+        runCatching { CivsEquipment.supply(worker, material, false) }.isSuccess
     fun damage(worker: CivWorker, type: BuildingType?, nativeDamage: Double): Double =
-        nativeDamage * if (type?.let(::tool)?.let { worker.inventory.orEmpty()[it] == 1L } == true) 0.9 else 1.0
+        nativeDamage * if (type?.let(::tool)?.let { tool -> CivsEquipment.slots(worker).take(6).any { it?.material == tool } } == true) 0.9 else 1.0
     fun trained(worker: CivWorker, type: BuildingType): CivWorker {
         val profession = profession(type)
         if (profession !in professions) return worker
@@ -44,5 +45,9 @@ object CivsResidents {
         val items = worker.inventory.orEmpty()
         require(items.all { (key, value) -> key in catalog && value in 1..if (key == "BREAD") 16L else 1L })
         require(items.keys.map(::slot).distinct().size == items.size)
+        worker.items?.let {
+            require(worker.inventory.isNullOrEmpty())
+            CivsEquipment.validate(it)
+        }
     }
 }

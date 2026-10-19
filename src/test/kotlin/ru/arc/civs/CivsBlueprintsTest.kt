@@ -5,6 +5,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import ru.arc.paper.api.*
 import java.nio.file.Path
 import java.util.UUID
@@ -119,6 +120,29 @@ class CivsBlueprintsTest : FunSpec({
             CivsBlueprintGeometry.rotate(CivsBlueprintGeometry.rotate(point, turns), -turns) shouldBe point
         }
         CivsBlueprintGeometry.rotate(point, 4) shouldBe point
+    }
+
+    test("lightweight control lookup subtracts the authored origin at every rotation without preparing a preview") {
+        val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(4, 4, 2), ArcSchematicPoint(2, 1, 3),
+            mapOf(ArcSchematicPoint(1, 3, 1) to "minecraft:structure_void"))
+        val minima = listOf(ArcSchematicPoint(-2, -1, -3), ArcSchematicPoint(1, -1, -2),
+            ArcSchematicPoint(-2, -1, 1), ArcSchematicPoint(-3, -1, -2))
+        val maxima = listOf(ArcSchematicPoint(2, 3, -1), ArcSchematicPoint(3, 3, 2),
+            ArcSchematicPoint(2, 3, 3), ArcSchematicPoint(-1, 3, 2))
+        val controls = listOf(ArcSchematicPoint(-1, 2, -2), ArcSchematicPoint(2, 2, -1),
+            ArcSchematicPoint(1, 2, 2), ArcSchematicPoint(-2, 2, 1))
+        val libraries = BlueprintLibraries()
+        every { libraries.source.load("test", ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(original)
+        libraries.subject.use { subject ->
+            for (turns in 0..3) {
+                val transformed = BlueprintCellsSnapshot(minima[turns], maxima[turns], ArcSchematicPoint(0, 0, 0))
+                val anchor = CivPosition(100, 64, 200)
+                val building = blueprintBuilding(transformed, anchor, controls[turns]).copy(rotation = turns * 90,
+                    entrance = anchor.copy(y = anchor.y + 1))
+                subject.controlPosition(building).join() shouldBe building.control
+            }
+            verify(exactly = 0) { libraries.source.captureSource(any(), any()); libraries.source.transform(any(), any()) }
+        }
     }
 
     test("prepare places the complete captured schematic at the selected ground pivot and derives its internal control") {

@@ -20,6 +20,10 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         if (city.worldId != from.world?.uid || city.worldId != to.world?.uid ||
             city.workers.none { it.id == workerId } || !city.contains(from.blockX, from.blockZ) ||
             !city.contains(to.blockX, to.blockZ)) return
+        // Buildings keep their authored floors. Even a valid destination never receives trail wear.
+        if (city.buildings.any { it.bounds.contains(from.blockX, from.blockY - 1, from.blockZ) ||
+                it.bounds.contains(to.blockX, to.blockY - 1, to.blockZ) || CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ) ||
+                CivsWorksiteLayouts.isField(it, to.blockX, to.blockZ) }) return
         val authority = (sequenceOf(city.owner) + city.members.asSequence()).mapNotNull(plugin.server::getPlayer)
             .firstOrNull { it.isOnline && !it.hasMetadata("NPC") && it.world.uid == city.worldId } ?: return
         try {
@@ -35,6 +39,13 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         }
     }
 
+    fun speed(ground: org.bukkit.block.Block): Double {
+        val provider = plugin.server.pluginManager.getPlugin("Trails")?.takeIf { it.isEnabled } ?: return 1.0
+        if (incompatible === provider) return 1.0
+        return try { CivsTrailsAdapter.speed(plugin, ground).coerceIn(0.2, 5.0) }
+        catch (failure: LinkageError) { incompatible = provider; logFailure(failure); 1.0 }
+    }
+
     private fun logFailure(failure: Throwable) {
         val now = System.currentTimeMillis()
         if (now < nextFailureLog) return
@@ -44,6 +55,8 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
 }
 
 private object CivsTrailsAdapter {
+    fun speed(plugin: Plugin, ground: org.bukkit.block.Block): Double =
+        plugin.server.servicesManager.load(TrailsFootTrafficService::class.java)?.speedMultiplier(ground) ?: 1.0
     fun record(plugin: Plugin, entity: Entity, authority: Player, from: Location, to: Location): CompletionStage<*>? =
         plugin.server.servicesManager.load(TrailsFootTrafficService::class.java)?.recordStep(entity, authority, from, to)
 }
