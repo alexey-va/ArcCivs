@@ -34,8 +34,8 @@ import org.bukkit.inventory.InventoryHolder
 import java.util.UUID
 
 /**
- * Members may remodel finished buildings and unstarted sites, and restore their missing control barrel.
- * Existing control blocks and the current/planned footprint of accepted construction stay locked for everyone.
+ * Members may remodel their buildings during construction and restore an eligible missing control barrel.
+ * Existing control blocks, pending deletion and exact inventory transaction cells stay locked.
  * Environmental changes and third-party pastes retain the complete footprint guard;
  * the settlement radius itself grants no event protection. Core pastes do not emit these events.
  */
@@ -89,7 +89,7 @@ class CivsProtection(
                     }
                     city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors)) }
                     city.buildings.forEach { building ->
-                        val locked = city.pendingDeletion != null || building.phase == BuildingPhase.CONSTRUCTING || city.construction?.buildingId == building.id
+                        val locked = city.pendingDeletion != null
                         add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
                         if (building.type == BuildingType.FARM && building.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null) {
                             CivsWorksiteLayouts.field(building).forEach { soil ->
@@ -99,7 +99,9 @@ class CivsProtection(
                             }
                         }
                     }
-                    city.construction?.plannedBuilding?.let { add(Footprint(city.worldId, it.bounds, emptySet())) }
+                    city.construction?.plannedBuilding?.let {
+                        add(Footprint(city.worldId, it.bounds, if (city.pendingDeletion != null) emptySet() else editors))
+                    }
                     civsProtectedBuildings(city).forEach { building ->
                         val point = building.control ?: return@forEach
                         val restorers = if (city.pendingDeletion == null && building.phase != BuildingPhase.CONSTRUCTING && city.construction?.buildingId != building.id)

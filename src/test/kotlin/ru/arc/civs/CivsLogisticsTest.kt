@@ -7,6 +7,21 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsLogisticsTest : FunSpec({
+    test("shipment reach uses source and destination barrels while the saved entrance remains its identity") {
+        val base = logisticsCity()
+        val warehouse = base.buildings[1].copy(entrance = CivPosition(-30, 64, 3))
+        val smith = base.buildings[2].copy(entrance = CivPosition(60, 64, 3))
+        val city = base.copy(buildings = listOf(base.buildings[0], warehouse, smith, base.buildings[3]))
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first()) {
+            if (it == warehouse.id) mapOf("IRON_INGOT" to 3L) else emptyMap()
+        })
+        plan.cargo.sourceBuildingId shouldBe warehouse.id
+        plan.cargo.targetBuildingId shouldBe smith.id
+        plan.cargo.sourceEntrance shouldBe warehouse.entrance
+        // The entrances are 90 blocks apart; the actual barrel leg is only ten.
+        CivsLogistics.pickup(city, city.workers.first().id, plan.cargo).workers.first().cargo shouldBe plan.cargo
+    }
+
     test("accepted cargo removes duplicate demand and a second courier chooses another item") {
         val city = logisticsCity()
         val warehouse = city.buildings[1]

@@ -65,6 +65,45 @@ internal object CivsEquipment {
     fun plainCount(worker: CivWorker, material: String): Int = slots(worker).filterNotNull()
         .filter { it.material == material && it.data == null }.sumOf(CivResidentItem::amount)
 
+    fun requestedTool(city: Settlement, worker: CivWorker): Material? {
+        val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE } ?: return null
+        val type = CivsRules.effectiveWorkType(city, building)
+        if (type !in CivsWorksites.TYPES) return null
+        val material = Material.valueOf(requireNotNull(CivsResidents.tool(type)))
+        val suffix = material.name.substringAfter('_')
+        return material.takeUnless { slots(worker)[4]?.material?.endsWith("_$suffix") == true }
+    }
+
+    /** Lowest native tier, then enchantments, remaining durability and stable player slot order. */
+    fun cheapestTool(player: Player, requested: Material): Int? {
+        val suffix = requested.name.substringAfter('_')
+        val tiers = listOf("WOODEN", "GOLDEN", "STONE", "COPPER", "IRON", "DIAMOND", "NETHERITE")
+        return (0..35).filter { index -> player.inventory.getItem(index)?.let {
+            it.amount > 0 && it.type.name.substringAfter('_') == suffix && it.type.name.substringBefore('_') in tiers
+        } == true }.minWithOrNull(compareBy<Int>(
+            { tiers.indexOf(player.inventory.getItem(it)!!.type.name.substringBefore('_')) },
+            { player.inventory.getItem(it)!!.enchantments.values.sum() + if (player.inventory.getItem(it)!!.itemMeta.isUnbreakable) 1000 else 0 },
+            { index -> player.inventory.getItem(index)!!.let { it.type.maxDurability.toInt() - ((it.itemMeta as? org.bukkit.inventory.meta.Damageable)?.damage ?: 0) } },
+            { it }))
+    }
+
+    fun canEquipRequestedTool(worker: CivWorker): Boolean = slots(worker).let { slots ->
+        slots[4] == null || (BAG until SLOTS).any { slots[it] == null }
+    }
+
+    fun giveRequestedTool(worker: CivWorker, player: Player, requested: Material): Pair<CivWorker, List<CivNativePlayerSlot>> {
+        val index = cheapestTool(player, requested) ?: throw CivsRejection("resident-item-missing")
+        val before = requireNotNull(CivResidentItem.of(player.inventory.getItem(index)))
+        val items = slots(worker).toMutableList()
+        items[4]?.let { previous ->
+            val free = (BAG until SLOTS).firstOrNull { items[it] == null } ?: throw CivsRejection("resident-inventory-full")
+            items[free] = previous
+        }
+        items[4] = before.copy(amount = 1)
+        return replace(worker, items) to listOf(CivNativePlayerSlot(index, before,
+            before.copy(amount = before.amount - 1).takeIf { it.amount > 0 }))
+    }
+
     fun supply(worker: CivWorker, material: String, returning: Boolean): CivWorker {
         if (returning) return consume(worker, material, 1)
         val slots = slots(worker).toMutableList()

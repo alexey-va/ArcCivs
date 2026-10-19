@@ -104,7 +104,7 @@ open class ArcCivsPlugin : JavaPlugin() {
             })
             val service = lifecycle.own(CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
-                    val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue)
+                    val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue, citizens::workplaceSnapshots)
                     lifecycle.own(AutoCloseable {
                         labels.close()
                         nativeDrains += labels.drained()

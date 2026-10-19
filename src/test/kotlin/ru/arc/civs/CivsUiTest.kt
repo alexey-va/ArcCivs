@@ -318,6 +318,39 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("resident tool request exposes an eligible one-shot handoff and keeps missing inventory noninteractive") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val worker = base.workers.first().copy(name = "Фёдор")
+            h.city = base.copy(buildings = base.buildings.map { building ->
+                if (building.id == worker.assignment) building.copy(type = BuildingType.FARM, schematicId = "medieval-oak/farm") else building
+            }, workers = base.workers.map { if (it.id == worker.id) worker else it })
+            var request: CivsToolRequest? = CivsToolRequest(Material.IRON_HOE, false)
+            every { h.host.toolRequest(h.player, worker.id) } answers { request }
+            every { h.host.workerStatus(worker.id) } returns "workers.status.waiting-tool"
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.body() shouldContain "Для работы нужна мотыга"
+            h.body() shouldContain "Передать пока нельзя"
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_tool"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-tool-unavailable-ru", h.screen, listOf(588, 380)) }
+            request = request!!.copy(canGive = true)
+            val handoff = CompletableFuture<Unit>()
+            every { h.host.giveRequestedTool(h.player, worker.id) } returns handoff
+            h.ui.openWorker(h.player, base.id, worker.id)
+            plainText(h.screen.buttons.first().label) shouldBe "Передать мотыгу"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-tool-ready-ru", h.screen, listOf(588, 380)) }
+            val ready = h.screen
+            h.click("give_tool"); h.click("give_tool", screen = ready)
+            verify(exactly = 1) { h.host.giveRequestedTool(h.player, worker.id) }
+            request = null
+            handoff.complete(Unit); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.worker"
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_tool"
+            h.body().contains("Для работы нужна мотыга") shouldBe false
+        }
+    }
+
     test("resident health skills and carried items use fresh state and real dialog history") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -1908,6 +1941,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.preview(any()) } answers { preview }
         every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"
+        every { host.toolRequest(any(), any()) } returns null
         every { host.residentItems(any(), any()) } answers {
             val workerId = secondArg<UUID>()
             city?.workers?.firstOrNull { it.id == workerId }?.let { worker -> CivsEquipment.slots(worker).map { it?.stack() } }

@@ -30,6 +30,9 @@ data class CivsPreviewView(
     val control: CivPosition = anchor,
 )
 
+/** A derived request, fulfilled by one native inventory transfer rather than a separate quest store. */
+data class CivsToolRequest(val material: org.bukkit.Material, val canGive: Boolean)
+
 /** Coordinates from the interaction, never a second ray cast after the click. */
 data class CivsGroundTarget(val worldId: UUID, val block: CivPosition)
 
@@ -101,6 +104,8 @@ interface CivsUiHost {
     fun supplyWorker(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
     fun returnWorkerItem(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
     fun feedWorker(player: Player, workerId: UUID): CompletableFuture<Unit>
+    fun toolRequest(player: Player, workerId: UUID): CivsToolRequest? = null
+    fun giveRequestedTool(player: Player, workerId: UUID): CompletableFuture<Unit> = CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
     fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
     fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
     fun addMember(player: Player, name: String): CompletableFuture<Unit>

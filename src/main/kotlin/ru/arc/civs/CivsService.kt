@@ -115,6 +115,8 @@ class CivsService(
             val targetWorld = plugin.server.getWorld(worldId) ?: return false
             if (y !in targetWorld.minHeight until targetWorld.maxHeight || !targetWorld.isChunkLoaded(x shr 4, z shr 4)) return false
             val block = targetWorld.getBlockAt(x, y, z)
+            if (!access.repairing && block.type != access.materials.getValue(position) &&
+                (block.getState(false) as? org.bukkit.block.Container)?.inventory?.isEmpty == false) return false
             // Preflight can precede this write by many ticks; Lands authority must still be current.
             return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))
         }
@@ -126,7 +128,8 @@ class CivsService(
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
         }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
-        surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo)).also(onCitizensCreated)
+        surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
+        doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
 
     init {
@@ -297,6 +300,7 @@ class CivsService(
         val selection = Selection(UUID.randomUUID(), player.world.uid, cityId, name, style, type,
             now() + settings.previewSeconds * 1_000L)
         selections[player.uniqueId] = selection
+        refreshBoundary(player)
         CivsDiagnostics.event("selection_begin", *CivsDiagnostics.actor(player), "selection" to selection.id,
             "city" to cityId, "city_name" to name, "style" to style, "type" to type, "expires_at" to selection.expires)
         return CompletableFuture.completedFuture(Unit)
@@ -411,6 +415,7 @@ class CivsService(
             "city" to cityId, "city_name" to name, "style" to style, "type" to type,
             "placement" to placement, "fixed_entrance" to fixedEntrance, "rotation" to rotation)
         previewLoads += player.uniqueId
+        refreshBoundary(player)
         // Keep the last usable position visible until the replacement is ready.
         val result = tracked<Unit>()
         blueprints.prepare(style, type, level, buildingId, worldId, placement, facing(player), rotation, fixedEntrance)
@@ -433,6 +438,7 @@ class CivsService(
                     previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
                         now() + settings.previewSeconds * 1_000L, movementOrigin ?: prepared.building.anchor)
                     if (selectionId != null) selections.remove(player.uniqueId)
+                    refreshBoundary(player)
                     CivsDiagnostics.event("preview_ready", "player" to player.uniqueId, "request" to request,
                         "selection" to selectionId, "world" to worldId, "bounds" to prepared.building.bounds,
                         "control" to prepared.building.control, "entrance" to prepared.building.entrance,
@@ -904,11 +910,26 @@ class CivsService(
         return CivsEquipment.slots(worker).map { it?.stack() }
     }
 
+    override fun toolRequest(player: Player, workerId: UUID): CivsToolRequest? {
+        val city = managed(player)
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        val tool = CivsEquipment.requestedTool(city, worker) ?: return null
+        return CivsToolRequest(tool, CivsEquipment.canEquipRequestedTool(worker) && CivsEquipment.cheapestTool(player, tool) != null)
+    }
+
+    override fun giveRequestedTool(player: Player, workerId: UUID): CompletableFuture<Unit> =
+        transferResidentItems(player, workerId, null, null, org.bukkit.event.inventory.ClickType.RIGHT, true)
+
     override fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType): CompletableFuture<Unit> =
+        transferResidentItems(player, workerId, npcSlot, playerSlot, click, false)
+
+    private fun transferResidentItems(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requested: Boolean): CompletableFuture<Unit> =
         cityAction("resident_transfer", player, "worker" to workerId, "resident_slot" to npcSlot, "player_slot" to playerSlot) { city ->
             var updated: CivWorker? = null
             inventoryMutation(city.id, { before ->
-                storage.prepareResidentTransfer(before, workerId, player, npcSlot, playerSlot, click).also { updated = it.worker }.plan
+                val tool = if (requested) CivsEquipment.requestedTool(before, before.workers.firstOrNull { it.id == workerId }
+                    ?: throw CivsRejection("worker-not-found")) ?: throw CivsRejection("resident-item-missing") else null
+                storage.prepareResidentTransfer(before, workerId, player, npcSlot, playerSlot, click, tool).also { updated = it.worker }.plan
             }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
                 before.copy(workers = before.workers.map { if (it.id == workerId) requireNotNull(updated) else it },
                     inventory = inventory, revision = before.revision + 1)
@@ -949,6 +970,7 @@ class CivsService(
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
                 val work = worksites.plan(city, worker) ?: throw CivsRejection("stale-worksite")
                 rejectIf(work.cycle != cycle || work.buildingId != assignment, "stale-delivery")
+                if (work.changes.isEmpty()) citizens.requireStorageArrival(cityId, workerId, assignment)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
@@ -960,6 +982,7 @@ class CivsService(
                 }.toCompletableFuture()
             } else {
                 rejectIf(constructionId != null, "stale-delivery")
+                citizens.requireStorageArrival(cityId, workerId, assignment)
                 if (city.inventory == null) return@afterCityAvailable mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
                 // Validate the observed trip before reserving space; repeated callbacks cannot mint again.
                 CivsRules.deliver(city, city.owner, workerId, assignment, cycle, nextAt, at, outputHandled = true)
@@ -997,6 +1020,7 @@ class CivsService(
                 rejectIf(current.cargo.id != requested.id || current.cargo.sourceEntrance != requested.sourceEntrance, "stale-delivery")
                 val cargo = current.cargo.copy(amount = minOf(current.cargo.amount, requested.amount))
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
+                citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
                 inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.pickup(before, workerId, cargo).copy(inventory = inventory)
                 }
@@ -1009,6 +1033,7 @@ class CivsService(
                 val city = cities[cityId] ?: throw CivsRejection("no-city")
                 val cargo = city.workers.firstOrNull { it.id == workerId }?.cargo ?: throw CivsRejection("stale-delivery")
                 rejectIf(cargo.id != requested.id || CivsLogistics.destination(city, cargo)?.id != destinationId, "stale-delivery")
+                citizens.requireStorageArrival(cityId, workerId, destinationId)
                 inventoryMutation(cityId, { storage.prepareCargoDropoff(it, cargo, destinationId) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.unload(before, workerId, cargo.id, now()).copy(inventory = inventory)
                 }.whenComplete { _, failure ->
@@ -1652,12 +1677,19 @@ class CivsService(
         return result
     }
 
+    private fun refreshBoundary(player: Player) {
+        val preview = previews[player.uniqueId]
+        boundary.pulse(player, if (ready()) city(player) else null,
+            player.uniqueId in selections || preview != null || player.uniqueId in previewLoads,
+            preview?.blueprint?.building?.bounds, preview?.blueprint?.building?.id)
+    }
+
     private fun pulse() {
         if (closed) return
         selections.filterValues { it.expires <= now() }.keys.toList().forEach { cancelSelection(it, "expired") }
         previews.filterValues { it.expires <= now() }.keys.toList().forEach { cancelPreview(it, "expired") }
         citizens.pulse(now())
-        plugin.server.onlinePlayers.forEach { player -> boundary.pulse(player, if (ready()) city(player) else null) }
+        plugin.server.onlinePlayers.forEach(::refreshBoundary)
         if (ready()) {
             recoverInventories()
             pulseDeletions()

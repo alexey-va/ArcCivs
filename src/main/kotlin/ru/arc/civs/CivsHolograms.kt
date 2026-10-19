@@ -6,6 +6,7 @@ import org.bukkit.Bukkit
 import org.bukkit.Color
 import org.bukkit.Location
 import org.bukkit.entity.Display
+import org.bukkit.entity.Player
 import org.bukkit.entity.TextDisplay
 import org.bukkit.plugin.Plugin
 import org.bukkit.util.Transformation
@@ -32,6 +33,12 @@ data class CivsNpcHologramSnapshot(
     val status: String,
     val health: Double,
     val maxHealth: Double,
+    val entity: Player? = null,
+    val profession: String = "",
+    val courierCart: Boolean = false,
+    val cargo: Map<String, Int> = emptyMap(),
+    val yaw: Float = 0f,
+    val nativeHeight: Double = 1.8,
 )
 
 /** Nearby public nameplates. No Bukkit entities, block reads, routing or gameplay state changes. */
@@ -42,31 +49,38 @@ class CivsHolograms internal constructor(
     private val snapshots: () -> List<CivsNpcHologramSnapshot>,
     private val displays: PaperPacketDisplays,
     private val nativeWork: BudgetedTaskQueue? = null,
+    private val workplaces: () -> List<CivsWorkplaceSnapshot> = { emptyList() },
 ) : AutoCloseable {
     constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText,
-                snapshots: () -> List<CivsNpcHologramSnapshot>, nativeWork: BudgetedTaskQueue? = null) :
+                snapshots: () -> List<CivsNpcHologramSnapshot>, nativeWork: BudgetedTaskQueue? = null,
+                workplaces: () -> List<CivsWorkplaceSnapshot> = { emptyList() }) :
         this(plugin, tasks, text, snapshots, nativeWork?.let { PaperPacketDisplays(plugin, "civs-residents", it) }
-            ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork)
+            ?: PaperPacketDisplays(plugin, "civs-residents"), nativeWork, workplaces)
 
     private data class Desired(val snapshot: CivsNpcHologramSnapshot, val text: Component)
     private data class Rendered(val handle: PacketTextDisplay, var value: Desired?)
     private val work = nativeWork ?: BudgetedTaskQueue(tasks)
     private val epoch = tasks.token()
     private val rendered = linkedMapOf<UUID, Rendered>()
+    private val carts = CivsCourierCart(displays)
+    private val decor = CivsWorkplaceDecor(displays)
     private var desired = emptyMap<UUID, Desired>()
     private var pending = false
     private var closed = false
     private var terminal: CompletableFuture<Void>? = null
     private val pulseTask = tasks.runTimer(epoch, 1, 5, ::pulse)
+    private val poseTask = tasks.runTimer(epoch, 1, 1) { carts.updatePoses() }
 
     internal fun pulse() {
         check(Bukkit.isPrimaryThread()) { "Resident nameplates require the server thread" }
         if (closed || !tasks.isCurrent(epoch)) return
         desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
-            it.health <= it.maxHealth && Bukkit.getWorld(it.worldId) != null }
+            it.health <= it.maxHealth && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
+            Bukkit.getWorld(it.worldId) != null && (it.entity == null || it.entity.isValid) }
             .associate { it.workerId to Desired(it, civsNpcHologramText(text, it)) }
-        if (pending || rendered.size == desired.size && rendered.all { (id, shown) -> shown.value == desired[id] }) return
+        decor.capture(workplaces())
+        if (pending || decor.current() && rendered.size == desired.size && rendered.all { (id, shown) -> samePresentation(shown.value, desired[id]) }) return
         pending = true
         work.submit({ !closed && tasks.isCurrent(epoch) }, ::reconcileOne).whenComplete { _, failure ->
             pending = false
@@ -75,26 +89,27 @@ class CivsHolograms internal constructor(
         }
     }
 
-    /** At most one handle create, move/update or removal in each shared native-budget step. */
+    /** One actor's bounded presentation per shared step; native movement belongs to its carrier. */
     private fun reconcileOne(): Boolean {
         rendered.keys.firstOrNull { it !in desired }?.let {
             rendered.remove(it)!!.handle.remove()
+            carts.remove(it)
             return false
         }
-        val changed = desired.entries.firstOrNull { rendered[it.key]?.value != it.value } ?: return true
+        val changed = desired.entries.firstOrNull { !samePresentation(rendered[it.key]?.value, it.value) } ?: return decor.reconcileOne()
         val value = changed.value
         val npc = value.snapshot
         val world = Bukkit.getWorld(npc.worldId) ?: run {
             desired = desired - changed.key
             return false
         }
-        val location = Location(world, npc.x, npc.y + CIVS_NPC_TEXT_OFFSET, npc.z)
+        val location = Location(world, npc.x, npc.y + if (npc.entity == null) CIVS_NPC_TEXT_OFFSET else 0.0, npc.z)
         val shown = rendered[changed.key] ?: Rendered(displays.spawnText(location, value.text), null).also {
             rendered[changed.key] = it
             it.handle.billboard = Display.Billboard.CENTER
             it.handle.alignment = TextDisplay.TextAlignment.CENTER
             it.handle.lineWidth = CIVS_NPC_TEXT_WIDTH
-            it.handle.backgroundColor = Color.fromARGB(115, 15, 23, 30)
+            it.handle.backgroundColor = Color.fromARGB(105, 28, 24, 19)
             it.handle.isShadowed = true
             it.handle.isSeeThrough = false
             it.handle.viewRange = 0.25f
@@ -103,21 +118,21 @@ class CivsHolograms internal constructor(
             it.handle.shadowStrength = 0f
             it.handle.displayWidth = 4f
             it.handle.displayHeight = 1f
-            it.handle.teleportDuration = 5
-            it.handle.transformation = Transformation(Vector3f(), Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
+            it.handle.teleportDuration = 0
         }
-        shown.value?.let { before ->
-            val previous = before.snapshot
-            if (previous.worldId != npc.worldId || previous.x != npc.x || previous.y != npc.y || previous.z != npc.z) {
-                val dx = previous.x - npc.x
-                val dy = previous.y - npc.y
-                val dz = previous.z - npc.z
-                // A recovered actor teleports: its nameplate must not glide across the whole town.
-                shown.handle.teleportDuration = if (previous.worldId != npc.worldId || dx * dx + dy * dy + dz * dz > 16) 0 else 5
-                shown.handle.teleport(location)
-            }
-            if (before.text != value.text) shown.handle.text(value.text)
+        val before = shown.value
+        if (npc.entity != null) {
+            shown.handle.attachTo(npc.entity)
+        } else {
+            // Static export/fixture support. Spawned Citizens always supply the native carrier.
+            shown.handle.detach()
+            if (before != null) shown.handle.teleport(location)
         }
+        shown.handle.transformation = Transformation(
+            Vector3f(0f, if (npc.entity == null) 0f else (CIVS_NPC_TEXT_OFFSET - npc.nativeHeight).toFloat(), 0f),
+            Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
+        if (before != null && before.text != value.text) shown.handle.text(value.text)
+        carts.sync(npc)
         shown.value = value
         return false
     }
@@ -126,6 +141,9 @@ class CivsHolograms internal constructor(
         if (closed) return
         closed = true
         pulseTask?.cancel()
+        poseTask?.cancel()
+        carts.close()
+        decor.close()
         desired = emptyMap()
         rendered.clear()
         if (nativeWork == null) work.close()
@@ -133,6 +151,15 @@ class CivsHolograms internal constructor(
     }
 
     fun drained(): CompletableFuture<Void> = terminal?.copy() ?: CompletableFuture.completedFuture(null)
+
+    private fun samePresentation(first: Desired?, second: Desired?): Boolean {
+        if (first == null || second == null) return first == second
+        val a = first.snapshot
+        val b = second.snapshot
+        return first.text == second.text && a.entity === b.entity && a.nativeHeight == b.nativeHeight &&
+            a.courierCart == b.courierCart && a.cargo == b.cargo &&
+            (a.entity != null || a.worldId == b.worldId && a.x == b.x && a.y == b.y && a.z == b.z)
+    }
 }
 
 internal const val CIVS_NPC_TEXT_SCALE = 0.70f
@@ -141,11 +168,23 @@ internal const val CIVS_NPC_TEXT_OFFSET = 2.15
 
 internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): Component {
     fun number(value: Double): String = String.format(Locale.ROOT, "%.1f", value).trimEnd('0').trimEnd('.')
+    val action = if (npc.status.removePrefix("workers.status.") == "waiting-tool") {
+        when (npc.profession) {
+            "farmer", "forester", "miner" -> text.render("hologram.tool-${npc.profession}")
+            else -> text.status(null, npc.status)
+        }
+    } else text.status(null, npc.status)
+    val profession = when (npc.profession) {
+        "" , "unassigned" -> text.render("hologram.resident")
+        "courier" -> text.render("hologram.courier")
+        else -> text.render("profession.${npc.profession}")
+    }
     return text.render("hologram.npc",
         values = arrayOf(
             "name" to Component.text(npc.name, TextColor.color(0xF3EFE5)),
-            "action" to text.status(null, npc.status).color(CivsText.INFO),
+            "profession" to profession.color(TextColor.color(0xE1C58D)),
+            "action" to action.color(TextColor.color(0xCDC7BC)),
             "health" to text.render("hologram.health", values = arrayOf("health" to number(npc.health), "max" to number(npc.maxHealth)))
-                .color(TextColor.color(0xF28E85)),
+                .color(TextColor.color(0xDC9B8D)),
         ))
 }

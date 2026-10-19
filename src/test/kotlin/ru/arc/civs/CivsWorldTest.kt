@@ -94,10 +94,7 @@ class CivsWorldTest : FunSpec({
             s.world.getBlockAt(1, 64, 0).blockData = Bukkit.createBlockData("minecraft:cocoa[age=1,facing=west]")
             val drifted = s.subject.revalidate(plan, owner)
             s.scheduler.tick()
-            val failure = rejection(drifted)
-            failure.reason shouldBe "world-changed"
-            failure.values shouldBe mapOf("block" to "COCOA", "x" to "1", "y" to "64", "z" to "0",
-                "world" to s.world.uid.toString(), "world_name" to s.world.name)
+            completed(drifted) shouldBe Unit
             s.world.getBlockAt(1, 64, 0).blockData.asString shouldBe "minecraft:cocoa[age=1,facing=west]"
         }
     }
@@ -482,26 +479,37 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("revalidation accepts before and after but rejects a third state without overwriting it") {
+    test("future cells accept manual clearing and rebuilding while bedrock and filled containers stay safe") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 1))
             val id = UUID.randomUUID()
             val plan = CivPlacementPlan(id, UUID.randomUUID(), s.world.uid, building, listOf(
-                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:oak_planks"),
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:oak_log[axis=y]", "minecraft:oak_planks"),
                 CivPlanBlock(CivPosition(1, 64, 0), "minecraft:air", "minecraft:stone"),
             ))
             val city = worldCity(s.world.uid, building).copy(id = plan.cityId,
                 construction = CivConstruction(id, building.id, 1, 0, 0, ConstructionPhase.PLACING, Stock(), plannedBuilding = building))
             s.cities += city
-            s.world.getBlockAt(0, 64, 0).type = Material.OAK_PLANKS
+            // The player cleared the log and rebuilt another still-pending cell after capture.
+            s.world.getBlockAt(0, 64, 0).type = Material.AIR
+            s.world.getBlockAt(1, 64, 0).type = Material.GOLD_BLOCK
             val accepted = s.subject.revalidate(plan, city.owner)
             s.scheduler.tick()
             completed(accepted) shouldBe Unit
-            s.world.getBlockAt(1, 64, 0).type = Material.GOLD_BLOCK
-            val rejected = s.subject.revalidate(plan, city.owner)
-            s.scheduler.tick()
-            failureReason(rejected) shouldBe "world-changed"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
             s.world.getBlockAt(1, 64, 0).type shouldBe Material.GOLD_BLOCK
+
+            s.world.getBlockAt(0, 64, 0).type = Material.BEDROCK
+            val bedrock = s.subject.revalidate(plan, city.owner)
+            s.scheduler.tick()
+            failureReason(bedrock) shouldBe "protected-terrain"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.BEDROCK
+            val chest = s.world.getBlockAt(0, 64, 0).also { it.type = Material.CHEST }.state as org.bukkit.block.Container
+            chest.inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val filledContainer = s.subject.revalidate(plan, city.owner)
+            s.scheduler.tick()
+            failureReason(filledContainer) shouldBe "container-not-empty"
+            chest.inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
         }
     }
 

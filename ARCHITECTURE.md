@@ -4,12 +4,16 @@ Players found one settlement, choose a curated imported building style, place
 and preview a town hall site, welcome gradual pioneers, assign a hut builder, build production and housing,
 recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
-management; unrelated players cannot build, break or loot city structures.
+management. Owners and members may remodel their structures, including construction
+footprints at every phase; unrelated players and environmental changes remain guarded.
 
-ArcCore host 0.1.18 with Core 2.7.44 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
-text, native dialogs/tables, packet displays and the host-owned asynchronous
+ArcCore host 0.1.18 and bundled Core helpers 2.7.45 are mandatory; the shared
+API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
+SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use transient Citizens PLAYER actors with
-bundled signed skins, native hand equipment and work-only arm swings. Skins are
+bundled signed skins, native hand equipment and work-only arm swings. Resident
+nameplates and courier carts attach as native passengers to that Citizens PLAYER
+actor; the bridge supports PLAYER NPCs, not online-player viewer entities. Skins are
 stable per worker UUID; lookup/update is disabled. Work props never enter city
 storage and NPC item pickup/drops are disabled. Supplied personal tools, armor and
 bread are recorded separately in the city snapshot. Residents have a native
@@ -21,8 +25,14 @@ equips native slots; a supplied matching iron work tool reduces incoming
 damage by ten percent. Props alone confer no bonus. Residents start with 20 health;
 each new completed profession cycle earns one internal point, with ten points per
 level and a level-five cap. The highest profession level adds two maximum health
-per extra level, up to 28. Old cycles grant no retroactive points. Production
+per extra level, up to 28. New cycles train the currently assigned profession;
+skill progress is persisted separately by profession and remains after reassignment.
+Old cycles grant no retroactive points. Production
 recipes consume actual inputs; gathering requires the corresponding world work.
+The worker tool request is derived from the current active assignment and equipment,
+not a persisted quest or reward. It transfers one real matching tool: lowest material
+tier first, then the existing enchantment/durability ordering. The debit uses the
+existing native inventory journal.
 
 Damage from players, monsters and the environment is intercepted before native
 death. The actor stops work while its injury waits for the current city write;
@@ -42,14 +52,6 @@ foot through a safe nearby endpoint; route recovery does not teleport. The same
 arrival, work and cycle-token checks still apply. There is no Core packet-NPC API.
 No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
-
-With Trails 2.3.18 enabled, actual grounded NPC block crossings use its optional
-Java service. Spawn, teleport, route recovery and stationary samples never count.
-ArcCivs submits only current residents moving inside their city with a real online
-owner/member in the same world as protection authority. Trails retains its normal
-world/permission, progression, widening, persistence and protection pipeline, and
-suppresses player feedback for NPC steps. Missing Trails or an online authority
-simply skips the step. The API is compile-only and is packaged solely by Trails.
 
 ## Network authority
 
@@ -108,14 +110,16 @@ cells. Ordinary terrain and crafted blocks, including lava, may be replaced; bed
 TileState/container contents and external protection remain guarded. This preparation
 is not a periodic repair. Completed grants never regenerate
 on a timer; normal block protection prevents harvesting controls, while external deletion
-requires restoring the missing barrel. A conflicting block is retained and reported.
+requires restoring the missing barrel. Members may restore an eligible missing
+control barrel on an ACTIVE building; existing control blocks remain protected.
+A conflicting block is retained and reported.
 The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. At night, residents shelter in their active house when
 available and otherwise use the town hall. Idle residents choose safe loaded
-wandering targets 6–16 blocks away. Routes avoid horizontal footprints of foreign
-buildings and farm fields; movement speed follows the actual surface speed.
+wandering targets 6–16 blocks away at speed 0.55. Routes avoid horizontal footprints
+of foreign buildings and farm fields; idle wandering does not generate Trails wear.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
 builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.
@@ -211,9 +215,10 @@ non-air source blocks.
 QUARRY advances an authored real shaft across multiple floors, spending local
 ladders, cobblestone and torches and harvesting native drops one block per
 4-second action. The three worksites therefore do not mint resources on a timer.
-Item-storage processors use only their own control barrel or virtual building map
-for ingredients and output; couriers move their goods. Legacy abstract-stock
-producers retain their old return trip. The chosen processor output is persisted
+Item-storage processors use only their current control barrel or virtual building map
+for ingredients and output; couriers move their goods to the current building endpoint.
+FARM and FORESTER perform work directly at field/tree cells, without a per-cell
+return trip. Legacy abstract-stock producers retain their old return trip. The chosen processor output is persisted
 per building; a full destination pauses delivery. Recruitment consumes12BREAD
 after all population/bed checks. No offline production/catch-up.
 
@@ -279,25 +284,35 @@ persistent FIFO queue, with only one active construction. The unique marker cell
 matching existing target blocks need no replacement. Core's provider-owned paste
 splits new placement around the control into at most six crops, applied sequentially
 in one batch while preserving the barrel and its inventory. Durable completion
-advances the plan, and restart recovery accepts only known planned before/after
-states. Callback fencing includes the order and expected cursor, not only the UUID.
-Previously captured paid plans retain their stored snapshots and original algorithm;
-mutable source assets cannot change an accepted design. Full snapshots are released
-after a batch.
+advances the plan, and callback fencing includes the order and expected cursor, not
+only the UUID. Revalidation checks only the batch about to be placed: current order
+identity, loaded chunks/borders, Lands authority, bedrock and nonempty containers.
+It does not compare future cells to their originally captured world preimage or keep
+extra per-cell world snapshots. The immutable captured schematic remains tied to the
+accepted plan, but owners and members may alter its cells at every construction phase.
+Committed batches are not checked or restored if a player later breaks or rebuilds
+them. If a crash interrupts an uncommitted batch, that batch may be applied again;
+its durable material reservation prevents a second charge, but there is no per-cell
+exactly-once guarantee.
 
 Paired and multi-block cells such as doors, beds and double blocks are applied as
-one placement unit, so a build step cannot leave only half of a pair. Finished
-building physics is suppressed except for the currently authorized construction
-cells and exact journal-receipt cells; receipt cells stay locked through commit.
-Native neighbor physics is issued only for the receipt's exact changed cells after
-the durable commit.
+one native placement unit, so a batch cannot leave only half of a pair. Finished
+buildings retain native physics; only the active placement and exact item-receipt
+cells are fenced while their operation is in progress, and receipt cells stay locked
+through commit. After the durable build commit, neighbor physics is issued for exact
+changed plan cells, including updates needed by vines beside removed logs. Cosmetic
+shape repair is limited to exact-source fences, panes and walls; it skips AIR and
+replacement blocks and never rebuilds a removed or remodeled structure.
 
 World placement validates ownership, loaded chunks, borders, Lands, building boxes
 and foreign controlpoints. It preserves nonempty inventories and registered storage.
-Owners and members may remodel ACTIVE buildings and unstarted SITE areas with normal
-drops. Accepted construction footprints and control blocks remain locked. Environmental
-and other-plugin schematic guards retain protection, so strangers cannot bypass it
-with explosions or pistons. Native control inventory remains accessible to members.
+Owners and members may place and break blocks inside their buildings, SITE plans and
+accepted upgrades at every construction phase, with normal drops. Existing control
+barrels remain protected (eligible missing ACTIVE controls may be restored), and exact
+live receipt cells remain locked. Stranger, environmental and other-plugin
+schematic guards remain active; owner/member editing does not bypass Lands, bedrock,
+nonempty-container or construction identity checks. Native control inventory remains
+accessible to members.
 Personal cyan boundary cues use Core packet displays within24blocks of an edge,
 with at most60parts per viewer and no perimeter/world scans.
 The same owner and settlement pulse maintain three-line RU/EN holograms above the
@@ -357,7 +372,9 @@ already placed BARREL has no special coordinate semantics. There is no second ai
 right-click, menu reopen, logout, world change, expiry,
 reload and shutdown retire the selection. Its identity fences asynchronous
 blueprint completion; a rejected location preserves the draft for the next click.
-Ground selection neither captures world blocks nor writes stock or city state.
+Ground targeting uses the player's actual eye location and look direction (including
+pitch), with a 12-block ray and ordinary block occlusion. Ground selection neither
+captures world blocks nor writes stock or city state.
 
 After a successful ground click, prepared placement uses Core `PaperActionPanels` through
 `CivsPlacementControls`. The main page offers confirm, anchor movement, both
@@ -373,6 +390,13 @@ controls sit slightly higher to keep terrain picking clear below them. Core stil
 obstacle avoidance, reach checks and hit testing; no separate positioning engine is used.
 Chat feedback is colored by outcome (green success, yellow warning, red rejection,
 blue guidance); ordinary dialog prose retains its existing palette.
+
+Placement selection immediately shows nearby saved building outlines, before a new
+candidate is ready. It considers footprints no more than 32 horizontal blocks from the
+player and 16 vertical blocks from the footprint entrance, and caps total neighboring-building
+geometry at 128 parts. Candidate overlaps are red; an ACTIVE building does not conflict with its
+own upgrade. This total geometry cap is separate from the shared per-tick display
+spawn budget.
 
 `CivsService` keeps the last valid preview until an asynchronous replacement is
 ready, blocks confirmation during that load and fences obsolete completions.

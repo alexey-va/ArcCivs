@@ -970,6 +970,9 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
         val building = worker.assignment?.let(city::building)
+        val toolRequest = host.toolRequest(player, workerId)
+        val toolKind = toolRequest?.material?.name?.substringAfterLast('_')?.lowercase(Locale.ROOT)
+        val canGiveTool = toolRequest?.canGive == true && !host.cityBusy(player)
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(text.literal(worker.name)), table(listOf(
                 tr(player, "workers.health-label") to workerHealth(player, worker),
@@ -977,12 +980,18 @@ class CivsUi internal constructor(
                 tr(player, "label.profession") to tr(player, "profession.${building?.let { CivsRules.profession(city, it) } ?: "unassigned"}"),
                 tr(player, "label.state") to workerStatus(player, worker),
                 tr(player, "label.deliveries") to text.literal(worker.completedCycles),
-            )), worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to materialName(player, cargo.material),
+            )), toolRequest?.let { body(tr(player, "workers.tool-request-$toolKind").color(CivsText.BODY)) },
+            if (toolRequest != null && !canGiveTool) body(tr(player, "workers.tool-request-unavailable").color(TextColor.color(0xA9A298))) else null,
+            worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to materialName(player, cargo.material),
                 "amount" to cargo.amount, "target" to (CivsLogistics.destination(city, cargo)?.let {
                     buildingName(player, it.type, it.level) } ?: tr(player, "buildings.generic")))) },
             if (worker.cargo != null) body(player, "logistics.cargo-help") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
+            if (canGiveTool) add(button(player, "give_tool", "workers.give-tool-$toolKind", COMMIT) {
+                perform(player, "civs.worker", "workers.detail-title", { host.giveRequestedTool(player, workerId) },
+                    success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
+            }.copy(tooltip = tr(player, "workers.give-tool-help")))
             add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId) })
             add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId) })
             if (!host.cityBusy(player) && CivsEquipment.plainCount(worker, "BREAD") > 0 &&

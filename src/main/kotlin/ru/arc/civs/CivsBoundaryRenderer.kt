@@ -19,7 +19,7 @@ import org.joml.Quaternionf
 import org.joml.Vector3f
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.LifecycleTaskScope
-import ru.arc.paper.display.PacketDisplay
+import ru.arc.paper.display.PacketBlockDisplay
 import ru.arc.paper.display.PacketTextDisplay
 import ru.arc.paper.display.PaperPacketDisplays
 import java.util.UUID
@@ -42,7 +42,7 @@ class CivsBoundaryRenderer internal constructor(
         this(plugin, tasks, nativeWork?.let { PaperPacketDisplays(plugin, "civs-boundary", it) }
             ?: PaperPacketDisplays(plugin, "civs-boundary"), nativeWork, text)
 
-    private data class Rendered(val handle: PacketDisplay, var geometry: CivsPreviewCuboid?)
+    private data class Rendered(val handle: PacketBlockDisplay, var geometry: CivsPreviewCuboid?)
     private data class Label(val handle: PacketTextDisplay, var value: CivsControlHologram?)
     private class Scene(val player: Player, val cityId: UUID, val worldId: UUID, val epoch: LifecycleTaskScope.Token) {
         val handles = linkedMapOf<CivsBoundaryKey, Rendered>()
@@ -54,14 +54,16 @@ class CivsBoundaryRenderer internal constructor(
 
     private val work = nativeWork ?: BudgetedTaskQueue(tasks)
     private val scenes = mutableMapOf<UUID, Scene>()
-    private val materials = listOf(Material.CYAN_CONCRETE, Material.OAK_PLANKS).associateWith { it.createBlockData() }
+    private val materials = listOf(Material.CYAN_CONCRETE, Material.OAK_PLANKS, Material.SMOOTH_SANDSTONE,
+        Material.RED_CONCRETE).associateWith { it.createBlockData() }
     private var closed = false
     private var terminal: CompletableFuture<Void>? = null
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
     /** Called by the settlement pulse, with its current local membership snapshot. No world/block scans. */
-    fun pulse(player: Player, city: Settlement?) {
+    fun pulse(player: Player, city: Settlement?, placing: Boolean = false, planned: CivBox? = null,
+              plannedBuildingId: UUID? = null) {
         check(Bukkit.isPrimaryThread()) { "Civs boundary updates require the server thread" }
         if (closed) return
         if (city == null || !city.canManage(player.uniqueId) || !player.isOnline || player.world.uid != city.worldId) {
@@ -70,7 +72,9 @@ class CivsBoundaryRenderer internal constructor(
         }
         val location = player.location
         val desired = (civsBoundaryGeometry(city, location.x, location.y, location.z) +
-            civsConstructionFenceGeometry(city, location.x, location.y, location.z)).associate { it.key to it.cuboid }
+            civsConstructionFenceGeometry(city, location.x, location.y, location.z) +
+            if (placing) civsBuildingBoundaryGeometry(city, location.x, location.y, location.z, planned, plannedBuildingId)
+            else emptyList()).associate { it.key to it.cuboid }
         val desiredLabels = text?.let { catalog ->
             civsControlHolograms(city, location.x, location.y, location.z) { catalog.buildingHologram(player, city, it) }
                 .associateBy { it.buildingId }
@@ -151,11 +155,14 @@ class CivsBoundaryRenderer internal constructor(
             it.handle.viewRange = 1f
             it.handle.shadowRadius = 0f
             it.handle.shadowStrength = 0f
-            if (cue.material == Material.CYAN_CONCRETE) it.handle.brightness = Display.Brightness(15, 15)
+            if (cue.material != Material.OAK_PLANKS) it.handle.brightness = Display.Brightness(15, 15)
             it.handle.interpolationDuration = 0
             it.handle.teleportDuration = 0
         }
-        if (rendered.geometry != null) rendered.handle.teleport(location)
+        rendered.geometry?.let { previous ->
+            if (previous.material != cue.material) rendered.handle.blockData = materials.getValue(cue.material)
+            if (previous.x != cue.x || previous.y != cue.y || previous.z != cue.z) rendered.handle.teleport(location)
+        }
         rendered.handle.transformation = Transformation(Vector3f(), Quaternionf(), Vector3f(cue.sx, cue.sy, cue.sz), Quaternionf())
         rendered.handle.displayWidth = maxOf(cue.sx, cue.sz)
         rendered.handle.displayHeight = cue.sy
@@ -278,6 +285,80 @@ internal fun civsBoundaryGeometry(city: Settlement, viewerX: Double, viewerY: Do
         edge(CivsBoundarySide.EAST, bounds.maxX, bounds.minZ, bounds.maxZ, false)
         edge(CivsBoundarySide.SOUTH, bounds.maxZ, bounds.minX, bounds.maxX, true)
         edge(CivsBoundarySide.WEST, bounds.minX, bounds.minZ, bounds.maxZ, false)
+    }
+}
+
+internal const val CIVS_BUILDING_BOUNDARY_PART_LIMIT = 128
+
+/**
+ * Nearby saved footprints become visible as soon as placement starts, before a candidate exists.
+ * Inclusive box overlap uses the same predicate as placement validation. An upgrade never conflicts
+ * with its own building. Conflicts take priority within the fixed display budget; no world reads.
+ */
+internal fun civsBuildingBoundaryGeometry(city: Settlement, viewerX: Double, viewerY: Double, viewerZ: Double,
+                                         planned: CivBox? = null, plannedBuildingId: UUID? = null): List<CivsBoundaryPart> {
+    require(viewerX.isFinite() && viewerY.isFinite() && viewerZ.isFinite())
+    val buildings = city.buildings.associateByTo(linkedMapOf()) { it.id }
+    city.construction?.plannedBuilding?.let { buildings[it.id] = it }
+    fun conflict(building: CivBuilding) = building.id != plannedBuildingId && planned?.overlaps(building.bounds) == true
+    fun distance(building: CivBuilding): Double {
+        val box = building.bounds
+        val dx = maxOf(box.min.x - viewerX, 0.0, viewerX - (box.max.x.toLong() + 1))
+        val dz = maxOf(box.min.z - viewerZ, 0.0, viewerZ - (box.max.z.toLong() + 1))
+        return dx * dx + dz * dz
+    }
+    return buildList {
+        for (building in buildings.values.sortedWith(compareByDescending<CivBuilding>(::conflict)
+            .thenBy(::distance).thenBy { it.id })) {
+            if (size >= CIVS_BUILDING_BOUNDARY_PART_LIMIT) break
+            if (distance(building) > 32.0 * 32.0 || abs(viewerY - building.entrance.y) > 16.0) continue
+            val box = building.bounds
+            val minX = box.min.x.toLong()
+            val maxX = box.max.x.toLong() + 1
+            val minZ = box.min.z.toLong()
+            val maxZ = box.max.z.toLong() + 1
+            val y = building.entrance.y + 0.10
+            val material = if (conflict(building)) Material.RED_CONCRETE else Material.SMOOTH_SANDSTONE
+            val thickness = 0.08f
+            val half = thickness / 2.0
+            val corners = mutableSetOf<Pair<Long, Long>>()
+            fun addPart(key: CivsBoundaryKey, x: Double, z: Double, sx: Float, sy: Float, sz: Float) {
+                if (size < CIVS_BUILDING_BOUNDARY_PART_LIMIT && sx > 0 && sz > 0)
+                    add(CivsBoundaryPart(key, CivsPreviewCuboid(x, y, z, sx, sy, sz, material)))
+            }
+            fun edge(side: CivsBoundarySide, fixed: Long, start: Long, end: Long, horizontal: Boolean) {
+                val across = if (horizontal) viewerZ else viewerX
+                if (abs(across - fixed) > 32.0) return
+                val along = if (horizontal) viewerX else viewerZ
+                val count = ceil((end - start) / 8.0).toLong()
+                val first = maxOf(0L, floor((along - 32.0 - start) / 8.0).toLong())
+                val last = minOf(count - 1, floor((along + 32.0 - start) / 8.0).toLong())
+                if (first > last) return
+                for (index in first..last) {
+                    val from = start + index * 8.0
+                    val to = minOf(end.toDouble(), from + 8.0)
+                    val insetStart = if (index == 0L) half else 0.0
+                    val insetEnd = if (index == count - 1) half else 0.0
+                    addPart(CivsBoundaryKey(side, index, false, building.id, 10),
+                        if (horizontal) from + insetStart else fixed - half,
+                        if (horizontal) fixed - half else from + insetStart,
+                        if (horizontal) (to - from - insetStart - insetEnd).toFloat() else thickness,
+                        thickness, if (horizontal) thickness else (to - from - insetStart - insetEnd).toFloat())
+                }
+                // Only real corners rise above the base; no repeating fence around completed houses.
+                for ((index, position) in listOf(0L to start, count to end)) {
+                    if (abs(along - position) > 32.0) continue
+                    val x = if (horizontal) position else fixed
+                    val z = if (horizontal) fixed else position
+                    if (corners.add(x to z)) addPart(CivsBoundaryKey(side, index, true, building.id, 11),
+                        x - half, z - half, thickness, 0.80f, thickness)
+                }
+            }
+            edge(CivsBoundarySide.NORTH, minZ, minX, maxX, true)
+            edge(CivsBoundarySide.EAST, maxX, minZ, maxZ, false)
+            edge(CivsBoundarySide.SOUTH, maxZ, minX, maxX, true)
+            edge(CivsBoundarySide.WEST, minX, minZ, maxZ, false)
+        }
     }
 }
 

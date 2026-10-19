@@ -11,6 +11,7 @@ import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
+import org.bukkit.entity.Player
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
@@ -24,7 +25,7 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsHologramsTest : FunSpec({
-    test("native position updates reuse handles and despawn removes a label through the shared budget") {
+    test("native carriers move nameplates without a second teleport follower and despawn removes the label") {
         MockBukkitTestRuntime.open().use { paper ->
             val plugin = paper.createSimplePlugin("CivsHologramsTest")
             val player = paper.addPlayer("Viewer").apply { setLocale(Locale.forLanguageTag("ru-RU")) }
@@ -38,7 +39,9 @@ class CivsHologramsTest : FunSpec({
                 mockk<PacketTextDisplay>(relaxed = true).also(handles::add)
             }
             every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
-            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 2.0, 64.0, 3.0, "Василий", "working", 18.5, 20.0)
+            val carrier = mockk<Player> { every { isValid } returns true }
+            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 2.0, 64.0, 3.0, "Василий", "working", 18.5, 20.0,
+                entity = carrier, profession = "farmer")
             var values = listOf(npc, npc.copy(workerId = UUID(0, 2), x = 5.0))
             val renderer = CivsHolograms(plugin, tasks, CivsText.fromYaml(civsLocaleSource()), { values }, displays, budget)
             try {
@@ -47,15 +50,18 @@ class CivsHologramsTest : FunSpec({
                 handles.size shouldBe 1
                 paper.performTicks(3)
                 handles.size shouldBe 2
-                spawned.first().y shouldBe 66.15
+                spawned.first().y shouldBe 64.0
                 verify { handles.first().billboard = Display.Billboard.CENTER; handles.first().viewRange = 0.25f }
+                verify { handles.first().attachTo(carrier) }
                 values = listOf(npc.copy(x = 2.5, status = "walking", health = 17.0), values[1])
                 renderer.pulse(); paper.performTicks(3)
                 handles.size shouldBe 2
-                verify { handles.first().teleport(match { it.x == 2.5 && it.y == 66.15 }); handles.first().text(any()) }
+                verify { handles.first().text(any()) }
+                verify(exactly = 0) { handles.first().teleport(any()) }
                 values = listOf(values.first().copy(x = 30.0), values[1])
                 renderer.pulse(); paper.performTicks(3)
                 verify { handles.first().teleportDuration = 0 }
+                verify(exactly = 0) { handles.first().teleport(any()) }
                 values = listOf(values[1])
                 renderer.pulse(); paper.performTicks(3)
                 verify(exactly = 1) { handles.first().remove() }
@@ -71,10 +77,14 @@ class CivsHologramsTest : FunSpec({
         MockBukkitTestRuntime.open().use { paper ->
             val player = paper.addPlayer("Viewer").apply { setLocale(Locale.forLanguageTag("ru-RU")) }
             val text = CivsText.fromYaml(civsLocaleSource())
-            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 0.0, 64.0, 0.0, "Василий", "working", 18.5, 20.0)
+            val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 0.0, 64.0, 0.0, "Василий", "working", 18.5, 20.0,
+                profession = "farmer")
             val label = civsNpcHologramText(text, npc)
             plainText(label) shouldContain "Василий\n"
+            plainText(label) shouldContain "\nФермер\n"
             plainText(label) shouldContain "\n♥ 18.5 / 20"
+            plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-tool"))) shouldContain "Нужна мотыга"
+            plainText(civsNpcHologramText(text, npc.copy(profession = "courier"))) shouldContain "Грузчик"
             plainText(civsNpcHologramText(text, npc.copy(name = "<red>Worker</red>"))) shouldContain "<red>Worker</red>"
             val building = CivBuilding(UUID(0, 2), BuildingType.FARM, 1, CivPosition(0, 64, 0), 0, "fixture/farm",
                 CivBox(CivPosition(-4, 64, -6), CivPosition(4, 70, 0)), CivPosition(0, 64, 1), BuildingPhase.CONSTRUCTING)
@@ -93,6 +103,10 @@ class CivsHologramsTest : FunSpec({
                 Files.writeString(out.resolve("nameplates.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
                     "evidence" to "compiled TextDisplay text and transforms, not native-client acceptance",
                     "npc" to mapOf("text" to serializer.serialize(label), "scale" to CIVS_NPC_TEXT_SCALE,
+                        "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET,
+                        "background" to listOf(28, 24, 19, 105)),
+                    "courier" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
+                        npc.copy(profession = "courier", status = "carrying-cargo"))), "scale" to CIVS_NPC_TEXT_SCALE,
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
                     "building" to mapOf("text" to serializer.serialize(text.buildingHologram(player, city, building)),
                         "scale" to CIVS_CONTROL_TEXT_SCALE, "lineWidth" to CIVS_CONTROL_TEXT_WIDTH),

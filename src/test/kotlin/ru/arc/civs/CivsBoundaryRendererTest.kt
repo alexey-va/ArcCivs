@@ -191,6 +191,98 @@ class CivsBoundaryRendererTest : FunSpec({
         bounded.map { it.key }.distinct().size shouldBe bounded.size
     }
 
+    test("placement immediately shows active neighbours and colours only intersecting foreign footprints") {
+        val first = fenceBuilding().copy(phase = BuildingPhase.ACTIVE)
+        val second = first.copy(id = UUID(0, 8), bounds = CivBox(CivPosition(15, 60, 0), CivPosition(21, 72, 9)))
+        val city = boundaryCity(UUID.randomUUID(), UUID.randomUUID()).copy(buildings = listOf(first, second))
+        val selection = civsBuildingBoundaryGeometry(city, 9.5, 64.0, -5.5)
+        selection.map { it.key.buildingId }.toSet() shouldBe setOf(first.id, second.id)
+        selection.all { it.cuboid.material == Material.SMOOTH_SANDSTONE } shouldBe true
+        val candidate = CivBox(CivPosition(8, 64, -5), CivPosition(13, 70, 4))
+        val overlapping = civsBuildingBoundaryGeometry(city, 9.5, 64.0, -5.5, candidate)
+        overlapping.filter { it.key.buildingId == first.id }.all { it.cuboid.material == Material.RED_CONCRETE } shouldBe true
+        overlapping.filter { it.key.buildingId == second.id }.all { it.cuboid.material == Material.SMOOTH_SANDSTONE } shouldBe true
+        civsBuildingBoundaryGeometry(city, 9.5, 64.0, -5.5, candidate, first.id)
+            .all { it.cuboid.material == Material.SMOOTH_SANDSTONE } shouldBe true
+        val above = candidate.copy(min = candidate.min.copy(y = 73), max = candidate.max.copy(y = 80))
+        civsBuildingBoundaryGeometry(city, 9.5, 64.0, -5.5, above)
+            .all { it.cuboid.material == Material.SMOOTH_SANDSTONE } shouldBe true
+        selection.map { it.key }.distinct().size shouldBe selection.size
+        selection.all { it.cuboid.y == 64.1 && it.cuboid.y + it.cuboid.sy <= 64.901 } shouldBe true
+    }
+
+    test("placement uses reserved upgrade bounds and prioritises conflicts within a fixed nearby budget") {
+        val old = fenceBuilding().copy(phase = BuildingPhase.ACTIVE)
+        val expanded = old.copy(bounds = old.bounds.copy(max = CivPosition(17, 80, 15)))
+        val order = CivConstruction(UUID.randomUUID(), old.id, 2, 100, 20, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = expanded)
+        val city = boundaryCity(UUID.randomUUID(), UUID.randomUUID()).copy(buildings = listOf(old), construction = order)
+        val parts = civsBuildingBoundaryGeometry(city, 5.5, 64.0, -5.5)
+        parts.filter { it.key.side == CivsBoundarySide.EAST }.all { it.cuboid.x > 17.0 } shouldBe true
+        civsBuildingBoundaryGeometry(city, 5.5, 96.0, -5.5) shouldBe emptyList()
+        val large = List(16) { index -> old.copy(id = UUID(0, index.toLong()),
+            bounds = CivBox(CivPosition(-1_000_000, -40, -1_000_000), CivPosition(1_000_000, 80, 1_000_000))) }
+        val bounded = civsBuildingBoundaryGeometry(city.copy(buildings = large, construction = null),
+            999_998.5, 64.0, 999_998.5)
+        bounded.size shouldBe CIVS_BUILDING_BOUNDARY_PART_LIMIT
+        bounded.map { it.key }.distinct().size shouldBe bounded.size
+        bounded.all { it.cuboid.sx > 0 && it.cuboid.sz > 0 && maxOf(it.cuboid.sx, it.cuboid.sz) <= 8f } shouldBe true
+        val many = city.copy(buildings = List(16) { old.copy(id = UUID(0, it.toLong())) } +
+            old.copy(id = UUID(0, 99), bounds = CivBox(CivPosition(16, 60, 0), CivPosition(27, 72, 11))), construction = null)
+        val conflict = CivBox(CivPosition(20, 64, 0), CivPosition(22, 68, 2))
+        val prioritised = civsBuildingBoundaryGeometry(many, 5.5, 64.0, -5.5, conflict)
+        prioritised.first().key.buildingId shouldBe UUID(0, 99)
+        prioritised.first().cuboid.material shouldBe Material.RED_CONCRETE
+    }
+
+    test("placement changes conflict colour in place and retires neighbour marks on exit") {
+        boundaryScenario { h ->
+            h.player.teleport(Location(h.player.world, 5.5, 64.0, -5.5))
+            val building = fenceBuilding().copy(phase = BuildingPhase.ACTIVE)
+            val city = h.city.copy(buildings = listOf(building))
+            val nativeEntities = h.player.world.entities.size
+            h.renderer.pulse(h.player, city); h.paper.performTicks(2)
+            h.handles.size shouldBe 0
+            h.renderer.pulse(h.player, city, placing = true); h.paper.performTicks(2)
+            val count = civsBuildingBoundaryGeometry(city, 5.5, 64.0, -5.5).size
+            h.remaining.size shouldBe count
+            h.renderer.pulse(h.player, city, true, building.bounds); h.paper.performTicks(2)
+            h.handles.size shouldBe count
+            h.handles.forEach { handle -> verify(exactly = 1) { handle.blockData = match { it.material == Material.RED_CONCRETE } } }
+            h.renderer.pulse(h.player, city, true, building.bounds, building.id); h.paper.performTicks(2)
+            h.handles.forEach { handle ->
+                verify(exactly = 1) { handle.blockData = match { it.material == Material.SMOOTH_SANDSTONE } }
+                verify(exactly = 0) { handle.teleport(any()) }
+            }
+            h.player.world.entities.size shouldBe nativeEntities
+            h.renderer.pulse(h.player, city); h.paper.performTicks(2)
+            h.remaining.size shouldBe 0
+            h.handles.forEach { verify(exactly = 1) { it.remove() } }
+        }
+    }
+
+    test("neighbour export uses the compiled selection and overlap geometry") {
+        val first = fenceBuilding().copy(phase = BuildingPhase.ACTIVE,
+            bounds = CivBox(CivPosition(0, 60, 0), CivPosition(7, 72, 7)))
+        val second = first.copy(id = UUID(0, 8), bounds = CivBox(CivPosition(12, 60, 0), CivPosition(18, 72, 8)))
+        val city = boundaryCity(UUID(0, 1), UUID(0, 2)).copy(buildings = listOf(first, second))
+        val candidate = CivBox(CivPosition(6, 60, -4), CivPosition(10, 72, 3))
+        val scenes = listOf("selection" to null, "overlap" to candidate).map { (name, box) -> mapOf(
+            "id" to name, "eye" to listOf(9.0, 65.62, -11.0), "target" to listOf(9.0, 64.4, 2.0),
+            "groundY" to 64, "existing" to listOf(first.bounds, second.bounds), "candidate" to box,
+            "cues" to civsBuildingBoundaryGeometry(city, 9.0, 64.0, -11.0, box).map { it.cuboid },
+        ) }
+        System.getenv("CIVS_NATIVE_PREVIEW_OUT")?.let { destination ->
+            val out = Path.of(destination)
+            Files.createDirectories(out)
+            val source = Path.of("src/main/kotlin/ru/arc/civs/CivsBoundaryRenderer.kt")
+            val hash = MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(source)).joinToString("") { "%02x".format(it) }
+            Files.writeString(out.resolve("placement-neighbours.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
+                "evidence" to "Compiled neighbour footprint geometry; flat terrain and low placeholder masses, no native client or authored buildings.",
+                "sourceSha256" to mapOf(source.toString() to hash), "scenes" to scenes)))
+        }
+    }
+
     test("site fences reuse stationary handles and retire on completion or city deletion without world blocks") {
         boundaryScenario { h ->
             h.player.teleport(Location(h.player.world, 5.5, 64.0, -5.5))

@@ -1596,6 +1596,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
             h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
+            verify(exactly = 1) { h.boundary.pulse(h.player, h.city, true, null, null) }
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             val position = CivPosition(6, 63, 6)
             h.world.getBlockAt(position.x, position.y, position.z).type = Material.GRASS_BLOCK
@@ -2197,7 +2198,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    for (cursor in 0..1) test("recovered tile $cursor pastes only its saved layer and waits for another builder trip") {
+    for (cursor in 0..1) test("recovered tile $cursor validates only its saved layer and preserves remodeled completed tiles") {
         serviceScenario { h ->
             val building = h.city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
                 anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),
@@ -2222,10 +2223,6 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
             every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(full)
-            every { h.worldAdapter.revalidate(any(), h.owner) } answers {
-                firstArg<CivPlacementPlan>().blocks.map { it.position.y } shouldBe listOf(64 + cursor)
-                CompletableFuture.completedFuture(Unit)
-            }
             every { h.blueprints.pasteParts(full, building, any()) } answers {
                 arg<CivBuildBatch>(2).minimum.y shouldBe 64 + cursor
                 CompletableFuture.completedFuture(listOf(part, secondPart))
@@ -2236,26 +2233,41 @@ class CivsServiceTest : FunSpec({
             every { h.blueprints.paste(secondPart, h.world.uid, building.anchor) } returns secondOperation
             every { repair.completion } returns CompletableFuture<ArcSchematicMutationResult>()
             every { h.blueprints.repair(any(), any()) } returns repair
-            h.start()
-            verify(exactly = 1) { h.blueprints.paste(part, h.world.uid, building.anchor) }
-            verify(exactly = 0) { h.blueprints.paste(full, any(), any()); h.store.saveInventoryTransaction(any()) }
-            pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
-            h.saves.size shouldBe 0
-            verify(exactly = 1) { h.blueprints.paste(secondPart, h.world.uid, building.anchor) }
-            secondPasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
-            h.service.city(h.player)!!.construction!!.workDone shouldBe cursor
-            h.commit()
-            h.service.city(h.player)!!.inventory shouldBe city.inventory
-            if (cursor == 0) {
-                h.service.city(h.player)!!.construction!!.workDone shouldBe 1
-                h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
-                h.paper.performTicks(80)
-                verify(exactly = 0) { h.blueprints.repair(any(), any()) }
-            } else {
-                h.service.city(h.player)!!.construction shouldBe null
-                h.service.city(h.player)!!.building(building.id)!!.phase shouldBe BuildingPhase.ACTIVE
+            // A filled chest in a completed tile would reject a whole-plan native revalidation.
+            val remodeled = h.world.getBlockAt(15, 64, 0)
+            if (cursor == 1) {
+                remodeled.type = Material.CHEST
+                (remodeled.state as org.bukkit.block.Container).inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
             }
-            verify(exactly = 2) { h.blueprints.paste(any(), any(), any()) }
+            CivsWorld(h.plugin, h.tasks, { 0L }) { listOf(city) }.use { nativeWorld ->
+                every { h.worldAdapter.revalidate(any(), h.owner) } answers {
+                    val batch = firstArg<CivPlacementPlan>()
+                    batch.blocks.map { it.position.y } shouldBe listOf(64 + cursor)
+                    nativeWorld.revalidate(batch, h.owner)
+                }
+                h.start()
+                verify(exactly = 1) { h.blueprints.paste(part, h.world.uid, building.anchor) }
+                verify(exactly = 0) { h.blueprints.paste(full, any(), any()); h.store.saveInventoryTransaction(any()) }
+                pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
+                h.saves.size shouldBe 0
+                verify(exactly = 1) { h.blueprints.paste(secondPart, h.world.uid, building.anchor) }
+                secondPasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
+                h.service.city(h.player)!!.construction!!.workDone shouldBe cursor
+                h.commit()
+                h.service.city(h.player)!!.inventory shouldBe city.inventory
+                if (cursor == 0) {
+                    h.service.city(h.player)!!.construction!!.workDone shouldBe 1
+                    h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
+                    h.paper.performTicks(80)
+                    verify(exactly = 0) { h.blueprints.repair(any(), any()) }
+                } else {
+                    h.service.city(h.player)!!.construction shouldBe null
+                    h.service.city(h.player)!!.building(building.id)!!.phase shouldBe BuildingPhase.ACTIVE
+                    remodeled.type shouldBe Material.CHEST
+                    (remodeled.state as org.bukkit.block.Container).inventory.getItem(0) shouldBe org.bukkit.inventory.ItemStack(Material.DIAMOND, 3)
+                }
+                verify(exactly = 2) { h.blueprints.paste(any(), any(), any()) }
+            }
         }
     }
 
@@ -2339,6 +2351,22 @@ class CivsServiceTest : FunSpec({
             h.world.getBlockAt(16, 64, 0).type shouldBe Material.AIR
             protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
             h.service.health().activeLeases shouldBe 0
+        }
+    }
+
+    test("a player container filled after preflight keeps its items at the exact native write boundary") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            val block = h.world.getBlockAt(15, 64, 0)
+            block.type = Material.BARREL
+            val contents = (block.state as org.bukkit.block.Barrel).inventory
+            contents.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            contents.getItem(0)!!.amount shouldBe 3
+            contents.clear()
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
         }
     }
 

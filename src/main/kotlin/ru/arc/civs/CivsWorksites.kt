@@ -88,7 +88,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val suffix = toolSuffix(building.type)
         if (slots[4]?.material?.endsWith(suffix) == true) return null
         val stock = stock(city, building.id)
-        val material = listOf("IRON", "STONE", "WOODEN", "DIAMOND", "NETHERITE", "GOLDEN")
+        val material = listOf("IRON", "COPPER", "STONE", "WOODEN", "DIAMOND", "NETHERITE", "GOLDEN")
             .map { it + suffix }.firstOrNull { (stock[it] ?: 0) > 0 } ?: return null
         val next = slots.toMutableList()
         next[4]?.let { previous ->
@@ -96,7 +96,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             next[free] = previous
         }
         next[4] = CivResidentItem(material, 1)
-        val standing = beside(city, building, world, requireNotNull(building.control)) ?: return null
+        val standing = citizenStorageTarget(city, building, world) ?: return null
         return work(worker, building, standing, emptyList(), mapOf(material to 1), status = "waiting-tool", duration = 1_000)
             .copy(equipmentAfter = next)
     }
@@ -110,7 +110,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val selected = CivsProduction.material(building)
         val available by lazy { stock(city, building.id) }
         if (selected == "BREAD" && (available["WHEAT"] ?: 0) >= 3) {
-            val standing = beside(city, building, world, requireNotNull(building.control)) ?: return null
+            val standing = citizenStorageTarget(city, building, world) ?: return null
             return work(worker, building, standing, emptyList(), mapOf("WHEAT" to 3), mapOf("BREAD" to 1), "working-field")
         }
         val (crop, seed) = when (selected) {

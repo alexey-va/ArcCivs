@@ -8,14 +8,19 @@ import io.mockk.mockk
 import io.mockk.verify
 import net.citizensnpcs.api.npc.NPC
 import net.citizensnpcs.api.npc.NPCRegistry
+import net.citizensnpcs.api.event.NPCOpenDoorEvent
 import org.bukkit.Chunk
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
+import org.bukkit.block.data.type.Door
 import org.bukkit.entity.Entity
+import org.bukkit.event.EventHandler
+import org.bukkit.event.Listener
 import org.bukkit.util.BoundingBox
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
@@ -88,8 +93,16 @@ class CivsCitizensTest : FunSpec({
         citizenCurrentPlan(after, CitizenPhase.DELIVERING) { error("Must await the unload receipt") } shouldBe after
         citizenCurrentPlan(after, CitizenPhase.RETURNING) { null } shouldBe null
         after.spawnOrigin shouldBe warehouse.entrance
-        after.storage shouldBe hall.entrance
+        after.workplace shouldBe warehouse.control
+        after.storage shouldBe hall.control
         after.type shouldBe BuildingType.WAREHOUSE
+        (hall.id in citizenRouteBuildings(city, before, before.storage, warehouse.control!!)) shouldBe true
+        val relocated = city.copy(buildings = listOf(hall.copy(control = CivPosition(-6, 64, -2)),
+            warehouse.copy(control = CivPosition(8, 64, -6))))
+        val moved = requireNotNull(citizenPlan(relocated, carrying, requested.copy(cargo = carrying.cargo!!, carrying = true)))
+        moved.workplace shouldBe relocated.buildings[1].control
+        moved.storage shouldBe relocated.buildings[0].control
+        moved.courier!!.cargo.sourceEntrance shouldBe warehouse.entrance
         citizenPlansContinue(after, after.copy(storage = CivPosition(20, 64, 0))) shouldBe false
         citizenPlan(city, carrying) shouldBe null // A missing logistics plan cannot start the newly assigned job.
     }
@@ -100,13 +113,123 @@ class CivsCitizensTest : FunSpec({
         val worker = CivWorker(UUID.randomUUID(), "Плотник", factory.id, nextDeliveryAt = 60_000)
         val city = city(listOf(hall, factory), worker, null).copy(inventory = CivInventory(CivStorageMode.VIRTUAL))
         val plan = requireNotNull(citizenPlan(city, worker))
-        plan.storage shouldBe factory.entrance
-        plan.workplace shouldBe factory.entrance
+        plan.storage shouldBe factory.control
+        plan.workplace shouldBe factory.control
         plan.completeAtWorkplace shouldBe true
         val cycle = plan.cycle()
         reachWork(cycle)
         repeat(60) { cycle.work((it + 1) * 1_000L) }
         cycle.phase shouldBe CitizenPhase.READY
+    }
+
+    test("physical work picks up its missing tool once then starts each field action directly at the worksite") {
+        val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
+        val barrelSide = CivPosition(21, 64, -2)
+        val tool = CivWorldWork(UUID.randomUUID(), 0, farm.id, barrelSide, emptyList(),
+            inputs = mapOf("IRON_HOE" to 1L), durationMillis = 1_000, status = "waiting-tool")
+        val plan = CitizenPlan(CitizenToken(farm.id, 0, 0, null), farm.control!!, tool.standing, BuildingType.FARM, tool.durationMillis,
+            null, completeAtWorkplace = true, worldWork = tool)
+        val pickup = plan.cycle()
+        pickup.start()
+        pickup.phase shouldBe CitizenPhase.TO_WORK
+        pickup.arrive(0); pickup.work(1_000)
+        pickup.phase shouldBe CitizenPhase.READY
+        pickup.beginDelivery(1_000)!!.let(pickup::acceptsCompletion) shouldBe true
+        val field = CivPosition(30, 64, -12)
+        val next = plan.copy(token = plan.token.copy(completedCycles = 1), workplace = field,
+            worldWork = tool.copy(cycle = 1, standing = field, inputs = emptyMap(), status = "working-field"))
+        val till = next.cycle()
+        till.start()
+        till.phase shouldBe CitizenPhase.TO_WORK
+        till.arrive(2_000); till.work(3_000)
+        till.phase shouldBe CitizenPhase.READY
+        // A route retry also returns to the real worksite rather than imposing another barrel visit.
+        till.pause("route-unreachable", 3_000, false)
+        till.retry(8_000)
+        till.phase shouldBe CitizenPhase.TO_WORK
+    }
+
+    test("work facing uses real eye height so a barrel below the eyes cannot tilt the head into the sky") {
+        val focus = Location(null, 0.5, 64.7, -3.5)
+        val eye = Location(null, 1.5, 65.62, -3.5)
+        val (yaw, pitch) = citizenLookDirection(eye, focus)
+        yaw shouldBe 90f
+        (pitch > 0f && pitch < 90f) shouldBe true
+        val lowerPitch = citizenLookDirection(eye.clone().also { it.y = 65.0 }, focus).second
+        (pitch > lowerPitch && lowerPitch > 0f) shouldBe true
+        (citizenLookDirection(eye, focus.clone().also { it.y = eye.y }).second == 0f) shouldBe true
+        eye.y shouldBe 65.62
+    }
+
+    test("only working travel earns road footsteps while idle wander and night sheltering stay slow") {
+        val plan = CitizenPlan(token(), CivPosition(0, 64, 0), CivPosition(10, 64, 0), BuildingType.FARM, 1_000, null)
+        for (phase in CitizenPhase.entries) {
+            citizenWorkingTravel(plan, phase, false) shouldBe
+                (phase in setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
+            citizenWorkingTravel(plan.copy(idleReason = "waiting-growth"), phase, false) shouldBe false
+            citizenWorkingTravel(plan, phase, true) shouldBe false
+        }
+    }
+
+    test("a nearby native path door opens during construction and keeps cancellation ownership and receipt locks") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = paper.addSimpleWorld("citizen-door")
+                world.loadChunk(0, 0)
+                val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+                val worker = CivWorker(UUID.randomUUID(), "Писарь", hall.id)
+                val city = city(listOf(hall), worker, null).copy(worldId = world.uid)
+                val npc = mockk<NPC>()
+                val lower = world.getBlockAt(0, 64, 0)
+                val upper = world.getBlockAt(0, 65, 0)
+                fun close() {
+                    lower.setBlockData(org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=lower,open=false]"), false)
+                    upper.setBlockData(org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=upper,open=false]"), false)
+                }
+                var action: (NPCOpenDoorEvent) -> Unit = {}
+                var events = 0
+                paper.server.pluginManager.registerEvents(object : Listener {
+                    @EventHandler
+                    fun door(event: NPCOpenDoorEvent) { events++; action(event) }
+                }, paper.createSimplePlugin("CitizenDoors"))
+                val at = Location(world, 0.5, 64.0, -1.5)
+                val door = CivPosition(0, 64, 0)
+                fun open(current: Settlement = city, blocked: (UUID, CivPosition) -> Boolean = { _, _ -> false }) =
+                    citizenOpenRouteDoor(npc, current, setOf(hall.id), at, door, blocked)
+                close()
+                open() shouldBe true
+                events shouldBe 1
+                (lower.blockData as Door).isOpen shouldBe true
+                (upper.blockData as Door).isOpen shouldBe true
+                close()
+                action = { it.isCancelled = true }
+                open() shouldBe false
+                (lower.blockData as Door).isOpen shouldBe false
+                (upper.blockData as Door).isOpen shouldBe false
+                action = {}
+                open(blocked = { _, point -> point == door.copy(y = 65) }) shouldBe false
+                events shouldBe 2
+                for (phase in ConstructionPhase.entries) {
+                    close()
+                    val construction = CivConstruction(UUID.randomUUID(), hall.id, 2, 1, 0,
+                        phase, Stock(), plannedBuilding = hall.copy(level = 2))
+                    open(city.copy(buildings = listOf(hall.copy(phase = BuildingPhase.CONSTRUCTING)),
+                        construction = construction)) shouldBe true
+                    (lower.blockData as Door).isOpen shouldBe true
+                    (upper.blockData as Door).isOpen shouldBe true
+                }
+                close()
+                open(city.copy(pendingDeletion = CivDeletion(null))) shouldBe false
+                citizenOpenRouteDoor(npc, city, setOf(hall.id), at.clone().also { it.x = 30.0 }, door) { _, _ -> false } shouldBe false
+                citizenOpenRouteDoor(npc, city, emptySet(), at, door) { _, _ -> false } shouldBe false
+                action = { upper.type = Material.STONE }
+                open() shouldBe false
+                upper.type shouldBe Material.STONE
+                (lower.blockData as Door).isOpen shouldBe false
+                // A missing or replaced companion is a collision, never a permission to walk through it.
+                open() shouldBe false
+            }
+        }
     }
 
     test("footsteps use actual short grounded moves and reset across teleport spawn and world changes") {
@@ -580,7 +703,7 @@ class CivsCitizensTest : FunSpec({
         retry.ready(Long.MAX_VALUE) shouldBe false
     }
 
-    test("builder captures construction identity and its planned upgrade entrance") {
+    test("builder captures construction identity and the site's real barrel with entrance fallback only when absent") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val farm = building(BuildingType.FARM, CivPosition(8, 64, 0))
         val upgradedFarm = farm.copy(level = 2, entrance = CivPosition(12, 64, 0))
@@ -589,12 +712,20 @@ class CivsCitizensTest : FunSpec({
             ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = upgradedFarm)
         val city = city(listOf(hall, farm), worker, order)
         val plan = requireNotNull(citizenPlan(city, worker))
-        plan.workplace shouldBe upgradedFarm.entrance
+        plan.workplace shouldBe farm.control
+        val bareSite = city.copy(buildings = listOf(hall, farm.copy(control = null)),
+            construction = order.copy(plannedBuilding = upgradedFarm.copy(control = null)))
+        citizenPlan(bareSite, worker)?.workplace shouldBe upgradedFarm.entrance
         plan.token shouldBe CitizenToken(hall.id, 3, 25_000, order.id)
         plan.workMillis shouldBe CivsRules.BUILDER_INTERVAL
         plan.idleReason shouldBe null
         citizenPlan(city.copy(construction = null), worker)?.idleReason shouldBe "no-construction"
         citizenPlan(city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)), worker)?.idleReason shouldBe "placing"
+        val missingDepot = city.copy(buildings = listOf(hall.copy(control = null), farm))
+        citizenPlan(missingDepot.copy(construction = order.copy(phase = ConstructionPhase.PAUSED,
+            failure = "protected-area")), worker)?.idleReason shouldBe "construction-paused"
+        citizenPlan(missingDepot.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS)), worker)
+            ?.idleReason shouldBe "waiting-materials"
         citizenPlan(city, worker.copy(assignment = null))?.idleReason shouldBe "unassigned"
     }
 
@@ -606,8 +737,8 @@ class CivsCitizensTest : FunSpec({
             Stock(), plannedBuilding = hut, batches = CivConstructionBatches(2), materials = emptyMap())
         val city = city(listOf(hall, hut), worker, order)
         val plan = requireNotNull(citizenPlan(city, worker))
-        plan.storage shouldBe hall.entrance
-        plan.workplace shouldBe hut.entrance
+        plan.storage shouldBe hall.control
+        plan.workplace shouldBe hut.control
         plan.workMillis shouldBe CivsRules.BUILDER_INTERVAL
         plan.idleReason shouldBe null
         citizenPlan(city, worker.copy(assignment = hall.id))?.idleReason shouldBe "building-unavailable"
@@ -730,7 +861,7 @@ class CivsCitizensTest : FunSpec({
 private fun token(nextDeliveryAt: Long = 0) = CitizenToken(UUID.randomUUID(), 0, nextDeliveryAt, null)
 private fun reachWork(cycle: CitizenCycle) { cycle.start(); cycle.arrive(0); cycle.arrive(0) }
 private fun building(type: BuildingType, entrance: CivPosition) = CivBuilding(UUID.randomUUID(), type, 1,
-    entrance, 0, "test", CivBox(entrance, entrance), entrance, BuildingPhase.ACTIVE)
+    entrance, 0, "test", CivBox(entrance, entrance), entrance, BuildingPhase.ACTIVE, control = entrance.copy(z = entrance.z - 2))
 private fun city(buildings: List<CivBuilding>, worker: CivWorker, order: CivConstruction?) = Settlement(
     UUID.randomUUID(), UUID.randomUUID(), "Test", UUID.randomUUID(), CivPosition(0, 64, 0), 48,
     "test", Stock(), buildings, listOf(worker), construction = order)

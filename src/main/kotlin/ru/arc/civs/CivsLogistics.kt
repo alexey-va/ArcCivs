@@ -80,7 +80,7 @@ object CivsLogistics {
         val candidates = mutableListOf<CivCourierPlan>()
         for (request in requests(city, stock)) {
             val target = city.building(request.buildingId)?.takeIf { it.control != null } ?: continue
-            if (target.id == warehouse.id || !withinRoute(warehouse.entrance, target.entrance)) continue
+            if (target.id == warehouse.id || !withinRoute(requireNotNull(warehouse.control), requireNotNull(target.control))) continue
             val amount = minOf(MAX_CARGO, (request.needed - request.inTransit).coerceAtLeast(0), available[request.material] ?: 0)
             if (amount > 0) {
                 val candidate = job(city, worker, warehouse, warehouse, target, request.material, amount)
@@ -90,7 +90,7 @@ object CivsLogistics {
         }
         for (source in city.buildings) {
             if (source.phase != BuildingPhase.ACTIVE || source.control == null || CivsRules.isBuilder(city, source)) continue
-            if (!withinRoute(source.entrance, warehouse.entrance)) continue
+            if (!withinRoute(source.control, requireNotNull(warehouse.control))) continue
             val material = CivsProduction.material(source) ?: continue
             val amount = minOf(MAX_CARGO, stock(source.id)[material] ?: 0L)
             if (amount > 0) candidates += job(city, worker, warehouse, source, warehouse, material, amount)
@@ -110,14 +110,16 @@ object CivsLogistics {
     private fun shipmentId(city: UUID, worker: UUID, cycle: Long, source: UUID, target: UUID, material: String): UUID =
         UUID.nameUUIDFromBytes("$city/$worker/$cycle/$source/$target/$material".toByteArray(StandardCharsets.UTF_8))
 
-    /** Deleted destinations return to a reachable warehouse/hall from the persisted source point. */
-    fun destination(city: Settlement, cargo: CivCargo): CivBuilding? =
-        city.building(cargo.targetBuildingId)?.takeIf { it.control != null }
+    /** A retained source uses its real barrel; a removed source retains its durable departure point. */
+    fun destination(city: Settlement, cargo: CivCargo): CivBuilding? {
+        val source = city.building(cargo.sourceBuildingId)?.control ?: cargo.sourceEntrance
+        return city.building(cargo.targetBuildingId)?.takeIf { it.control != null }
             ?: city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE && it.control != null &&
-                withinRoute(cargo.sourceEntrance, it.entrance) }
-                .minByOrNull { distanceSquared(cargo.sourceEntrance, it.entrance) }
+                withinRoute(source, requireNotNull(it.control)) }
+                .minByOrNull { distanceSquared(source, requireNotNull(it.control)) }
             ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL && it.control != null &&
-                withinRoute(cargo.sourceEntrance, it.entrance) }
+                withinRoute(source, requireNotNull(it.control)) }
+    }
 
     private fun distanceSquared(from: CivPosition, to: CivPosition): Double =
         (from.x.toDouble() - to.x).let { it * it } + (from.y.toDouble() - to.y).let { it * it } +

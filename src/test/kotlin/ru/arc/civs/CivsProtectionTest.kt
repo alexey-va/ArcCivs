@@ -137,24 +137,47 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("full current and planned boxes protect owners while the rest of their city stays editable") {
+    test("owners and members can edit current and planned construction in every phase while strangers stay blocked") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("settlement")
             val otherWorld = paper.addSimpleWorld("other")
             val player = paper.addPlayer("Owner")
-            val old = protectionBuilding(0, 1)
+            val member = paper.addPlayer("Member")
+            val stranger = paper.addPlayer("Stranger")
+            val control = CivPosition(-1, 63, 0)
+            val old = protectionBuilding(0, 1).copy(phase = BuildingPhase.CONSTRUCTING, control = control)
             val planned = old.copy(level = 2, bounds = CivBox(CivPosition(0, 64, 0), CivPosition(3, 66, 3)))
-            val city = protectionCity(world.uid, player.uniqueId, old).copy(construction = CivConstruction(UUID.randomUUID(),
-                old.id, 2, 1, 0, ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = planned))
+            var city = protectionCity(world.uid, player.uniqueId, old).copy(members = setOf(member.uniqueId))
             val listener = CivsProtection({ listOf(city) })
             paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("ProtectionTest"))
-            paper.callEvent(BlockBreakEvent(world.getBlockAt(0, 65, 0), player)).isCancelled shouldBe true
-            paper.callEvent(BlockBreakEvent(world.getBlockAt(3, 66, 3), player)).isCancelled shouldBe true
+            val current = world.getBlockAt(0, 65, 0).also { it.type = Material.STONE }
+            val future = world.getBlockAt(3, 66, 3).also { it.type = Material.STONE }
+            val barrel = world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
+            for (phase in ConstructionPhase.entries) {
+                city = city.copy(construction = CivConstruction(UUID.randomUUID(), old.id, 2, 1, 0,
+                    phase, Stock(), plannedBuilding = planned))
+                listener.refresh()
+                for (actor in listOf(player, member, stranger)) {
+                    val denied = actor == stranger
+                    for (block in listOf(current, future)) {
+                        paper.callEvent(BlockBreakEvent(block, actor)).isCancelled shouldBe denied
+                        paper.callEvent(BlockPlaceEvent(block, block.state, block.getRelative(BlockFace.DOWN),
+                            ItemStack(Material.STONE), actor, true, EquipmentSlot.HAND)).isCancelled shouldBe denied
+                    }
+                    paper.callEvent(BlockMultiPlaceEvent(listOf(current.state, future.state), world.getBlockAt(4, 63, 0),
+                        ItemStack(Material.STONE), actor, true, EquipmentSlot.HAND)).isCancelled shouldBe denied
+                    paper.callEvent(BlockBreakEvent(barrel, actor)).isCancelled shouldBe true
+                }
+            }
             paper.callEvent(BlockBreakEvent(world.getBlockAt(4, 64, 0), player)).isCancelled shouldBe false
             paper.callEvent(BlockBreakEvent(otherWorld.getBlockAt(0, 65, 0), player)).isCancelled shouldBe false
-            val states = listOf(world.getBlockAt(4, 64, 0).state, world.getBlockAt(3, 65, 0).state)
-            paper.callEvent(BlockMultiPlaceEvent(states, world.getBlockAt(4, 63, 0), ItemStack(Material.STONE), player,
-                true, EquipmentSlot.HAND)).isCancelled shouldBe true
+            city = city.copy(pendingDeletion = CivDeletion(null))
+            listener.refresh()
+            for (actor in listOf(player, member)) for (block in listOf(current, future)) {
+                paper.callEvent(BlockBreakEvent(block, actor)).isCancelled shouldBe true
+                paper.callEvent(BlockPlaceEvent(block, block.state, block.getRelative(BlockFace.DOWN),
+                    ItemStack(Material.STONE), actor, true, EquipmentSlot.HAND)).isCancelled shouldBe true
+            }
         }
     }
 
@@ -200,7 +223,7 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("accepted current and planned construction keep physics locked without freezing another finished building") {
+    test("construction allows native door and vine physics while its control stays locked") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("construction-physics")
             val building = protectionBuilding(0, 2).copy(control = CivPosition(1, 64, 1))
@@ -218,9 +241,10 @@ class CivsProtectionTest : FunSpec({
                     phase, Stock(), plannedBuilding = planned))
                 listener.refresh()
                 for (block in listOf(currentDoor, plannedVine, control)) {
-                    paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe true
+                    val denied = block == control
+                    paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe denied
                     paper.callEvent(BlockDestroyEvent(block, Material.AIR.createBlockData(), block.blockData, 0, true))
-                        .isCancelled shouldBe true
+                        .isCancelled shouldBe denied
                 }
                 paper.callEvent(BlockPhysicsEvent(other, other.blockData)).isCancelled shouldBe false
             }
@@ -274,7 +298,7 @@ class CivsProtectionTest : FunSpec({
             city = city.copy(construction = CivConstruction(UUID.randomUUID(), farm.id, 2, 3, 0,
                 ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = farm.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)))
             listener.refresh()
-            grow(crop).isCancelled shouldBe true
+            grow(crop).isCancelled shouldBe false
         }
     }
 
@@ -324,42 +348,6 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    // MockBukkit 4.116.3 does not implement Inventory.getHolder(false) for native container events.
-    test("sites allow member edits but control blocks and every accepted construction phase stay locked").config(enabled = false) {
-        protectionScenario { paper ->
-            val world = paper.addSimpleWorld("site-protection")
-            val owner = paper.addPlayer("Owner")
-            val member = paper.addPlayer("Member")
-            val stranger = paper.addPlayer("Stranger")
-            val control = CivPosition(-1, 63, 0)
-            val building = protectionBuilding(0, 2).copy(phase = BuildingPhase.SITE, control = control)
-            var city = protectionCity(world.uid, owner.uniqueId, building).copy(members = setOf(member.uniqueId))
-            val listener = CivsProtection({ listOf(city) })
-            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("SiteProtectionTest"))
-            val barrel = world.getBlockAt(control.x, control.y, control.z).apply { type = Material.BARREL }
-            for (actor in listOf(owner, member, stranger)) {
-                paper.callEvent(BlockBreakEvent(world.getBlockAt(1, 64, 1), actor)).isCancelled shouldBe (actor == stranger)
-                paper.callEvent(BlockBreakEvent(world.getBlockAt(control.x, control.y, control.z), actor)).isCancelled shouldBe true
-                val view = mockk<InventoryView>()
-                every { view.topInventory } returns (barrel.state as Container).inventory
-                every { view.player } returns actor
-                paper.callEvent(InventoryOpenEvent(view)).isCancelled shouldBe (actor == stranger)
-            }
-            for (phase in ConstructionPhase.entries) {
-                val planned = building.copy(phase = BuildingPhase.CONSTRUCTING,
-                    bounds = CivBox(CivPosition(0, 64, 0), CivPosition(4, 66, 4)))
-                city = city.copy(buildings = listOf(building.copy(phase = BuildingPhase.ACTIVE)),
-                    construction = CivConstruction(UUID.randomUUID(), building.id, 2, 3, 0, phase, Stock(), plannedBuilding = planned))
-                listener.refresh()
-                for (actor in listOf(owner, member, stranger)) {
-                    listener.isProtected(world.uid, 0, 64, 0, actor.uniqueId) shouldBe true
-                    listener.isProtected(world.uid, 4, 64, 4, actor.uniqueId) shouldBe true
-                    listener.isProtected(world.uid, control.x, control.y, control.z, actor.uniqueId) shouldBe true
-                }
-            }
-        }
-    }
-
     for (phase in listOf(BuildingPhase.SITE, BuildingPhase.ACTIVE)) test("owners and members may restore only a missing $phase control barrel while its breaking stays denied") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("restore-site-control")
@@ -390,7 +378,7 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("a control barrel restore never bypasses accepted current or planned construction footprints") {
+    test("accepted construction locks its own controls without blocking another site control restore") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("accepted-control-protection")
             val owner = paper.addPlayer("Owner")
@@ -416,13 +404,13 @@ class CivsProtectionTest : FunSpec({
             listener.refresh()
             paper.callEvent(controlPlacement(world, control, owner)).isCancelled shouldBe true
 
-            // A different accepted building may cover this control without covering the SITE's building box.
+            // Another owned construction footprint does not remove this unrelated SITE's restore permission.
             val accepted = protectionBuilding(-3, -1).copy(type = BuildingType.HOUSE,
                 bounds = CivBox(CivPosition(-3, 62, 0), CivPosition(-1, 63, 1)))
             city = city.copy(buildings = listOf(site, accepted), construction = CivConstruction(UUID.randomUUID(), accepted.id,
                 2, 3, 0, ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = accepted.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)))
             listener.refresh()
-            paper.callEvent(controlPlacement(world, control, owner)).isCancelled shouldBe true
+            paper.callEvent(controlPlacement(world, control, owner)).isCancelled shouldBe false
         }
     }
 

@@ -312,8 +312,7 @@ class CivsWorld(
             val block = read(cell.position)
             if (block.type == Material.BEDROCK) rejectAt("protected-terrain", block)
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
-            val current = block.blockData.asString
-            if (current != cell.before && current != cell.after) rejectAt("world-changed", block)
+            // Players may clear or remodel a cell before this one-pass construction batch reaches it.
             val after = parse(cell.after)
             requireCivs(after.material != Material.BARRIER, "invalid-plan")
             if (!canModify(owner, block, after.material)) rejectAt("lands-denied", block)

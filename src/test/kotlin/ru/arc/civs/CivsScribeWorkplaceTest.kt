@@ -23,30 +23,34 @@ class CivsScribeWorkplaceTest : FunSpec({
     val city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Test", UUID.randomUUID(), CivPosition(0, 64, 0),
         48, "test", Stock(), listOf(hall, hut), listOf(worker), inventory = CivInventory(CivStorageMode.VIRTUAL))
 
-    test("ordinary hall work binds its barrel while spawn and storage stay at the entrance") {
+    test("ordinary hall work and storage bind the real barrel instead of the entrance") {
         val plan = requireNotNull(citizenPlan(city, worker))
         plan.type shouldBe BuildingType.TOWN_HALL
         plan.workplace shouldBe hall.control
-        plan.storage shouldBe hall.entrance
-        plan.spawnOrigin shouldBe hall.entrance
+        plan.storage shouldBe hall.control
+        plan.spawnOrigin shouldBe hall.control
         citizenPlan(city.copy(buildings = listOf(hall.copy(control = null), hut)), worker)?.idleReason shouldBe "building-unavailable"
     }
 
-    test("scribe accepts its own interior but rejects a foreign footprint and never stands on the barrel") {
-        val plan = requireNotNull(citizenPlan(city, worker))
+    test("storage accepts its own interior but rejects a foreign footprint and never stands on the barrel") {
+        val world = storageWorld(city.worldId, hall.control!!)
         val east = CivPosition(1, 64, -4)
-        citizenScribeTarget(city, plan) { true } shouldBe east
+        citizenStorageTarget(city, hall, world) { true } shouldBe east
         val obstruction = hut.copy(bounds = CivBox(CivPosition(1, 63, -5), CivPosition(2, 67, -3)))
-        citizenScribeTarget(city.copy(buildings = listOf(hall, obstruction)), plan) { true } shouldBe CivPosition(-1, 64, -4)
+        citizenStorageTarget(city.copy(buildings = listOf(hall, obstruction)), hall, world) { true } shouldBe CivPosition(-1, 64, -4)
         val visited = mutableListOf<CivPosition>()
-        citizenScribeTarget(city, plan) { visited += it; false } shouldBe null
+        citizenStorageTarget(city, hall, world) { visited += it; false } shouldBe null
         visited.size shouldBe 12
         visited.none { it.x == hall.control!!.x && it.z == hall.control!!.z } shouldBe true
+        citizenStorageTarget(city, hall, world) { it == hall.control!!.copy(y = 65) } shouldBe null
+        every { world.getBlockAt(0, 64, -4).type } returns Material.AIR
+        citizenStorageTarget(city, hall, world) { true } shouldBe null
     }
 
     test("scribe fixture finds a raised supported floor and never reads unloaded cells") {
         MockBukkitTestRuntime.open().use {
             val world = mockk<World>()
+            every { world.uid } returns city.worldId
             val chunk = mockk<Chunk>()
             every { world.isChunkLoaded(any(), any()) } returns true
             every { world.getChunkAt(any<Int>(), any<Int>(), false) } returns chunk
@@ -57,19 +61,35 @@ class CivsScribeWorkplaceTest : FunSpec({
                 val x = firstArg<Int>(); val y = secondArg<Int>(); val z = thirdArg<Int>()
                 val solid = y <= 64
                 mockk<Block> {
-                    every { type } returns if (solid) Material.STONE else Material.AIR
+                    every { type } returns if (CivPosition(x, y, z) == hall.control) Material.BARREL else if (solid) Material.STONE else Material.AIR
                     every { isPassable } returns !solid
                     every { isLiquid } returns false
                     every { boundingBox } returns BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0,
                         y + if (solid) 1.0 else 0.0, z + 1.0)
                 }
             }
-            val plan = requireNotNull(citizenPlan(city, worker))
-            citizenScribeTarget(city, plan) { citizenStandable(world, it) } shouldBe CivPosition(1, 65, -4)
+            citizenStorageTarget(city, hall, world) shouldBe CivPosition(1, 65, -4)
             every { world.isChunkLoaded(any(), any()) } returns false
             every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } throws AssertionError("No unloaded reads")
-            citizenScribeTarget(city, plan) { citizenStandable(world, it) } shouldBe null
+            citizenStorageTarget(city, hall, world) shouldBe null
             verify(exactly = 0) { world.getChunkAt(any<Int>(), any<Int>(), true) }
         }
     }
+
+    test("barrel arrival rejects the distant entrance the barrel top and an unloaded or missing barrel") {
+        val control = hall.control!!
+        val world = storageWorld(city.worldId, control)
+        citizenAtStorage(world, CitizenPoint(hall.entrance.x + 0.5, hall.entrance.y.toDouble(), hall.entrance.z + 0.5), control) shouldBe false
+        citizenAtStorage(world, CitizenPoint(1.5, 64.0, -3.5), control) shouldBe true
+        citizenAtStorage(world, CitizenPoint(0.5, 65.0, -3.5), control) shouldBe false
+        every { world.isChunkLoaded(any(), any()) } returns false
+        every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } throws AssertionError("No unloaded reads")
+        citizenAtStorage(world, CitizenPoint(1.5, 64.0, -3.5), control) shouldBe false
+    }
 })
+
+private fun storageWorld(worldId: UUID, control: CivPosition): World = mockk {
+    every { uid } returns worldId
+    every { isChunkLoaded(any(), any()) } returns true
+    every { getBlockAt(control.x, control.y, control.z) } returns mockk { every { type } returns Material.BARREL }
+}

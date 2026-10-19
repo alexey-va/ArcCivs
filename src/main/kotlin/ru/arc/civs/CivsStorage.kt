@@ -331,12 +331,13 @@ class CivsStorage(private val plugin: Plugin,
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
     fun isWorldLocked(worldId: UUID, position: CivPosition): Boolean = Key(worldId, position) in lockedWorld
 
-    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType): CivResidentTransferPlan {
+    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null): CivResidentTransferPlan {
         checkClaim(city)
         reject(!city.canManage(player.uniqueId) || !player.isOnline, "not-authorized")
         reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-        val (updated, changes) = CivsEquipment.transfer(worker, player, npcSlot, playerSlot, click)
+        val (updated, changes) = if (requestedTool != null) CivsEquipment.giveRequestedTool(worker, player, requestedTool)
+            else CivsEquipment.transfer(worker, player, npcSlot, playerSlot, click)
         val transfer = CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), changes)
         return CivResidentTransferPlan(CivStoragePlan(requireNotNull(city.inventory), emptyList(), residentTransfer = transfer), updated)
     }

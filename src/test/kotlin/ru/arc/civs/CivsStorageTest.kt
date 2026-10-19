@@ -132,6 +132,45 @@ class CivsStorageTest : FunSpec({
         taken.after.workers.single().items!![4] shouldBe null
     }
 
+    test("requested tool selects the cheapest worn plain tier and equips it through the existing receipt once") {
+        val player = paper.addPlayer("ToolDonor")
+        val farm = addLocalBuilding(BuildingType.FARM)
+        val items = MutableList<CivResidentItem?>(33) { null }.also { it[4] = CivResidentItem("STICK", 1) }
+        val worker = CivWorker(UUID.randomUUID(), "Farmer", farm.id, nextDeliveryAt = 1_000, items = items)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.inventory.setItem(0, ItemStack(Material.IRON_HOE))
+        player.inventory.setItem(1, ItemStack(Material.WOODEN_HOE).apply { addUnsafeEnchantment(Enchantment.UNBREAKING, 1) })
+        player.inventory.setItem(2, ItemStack(Material.WOODEN_HOE))
+        val chosen = named(Material.WOODEN_HOE, 1).apply { editMeta { (it as Damageable).damage = 21 } }
+        player.inventory.setItem(3, chosen)
+        player.inventory.setItem(4, ItemStack(Material.GOLDEN_HOE))
+        player.inventory.setItem(5, ItemStack(Material.COPPER_PICKAXE))
+        CivsEquipment.cheapestTool(player, Material.IRON_PICKAXE) shouldBe 5
+        player.inventory.setItem(5, null)
+        CivsEquipment.requestedTool(city, worker) shouldBe Material.IRON_HOE
+        CivsEquipment.cheapestTool(player, Material.IRON_HOE) shouldBe 3
+        CivsEquipment.cheapestTool(player, Material.IRON_PICKAXE) shouldBe null
+        CivsEquipment.canEquipRequestedTool(worker) shouldBe true
+        val full = worker.copy(items = items.mapIndexed { i, item -> if (i >= 6) CivResidentItem("STONE", 64) else item })
+        CivsEquipment.canEquipRequestedTool(full) shouldBe false
+
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, null, null, ClickType.RIGHT, Material.IRON_HOE)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        player.inventory.getItem(3) shouldBe chosen
+        prepared.worker.items!![4]!!.stack() shouldBe chosen
+        prepared.worker.items!![6] shouldBe CivResidentItem("STICK", 1)
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(3) shouldBe null
+        player.inventory.getItem(0)!!.type shouldBe Material.IRON_HOE
+        player.inventory.getItem(1)!!.enchantments[Enchantment.UNBREAKING] shouldBe 1
+        player.inventory.getItem(2)!!.type shouldBe Material.WOODEN_HOE
+        CivsEquipment.requestedTool(receipt.after, prepared.worker) shouldBe null
+    }
+
     test("resident receipts wait for rejoin and retry an already applied player change after a failed save") {
         val player = paper.addPlayer("ReturningEquipmentOwner")
         player.openInventory(paper.server.createInventory(player, 9))
