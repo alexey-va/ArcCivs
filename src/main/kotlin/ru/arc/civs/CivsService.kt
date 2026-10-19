@@ -115,7 +115,7 @@ class CivsService(
             val targetWorld = plugin.server.getWorld(worldId) ?: return false
             if (y !in targetWorld.minHeight until targetWorld.maxHeight || !targetWorld.isChunkLoaded(x shr 4, z shr 4)) return false
             val block = targetWorld.getBlockAt(x, y, z)
-            if (!access.repairing && block.type != access.materials.getValue(position) &&
+            if (!access.repairing &&
                 (block.getState(false) as? org.bukkit.block.Container)?.inventory?.isEmpty == false) return false
             // Preflight can precede this write by many ticks; Lands authority must still be current.
             return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))

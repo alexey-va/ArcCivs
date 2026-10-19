@@ -2355,18 +2355,21 @@ class CivsServiceTest : FunSpec({
     }
 
     test("a player container filled after preflight keeps its items at the exact native write boundary") {
-        serviceScenario { h ->
-            val placement = h.placement()
-            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
-            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
-            val block = h.world.getBlockAt(15, 64, 0)
-            block.type = Material.BARREL
-            val contents = (block.state as org.bukkit.block.Barrel).inventory
-            contents.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
-            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
-            contents.getItem(0)!!.amount shouldBe 3
-            contents.clear()
-            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+        // WorldEdit clears container contents before setBlock, even for the same target material.
+        listOf(Material.OAK_PLANKS, Material.CHEST).forEach { target ->
+            serviceScenario { h ->
+                val placement = h.placement(target)
+                h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+                val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+                val block = h.world.getBlockAt(15, 64, 0)
+                block.type = Material.CHEST
+                val contents = (block.state as org.bukkit.block.Container).inventory
+                contents.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                contents.getItem(0)!!.amount shouldBe 3
+                contents.clear()
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            }
         }
     }
 
@@ -2636,7 +2639,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         world.loadChunk(0, 0); world.loadChunk(1, 0)
         return placement
     }
-    fun placement(): ServicePlacement {
+    fun placement(firstMaterial: Material = Material.OAK_PLANKS): ServicePlacement {
         val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
             anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),
             entrance = CivPosition(15, 64, 3), phase = BuildingPhase.CONSTRUCTING)
@@ -2645,12 +2648,12 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         val reserved = CivsRules.reserveBuild(city, owner, building, order)
         val ready = CivsRules.validate(reserved.copy(construction = order.copy(workDone = 3, phase = ConstructionPhase.READY_TO_PLACE)))
         val plan = CivPlacementPlan(order.id, city.id, world.uid, building, listOf(
-            CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:oak_planks"),
+            CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", firstMaterial.key.toString()),
             CivPlanBlock(CivPosition(16, 64, 0), "minecraft:air", "minecraft:stone"),
         ), "b".repeat(64))
         val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
         every { snapshot.blocks() } returns listOf(
-            ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:oak_planks", false, false),
+            ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), firstMaterial.key.toString(), false, false),
             ArcSchematicBlock(ArcSchematicPoint(1, 0, 0), "minecraft:stone", false, false),
         )
         val placement = ServicePlacement(ready)
