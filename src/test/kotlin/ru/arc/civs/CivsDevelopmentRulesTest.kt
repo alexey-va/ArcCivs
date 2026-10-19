@@ -215,7 +215,7 @@ class CivsDevelopmentRulesTest : FunSpec({
     }
 
     test("funded recruitment and item production advance residents without duplicating abstract resources") {
-        denied("town-hall-not-ready") { newCity().let { CivsRules.recruitFunded(it, it.owner, id(101), "Рано") } }
+        newCity().let { CivsRules.recruitFunded(it, it.owner, id(101), "Замена").workers.size shouldBe 1 }
         var city = builderCity().let { it.copy(buildings = it.buildings.map { b -> b.copy(phase = BuildingPhase.ACTIVE) }) }
         city = CivsRules.validate(city)
         denied("materials-required") { CivsRules.recruit(city, city.owner, id(101), "Второй") }
@@ -262,7 +262,8 @@ class CivsDevelopmentRulesTest : FunSpec({
             denied("invalid-construction") { CivsRules.startSite(fresh, fresh.owner, hut, it) }
         }
         denied("invalid-state") { CivsRules.validate(newCity().copy(immigration = CivImmigration(5, 31_000))) }
-        denied("invalid-state") { CivsRules.validate(newCity().copy(immigration = CivImmigration(0, 31_000))) }
+        val lostPioneers = newCity().copy(immigration = CivImmigration(0, 31_000))
+        CivsRules.validate(lostPioneers) shouldBe lostPioneers
         val unfinishedUpgrade = fresh.building(id(1))!!.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
         denied("invalid-state") { CivsRules.validate(fresh.copy(construction = batches(unfinishedUpgrade, 2))) }
         denied("invalid-state") { CivsRules.validate(newCity().copy(stock = Stock(1))) }

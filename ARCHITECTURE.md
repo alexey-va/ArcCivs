@@ -10,8 +10,30 @@ Core 2.7.41 is mandatory: lifecycle/scheduling, SQL, atomic files, localized
 text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use transient Citizens PLAYER actors with
 bundled signed skins, native hand equipment and work-only arm swings. Skins are
-stable per worker UUID; lookup/update is disabled. Equipment never enters city
-storage and NPC item pickup/drops are disabled. NPCs use Citizens native Minecraft
+stable per worker UUID; lookup/update is disabled. Work props never enter city
+storage and NPC item pickup/drops are disabled. Supplied personal tools, armor and
+bread are recorded separately in the city snapshot, transferred one item at a time
+through the existing inventory receipt. One bread heals six health points; up to
+16 may be carried. Returning an item requires warehouse space. Plain leather/iron
+armor equips native slots; a supplied matching iron work tool reduces incoming
+damage by ten percent. Props alone confer no bonus. Residents start with 20 health;
+each new completed profession cycle earns one internal point, with ten points per
+level and a level-five cap. The highest profession level adds two maximum health
+per extra level, up to 28. Old cycles grant no retroactive points. Production
+amounts and work intervals are unchanged.
+
+Damage from players, monsters and the environment is intercepted before native
+death. The actor stops work while its injury waits for the current city write;
+health or permanent removal is committed before native health/despawn changes.
+Failed/unknown injury commits remain frozen until a successful canonical reload.
+Native regeneration is disabled. Viewer/chunk retirement preserves stored health
+and personal inventory; it cannot heal or resurrect a dead worker. Nearby idle
+monsters may target residents through bounded round-robin checks; existing monster
+targets and cancelled protection events are respected. Death destroys carried
+supplies without drops or XP and frees the job/population slot. Ordinary recruitment
+still costs 12 bread and also works before hall completion, so losing the first
+builder does not permanently strand the settlement. Arrival receipts are never
+replenished by death or recruitment. NPCs use Citizens native Minecraft
 bounded point-to-point navigation, with ArcCivs checking actual arrival separately
 from the navigator's completion callback. A failed or stuck
 route may teleport to a safe loaded point near its target, as explicitly requested

@@ -582,12 +582,12 @@ class CivsUi internal constructor(
 
     private fun showOffer(player: Player, type: BuildingType, error: Component? = null) {
         val city = city(player) ?: return
-        val eligible = city.buildings.size < CivsRules.MAX_BUILDINGS && !host.cityBusy(player)
+        val eligible = city.buildings.size < CivsRules.MAX_BUILDINGS
         present(player, "civs.offer", "buildings.offer-title", listOfNotNull(
             body(buildingName(player, type, 1)), body(player, "building-purpose.${type.name.lowercase(Locale.ROOT)}"),
             body(player, "buildings.site-help"),
             if (city.buildings.size >= CivsRules.MAX_BUILDINGS) body(player, "reason.building-limit") else null,
-            busyBody(player), error?.let(::body),
+            error?.let(::body),
         ), buildList {
             if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT) {
                 beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
@@ -618,7 +618,7 @@ class CivsUi internal constructor(
             if (legacyControl) body(player, "control.legacy-help") else null,
             if (legacyControl && city.construction != null) body(player, "reason.construction-busy") else null,
             if (building.type == BuildingType.TOWN_HALL && CivsRules.legacyHallBuilder(city)) body(player, "buildings.legacy-builder-help") else null,
-            busyBody(player), error?.let(::body),
+            error?.let(::body),
         ), buildList {
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
@@ -750,7 +750,7 @@ class CivsUi internal constructor(
                     "have" to (available.getOrNull()?.get(material) ?: 0), "need" to count)
             }, tr(player, "materials.item") to tr(player, "materials.stock-needed"),
                 DialogTables.Frame.EPIC, 320, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
-            available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player),
+            available.exceptionOrNull()?.let { body(text.failure(player, it)) },
         ), buildList {
             if (canSupply) {
                 add(button(player, "supply", "materials.supply", STOCK) {
@@ -764,7 +764,7 @@ class CivsUi internal constructor(
                         workingKey = "materials.supplying")
                 }.copy(tooltip = tr(player, "materials.grant-help")))
             }
-            if (order == null && queued == null && !host.cityBusy(player) && available.isSuccess) add(button(player, "start",
+            if (order == null && queued == null) add(button(player, "start",
                 if (city.construction == null && city.constructionQueue.orEmpty().isEmpty()) "materials.start" else "queue.add", COMMIT) {
                 perform(player, "civs.building-materials", "materials.title", { host.startBuilding(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
@@ -846,7 +846,7 @@ class CivsUi internal constructor(
         if (building.level >= 3) return showBuilding(player, buildingId)
         val target = building.level + 1
         val hallRequired = building.type != BuildingType.TOWN_HALL && target > city.level()
-        val eligible = !hallRequired && city.construction == null && !host.cityBusy(player) && building.phase == BuildingPhase.ACTIVE
+        val eligible = !hallRequired && city.construction == null && building.phase == BuildingPhase.ACTIVE
         present(player, "civs.upgrade", "upgrades.detail-title", listOfNotNull(
             body(buildingName(player, building.type, building.level)),
             table(buildList {
@@ -860,7 +860,7 @@ class CivsUi internal constructor(
                 city.construction != null -> body(player, "reason.construction-busy")
                 hallRequired -> body(tr(player, "upgrades.hall-required", "level" to target))
                 else -> null
-            }, busyBody(player), error?.let(::body),
+            }, error?.let(::body),
         ), buildList {
             if (eligible) add(button(player, "prepare", "upgrades.prepare", COMMIT) {
                 perform(player, "civs.preview", "preview.title", { host.prepareUpgrade(player, buildingId) },
@@ -896,12 +896,15 @@ class CivsUi internal constructor(
         val building = worker.assignment?.let(city::building)
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(text.literal(worker.name)), table(listOf(
+                tr(player, "workers.health-label") to workerHealth(player, worker),
                 tr(player, "label.workplace") to (building?.let { buildingName(player, it.type, it.level) } ?: tr(player, "workers.unassigned")),
                 tr(player, "label.profession") to tr(player, "profession.${building?.let { CivsRules.profession(it.type) } ?: "unassigned"}"),
                 tr(player, "label.state") to workerStatus(player, worker),
                 tr(player, "label.deliveries") to text.literal(worker.completedCycles),
             )), busyBody(player), error?.let(::body),
         ), buildList {
+            add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId) })
+            add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId) })
             if (!host.cityBusy(player)) add(button(player, "assign", "workers.assign", PERSONAL) { showAssignments(player, workerId) })
             if (worker.assignment != null && !host.cityBusy(player)) add(button(player, "unassign", "workers.unassign") {
                 perform(player, "civs.worker", "workers.detail-title", { host.assign(player, workerId, null) },
@@ -909,6 +912,97 @@ class CivsUi internal constructor(
             })
         }, reopen = { showWorker(player, workerId) })
     }
+
+    private fun showWorkerSkills(player: Player, workerId: UUID) {
+        val city = city(player) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+        present(player, "civs.worker-skills", "workers.skills-title", listOf(
+            body(text.literal(worker.name)), body(player, "workers.skills-help"),
+            table(listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM).map { type ->
+                val level = CivsResidents.skillLevel(worker, type.name)
+                tr(player, "profession.${CivsRules.profession(type)}") to if (level >= 5) tr(player, "workers.skill-max", "level" to level)
+                else tr(player, "workers.skill-progress", "level" to level,
+                    "xp" to CivsResidents.skillExperience(worker, type.name), "goal" to level * 10)
+            }),
+            body(tr(player, "workers.endurance-help", "health" to residentNumber(CivsResidents.maxHealth(worker)))),
+        ), emptyList(), reopen = { showWorkerSkills(player, workerId) })
+    }
+
+    private fun showWorkerInventory(player: Player, workerId: UUID, page: Int = 0, error: Component? = null) {
+        val city = city(player) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+        val materials = CivsResidents.catalog
+        val current = page.coerceIn(0, lastPage(materials.size))
+        val available = runCatching { host.availableMaterials(player) }
+        val carried = worker.inventory.orEmpty()
+        present(player, "civs.worker-inventory", "workers.inventory-title", listOfNotNull(
+            body(text.literal(worker.name)), table(listOf(
+                tr(player, "workers.health-label") to workerHealth(player, worker),
+                tr(player, "workers.bread-label") to tr(player, "common.fraction", "value" to (carried["BREAD"] ?: 0), "limit" to 16),
+            )), body(player, "workers.inventory-help"), body(tr(player, "workers.death-help").color(STOCK)),
+            available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player), error?.let(::body),
+        ), buildList {
+            if (!host.cityBusy(player) && (carried["BREAD"] ?: 0) > 0 && CivsResidents.health(worker) < CivsResidents.maxHealth(worker)) {
+                add(button(player, "feed", "workers.feed", COMMIT) {
+                    perform(player, "civs.worker-inventory", "workers.inventory-title", { host.feedWorker(player, workerId) },
+                        success = { showWorkerInventory(player, workerId, current) },
+                        failure = { showWorkerInventory(player, workerId, current, it) })
+                }.copy(tooltip = tr(player, "workers.feed-help")))
+            }
+            materials.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEach { material ->
+                val count = carried[material] ?: 0
+                add(valueButton(player, "item_${material.lowercase(Locale.ROOT)}", "common.destination",
+                    tr(player, "workers.inventory-item", "item" to materialName(player, material), "amount" to count),
+                    if (count > 0) STOCK else WHITE,
+                    tr(player, "workers.inventory-counts", "held" to count, "stock" to
+                        if (available.isSuccess) text.literal(available.getOrNull()?.get(material) ?: 0) else tr(player, "workers.stock-unknown"))) {
+                    showWorkerItem(player, workerId, material)
+                })
+            }
+            pages(player, current, materials.size) { showWorkerInventory(player, workerId, it) }
+        }, reopen = { showWorkerInventory(player, workerId, current) })
+    }
+
+    private fun showWorkerItem(player: Player, workerId: UUID, material: String, error: Component? = null) {
+        val city = city(player) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+        if (material !in CivsResidents.catalog) return showWorkerInventory(player, workerId)
+        val held = worker.inventory?.get(material) ?: 0
+        val available = runCatching { host.availableMaterials(player) }
+        val stock = available.getOrNull()?.get(material) ?: 0
+        val canCarry = CivsResidents.canCarry(worker, material)
+        present(player, "civs.worker-item", "workers.item-title", listOfNotNull(
+            body(materialName(player, material)), table(listOf(
+                tr(player, "workers.item-held") to text.literal(held),
+                tr(player, "workers.item-stock") to (if (available.isSuccess) text.literal(stock) else tr(player, "workers.stock-unknown")),
+            )), body(player, when (material) {
+                "BREAD" -> "workers.item-food-help"
+                "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE" -> "workers.item-tool-help"
+                else -> "workers.item-armor-help"
+            }),
+            if (!canCarry) body(player, when {
+                material == "BREAD" -> "workers.bread-full"
+                held > 0 -> "workers.item-already-held"
+                else -> "workers.armor-occupied"
+            }) else null,
+            if (canCarry && available.isSuccess && stock == 0L) body(player, "workers.stock-empty") else null,
+            available.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player), error?.let(::body),
+        ), buildList {
+            if (!host.cityBusy(player) && canCarry && stock > 0 && available.isSuccess) add(button(player, "supply", "workers.supply", COMMIT) {
+                perform(player, "civs.worker-item", "workers.item-title", { host.supplyWorker(player, workerId, material) },
+                    success = { showWorkerItem(player, workerId, material) }, failure = { showWorkerItem(player, workerId, material, it) })
+            })
+            if (!host.cityBusy(player) && held > 0) add(button(player, "return_item", "workers.return-item", STOCK) {
+                perform(player, "civs.worker-item", "workers.item-title", { host.returnWorkerItem(player, workerId, material) },
+                    success = { showWorkerItem(player, workerId, material) }, failure = { showWorkerItem(player, workerId, material, it) })
+            })
+        }, reopen = { showWorkerItem(player, workerId, material) })
+    }
+
+    private fun workerHealth(player: Player, worker: CivWorker): Component = tr(player, "common.fraction",
+        "value" to residentNumber(CivsResidents.health(worker)), "limit" to residentNumber(CivsResidents.maxHealth(worker)))
+
+    private fun residentNumber(value: Double): String = String.format(Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')
 
     private fun showAssignments(player: Player, workerId: UUID, page: Int = 0, error: Component? = null) {
         val city = city(player) ?: return

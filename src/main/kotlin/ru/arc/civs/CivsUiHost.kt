@@ -96,6 +96,9 @@ interface CivsUiHost {
     fun cancelPreview(player: Player)
     fun recruit(player: Player): CompletableFuture<Unit>
     fun assign(player: Player, workerId: UUID, buildingId: UUID?): CompletableFuture<Unit>
+    fun supplyWorker(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
+    fun returnWorkerItem(player: Player, workerId: UUID, material: String): CompletableFuture<Unit>
+    fun feedWorker(player: Player, workerId: UUID): CompletableFuture<Unit>
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>

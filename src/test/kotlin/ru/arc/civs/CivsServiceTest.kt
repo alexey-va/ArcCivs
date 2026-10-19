@@ -29,6 +29,68 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("resident injury waits for another city save and retains both updates before publishing death") {
+        serviceScenario { h ->
+            h.start()
+            val worker = h.city.workers.last()
+            val member = h.paper.addPlayer("ResidentMember")
+            val assigning = h.service.addMember(h.player, member.name)
+            h.tick()
+            val injury = h.service.hurtResident(h.city.id, worker.id, 20.0)
+            injury.isDone shouldBe false
+            h.saves.size shouldBe 1
+            h.service.city(h.player)!!.workers.size shouldBe 4
+            h.commit(); assigning.join()
+            h.tick()
+            h.saves.size shouldBe 2
+            h.service.city(h.player)!!.workers.size shouldBe 4
+            h.saves.last().first.workers.size shouldBe 3
+            (member.uniqueId in h.saves.last().first.members) shouldBe true
+            h.saves.last().first.revision shouldBe h.saves.first().first.revision + 1
+            h.commit(); injury.join()
+            h.service.city(h.player)!!.workers.none { it.id == worker.id } shouldBe true
+        }
+    }
+
+    test("resident supply and return conserve native items through delayed city commits") {
+        serviceScenario { h ->
+            h.supplySite(h.owner, 1)
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val worker = h.city.workers.last().id
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.IRON_HELMET))
+            val supplied = h.service.supplyWorker(h.player, worker, "IRON_HELMET")
+            h.tick()
+            supplied.isDone shouldBe false
+            barrel.getItem(0) shouldBe null
+            h.service.city(h.player)!!.workers.last().inventory shouldBe null
+            h.commit(); supplied.join()
+            h.service.city(h.player)!!.workers.last().inventory?.get("IRON_HELMET") shouldBe 1L
+            val returned = h.service.returnWorkerItem(h.player, worker, "IRON_HELMET")
+            h.tick()
+            barrel.getItem(0)!!.type shouldBe Material.IRON_HELMET
+            h.commit(); returned.join()
+            h.service.city(h.player)!!.workers.last().inventory.orEmpty() shouldBe emptyMap()
+            barrel.getItem(0)!!.amount shouldBe 1
+        }
+    }
+
+    test("unknown resident injury commit blocks later healing and item debits") {
+        serviceScenario { h ->
+            h.start()
+            val worker = h.city.workers.last().id
+            val injury = h.service.hurtResident(h.city.id, worker, 3.0)
+            h.saves.last().second.completeExceptionally(IllegalStateException("unknown commit")); h.tick()
+            injury.isCompletedExceptionally shouldBe true
+            h.service.feedWorker(h.player, worker).isCompletedExceptionally shouldBe true
+            h.service.supplyWorker(h.player, worker, "BREAD").isCompletedExceptionally shouldBe true
+            h.saves.size shouldBe 1
+            CivsResidents.health(h.service.city(h.player)!!.workers.last()) shouldBe 20.0
+        }
+    }
+
     test("receipt bootstrap blocks drops before journal locks then releases only unrelated players while SQL is pending") {
         serviceScenario { h ->
             val player = h.paper.addPlayer("BootstrapSupplier")
@@ -1557,6 +1619,146 @@ class CivsServiceTest : FunSpec({
             services.load(ArcBlockProtectionService::class.java) shouldBe null
         }
     }
+
+    test("a site preview and confirmation survive a delayed builder save without losing either revision") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            val source = h.previewBlueprint(CivPosition(5, 63, 5))
+            val blueprint = h.sitePreview(source.copy(building = source.building.copy(
+                id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)))
+            h.world.getBlockAt(5, 63, 5).type = Material.GRASS_BLOCK
+            h.start(); placement.validation.complete(Unit); h.tick()
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
+            val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(5, 63, 5)))
+            h.tick(); selected.join()
+            h.service.preview(h.player)!!.type shouldBe BuildingType.WAREHOUSE
+            val confirmed = h.service.confirmPreview(h.player)
+            val duplicate = h.service.confirmPreview(h.player)
+            h.tick()
+            confirmed.isDone shouldBe false
+            duplicate.isDone shouldBe false
+            h.saves.size shouldBe 1
+            h.world.getBlockAt(5, 64, 0).type shouldBe Material.AIR
+            verify(exactly = 0) { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
+            h.commit()
+            h.saves.size shouldBe 2
+            h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.saves.last().first.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            h.service.city(h.player)!!.building(blueprint.building.id) shouldBe null
+            h.world.getBlockAt(5, 64, 0).type shouldBe Material.AIR
+            h.commit()
+            h.world.getBlockAt(5, 64, 0).type shouldBe Material.BARREL
+            h.saves.size shouldBe 3 // Retire the already-durable control receipt.
+            placement.pasted.complete(ArcSchematicMutationResult(2, 0, false)); h.tick()
+            h.saves.size shouldBe 3 // Builder completion waits for receipt retirement.
+            h.commit(); confirmed.join(); duplicate.join()
+            h.saves.size shouldBe 4
+            h.saves.last().first.construction shouldBe null
+            h.saves.last().first.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            h.commit()
+            val saved = h.service.city(h.player)!!
+            saved.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            saved.construction shouldBe null
+            saved.pendingControls shouldBe emptyList()
+            h.saves.map { it.first.revision } shouldBe (1L..4L).map { placement.city.revision + it }
+            verify(exactly = 1) { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("late builder validation waits for a site reservation and keeps its newly committed geometry") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            val source = h.previewBlueprint(CivPosition(5, 63, 5))
+            val blueprint = h.sitePreview(source.copy(building = source.building.copy(
+                id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)))
+            h.world.getBlockAt(5, 63, 5).type = Material.GRASS_BLOCK
+            h.start()
+            h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
+            val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(5, 63, 5)))
+            h.tick(); selected.join()
+            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            h.saves.size shouldBe 1
+            placement.validation.complete(Unit); h.tick()
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            h.commit()
+            h.saves.size shouldBe 2
+            h.commit(); confirmed.join()
+            h.saves.size shouldBe 3
+            h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.saves.last().first.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            h.saves.last().first.pendingControls shouldBe emptyList()
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            h.commit()
+            h.service.city(h.player)!!.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+        }
+    }
+
+    test("a requested site job waits for the builder save and queues against its newly published state") {
+        serviceScenario { h ->
+            val placement = h.placement()
+            val site = h.city.buildings.last().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                phase = BuildingPhase.SITE, control = CivPosition(10, 63, 0))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(
+                placement.city.copy(buildings = placement.city.buildings.map {
+                    if (it.id == h.city.buildings.last().id) site else it
+                })))
+            h.start(); placement.validation.complete(Unit); h.tick()
+            h.saves.size shouldBe 1
+            val requested = h.service.startBuilding(h.player, site.id)
+            val duplicate = h.service.startBuilding(h.player, site.id)
+            h.tick()
+            requested.isDone shouldBe false
+            duplicate.isDone shouldBe false
+            h.saves.size shouldBe 1
+            h.commit()
+            h.saves.size shouldBe 2
+            h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.saves.last().first.constructionQueue shouldBe listOf(site.id)
+            h.service.city(h.player)!!.constructionQueue.orEmpty() shouldBe emptyList()
+            h.commit(); requested.join(); duplicate.join()
+            h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
+            h.saves.size shouldBe 2
+            verify(exactly = 0) { h.store.loadPlan(site.id) }
+        }
+    }
+
+    for (outcome in listOf("cancelled", "unknown", "shutdown"))
+        test("a confirmation waiting for a save fails closed after $outcome") {
+            serviceScenario { h ->
+                val placement = h.placement()
+                val source = h.previewBlueprint(CivPosition(5, 63, 5))
+                h.sitePreview(source.copy(building = source.building.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)))
+                h.world.getBlockAt(5, 63, 5).type = Material.GRASS_BLOCK
+                h.start(); placement.validation.complete(Unit); h.tick()
+                h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
+                val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                    CivsGroundTarget(h.world.uid, CivPosition(5, 63, 5)))
+                h.tick(); selected.join()
+                val confirmed = h.service.confirmPreview(h.player)
+                confirmed.isDone shouldBe false
+                when (outcome) {
+                    "cancelled" -> { h.service.cancelPreview(h.player); h.commit() }
+                    "unknown" -> {
+                        h.saves.single().second.completeExceptionally(IllegalStateException("acknowledgement lost"))
+                        h.tick()
+                    }
+                    "shutdown" -> { h.service.close(); h.commit() }
+                }
+                confirmed.isCompletedExceptionally shouldBe true
+                h.saves.size shouldBe 1
+                h.world.getBlockAt(5, 64, 0).type shouldBe Material.AIR
+                verify(exactly = 0) { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
+                if (outcome == "unknown") {
+                    (shouldThrow<CompletionException> { confirmed.join() }.cause as CivsRejection).reason shouldBe "storage-unavailable"
+                    h.service.confirmPreview(h.player).isCompletedExceptionally shouldBe true
+                }
+            }
+        }
 
     test("a recruitment becomes visible only after its exact durable acknowledgement") {
         serviceScenario { h ->

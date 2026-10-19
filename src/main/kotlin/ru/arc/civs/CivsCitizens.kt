@@ -17,10 +17,14 @@ import org.bukkit.World
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Player
+import org.bukkit.entity.Monster
+import org.bukkit.attribute.Attribute
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.HandlerList
 import org.bukkit.event.Listener
+import org.bukkit.event.entity.EntityDamageEvent
+import org.bukkit.event.entity.EntityRegainHealthEvent
 import org.bukkit.event.player.PlayerChangedWorldEvent
 import org.bukkit.event.player.PlayerQuitEvent
 import org.bukkit.event.player.PlayerTeleportEvent
@@ -48,6 +52,8 @@ class CivsCitizens(
     private val interact: (Player, UUID, UUID) -> Unit,
     private val maxActive: Int = 48,
     private val viewerRange: Int = 96,
+    private val hurt: (UUID, UUID, Double) -> CompletableFuture<Settlement> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
 ) : Listener, AutoCloseable {
     private val registry: NPCRegistry
     private val citizensProvider: Plugin
@@ -61,6 +67,9 @@ class CivsCitizens(
     private var retirement: CompletableFuture<Void>? = null
     private var wanderBudget = 0
     private var recoveryBudget = 0
+    private val pendingHarm = mutableSetOf<UUID>()
+    private val harmCompletions = ConcurrentLinkedQueue<HarmCompletion>()
+    private var threatCursor = 0
 
     init {
         require(maxActive in 1..48 && viewerRange in 1..96)
@@ -80,6 +89,7 @@ class CivsCitizens(
         wanderBudget = 8 // Aggregate native target checks across all idle actors, not eight per NPC.
         recoveryBudget = 2 // At most two bounded safe-position searches after real route failures per pulse.
         drainCompletions(nowMillis)
+        drainHarm()
         val cities = cityProvider().associateBy { it.id }
         val workers = cities.values.flatMap { city -> city.workers.map { it.id to (city to it) } }.toMap()
         statuses.keys.retainAll(workers.keys)
@@ -93,6 +103,10 @@ class CivsCitizens(
                 continue
             }
             val (city, worker) = current
+            if (worker.id in pendingHarm) {
+                statuses[worker.id] = "injury-pending"
+                continue
+            }
             val world = plugin.server.getWorld(city.worldId)
             val plan = citizenPlan(city, worker)
             val reason = when {
@@ -125,6 +139,7 @@ class CivsCitizens(
                 setEquipment(actor.npc, nextPlan)
             }
             try {
+                syncResident(actor.npc, worker, requireNotNull(plan))
                 update(actor, city, requireNotNull(world), nowMillis)
             } catch (error: Exception) {
                 pause(actor, "route-unreachable", nowMillis)
@@ -136,6 +151,7 @@ class CivsCitizens(
         for ((workerId, pair) in workers) {
             if (workerId in actors) continue
             val (city, worker) = pair
+            if (workerId in pendingHarm) continue
             val plan = citizenPlan(city, worker)
             val world = plugin.server.getWorld(city.worldId)
             val reason = when {
@@ -173,12 +189,13 @@ class CivsCitizens(
                     val player = entity as Player
                     player.canPickupItems = false
                     player.isPersistent = false
-                    player.isInvulnerable = true
+                    player.isInvulnerable = false
                     player.isCollidable = false
                     player.isSilent = true
                 }) { "Citizens rejected spawn" }
                 val actor = Actor(city.id, workerId, city.worldId, npc, plan)
                 actors[workerId] = actor
+                syncResident(npc, worker, plan)
                 spawnRetries.remove(workerId)
                 update(actor, city, world, nowMillis)
                 if (actors[workerId] === actor) CivsDiagnostics.event("citizen_spawn", "city" to city.id,
@@ -196,11 +213,13 @@ class CivsCitizens(
                     "ArcCivs NPC spawn failed city=${city.id} worker=$workerId attempt=${retry.attempts}", error)
             }
         }
+        attractThreats()
     }
 
     /** Stable locale keys; no Bukkit objects or user-controlled text enter the key. */
     fun status(workerId: UUID): String {
         checkMainThread()
+        if (workerId in pendingHarm) return "workers.status.injury-pending"
         if (!closed.get()) {
             val city = cityProvider().firstOrNull { it.workers.any { worker -> worker.id == workerId } }
             val worker = city?.workers?.firstOrNull { it.id == workerId }
@@ -216,6 +235,13 @@ class CivsCitizens(
     fun activeCount(): Int {
         checkMainThread()
         return actors.size
+    }
+
+    /** Only a successful canonical reload resolves an injury with an unknown commit outcome. */
+    fun reconcileResidents() {
+        checkMainThread()
+        pendingHarm.clear()
+        harmCompletions.clear()
     }
 
     /** Called by one Core timer before Paper chooses active/inactive entity ticks. */
@@ -513,7 +539,7 @@ class CivsCitizens(
     }
 
     private fun configure(npc: NPC, workerId: UUID, plan: CitizenPlan) {
-        npc.isProtected = true
+        npc.isProtected = false
         npc.setUseMinecraftAI(false)
         npc.setAlwaysUseNameHologram(false)
         npc.data().set(NPC.Metadata.KEEP_CHUNK_LOADED, false)
@@ -522,6 +548,7 @@ class CivsCitizens(
         npc.data().set(NPC.Metadata.REMOVE_FROM_TABLIST, true)
         npc.data().set(NPC.Metadata.PICKUP_ITEMS, false)
         npc.data().set(NPC.Metadata.DROPS_ITEMS, false)
+        npc.data().set(NPC.Metadata.RESPAWN_DELAY, -1)
         npc.data().set(NPC.Metadata.COLLIDABLE, false)
         npc.data().set(NPC.Metadata.FLUID_PUSHABLE, false)
         npc.data().set(NPC.Metadata.NAMEPLATE_VISIBLE, true)
@@ -538,9 +565,103 @@ class CivsCitizens(
     }
 
     private fun setEquipment(npc: NPC, plan: CitizenPlan) {
-        // Equipment belongs only to this transient, protected NPC; pickup and drops stay disabled.
-        npc.getOrAddTrait(Equipment::class.java).set(Equipment.EquipmentSlot.HAND,
-            citizenTool(plan)?.let { ItemStack(it) })
+        // An unsupplied work tool is a visual prop; it never enters a personal or town inventory.
+        val equipment = npc.getOrAddTrait(Equipment::class.java)
+        val material = citizenTool(plan)
+        if (equipment.get(Equipment.EquipmentSlot.HAND)?.type != material)
+            equipment.set(Equipment.EquipmentSlot.HAND, material?.let(::ItemStack))
+    }
+
+    private fun syncResident(npc: NPC, worker: CivWorker, plan: CitizenPlan) {
+        val player = npc.entity as Player
+        player.getAttribute(Attribute.MAX_HEALTH)?.let { if (it.baseValue != CivsResidents.maxHealth(worker)) it.baseValue = CivsResidents.maxHealth(worker) }
+        if (player.health != CivsResidents.health(worker)) player.health = CivsResidents.health(worker)
+        val equipment = npc.getOrAddTrait(Equipment::class.java)
+        val items = worker.inventory.orEmpty()
+        for ((suffix, slot) in listOf("HELMET" to Equipment.EquipmentSlot.HELMET,
+            "CHESTPLATE" to Equipment.EquipmentSlot.CHESTPLATE, "LEGGINGS" to Equipment.EquipmentSlot.LEGGINGS,
+            "BOOTS" to Equipment.EquipmentSlot.BOOTS)) {
+            val material = items.keys.firstOrNull { it.endsWith("_$suffix") }
+            val native = material?.let(org.bukkit.Material::valueOf)
+            if (equipment.get(slot)?.type != native) equipment.set(slot, native?.let(::ItemStack))
+        }
+        setEquipment(npc, plan)
+    }
+
+    /** Player NPCs are absent from the native player list; explicitly offer them to idle nearby monsters. */
+    private fun attractThreats() {
+        val available = actors.values.toList()
+        if (available.isEmpty()) return
+        repeat(minOf(2, available.size)) {
+            val actor = available[Math.floorMod(threatCursor++, available.size)]
+            if (!actor.npc.isSpawned || actor.workerId in pendingHarm) return@repeat
+            val player = actor.npc.entity as Player
+            runCatching {
+                // Native spatial lookup is indivisible; only two queries and 16 LOS/target checks per query per pulse.
+                for (entity in player.world.getNearbyEntities(player.location, 8.0, 4.0, 8.0) { it is Monster }.take(16)) {
+                    val monster = entity as Monster
+                    if (monster.isValid && monster.type !in NEUTRAL_MONSTERS && monster.target == null && monster.hasLineOfSight(player))
+                        monster.target = player
+                }
+            }.onFailure { logFailure(actor, "threat-target", it) }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    fun onDamage(event: EntityDamageEvent) {
+        val actor = actors.values.firstOrNull { it.npc.isSpawned && it.npc.entity.uniqueId == event.entity.uniqueId } ?: return
+        // Native death must never race a durable city write or create an automatic Citizens respawn.
+        event.isCancelled = true
+        if (closed.get() || actor.workerId in pendingHarm) return
+        val at = System.currentTimeMillis()
+        if (at < actor.damageAfter) return
+        val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        val damage = CivsResidents.damage(worker, actor.plan.type, event.finalDamage)
+        if (!damage.isFinite() || damage <= 0) return
+        actor.damageAfter = at + 500
+        pendingHarm += actor.workerId
+        runCatching { cancelRoute(actor) }.onFailure { logFailure(actor, "injury-stop", it) }
+        actor.cycle.close()
+        val completionQueue = harmCompletions
+        val future = try { hurt(actor.cityId, actor.workerId, damage) }
+            catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        future.whenComplete { saved, error ->
+            if (!closed.get()) completionQueue.add(HarmCompletion(actor.workerId, saved, error))
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    fun onRegainHealth(event: EntityRegainHealthEvent) {
+        if (actors.values.any { it.npc.isSpawned && it.npc.entity.uniqueId == event.entity.uniqueId }) event.isCancelled = true
+    }
+
+    private fun drainHarm() {
+        while (true) {
+            val result = harmCompletions.poll() ?: return
+            val actor = actors[result.workerId]
+            if (result.error != null) {
+                // Keep this identity frozen until canonical recovery; never replay an unknown commit.
+                if (actor != null) logFailure(actor, "injury", result.error)
+                continue
+            }
+            pendingHarm -= result.workerId
+            if (actor != null) {
+                runCatching {
+                    val worker = result.city?.workers?.firstOrNull { it.id == result.workerId }
+                    if (worker == null) remove(actor, "dead")
+                    else if (!actor.npc.isSpawned || !actor.npc.entity.isValid) remove(actor, "unavailable")
+                    else {
+                        actor.cycle = CitizenCycle(actor.plan.token, actor.plan.workMillis, actor.plan.completeAtWorkplace)
+                        syncResident(actor.npc, worker, actor.plan)
+                        (actor.npc.entity as Player).playHurtAnimation(0f)
+                    }
+                }.onFailure {
+                    logFailure(actor, "injury-publication", it)
+                    remove(actor, "unavailable") // The next actor comes from the committed health, never from a replayed hit.
+                }
+            }
+        }
     }
 
     private fun spawnPoint(world: World, storage: CivPosition, ordinal: Int, viewers: List<CitizenViewer>): Location? {
@@ -697,6 +818,7 @@ class CivsCitizens(
         val animation = CitizenWorkAnimation()
         var route: Route? = null
         var reportedFailure = false
+        var damageAfter = 0L
     }
     private class Route(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long, val timeoutMillis: Long) {
         var completion: CitizenNavigationCompletion? = null
@@ -707,9 +829,11 @@ class CivsCitizens(
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?)
+    private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?)
 
     private companion object {
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
+        val NEUTRAL_MONSTERS = setOf(EntityType.ENDERMAN, EntityType.PIGLIN, EntityType.ZOMBIFIED_PIGLIN, EntityType.SPIDER)
     }
 }
 

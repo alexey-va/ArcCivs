@@ -214,7 +214,7 @@ object CivsRules {
 
     private fun addRecruit(city: Settlement, actor: UUID, workerId: UUID, name: String, funded: Boolean): Settlement {
         authorized(city, actor)
-        check(city.buildings.single { it.type == BuildingType.TOWN_HALL }.phase == BuildingPhase.ACTIVE, "town-hall-not-ready")
+        // Residents lost during the first construction must be replaceable before the hall is finished.
         check(city.workers.none { it.id == workerId }, "duplicate-worker")
         check(validText(name.trim(), 32), "invalid-name")
         check(city.workers.size < populationLimit(city), "population-full")
@@ -240,6 +240,44 @@ object CivsRules {
         return changed(city, city.copy(workers = city.workers.map {
             if (it.id == workerId) it.copy(assignment = buildingId, nextDeliveryAt = due) else it
         }))
+    }
+
+    fun hurtResident(city: Settlement, actor: UUID, workerId: UUID, damage: Double): Settlement {
+        authorized(city, actor)
+        check(damage.isFinite() && damage > 0, "invalid-damage")
+        val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
+        val health = CivsResidents.health(worker) - damage
+        return changed(city, city.copy(workers = if (health <= 0) city.workers.filterNot { it.id == workerId }
+            else city.workers.map { if (it.id == workerId) it.copy(health = health) else it }))
+    }
+
+    /** The caller includes the exact town-storage debit/credit in this same revision's receipt. */
+    fun supplyResident(city: Settlement, actor: UUID, workerId: UUID, material: String, returning: Boolean = false): Settlement {
+        authorized(city, actor)
+        check(material in CivsResidents.catalog, "invalid-resident-item")
+        val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
+        val items = worker.inventory.orEmpty().toMutableMap()
+        val count = items[material] ?: 0
+        if (returning) {
+            check(count > 0, "resident-item-missing")
+            if (count == 1L) items.remove(material) else items[material] = count - 1
+        } else {
+            check(count < if (material == "BREAD") 16 else 1, "resident-inventory-full")
+            check(items.keys.none { it != material && CivsResidents.slot(it) == CivsResidents.slot(material) }, "resident-slot-occupied")
+            items[material] = count + 1
+        }
+        return changed(city, city.copy(workers = city.workers.map { if (it.id == workerId) it.copy(inventory = items.toMap()) else it }))
+    }
+
+    fun feedResident(city: Settlement, actor: UUID, workerId: UUID): Settlement {
+        authorized(city, actor)
+        val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
+        check(CivsResidents.health(worker) < CivsResidents.maxHealth(worker), "resident-healthy")
+        val count = worker.inventory.orEmpty()["BREAD"] ?: 0
+        check(count > 0, "resident-food-missing")
+        val items = if (count == 1L) worker.inventory.orEmpty() - "BREAD" else worker.inventory.orEmpty() + ("BREAD" to count - 1)
+        val updated = worker.copy(health = minOf(CivsResidents.maxHealth(worker), CivsResidents.health(worker) + 6), inventory = items)
+        return changed(city, city.copy(workers = city.workers.map { if (it.id == workerId) updated else it }))
     }
 
     fun needsAutoAssignment(city: Settlement): Boolean = city.workers.any { it.assignment == null } &&
@@ -448,7 +486,8 @@ object CivsRules {
             } else check(outputHandled, "materials-required")
         }
         val interval = if (isBuilder(building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(building.type)
-        val updated = worker.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, interval))
+        val updated = CivsResidents.trained(worker.copy(completedCycles = add(worker.completedCycles, 1),
+            nextDeliveryAt = add(now, interval)), building.type)
         return changed(city, city.copy(stock = stock, construction = construction,
             workers = city.workers.map { if (it.id == workerId) updated else it }))
     }
@@ -505,10 +544,11 @@ object CivsRules {
                 }
             }
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
-            snapshot(city.workers.size in 0..MAX_POPULATION && (city.workers.size >= 4 || city.immigration != null) &&
+            snapshot(city.workers.size in 0..MAX_POPULATION &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
-            city.immigration?.let { snapshot(it.remaining in 0..4 && it.nextArrivalAt >= city.createdAt && city.workers.size + it.remaining >= 4) }
+            city.immigration?.let { snapshot(it.remaining in 0..4 && it.nextArrivalAt >= city.createdAt) }
             snapshot(city.workers.all { worker ->
+                CivsResidents.validated(worker)
                 present(worker.id) && validText(worker.name, 32) && worker.completedCycles >= 0 && worker.nextDeliveryAt >= 0 &&
                     (worker.assignment == null || worker.nextDeliveryAt > 0 && city.building(worker.assignment)?.let {
                         slots(it) > 0 || (it.type == BuildingType.TOWN_HALL && (it.phase == BuildingPhase.ACTIVE || isFounding(city)))

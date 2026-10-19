@@ -403,7 +403,8 @@ class CivsStore(
     )
 
     private fun snapshotCity(city: Settlement): Settlement = city.copy(
-        buildings = city.buildings.toList(), workers = city.workers.toList(), members = city.members.toSet(),
+        buildings = city.buildings.toList(), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
+            inventory = it.inventory?.toMap()) }, members = city.members.toSet(),
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),

@@ -8,6 +8,76 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    test("resident injuries and permanent deaths survive decoding even below four residents") {
+        val city = activeCity()
+        val worker = city.workers.first()
+        val injured = CivsRules.hurtResident(city, owner, worker.id, 7.5)
+        CivsResidents.health(injured.workers.first()) shouldBe 12.5
+        val decoded = CivsRules.validate(Gson().fromJson(Gson().toJson(injured), Settlement::class.java))
+        CivsResidents.health(decoded.workers.first()) shouldBe 12.5
+        var empty = decoded
+        for (resident in decoded.workers) empty = CivsRules.hurtResident(empty, owner, resident.id, 100.0)
+        empty.workers shouldBe emptyList()
+        CivsRules.validate(Gson().fromJson(Gson().toJson(empty), Settlement::class.java)).workers shouldBe emptyList()
+        rejects("worker-not-found") { CivsRules.hurtResident(empty, owner, worker.id, 1.0) }
+        rejects("not-authorized") { CivsRules.hurtResident(city, uuid(999), worker.id, 1.0) }
+        rejects("invalid-damage") { CivsRules.hurtResident(city, owner, worker.id, Double.NaN) }
+    }
+
+    test("lost starter builders can be replaced before town hall completion at the existing bread price") {
+        val started = CivsRules.found(uuid(10), owner, "Settlement", uuid(30), CivPosition(0, 64, 0),
+            100, "medieval", building(1, BuildingType.TOWN_HALL, 0), 1_000)
+        val resident = CivsRules.immigrate(started, owner, uuid(100), "Pioneer", 31_000)
+        val lost = CivsRules.hurtResident(resident, owner, uuid(100), 20.0)
+        val replacement = CivsRules.recruitFunded(lost, owner, uuid(101), "Replacement")
+        replacement.workers.size shouldBe 1
+        replacement.immigration shouldBe resident.immigration
+        replacement.inventory shouldBe lost.inventory // Caller supplies the existing12-bread receipt.
+    }
+
+    test("personal supplies enforce slot limits and only carried bread heals") {
+        val city = activeCity()
+        val id = city.workers.first().id
+        var supplied = CivsRules.supplyResident(city, owner, id, "LEATHER_HELMET")
+        rejects("resident-slot-occupied") { CivsRules.supplyResident(supplied, owner, id, "IRON_HELMET") }
+        supplied = CivsRules.supplyResident(supplied, owner, id, "LEATHER_HELMET", returning = true)
+        supplied = CivsRules.supplyResident(supplied, owner, id, "IRON_HELMET")
+        rejects("invalid-resident-item") { CivsRules.supplyResident(supplied, owner, id, "DIAMOND") }
+        repeat(16) { supplied = CivsRules.supplyResident(supplied, owner, id, "BREAD") }
+        rejects("resident-inventory-full") { CivsRules.supplyResident(supplied, owner, id, "BREAD") }
+        rejects("resident-healthy") { CivsRules.feedResident(supplied, owner, id) }
+        val injured = CivsRules.hurtResident(supplied, owner, id, 10.0)
+        val healed = CivsRules.feedResident(injured, owner, id)
+        CivsResidents.health(healed.workers.first()) shouldBe 16.0
+        healed.workers.first().inventory?.get("BREAD") shouldBe 15L
+        CivsRules.hurtResident(healed, owner, id, 100.0).workers.none { it.id == id } shouldBe true
+    }
+
+    test("new profession experience grants bounded endurance without rewriting old cycles or production rates") {
+        var worker = activeCity().workers.first().copy(completedCycles = 1_000)
+        CivsResidents.maxHealth(worker) shouldBe 20.0
+        repeat(10) { worker = CivsResidents.trained(worker, BuildingType.FORESTER) }
+        CivsResidents.skillLevel(worker, "FORESTER") shouldBe 2
+        CivsResidents.skillLevel(worker, "QUARRY") shouldBe 1
+        CivsResidents.maxHealth(worker) shouldBe 22.0
+        repeat(100) { worker = CivsResidents.trained(worker, BuildingType.FORESTER) }
+        worker.skills?.get("FORESTER") shouldBe 40L
+        CivsResidents.maxHealth(worker) shouldBe 28.0
+        CivsResidents.damage(worker, BuildingType.FORESTER, 10.0) shouldBe 10.0
+        CivsResidents.damage(worker.copy(inventory = mapOf("IRON_AXE" to 1)), BuildingType.FORESTER, 10.0) shouldBe 9.0
+        CivsResidents.damage(worker.copy(inventory = mapOf("IRON_AXE" to 1)), BuildingType.QUARRY, 10.0) shouldBe 10.0
+    }
+
+    test("invalid saved resident health inventory and skills fail closed") {
+        val city = activeCity()
+        for (worker in listOf(city.workers.first().copy(health = 0.0), city.workers.first().copy(health = 21.0),
+            city.workers.first().copy(skills = mapOf("QUARRY" to -1)),
+            city.workers.first().copy(inventory = mapOf("BREAD" to 17)),
+            city.workers.first().copy(inventory = mapOf("IRON_HELMET" to 1, "LEATHER_HELMET" to 1)))) {
+            rejects("invalid-state") { CivsRules.validate(city.copy(workers = listOf(worker))) }
+        }
+    }
+
     test("automatic jobs fill the builder site first and preserve manual assignments and delivery tokens") {
         val farm = building(2, BuildingType.FARM, 8, phase = BuildingPhase.ACTIVE)
         val hut = building(3, BuildingType.BUILDER_HUT, 16, phase = BuildingPhase.SITE)

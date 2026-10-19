@@ -49,6 +49,10 @@ data class CivWorker(
     val assignment: UUID?,
     val completedCycles: Long = 0,
     val nextDeliveryAt: Long = 0,
+    /** Null fields preserve pre-resident snapshots without granting items or invented experience. */
+    val health: Double? = null,
+    val skills: Map<String, Long>? = null,
+    val inventory: Map<String, Long>? = null,
 )
 
 /** Captured placement bytes live under this order's UUID, independently of mutable source files. */
