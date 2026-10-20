@@ -103,7 +103,8 @@ class CivsHolograms internal constructor(
             desired = desired - changed.key
             return false
         }
-        val location = Location(world, npc.x, npc.y + if (npc.entity == null) CIVS_NPC_TEXT_OFFSET else 0.0, npc.z)
+        val location = Location(world, npc.x,
+            npc.y + if (npc.entity == null) CIVS_NPC_TEXT_OFFSET else npc.nativeHeight, npc.z)
         val shown = rendered[changed.key] ?: Rendered(displays.spawnText(location, value.text), null).also {
             rendered[changed.key] = it
             it.handle.billboard = Display.Billboard.CENTER
@@ -112,7 +113,7 @@ class CivsHolograms internal constructor(
             it.handle.backgroundColor = Color.fromARGB(105, 28, 24, 19)
             it.handle.isShadowed = true
             it.handle.isSeeThrough = false
-            it.handle.viewRange = 0.25f
+            it.handle.viewRange = 1f
             it.handle.brightness = Display.Brightness(15, 15)
             it.handle.shadowRadius = 0f
             it.handle.shadowStrength = 0f

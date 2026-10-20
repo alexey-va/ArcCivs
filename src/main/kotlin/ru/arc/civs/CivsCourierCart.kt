@@ -86,7 +86,7 @@ internal class CivsCourierCart(
 
     private fun configure(handle: PacketDisplay) {
         handle.billboard = Display.Billboard.FIXED
-        handle.viewRange = 0.25f
+        handle.viewRange = 1f
         handle.displayWidth = 3f
         handle.displayHeight = 3f
         handle.interpolationDelay = -1

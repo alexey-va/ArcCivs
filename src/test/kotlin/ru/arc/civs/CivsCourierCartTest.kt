@@ -48,6 +48,8 @@ class CivsCourierCartTest : FunSpec({
             pieces.size shouldBe 0
             owner.sync(npc.copy(cargo = mapOf("COBBLESTONE" to 64)))
             pieces.size shouldBe 3
+            verify { body.viewRange = 1f }
+            pieces.forEach { handle -> verify { handle.viewRange = 1f } }
             yaw = 90f
             owner.updatePoses()
             verify { body.attachTo(carrier); body.transformation = match { it.translation.x < -0.99f } }

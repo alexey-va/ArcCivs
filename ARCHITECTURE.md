@@ -7,7 +7,7 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
-ArcCore host 0.1.18 and bundled Core helpers 2.7.45 are mandatory; the shared
+ArcCore host 0.1.19 and bundled Core helpers 2.7.47 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use transient Citizens PLAYER actors with
@@ -52,6 +52,17 @@ foot through a safe nearby endpoint; route recovery does not teleport. The same
 arrival, work and cycle-token checks still apply. There is no Core packet-NPC API.
 No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
+
+Construction uses the host's paced schematic overload: at most one accepted
+block or indivisible pair every five ticks. Its primary-thread readiness check
+requires an arrived, stationary, awake builder for the current order. Unavailable
+builders suspend native placement without discarding durable material credit.
+Accepted native writes drive the builder's held material, gaze, swing and local
+feedback; cosmetic failures cannot invalidate an already accepted write.
+The builder remains at the worksite through native completion and durable commit.
+Committed batches enqueue neighbour physics for their actual changed cells;
+Paper receives both neighbour and client-update flags so unsupported plants
+disappear on clients as well as on the server.
 
 ## Network authority
 
@@ -117,9 +128,20 @@ The first pioneer arrives after30s,
 then one per60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. At night, residents shelter in their active house when
-available and otherwise use the town hall. Idle residents choose safe loaded
-wandering targets 6–16 blocks away at speed 0.55. Routes avoid horizontal footprints
+available and otherwise use the town hall, then enter the native sleeping pose.
+Idle residents choose safe loaded wandering targets within eight blocks of their
+workplace, otherwise home or town hall, at speed 0.55. Routes avoid horizontal footprints
 of foreign buildings and farm fields; idle wandering does not generate Trails wear.
+Idle/evening campfire visits use existing lit campfires within 24 blocks of the
+resident's anchor. Discovery examines at most one loaded chunk per pulse, caches
+at most 256 chunks for 120 seconds and invalidates affected chunks on block events.
+Six distinct safe standing positions avoid controls, fire and occupied seats;
+travel expires after 45 seconds and rest lasts 25–45 seconds. Work, cargo and
+night sheltering supersede leisure. No chunks are loaded for discovery.
+Optional resource-pack speech uses a stable voice profile per worker UUID.
+Only human viewers within 12 blocks hear it; sleeping or moving residents are
+silent. Per-resident intervals are 45–75 seconds, with an eight-second shared
+minimum. Campfire, sleep and actual speech diagnostics are emitted on transitions.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
 builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.

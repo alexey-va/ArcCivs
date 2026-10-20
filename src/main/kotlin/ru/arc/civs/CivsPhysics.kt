@@ -57,8 +57,9 @@ internal class CivsPhysics(private val plugin: Plugin, tasks: LifecycleTaskScope
             val world = getLevel.invoke(block)
             val pos = getPosition.invoke(block)
             val current = getState.invoke(block.blockData)
-            // UPDATE_NEIGHBORS only: the initial write already sent the client update.
-            notify.invoke(world, pos, getChunk.invoke(world, pos), getState.invoke(before), current, current, 1, 512)
+            // UPDATE_NEIGHBORS | UPDATE_CLIENTS: Paper propagates the client flag to
+            // shape updates too, so removed unsupported plants must reach viewers.
+            notify.invoke(world, pos, getChunk.invoke(world, pos), getState.invoke(before), current, current, 3, 512)
         }
     }
 }

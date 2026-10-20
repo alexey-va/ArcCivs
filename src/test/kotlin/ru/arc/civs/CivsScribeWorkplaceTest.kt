@@ -86,6 +86,24 @@ class CivsScribeWorkplaceTest : FunSpec({
         every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } throws AssertionError("No unloaded reads")
         citizenAtStorage(world, CitizenPoint(1.5, 64.0, -3.5), control) shouldBe false
     }
+
+    test("all professions avoid control barrel footholds and diagonal shortcuts including a new construction site") {
+        val planned = hut.copy(control = CivPosition(12, 64, 2), phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), planned.id, 1, 2, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = planned)
+        val current = city.copy(buildings = listOf(hall), construction = order)
+        citizenControlBuilding(current, planned.control!!) shouldBe planned
+        val control = hall.control!!
+        citizenControlClear(current, control) shouldBe false
+        citizenControlClear(current, control.copy(y = control.y + 1)) shouldBe false
+        citizenControlClear(current, control.copy(x = control.x + 1)) shouldBe true
+        citizenControlClear(current, planned.control!!.copy(y = 65)) shouldBe false
+        citizenControlStepClear(current, CitizenPoint(1.5, 64.0, -3.5), CitizenPoint(.5, 64.0, -4.5)) shouldBe false
+        citizenControlStepClear(current, CitizenPoint(1.5, 64.0, -3.5), CitizenPoint(1.5, 64.0, -4.5)) shouldBe true
+        val plan = CitizenPlan(CitizenToken(hut.id, 0, 0, order.id), hall.control!!, planned.control,
+            BuildingType.BUILDER_HUT, 1_000, null)
+        citizenRouteBuildings(current, plan, planned.control!!, hall.entrance).contains(planned.id) shouldBe true
+    }
 })
 
 private fun storageWorld(worldId: UUID, control: CivPosition): World = mockk {

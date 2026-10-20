@@ -4,6 +4,7 @@ import com.google.gson.JsonParser
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Material
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.net.URI
 import java.util.Base64
 import java.util.UUID
@@ -31,7 +32,7 @@ class CivsCitizenAppearanceTest : FunSpec({
     test("each profession carries a recognizable tool and an unassigned resident has an empty hand") {
         citizenTool(appearancePlan(BuildingType.TOWN_HALL)) shouldBe Material.BOOK
         citizenTool(appearancePlan(BuildingType.BUILDER_HUT)) shouldBe Material.IRON_SHOVEL
-        citizenTool(appearancePlan(BuildingType.BUILDER_HUT, "placing")) shouldBe Material.BRICKS
+        citizenTool(appearancePlan(BuildingType.BUILDER_HUT, "placing")) shouldBe null
         citizenTool(appearancePlan(BuildingType.FORESTER)) shouldBe Material.IRON_AXE
         citizenTool(appearancePlan(BuildingType.QUARRY)) shouldBe Material.IRON_PICKAXE
         citizenTool(appearancePlan(BuildingType.FARM)) shouldBe Material.IRON_HOE
@@ -45,20 +46,36 @@ class CivsCitizenAppearanceTest : FunSpec({
     test("work gestures stop throughout travel delivery waiting pause and closed lifecycle") {
         val working = appearancePlan(BuildingType.FORESTER)
         for (phase in CitizenPhase.entries) {
-            citizenWorking(working, phase, null) shouldBe (phase == CitizenPhase.WORKING)
+            citizenWorking(working, phase) shouldBe (phase == CitizenPhase.WORKING)
         }
         for (reason in listOf("unassigned", "no-construction", "waiting-materials", "construction-paused",
             "building-unavailable")) {
             for (phase in CitizenPhase.entries) {
-                citizenWorking(appearancePlan(BuildingType.BUILDER_HUT, reason), phase,
-                    ConstructionPhase.PLACING) shouldBe false
+                citizenWorking(appearancePlan(BuildingType.BUILDER_HUT, reason), phase) shouldBe false
             }
         }
         val placing = appearancePlan(BuildingType.BUILDER_HUT, "placing")
-        for (phase in ConstructionPhase.entries) {
-            citizenWorking(placing, CitizenPhase.IDLE, phase) shouldBe (phase == ConstructionPhase.PLACING)
+        citizenWorking(placing, CitizenPhase.IDLE) shouldBe false
+        citizenWorking(placing, CitizenPhase.CLOSED) shouldBe false
+    }
+
+    test("only a matching stationary builder presents accepted materials and a timer never fabricates a placement") {
+        val order = UUID.randomUUID()
+        val plan = appearancePlan(BuildingType.BUILDER_HUT, "placing")
+            .let { it.copy(token = it.token.copy(constructionId = order)) }
+        for (phase in CitizenPhase.entries) {
+            citizenWorking(plan, phase) shouldBe false
+            citizenConstructionWorking(plan, phase, order) shouldBe
+                (phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING))
+            citizenConstructionWorking(plan, phase, UUID.randomUUID()) shouldBe false
         }
-        citizenWorking(placing, CitizenPhase.CLOSED, ConstructionPhase.PLACING) shouldBe false
+        citizenConstructionWorking(plan.copy(idleReason = "waiting-materials"), CitizenPhase.WORKING, order) shouldBe false
+        MockBukkitTestRuntime.open().use {
+            citizenPlacementItem(Material.OAK_PLANKS) shouldBe Material.OAK_PLANKS
+            citizenPlacementItem(Material.STONE) shouldBe Material.STONE
+            citizenPlacementItem(Material.WATER) shouldBe Material.WATER_BUCKET
+            citizenPlacementItem(Material.AIR) shouldBe null
+        }
     }
 
     test("a late work pulse performs one swing and never replays gestures missed during a pause") {

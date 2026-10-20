@@ -16,6 +16,7 @@ import ru.arc.core.whenCompleteSync
 import ru.arc.observability.RuntimeHealthContribution
 import ru.arc.observability.RuntimeHealthState
 import ru.arc.paper.api.ArcSchematicOperation
+import ru.arc.paper.api.ArcSchematicBlock
 import ru.arc.paper.api.ArcSchematicSnapshot
 import ru.arc.paper.api.ArcBlockProtectionService
 import ru.arc.paper.api.ArcSchematicException
@@ -54,9 +55,12 @@ class CivsService(
         val id: UUID, val worldId: UUID, val cityId: UUID?, val name: String, val style: String,
         val type: BuildingType, val expires: Long,
     )
-    private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>, val containersChanged: Boolean) {
+    private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>,
+                                  val containersChanged: Boolean, val physicsCells: List<CivPlanBlock>) {
         var repairing = false
+        var feedbackFailed = false
     }
+    private data class ConstructionFocus(val orderId: UUID, val position: CivPosition, val tick: Int)
     private data class RecoveredPlacement(val plan: CivPlacementPlan, val snapshot: ArcSchematicSnapshot,
         val access: PlacementAccess, val batch: CivBuildBatch?, val validationPlan: CivPlacementPlan)
     private var cities = linkedMapOf<UUID, Settlement>()
@@ -76,6 +80,7 @@ class CivsService(
     private val placing = mutableSetOf<UUID>()
     private val placementRuns = mutableMapOf<UUID, UUID>()
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
+    private val constructionFocus = mutableMapOf<UUID, ConstructionFocus>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
     private var initialized = false
     private var closed = false
@@ -129,7 +134,8 @@ class CivsService(
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
         }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
         surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
-        doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) })).also(onCitizensCreated)
+        doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
+        constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
 
     init {
@@ -965,6 +971,7 @@ class CivsService(
             val building = city.building(assignment) ?: throw CivsRejection("building-not-found")
             if (CivsRules.isBuilder(city, building)) {
                 rejectIf(city.construction?.id != constructionId, "stale-delivery")
+                citizens.requireConstructionArrival(cityId, workerId, requireNotNull(constructionId))
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
             } else if (building.type in CivsWorksites.TYPES) {
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
@@ -1686,6 +1693,7 @@ class CivsService(
 
     private fun pulse() {
         if (closed) return
+        constructionFocus.entries.removeIf { (cityId, focus) -> cities[cityId]?.construction?.id != focus.orderId }
         selections.filterValues { it.expires <= now() }.keys.toList().forEach { cancelSelection(it, "expired") }
         previews.filterValues { it.expires <= now() }.keys.toList().forEach { cancelPreview(it, "expired") }
         citizens.pulse(now())
@@ -2005,7 +2013,7 @@ class CivsService(
                 val containersChanged = cells.any { it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes }
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y && p.z in batch.minimum.z..batch.maximum.z
-                }, containersChanged), batch, plan.copy(blocks = cells))
+                }, containersChanged, cells.filter { it.before != it.after }), batch, plan.copy(blocks = cells))
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
@@ -2078,7 +2086,14 @@ class CivsService(
             placementAccess[cityId] = access
             CivsDiagnostics.event("construction_part_started", "city" to cityId, "order" to orderId,
                 "batch" to order.workDone, "part" to partIndex + 1, "parts" to parts.size)
-            val operation = blueprints.paste(parts[partIndex], plan.worldId, plan.building.anchor)
+            val operation = blueprints.paste(parts[partIndex], plan.worldId, plan.building.anchor,
+                java.util.function.Consumer { cell -> constructionPlaced(cityId, orderId, access, cell) },
+                java.util.function.BooleanSupplier {
+                    ready() && placementAccess[cityId] === access && !access.repairing &&
+                        cities[cityId]?.construction?.let { it.id == orderId && it.workDone == order.workDone } == true &&
+                        constructionFocus[cityId]?.let { it.orderId != orderId || Bukkit.getCurrentTick() - it.tick >= 5 } != false &&
+                        citizens.constructionReady(cityId, orderId)
+                })
             operations[cityId] = operation
             operation.completion.whenCompleteSync(tasks) { mutation, failure ->
                 if (placementAccess[cityId] !== access) return@whenCompleteSync
@@ -2116,12 +2131,38 @@ class CivsService(
                                 "completed" to (order.workDone + 1), "total" to order.workRequired)
                             if (access.containersChanged) saved?.let { storage.refreshBuilding(it, plan.building) }
                             if (saved?.construction == null) repairCommitted(cityId, plan, fullSnapshot)
-                            else { releasePlacement(cityId); tasks.runLater(1) { pulseConstruction() } }
+                            else {
+                                releasePlacement(cityId)
+                                // Include recovered no-ops written before a failed attempt; the durable batch owns them.
+                                physics.enqueue(plan.worldId, access.physicsCells)
+                                tasks.runLater(1) { pulseConstruction() }
+                            }
                         }
                     }
                 }.onFailure { placementFailed(cityId, orderId, it) }
             }
         }.onFailure { placementFailed(cityId, orderId, it) }
+    }
+
+    private fun constructionPlaced(cityId: UUID, orderId: UUID, access: PlacementAccess, cell: ArcSchematicBlock) {
+        if (!ready() || placementAccess[cityId] !== access || access.repairing ||
+            cities[cityId]?.construction?.id != orderId) return
+        val point = CivPosition(cell.position.x, cell.position.y, cell.position.z)
+        val material = access.materials[point] ?: return
+        val previous = constructionFocus.put(cityId, ConstructionFocus(orderId, point, Bukkit.getCurrentTick()))
+        if (cell.isAir || cell.isBarrier || material.isAir) return
+        // A paired native placement is one gesture and one sound; retain the final accepted focus for the next pulse.
+        if (previous?.orderId == orderId && previous.tick == Bukkit.getCurrentTick()) return
+        fun cosmetic(action: () -> Unit) {
+            runCatching(action).onFailure { failure ->
+                if (!access.feedbackFailed) {
+                    access.feedbackFailed = true
+                    log("present construction block $orderId at $point", failure)
+                }
+            }
+        }
+        cosmetic { citizens.constructionPlaced(cityId, orderId, point, material) }
+        cosmetic { world.constructionFeedback(access.plan.worldId, cell) }
     }
 
     private fun repairCommitted(cityId: UUID, plan: CivPlacementPlan, snapshot: ArcSchematicSnapshot) {
@@ -2143,7 +2184,7 @@ class CivsService(
                         repair.completion.whenCompleteSync(tasks) { _, repairFailure ->
                             if (placementAccess[cityId] !== access) return@whenCompleteSync
                             releasePlacement(cityId)
-                            physics.enqueue(plan.worldId, plan.blocks)
+                            physics.enqueue(plan.worldId, access.physicsCells)
                             if (repairFailure != null) log("repair shapes $cityId", repairFailure)
                             else store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
                                 .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure) }
@@ -2296,6 +2337,7 @@ class CivsService(
         initialized = false
         HandlerList.unregisterAll(this)
         placementAccess.clear()
+        constructionFocus.clear()
         placementRuns.clear()
         placing.clear()
         operations.values.toList().forEach { it.cancel() }

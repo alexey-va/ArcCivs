@@ -491,7 +491,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("warehouse requests and held cargo stay visible while production shows only its own local supplies") {
+    test("warehouse request tables show one current stock snapshot without building buttons and retain held cargo and local supplies") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -501,7 +501,11 @@ class CivsUiTest : FunSpec({
             val courier = base.workers[1].copy(name = "Кладовщик", assignment = warehouse.id, nextDeliveryAt = 1, cargo = cargo)
             h.city = base.copy(buildings = base.buildings + warehouse,
                 workers = base.workers.map { if (it.id == courier.id) courier else it },
-                inventory = base.inventory!!.copy(materials = mapOf("PAPER" to 99L, "LEATHER" to 99L)))
+                inventory = base.inventory!!.copy(mode = CivStorageMode.PHYSICAL,
+                    materials = emptyMap(), buildingMaterials = emptyMap()))
+            var physical = mapOf("PAPER" to 47L, "LEATHER" to 12L, "STONE" to 128L, "OAK_LOG" to 4L)
+            var stockSnapshots = 0
+            every { h.host.availableMaterials(h.player) } answers { stockSnapshots++; physical }
             every { h.host.localMaterials(h.player, hall.id) } returns mapOf("PAPER" to 1L)
             every { h.host.supplyRequests(h.player) } returns listOf(
                 CivSupplyRequest(hall.id, "PAPER", 3, 2), CivSupplyRequest(hall.id, "LEATHER", 1, 0),
@@ -510,19 +514,31 @@ class CivsUiTest : FunSpec({
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.ui.openBuilding(h.player, base.id, warehouse.id)
             h.body() shouldContain "1 / 2"
+            val beforeRequests = stockSnapshots
             h.click("logistics")
             h.screen.id shouldBe "civs.logistics"
-            h.body() shouldContain "Ещё нужно: 1 · В пути: 2"
-            h.screen.buttons.count { it.id.value.startsWith("request_") } shouldBe 3
+            h.body() shouldContain "Осталось"
+            h.body() shouldContain "складах"
+            h.body() shouldContain "1 / 47"
+            h.body() shouldContain "1 / 12"
+            h.body() shouldContain "8 / 128"
+            h.body() shouldContain "В пути: 2"
+            stockSnapshots shouldBe beforeRequests + 1
+            h.screen.buttons.map { it.id.value } shouldBe listOf("next")
             export("logistics-requests-ru")
+            physical = physical + ("OAK_LOG" to 6L)
             h.click("next")
-            h.screen.buttons.count { it.id.value.startsWith("request_") } shouldBe 1
-            h.click("request_0")
+            h.body() shouldContain "4 / 6"
+            stockSnapshots shouldBe beforeRequests + 2
+            h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
+            export("logistics-requests-page-2-ru")
+            h.click("history")
             h.screen.id shouldBe "civs.building"
+            h.ui.openBuilding(h.player, base.id, hall.id)
             h.click("production")
             h.body() shouldContain "1 / 3 нужно"
             h.body() shouldContain "0 / 1 нужно"
-            h.body().contains("99 /") shouldBe false
+            h.body().contains("47 /") shouldBe false
             export("logistics-local-inputs-ru")
             h.ui.openWorker(h.player, base.id, courier.id)
             h.body() shouldContain "Груз: Бумага × 2"
@@ -532,6 +548,24 @@ class CivsUiTest : FunSpec({
             h.click("skills"); h.click("next")
             h.body() shouldContain "Кладовщик"
             export("logistics-skills-last-ru")
+        }
+    }
+
+    test("warehouse request tables keep stock unknown when its snapshot is unavailable") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val hall = base.buildings.first()
+            val warehouse = base.buildings.last().copy(type = BuildingType.WAREHOUSE)
+            h.city = base.copy(buildings = listOf(hall, warehouse))
+            every { h.host.supplyRequests(h.player) } returns listOf(CivSupplyRequest(hall.id, "PAPER", 3, 0))
+            every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-unavailable")
+            h.ui.openBuilding(h.player, base.id, warehouse.id)
+            h.click("logistics")
+            h.body() shouldContain "3 / Нет данных"
+            h.body().contains("3 / 0") shouldBe false
+            h.screen.buttons shouldBe emptyList()
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-stock-unavailable-ru", h.screen, listOf(588, 380)) }
         }
     }
 
@@ -595,7 +629,7 @@ class CivsUiTest : FunSpec({
             h.city = CivsRules.assign(h.city!!, h.player.uniqueId, worker.id, h.city!!.buildings.last().id, 0)
             for ((status, label) in listOf(
                 "no-construction" to "Walking around · no construction",
-                "sleeping" to "Settlement is sleeping",
+                "sleeping" to "Sleeping",
                 "route-unreachable" to "No accessible route",
                 "waiting-materials" to "Waiting for construction materials",
                 "placing" to "Placing the next section",
@@ -1223,7 +1257,7 @@ class CivsUiTest : FunSpec({
             val idle = base.workers[1]
             every { h.host.workerStatus(idle.id) } returns "workers.status.sleeping"
             h.ui.openWorker(h.player, base.id, idle.id)
-            h.body() shouldContain "Settlement is sleeping"
+            h.body() shouldContain "Sleeping"
             every { h.host.workerStatus(idle.id) } returns "workers.status.unassigned"
             h.ui.openWorker(h.player, base.id, idle.id)
             h.body() shouldContain "Walking around · unassigned"

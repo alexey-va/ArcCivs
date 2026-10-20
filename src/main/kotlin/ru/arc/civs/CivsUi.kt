@@ -870,27 +870,29 @@ class CivsUi internal constructor(
         if (warehouse.type != BuildingType.WAREHOUSE) return showBuilding(player, warehouseId)
         val result = runCatching { host.supplyRequests(player) }
         val requests = result.getOrDefault(emptyList())
+        val available = if (requests.isNotEmpty()) runCatching { host.availableMaterials(player) }
+            else Result.success(emptyMap<String, Long>())
         val current = page.coerceIn(0, lastPage(requests.size, LOGISTICS_PAGE_SIZE))
         val visible = requests.drop(current * LOGISTICS_PAGE_SIZE).take(LOGISTICS_PAGE_SIZE)
         present(player, "civs.logistics", "logistics.title", buildList {
-            add(body(buildingName(player, warehouse.type, warehouse.level)))
-            add(body(player, "logistics.help"))
             result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
+            available.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
             if (result.isSuccess && requests.isEmpty()) add(body(player, "logistics.empty"))
-            for (request in visible) {
-                val building = city.building(request.buildingId)
-                add(body(tr(player, "logistics.request", "building" to (building?.let { buildingName(player, it.type, it.level) }
-                    ?: tr(player, "buildings.generic")), "item" to materialName(player, request.material),
-                    "missing" to (request.needed - request.inTransit).coerceAtLeast(0), "transit" to request.inTransit)))
+            for ((buildingId, group) in visible.groupBy(CivSupplyRequest::buildingId)) {
+                add(body(city.building(buildingId)?.let { buildingName(player, it.type, it.level) }
+                    ?: tr(player, "buildings.generic")))
+                add(DialogTables.body(group.map { request ->
+                    val stock = if (available.isSuccess) text.literal(available.getOrNull()?.get(request.material) ?: 0)
+                        else tr(player, "workers.stock-unknown")
+                    var value = tr(player, "logistics.amounts", "remaining" to (request.needed - request.inTransit).coerceAtLeast(0),
+                        "stock" to stock).color(WHITE)
+                    if (request.inTransit > 0) value = value.append(Component.newline())
+                        .append(tr(player, "logistics.in-transit", "amount" to request.inTransit).color(CivsText.BODY))
+                    materialName(player, request.material).color(CivsText.BODY) to value
+                }, tr(player, "logistics.item").color(STOCK) to tr(player, "logistics.remaining-stock").color(STOCK),
+                    DialogTables.Frame.EPIC, 320, DialogTables.Columns.BALANCED))
             }
         }, buildList {
-            visible.forEachIndexed { index, request ->
-                city.building(request.buildingId)?.let { building ->
-                    add(valueButton(player, "request_$index", "common.destination", buildingName(player, building.type, building.level), STOCK) {
-                        showBuilding(player, request.buildingId)
-                    })
-                }
-            }
             pages(player, current, requests.size, LOGISTICS_PAGE_SIZE) { showSupplyRequests(player, warehouseId, it) }
         }, reopen = { showSupplyRequests(player, warehouseId, current) })
     }

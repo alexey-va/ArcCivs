@@ -27,3 +27,7 @@ maximum-previews: 4
 preview-seconds: 120
 maximum-active-npcs: 48
 npc-viewer-range: 96
+npc-voices:
+  # Enable together with the resource pack that defines male1/female1 idle/work/greet events.
+  enabled: false
+  event-prefix: 'arccivs:citizen'

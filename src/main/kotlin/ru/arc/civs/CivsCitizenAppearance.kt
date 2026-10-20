@@ -31,8 +31,7 @@ internal fun citizenSkin(skins: List<CitizenSkin>, workerId: UUID): CitizenSkin 
 internal fun citizenTool(plan: CitizenPlan): Material? = plan.courier?.takeIf { it.carrying }?.cargo?.material
     ?.let(Material::getMaterial) ?: when (plan.type) {
     BuildingType.TOWN_HALL -> Material.BOOK
-    BuildingType.BUILDER_HUT ->
-        if (plan.idleReason == "placing") Material.BRICKS else Material.IRON_SHOVEL
+    BuildingType.BUILDER_HUT -> if (plan.idleReason == "placing") null else Material.IRON_SHOVEL
     BuildingType.FORESTER, BuildingType.SAWMILL -> Material.IRON_AXE
     BuildingType.QUARRY, BuildingType.BLACKSMITH, BuildingType.STONEMASON -> Material.IRON_PICKAXE
     BuildingType.FARM -> Material.IRON_HOE
@@ -41,9 +40,21 @@ internal fun citizenTool(plan: CitizenPlan): Material? = plan.courier?.takeIf { 
     else -> null
 }
 
-internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase, construction: ConstructionPhase?): Boolean =
-    phase != CitizenPhase.CLOSED && (plan.idleReason == null && phase == CitizenPhase.WORKING ||
-        plan.idleReason == "placing" && construction == ConstructionPhase.PLACING)
+internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
+    plan.type != BuildingType.BUILDER_HUT && plan.idleReason == null && phase == CitizenPhase.WORKING
+
+internal fun citizenConstructionWorking(plan: CitizenPlan, phase: CitizenPhase, orderId: UUID): Boolean =
+    plan.type == BuildingType.BUILDER_HUT && plan.token.constructionId == orderId &&
+        plan.idleReason in listOf(null, "placing") &&
+        phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING)
+
+internal fun citizenPlacementItem(material: Material): Material? = when {
+    material.isAir -> null
+    material.isItem -> material
+    material == Material.WATER -> Material.WATER_BUCKET
+    material == Material.LAVA -> Material.LAVA_BUCKET
+    else -> null
+}
 
 internal fun citizenWorkBuilding(city: Settlement, plan: CitizenPlan): CivBuilding? =
     plan.courier?.let { city.building(it.cargo.sourceBuildingId) } ?: when (plan.type) {

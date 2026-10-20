@@ -71,7 +71,7 @@ class CivsWorkforceTest : FunSpec({
         val before = city
         city = workforceTrip(city, first)
         city.construction!!.workCredit shouldBe 8
-        citizenPlan(city, second) shouldBe secondPlan
+        citizenPlan(city, second) shouldBe secondPlan!!.copy(idleReason = "placing")
         city = workforceTrip(city, second)
         city.construction!!.workCredit shouldBe 16
         city.construction!!.workDone shouldBe 0
@@ -79,7 +79,7 @@ class CivsWorkforceTest : FunSpec({
         val orderId = city.construction!!.id
         city = CivsRules.payBatch(city, city.owner, orderId, 0, mapOf("STONE" to 1L))
         val thirdPlan = citizenPlan(before, third)
-        citizenPlan(city, third) shouldBe thirdPlan
+        citizenPlan(city, third) shouldBe thirdPlan!!.copy(idleReason = "placing")
         city = workforceRoundTrip(workforceTrip(city, third))
         city.construction!!.phase shouldBe ConstructionPhase.PLACING
         city.construction!!.payment!!.reservedBatch shouldBe 0

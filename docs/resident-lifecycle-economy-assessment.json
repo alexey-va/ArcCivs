@@ -1,0 +1,399 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.26 to 0.1.27: observed placement, local rest and speech",
+  "assumptions": [
+    "Source comparison against Spawn ArcCivs 0.1.26. Delivery, activation and native-client acceptance are separate evidence.",
+    "Low/base/high retain 1/10/16 participating cities, level 1/2/3 worksites and 1/2/3 workers. These are explicit sensitivity assumptions, not measured participation. Different worksite modes are alternatives, not additive.",
+    "At matched completed activity, item output, paid inputs, native tool wear, internal profession points and every price remain unchanged. All per-unit before/after amounts below are identical. Native drop baskets remain world- and tool-dependent.",
+    "Night sheltering at world ticks 12000 through 23000 already exists in 0.1.26. This release adds visible sleeping and explicitly stops in-progress schematic placement until the observed builder is present and awake. It does not introduce a new nightly production window.",
+    "Construction writes one block or an indivisible pair per five server ticks, at most four units per second per active city paste. Cropped parts share this cadence. The same accepted planned materials are paid through the existing batch journal; there are no extra rewards, material refunds or minting from cosmetic held items.",
+    "Campfire gatherings occur only during idle time or between completed work cycles in the evening, never while carrying cargo or while a placement depends on a live builder. They may reduce realized work time; no throughput increase or exact daily work rate is claimed.",
+    "Stuck recovery and bounded local wandering can improve realized availability. Completed action counts and real route durations are not measured here. A sensitivity of 0/5/15 percent of formerly active time spent resting implies item/consumption activity multipliers 1.00/0.95/0.85 if all other constraints stay equal, not a forecast.",
+    "Tree stock, ore deposits, mature crop growth, inventories, native durability, viewers and storage still limit production. The 128-log scenario is a finite-world stress case, not sustainable daily growth. Sapling species alternatives are not additive.",
+    "Vault, tokens and player XP deltas are separately zero. Cosmetic items, label/display changes and speech have no economic output. Current EconomyShopGUI SELL remains current; planned SELL-to-contract remains future. No item-to-money rate is inferred.",
+    "Read-only 168-hour ledger from Spawn on 2026-10-20: 3769 records, 31068 operations, 33 players, exact time boundary. Currency totals are separated; unknown-source transactions remain, and admin operations are present. These network totals do not measure ArcCivs worker yield or ordinary-player income."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "item_selected_logs": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "forester_logs_l1",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "One selected timber alternative. Matched activity assumes one 4-log tree/day and native 1:1 same-log drops, without bonus enchantment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              0,
+              0
+            ]
+          }
+        },
+        {
+          "id": "forester_logs_l2",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "One selected timber alternative. Matched activity assumes two 12-log trees/day and native 1:1 same-log drops, without bonus enchantment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              2,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              2,
+              0
+            ]
+          }
+        },
+        {
+          "id": "forester_logs_l3",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "One selected timber alternative. Matched activity assumes three 128-log trees/day at the source maximum; finite-world stress case, not sustainable telemetry. Native 1:1 same-log drops assumed without bonus enchantment.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "128",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "128",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_farm_harvest_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "mature_crop_actions",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites farm / CivsStorage durable work receipt",
+          "basis": "Completed harvest-action count, not crop stack count. Assumes only mature native crop actions: 1/4/9 per city-day; actual drops are variable.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "bread_recipe_output",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites bread recipe / CivsStorage durable work receipt",
+          "basis": "Alternative FARM mode: 3 existing wheat are consumed for 1 bread per completed recipe; assumes 1/4/9 recipes per city-day.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "item_wheat": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "bread_recipe_input",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites bread recipe / CivsStorage durable work receipt",
+          "basis": "Paid input for the mutually exclusive BREAD mode: 3 wheat per recipe, or 3/12/27 wheat per city-day.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              9
+            ]
+          }
+        }
+      ]
+    },
+    "item_non_dark_oak_saplings": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "ordinary_tree_replant_input",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "Mutually exclusive ordinary one-root timber alternative: one existing matching paid sapling per replanted tree, 1/2/3 per city-day; absent stock means no replant.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "item_dark_oak_saplings": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "dark_oak_tree_replant_input",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "Mutually exclusive DARK_OAK alternative: native 2x2 replant consumes four existing paid saplings per cut tree, 4/8/12 per city-day; no replant if all four are unavailable.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_tree_cut_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "tree_cut_actions",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites forest / CivsStorage durable work receipt",
+          "basis": "One receipt is one complete tree cut independent of log count; assumes 1/2/3 cuts per city-day.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "worksite_mine_cell_receipts": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "mine_cell_actions",
+          "kind": "item",
+          "source": "ArcCivs CivsWorksites mine / CivsStorage durable work receipt",
+          "basis": "One receipt is one changed world cell, not one ore/item. Assumes 5/10/15 cells per city-day; only actual dug blocks yield native drops.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              10,
+              15
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              10,
+              15
+            ]
+          }
+        }
+      ]
+    },
+    "item_requested_native_tools": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "requested_tool_transfer",
+          "kind": "transfer",
+          "source": "ArcCivs CivsEquipment / CivsService / CivsStorage resident-transfer journal",
+          "basis": "One existing matching native tool transferred player-to-resident per action. Same 1/2/3 per-city-day sensitivity before manual transfer and after the quick button; does not mint or price the item.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

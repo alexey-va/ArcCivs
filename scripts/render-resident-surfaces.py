@@ -111,7 +111,8 @@ def render_workplace_states(args, client, projection):
         for face, pixels, shade in barrel_faces:
             view.quad(face, pixels, shade)
         for piece in state["pieces"]:
-            points = transformed([(-.5, .5, 0), (.5, .5, 0), (.5, -.5, 0), (-.5, -.5, 0)], piece["transform"], (0, 0, 0), 0)
+            # Vanilla generated/handheld FIXED context rotates the item 180 degrees around Y.
+            points = transformed([(.5, .5, 0), (-.5, .5, 0), (-.5, -.5, 0), (.5, -.5, 0)], piece["transform"], (0, 0, 0), 0)
             view.quad(points, texture("item/" + piece["material"].lower()))
         filename = f"workplace-{state['id']}-player.png"
         view.image().save(args.out / filename)
@@ -351,7 +352,7 @@ def main():
                 view.cuboid((-.46875, .703125, -.1172), (.2344, .703125, .2344), shirt)
                 view.cuboid((.2344, .703125, -.1172), (.2344, .703125, .2344), shirt)
                 view.cuboid((1.1, 0, -.5), (1, 1, 1), stone)
-                for key, center in (("npc", (0, labels["npc"]["offset"], 0)), ("building", (1.6, 1.3, 0))):
+                for key, center in (("npc", (0, labels["npc"]["offset"], 0)), ("building", (1.6, labels["building"]["offset"], 0))):
                     value = labels[key]
                     lines = value["text"].split("\n")
                     rendered_lines = [core.render_text_line(line, stack) for line in lines]

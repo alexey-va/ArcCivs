@@ -26,7 +26,7 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsBoundaryRendererTest : FunSpec({
-    test("holograms use saved controls and retain only the nearest four within sixteen blocks") {
+    test("holograms clear lid props and retain only the nearest four saved controls within sixty-four blocks") {
         val site = fenceBuilding()
         val city = boundaryCity(UUID.randomUUID(), UUID.randomUUID()).copy(buildings = List(8) { index ->
             site.copy(id = UUID(0, index.toLong()), control = CivPosition(index * 3, 64, 0))
@@ -35,13 +35,16 @@ class CivsBoundaryRendererTest : FunSpec({
         val parts = civsControlHolograms(city, 0.5, 64.0, 0.5) { labels++; Component.text(it.id.toString()) }
         parts.map { it.buildingId } shouldBe (0L..3L).map { UUID(0, it) }
         labels shouldBe 4
-        parts.first().let { listOf(it.x, it.y, it.z) } shouldBe listOf(0.5, 65.3, 0.5)
+        parts.first().let { listOf(it.x, it.y, it.z) } shouldBe listOf(0.5, 65.9, 0.5)
+        val distant = city.copy(buildings = listOf(site.copy(control = CivPosition(32, 64, 0))))
+        civsControlHolograms(distant, 0.5, 64.5, 0.5) { Component.empty() }.size shouldBe 1
+        civsControlHolograms(distant, -32.5, 64.5, 0.5) { Component.empty() } shouldBe emptyList()
         val planned = site.copy(control = CivPosition(100, 90, 100))
         val order = CivConstruction(UUID.randomUUID(), site.id, 2, 100, 40, ConstructionPhase.WAITING_MATERIALS,
             Stock(), plannedBuilding = planned)
         val upgrading = city.copy(buildings = listOf(site.copy(phase = BuildingPhase.ACTIVE)), construction = order)
         civsControlHolograms(upgrading, 5.5, 65.0, 5.5) { Component.empty() }.single().let { listOf(it.x, it.y, it.z) } shouldBe
-            listOf(5.5, 66.3, 5.5)
+            listOf(5.5, 66.9, 5.5)
         civsControlHolograms(upgrading, 100.0, 90.0, 100.0) { Component.empty() } shouldBe emptyList()
     }
 
@@ -58,6 +61,7 @@ class CivsBoundaryRendererTest : FunSpec({
             h.player.world.entities.size shouldBe entities
             plainText(h.labelText.getValue(label)) shouldBe "Town hall\nLevel 1\nNo workers"
             verify(exactly = 1) { label.isVisibleByDefault = false; label.showTo(h.player); label.isSeeThrough = false }
+            verify { label.viewRange = 1f }
             h.renderer.pulse(h.player, city); h.paper.performTicks(2)
             verify(exactly = 0) { label.text(any()); label.teleport(any()) }
             val order = CivConstruction(UUID.randomUUID(), building.id, 2, 100, 40, ConstructionPhase.WAITING_MATERIALS, Stock())
@@ -69,7 +73,7 @@ class CivsBoundaryRendererTest : FunSpec({
             h.labelHandles.size shouldBe 1
             val relocated = city.copy(buildings = listOf(building.copy(control = CivPosition(6, 65, 5))))
             h.renderer.pulse(h.player, relocated); h.paper.performTicks(2)
-            verify(exactly = 1) { label.teleport(match { it.x == 6.5 && it.y == 66.3 && it.z == 5.5 }) }
+            verify(exactly = 1) { label.teleport(match { it.x == 6.5 && it.y == 66.9 && it.z == 5.5 }) }
             h.renderer.pulse(h.player, relocated.copy(buildings = emptyList())); h.paper.performTicks(2)
             h.labelRemaining.size shouldBe 0
             verify(exactly = 1) { label.remove() }

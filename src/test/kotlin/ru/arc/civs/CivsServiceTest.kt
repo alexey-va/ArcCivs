@@ -476,7 +476,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             verify(exactly = 1) { storage.prepareDebitBackground(any(), mapOf("STONE" to 1L), any()) }
             verify(exactly = 1) { storage.unlock(any()) }
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
             h.commit()
             h.time += 5_000; h.paper.performTicks(20)
@@ -717,7 +717,7 @@ class CivsServiceTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start(); h.commit()
             h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
-            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
             val barrel = (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
             h.time += 5_000; h.paper.performTicks(20)
@@ -726,10 +726,10 @@ class CivsServiceTest : FunSpec({
             receipt!!.after.construction!!.payment!!.reservedBatch shouldBe 0
             durable.complete(receipt!!); h.tick()
             barrel.getItem(0) shouldBe null
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.commit(); h.paper.performTicks(20)
             h.service.city(h.player)!!.construction!!.materials shouldBe mapOf("OAK_PLANKS" to 1L)
-            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
             placement.pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick(); h.commit()
             h.service.city(h.player)!!.construction!!.workDone shouldBe 1
             h.service.city(h.player)!!.construction!!.payment shouldBe CivConstructionPayment()
@@ -744,13 +744,43 @@ class CivsServiceTest : FunSpec({
             val retried = h.service.retryConstruction(h.player, city.id); h.tick(); h.commit(); retried.join()
             h.paper.performTicks(20)
             // Retry preserves the paid receipt, but placement still waits for its durable phase transition.
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.saves.filter { !it.second.isDone }.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
             h.commit()
             h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
             (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
-            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("paced paste waits for its live builder and accepted feedback is fenced and cannot fail a paid row") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true)
+            val orderId = placement.city.construction!!.id
+            var accepted: java.util.function.Consumer<ArcSchematicBlock>? = null
+            var ready: java.util.function.BooleanSupplier? = null
+            every { h.blueprints.paste(any(), any(), any(), any(), any()) } answers {
+                accepted = arg(3); ready = arg(4); placement.operation
+            }
+            every { h.citizens.constructionReady(placement.city.id, orderId) } returns false
+            h.start()
+            accepted shouldBe null
+            h.commit()
+            requireNotNull(ready).asBoolean shouldBe false
+            every { h.citizens.constructionReady(placement.city.id, orderId) } returns true
+            ready!!.asBoolean shouldBe true
+            val cell = ArcSchematicBlock(ArcSchematicPoint(15, 64, 0), "minecraft:stone", false, false)
+            every { h.worldAdapter.constructionFeedback(h.world.uid, cell) } throws IllegalStateException("cosmetic failure")
+            accepted!!.accept(cell)
+            verify(exactly = 1) { h.citizens.constructionPlaced(placement.city.id, orderId, CivPosition(15, 64, 0), Material.STONE) }
+            placement.pasted.isDone shouldBe false
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
+            h.service.close()
+            ready!!.asBoolean shouldBe false
+            accepted!!.accept(cell)
+            verify(exactly = 1) { h.worldAdapter.constructionFeedback(h.world.uid, cell) }
         }
     }
 
@@ -794,7 +824,7 @@ class CivsServiceTest : FunSpec({
             h.service.close()
             durable.complete(receipt!!); h.tick()
             (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 1
-            verify(exactly = 0) { h.store.save(any()); h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.store.save(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
         }
     }
 
@@ -813,7 +843,7 @@ class CivsServiceTest : FunSpec({
             h.commit(); h.paper.performTicks(20)
             h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
-            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
         }
     }
 
@@ -1113,7 +1143,7 @@ class CivsServiceTest : FunSpec({
             h.saves.single().first.pendingDeletion shouldBe CivDeletion(buildingId)
             h.commit()
             placement.validation.complete(Unit); h.tick()
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.saves.size shouldBe 2
             h.commit(); deletion.join() shouldBe Unit
             h.service.city(h.player)!!.construction shouldBe null
@@ -1983,7 +2013,7 @@ class CivsServiceTest : FunSpec({
             h.saves.size shouldBe 1
             placement.validation.complete(Unit); h.tick()
             h.saves.size shouldBe 1
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.commit()
             h.saves.size shouldBe 2
             h.commit(); confirmed.join()
@@ -1991,10 +2021,10 @@ class CivsServiceTest : FunSpec({
             h.saves.last().first.construction!!.phase shouldBe ConstructionPhase.PLACING
             h.saves.last().first.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
             h.saves.last().first.pendingControls shouldBe emptyList()
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.commit()
             h.service.city(h.player)!!.building(blueprint.building.id)!!.phase shouldBe BuildingPhase.SITE
-            verify(exactly = 1) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
         }
     }
 
@@ -2219,6 +2249,8 @@ class CivsServiceTest : FunSpec({
             val pasted = CompletableFuture<ArcSchematicMutationResult>()
             val secondOperation = mockk<ArcSchematicOperation>(relaxed = true)
             val secondPasted = CompletableFuture<ArcSchematicMutationResult>()
+            var firstAccepted: java.util.function.Consumer<ArcSchematicBlock>? = null
+            var secondReady: java.util.function.BooleanSupplier? = null
             val repair = mockk<ArcSchematicOperation>(relaxed = true)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
@@ -2228,9 +2260,16 @@ class CivsServiceTest : FunSpec({
                 CompletableFuture.completedFuture(listOf(part, secondPart))
             }
             every { operation.completion } returns pasted
-            every { h.blueprints.paste(part, h.world.uid, building.anchor) } returns operation
+            every { h.blueprints.paste(part, h.world.uid, building.anchor, any(), any()) } answers {
+                firstAccepted = arg(3)
+                operation
+            }
             every { secondOperation.completion } returns secondPasted
-            every { h.blueprints.paste(secondPart, h.world.uid, building.anchor) } returns secondOperation
+            every { h.blueprints.paste(secondPart, h.world.uid, building.anchor, any(), any()) } answers {
+                secondReady = arg(4)
+                secondOperation
+            }
+            every { h.citizens.constructionReady(city.id, order.id) } returns true
             every { repair.completion } returns CompletableFuture<ArcSchematicMutationResult>()
             every { h.blueprints.repair(any(), any()) } returns repair
             // A filled chest in a completed tile would reject a whole-plan native revalidation.
@@ -2246,11 +2285,18 @@ class CivsServiceTest : FunSpec({
                     nativeWorld.revalidate(batch, h.owner)
                 }
                 h.start()
-                verify(exactly = 1) { h.blueprints.paste(part, h.world.uid, building.anchor) }
-                verify(exactly = 0) { h.blueprints.paste(full, any(), any()); h.store.saveInventoryTransaction(any()) }
-                pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
+                verify(exactly = 1) { h.blueprints.paste(part, h.world.uid, building.anchor, any(), any()) }
+                verify(exactly = 0) { h.blueprints.paste(full, any(), any(), any(), any()); h.store.saveInventoryTransaction(any()) }
+                firstAccepted!!.accept(ArcSchematicBlock(ArcSchematicPoint(15, 64 + cursor, 0), "minecraft:stone", false, false))
+                pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.paper.performTicks(1)
                 h.saves.size shouldBe 0
-                verify(exactly = 1) { h.blueprints.paste(secondPart, h.world.uid, building.anchor) }
+                verify(exactly = 1) { h.blueprints.paste(secondPart, h.world.uid, building.anchor, any(), any()) }
+                // A new native operation must retain the order's cadence across cropped parts.
+                secondReady!!.asBoolean shouldBe false
+                h.paper.performTicks(3)
+                secondReady!!.asBoolean shouldBe false
+                h.paper.performTicks(1)
+                secondReady!!.asBoolean shouldBe true
                 secondPasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
                 h.service.city(h.player)!!.construction!!.workDone shouldBe cursor
                 h.commit()
@@ -2266,7 +2312,7 @@ class CivsServiceTest : FunSpec({
                     remodeled.type shouldBe Material.CHEST
                     (remodeled.state as org.bukkit.block.Container).inventory.getItem(0) shouldBe org.bukkit.inventory.ItemStack(Material.DIAMOND, 3)
                 }
-                verify(exactly = 2) { h.blueprints.paste(any(), any(), any()) }
+                verify(exactly = 2) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             }
         }
     }
@@ -2293,15 +2339,15 @@ class CivsServiceTest : FunSpec({
             val pasted = CompletableFuture<ArcSchematicMutationResult>()
             val operation = mockk<ArcSchematicOperation>(relaxed = true)
             every { operation.completion } returns pasted
-            every { h.blueprints.paste(snapshot, h.world.uid, hall.anchor) } returns operation
+            every { h.blueprints.paste(snapshot, h.world.uid, hall.anchor, any(), any()) } returns operation
             val repaired = mockk<ArcSchematicOperation>(relaxed = true)
             every { repaired.completion } returns CompletableFuture<ArcSchematicMutationResult>()
             every { h.blueprints.repair(any(), any()) } returns repaired
             h.world.getChunkAt(hall.entrance.x shr 4, hall.entrance.z shr 4)
             h.start()
-            verify(exactly = 0) { h.blueprints.paste(any(), any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             validation.complete(Unit); h.tick()
-            verify(exactly = 1) { h.blueprints.paste(snapshot, h.world.uid, hall.anchor) }
+            verify(exactly = 1) { h.blueprints.paste(snapshot, h.world.uid, hall.anchor, any(), any()) }
             h.saves.size shouldBe 0
             pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick()
             h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.PLACING
@@ -2635,7 +2681,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
             CompletableFuture.completedFuture(listOf(snapshot))
         }
         every { placement.operation.completion } returns placement.pasted
-        every { blueprints.paste(snapshot, world.uid, building.anchor) } returns placement.operation
+        every { blueprints.paste(snapshot, world.uid, building.anchor, any(), any()) } returns placement.operation
         world.loadChunk(0, 0); world.loadChunk(1, 0)
         return placement
     }
@@ -2664,7 +2710,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         every { blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
         every { worldAdapter.revalidate(plan, owner) } returns placement.validation
         every { placement.operation.completion } returns placement.pasted
-        every { blueprints.paste(snapshot, world.uid, building.anchor) } returns placement.operation
+        every { blueprints.paste(snapshot, world.uid, building.anchor, any(), any()) } returns placement.operation
         val repair = mockk<ArcSchematicOperation>(relaxed = true)
         every { repair.completion } returns placement.repaired
         every { blueprints.repair(any(), any()) } returns repair

@@ -16,7 +16,7 @@ import java.util.UUID
 data class CivsWorkplaceSnapshot(val buildingId: UUID, val worldId: UUID, val control: CivPosition,
     val type: BuildingType, val rotation: Int)
 
-/** Two small flat profession props outside the barrel side. They have no native entity or hitbox. */
+/** A large tool behind its resource, both resting above the barrel lid with no entity or hitbox. */
 internal class CivsWorkplaceDecor(private val displays: PaperPacketDisplays) : AutoCloseable {
     private data class Shown(val value: CivsWorkplaceSnapshot, val handles: List<PacketItemDisplay>)
     private val shown = linkedMapOf<UUID, Shown>()
@@ -39,7 +39,8 @@ internal class CivsWorkplaceDecor(private val displays: PaperPacketDisplays) : A
                 val handle = displays.spawnItem(at, ItemStack(item)).also(handles::add)
                 handle.itemDisplayTransform = ItemDisplay.ItemDisplayTransform.FIXED
                 handle.billboard = Display.Billboard.FIXED
-                handle.viewRange = .25f
+                handle.viewRange = 1f
+                handle.brightness = Display.Brightness(15, 15)
                 handle.displayWidth = 2f
                 handle.displayHeight = 2f
                 handle.shadowRadius = 0f
@@ -72,7 +73,10 @@ internal fun civsWorkplaceItems(type: BuildingType): List<Material> = when (type
 
 internal fun civsWorkplaceTransform(rotation: Int, index: Int): Transformation {
     val facing = Quaternionf().rotationY(Math.toRadians(90.0 - rotation).toFloat())
-    val position = Vector3f(if (index == 0) -.14f else .25f, if (index == 0) .57f else .34f, .522f)
+    // Generated FIXED items have a 1/16-block depth. Keep their complete lower edge
+    // above y=1, with the smaller resource in front of the inclined tool.
+    val position = if (index == 0) Vector3f(-.08f, 1.35f, -.08f) else Vector3f(.22f, 1.17f, .18f)
     facing.transform(position)
-    return Transformation(position, facing, Vector3f(if (index == 0) .50f else .22f), Quaternionf())
+    val tilt = Math.toRadians(if (index == 0) 35.0 else 55.0).toFloat()
+    return Transformation(position, facing.rotateX(tilt), Vector3f(if (index == 0) .78f else .50f), Quaternionf())
 }

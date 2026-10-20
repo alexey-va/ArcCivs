@@ -105,6 +105,13 @@ class CivsCitizensTest : FunSpec({
         moved.courier!!.cargo.sourceEntrance shouldBe warehouse.entrance
         citizenPlansContinue(after, after.copy(storage = CivPosition(20, 64, 0))) shouldBe false
         citizenPlan(city, carrying) shouldBe null // A missing logistics plan cannot start the newly assigned job.
+        for (phase in CitizenPhase.entries) {
+            citizenCourierCart(before, phase, false) shouldBe (phase in setOf(
+                CitizenPhase.TO_WORK, CitizenPhase.WORKING, CitizenPhase.PICKUP_READY, CitizenPhase.PICKING_UP,
+                CitizenPhase.RETURNING, CitizenPhase.READY, CitizenPhase.DELIVERING))
+            citizenCourierCart(before, phase, true) shouldBe false
+            citizenCourierCart(before.copy(courier = null, idleReason = "waiting-orders"), phase, false) shouldBe false
+        }
     }
 
     test("item production finishes at its own building without sending a worker to the shared depot") {
@@ -504,6 +511,26 @@ class CivsCitizensTest : FunSpec({
         cycle.beginDelivery(102_001) shouldBe null
     }
 
+    test("paid ready and placing orders send the builder straight to a stationary worksite hold") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val hut = building(BuildingType.BUILDER_HUT, CivPosition(8, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id)
+        for (phase in listOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) {
+            val order = CivConstruction(UUID.randomUUID(), hut.id, 2, 2, 0, phase, Stock(),
+                plannedBuilding = hut.copy(level = 2), batches = CivConstructionBatches(2),
+                payment = CivConstructionPayment(reservedBatch = 0), materials = emptyMap())
+            val plan = citizenPlan(city(listOf(hall, hut), worker, order), worker)!!
+            plan.idleReason shouldBe "placing"
+            val cycle = plan.cycle()
+            cycle.start()
+            cycle.phase shouldBe CitizenPhase.TO_WORK
+            cycle.arrive(1_000)
+            cycle.phase shouldBe CitizenPhase.WORKING
+            cycle.beginDelivery(100_000) shouldBe null
+            citizenConstructionWorking(plan, cycle.phase, order.id) shouldBe true
+        }
+    }
+
     test("arrival after a recovery teleport never credits time known to have been away from work") {
         val cycle = CitizenCycle(token(), 2_000, completeAtWorkplace = true)
         reachWork(cycle)
@@ -718,6 +745,7 @@ class CivsCitizensTest : FunSpec({
         citizenPlan(bareSite, worker)?.workplace shouldBe upgradedFarm.entrance
         plan.token shouldBe CitizenToken(hall.id, 3, 25_000, order.id)
         plan.workMillis shouldBe CivsRules.BUILDER_INTERVAL
+        plan.completeAtWorkplace shouldBe true
         plan.idleReason shouldBe null
         citizenPlan(city.copy(construction = null), worker)?.idleReason shouldBe "no-construction"
         citizenPlan(city.copy(construction = order.copy(phase = ConstructionPhase.PLACING)), worker)?.idleReason shouldBe "placing"
@@ -772,7 +800,7 @@ class CivsCitizensTest : FunSpec({
         wander.ready(0) shouldBe true
         val targets = (0..39).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
         targets.distinct().size shouldBe 40
-        targets.all { city.contains(it.x, it.z) && kotlin.math.abs(it.x) <= 16 && kotlin.math.abs(it.z) <= 16 && it.y in 62..66 } shouldBe true
+        targets.all { city.contains(it.x, it.z) && it.x * it.x + it.z * it.z <= 64 && it.y in 62..66 } shouldBe true
         targets.take(5).map { it.x to it.z }.distinct().size shouldBe 1
         targets.take(5).map { it.y } shouldBe listOf(64, 65, 63, 66, 62)
         targets[5].let { it.x to it.z } shouldBe targets[9].let { it.x to it.z }
@@ -796,6 +824,43 @@ class CivsCitizensTest : FunSpec({
         repeat(40) { wander.reject(Long.MAX_VALUE) }
         wander.ready(Long.MAX_VALUE - 1) shouldBe false
         wander.ready(Long.MAX_VALUE) shouldBe true
+    }
+
+    test("idle walks keep their workplace or home anchor and reject climbs without limiting a working route") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+            val farm = building(BuildingType.FARM, CivPosition(25, 64, 0))
+            val home = building(BuildingType.HOUSE, CivPosition(-20, 64, 0))
+            val worker = CivWorker(UUID.randomUUID(), "Farmer", farm.id)
+            val city = city(listOf(hall, farm, home), worker, null)
+            citizenIdleBuilding(city, worker) shouldBe farm
+            citizenIdleBuilding(city, worker.copy(assignment = null)) shouldBe home
+            citizenIdleBuilding(city.copy(buildings = listOf(hall, farm)), worker.copy(assignment = null)) shouldBe hall
+            val anchor = farm.control!!
+            val at = CitizenPoint(anchor.x + .5, anchor.y.toDouble(), anchor.z + .5)
+            citizenIdleRouteAllowed(anchor, at, anchor.copy(x = anchor.x + 8)) shouldBe true
+            citizenIdleRouteAllowed(anchor, at, anchor.copy(x = anchor.x + 9)) shouldBe false
+            citizenIdleRouteAllowed(anchor, at, anchor.copy(y = anchor.y + 3)) shouldBe false
+            val distant = at.copy(x = at.x + 20)
+            citizenIdleRouteAllowed(anchor, distant, anchor.copy(x = anchor.x + 19)) shouldBe true
+            citizenIdleRouteAllowed(anchor, distant, anchor.copy(x = anchor.x + 21)) shouldBe false
+            citizenRouteWithinReach(at, at.copy(x = at.x + 60)) shouldBe true
+            val world = paper.addSimpleWorld("idle-ground")
+            world.loadChunk(0, 0)
+            val point = CivPosition(2, 64, 2)
+            val floor = world.getBlockAt(2, 63, 2)
+            floor.type = Material.DIRT
+            citizenIdleTerrain(world, point) shouldBe true
+            for (material in listOf(Material.VINE, Material.LADDER, Material.SCAFFOLDING)) {
+                world.getBlockAt(2, 64, 2).type = material
+                citizenIdleTerrain(world, point) shouldBe false
+            }
+            world.getBlockAt(2, 64, 2).type = Material.AIR
+            for (material in listOf(Material.OAK_LOG, Material.OAK_LEAVES)) {
+                floor.type = material
+                citizenIdleTerrain(world, point) shouldBe false
+            }
+        }
     }
 
     test("wander finds nearby raised and lowered floors before moving to another horizontal target") {

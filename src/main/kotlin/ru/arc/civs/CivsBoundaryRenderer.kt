@@ -127,7 +127,7 @@ class CivsBoundaryRenderer internal constructor(
                 it.handle.isShadowed = true
                 it.handle.isSeeThrough = false
                 it.handle.textOpacity = 0xff.toByte()
-                it.handle.viewRange = 0.25f
+                it.handle.viewRange = 1f
                 it.handle.shadowRadius = 0f
                 it.handle.shadowStrength = 0f
                 it.handle.brightness = Display.Brightness(15, 15)
@@ -209,6 +209,7 @@ class CivsBoundaryRenderer internal constructor(
 
 internal const val CIVS_CONTROL_TEXT_SCALE = 0.75f
 internal const val CIVS_CONTROL_TEXT_WIDTH = 180
+internal const val CIVS_CONTROL_TEXT_OFFSET = 1.90
 internal data class CivsControlHologram(val buildingId: UUID, val x: Double, val y: Double, val z: Double, val text: Component)
 
 /** Only saved controls qualify: no guessed anchor, planned upgrade marker, world scan or block lookup. */
@@ -219,10 +220,10 @@ internal fun civsControlHolograms(city: Settlement, viewerX: Double, viewerY: Do
         val dx = control.x + 0.5 - viewerX
         val dy = control.y + 0.5 - viewerY
         val dz = control.z + 0.5 - viewerZ
-        (building to (dx * dx + dy * dy + dz * dz)).takeIf { it.second <= 16.0 * 16.0 }
+        (building to (dx * dx + dy * dy + dz * dz)).takeIf { it.second <= 64.0 * 64.0 }
     } }.sortedWith(compareBy<Pair<CivBuilding, Double>> { it.second }.thenBy { it.first.id }).take(4).map { (building, _) ->
         val control = requireNotNull(building.control)
-        CivsControlHologram(building.id, control.x + 0.5, control.y + 1.30, control.z + 0.5, label(building))
+        CivsControlHologram(building.id, control.x + 0.5, control.y + CIVS_CONTROL_TEXT_OFFSET, control.z + 0.5, label(building))
     }
 }
 

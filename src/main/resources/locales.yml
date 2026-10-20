@@ -394,7 +394,7 @@ ru:
     recruit-help: 'Житель займёт одно спальное место. После заселения назначьте ему работу.'
     recruit-confirm: 'Пригласить жителя'
     status:
-      sleeping: 'Город спит'
+      sleeping: 'Спит'
       idle: 'Ожидает работу'
       unassigned: 'Гуляет · без работы'
       no-assignment: 'Гуляет · без работы'
@@ -405,6 +405,8 @@ ru:
       working: 'Работает'
       waiting-growth: 'Ждёт созревания'
       sheltering: 'Укрывается на ночь'
+      to-campfire: 'Идёт к костру'
+      campfire: 'Отдыхает у костра'
       waiting-tool: 'Нужен инструмент'
       working-field: 'Работает на поле'
       felling-tree: 'Рубит дерево'
@@ -719,11 +721,11 @@ ru:
   logistics:
     open: 'Заявки на перевозку ›'
     title: 'Снабжение города'
-    help: 'Кладовщики доставляют недостающее сырьё и собирают продукцию. Заявки появляются автоматически.'
     empty: 'Сейчас нет заявок на сырьё. Кладовщики проверяют готовую продукцию.'
-    request: |-
-      <building> · <item>
-      Ещё нужно: <missing> · В пути: <transit>
+    item: 'Материал'
+    remaining-stock: 'Осталось / На складах'
+    amounts: '<remaining> / <stock>'
+    in-transit: 'В пути: <amount>'
     cargo: 'Груз: <item> × <amount> → <target>'
     cargo-help: 'Сначала доставит груз, затем займётся новой работой. При гибели груз теряется.'
   production:
@@ -1132,7 +1134,7 @@ en:
     recruit-help: 'The resident will occupy one bed. Assign a workplace after recruitment.'
     recruit-confirm: 'Recruit resident'
     status:
-      sleeping: 'Settlement is sleeping'
+      sleeping: 'Sleeping'
       idle: 'Waiting for work'
       unassigned: 'Walking around · unassigned'
       no-assignment: 'Walking around · unassigned'
@@ -1143,6 +1145,8 @@ en:
       working: 'Working'
       waiting-growth: 'Waiting for crops to grow'
       sheltering: 'Taking shelter for the night'
+      to-campfire: 'Walking to the campfire'
+      campfire: 'Resting by the campfire'
       waiting-tool: 'Needs a tool'
       working-field: 'Working in the field'
       felling-tree: 'Felling a tree'
@@ -1457,11 +1461,11 @@ en:
   logistics:
     open: 'Transport requests ›'
     title: 'Town supplies'
-    help: 'Couriers deliver missing inputs and collect products. Requests appear automatically.'
     empty: 'No input requests right now. Couriers are checking for finished products.'
-    request: |-
-      <building> · <item>
-      Still needed: <missing> · In transit: <transit>
+    item: 'Material'
+    remaining-stock: 'Remaining / In storage'
+    amounts: '<remaining> / <stock>'
+    in-transit: 'In transit: <amount>'
     cargo: 'Carrying <item> × <amount> → <target>'
     cargo-help: 'Delivers this cargo before starting a new job. Cargo is lost on death.'
   production:

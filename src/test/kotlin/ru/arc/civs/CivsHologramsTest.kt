@@ -50,8 +50,11 @@ class CivsHologramsTest : FunSpec({
                 handles.size shouldBe 1
                 paper.performTicks(3)
                 handles.size shouldBe 2
-                spawned.first().y shouldBe 64.0
-                verify { handles.first().billboard = Display.Billboard.CENTER; handles.first().viewRange = 0.25f }
+                spawned.first().y shouldBe 65.8
+                verify { handles.first().billboard = Display.Billboard.CENTER; handles.first().viewRange = 1f }
+                verify { handles.first().transformation = match {
+                    kotlin.math.abs(spawned.first().y + it.translation.y - (npc.y + CIVS_NPC_TEXT_OFFSET)) < 0.00001
+                } }
                 verify { handles.first().attachTo(carrier) }
                 values = listOf(npc.copy(x = 2.5, status = "walking", health = 17.0), values[1])
                 renderer.pulse(); paper.performTicks(3)
@@ -104,12 +107,14 @@ class CivsHologramsTest : FunSpec({
                     "evidence" to "compiled TextDisplay text and transforms, not native-client acceptance",
                     "npc" to mapOf("text" to serializer.serialize(label), "scale" to CIVS_NPC_TEXT_SCALE,
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET,
+                        "viewRangeBlocks" to 64,
                         "background" to listOf(28, 24, 19, 105)),
                     "courier" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
                         npc.copy(profession = "courier", status = "carrying-cargo"))), "scale" to CIVS_NPC_TEXT_SCALE,
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
                     "building" to mapOf("text" to serializer.serialize(text.buildingHologram(player, city, building)),
-                        "scale" to CIVS_CONTROL_TEXT_SCALE, "lineWidth" to CIVS_CONTROL_TEXT_WIDTH),
+                        "scale" to CIVS_CONTROL_TEXT_SCALE, "lineWidth" to CIVS_CONTROL_TEXT_WIDTH,
+                        "offset" to CIVS_CONTROL_TEXT_OFFSET),
                 )))
             }
         }

@@ -5,6 +5,8 @@ import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.Particle
+import org.bukkit.SoundCategory
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.TileState
@@ -66,6 +68,21 @@ class CivsWorld(
         } catch (_: LinkageError) {
             false
         }
+    }
+
+    /** Called only for Core's accepted writes; no synthetic barrel impacts or block mutations. */
+    internal fun constructionFeedback(worldId: UUID, cell: ArcSchematicBlock) {
+        check(Bukkit.isPrimaryThread()) { "Civs construction feedback requires the server thread" }
+        if (cell.isAir || cell.isBarrier) return
+        val target = plugin.server.getWorld(worldId) ?: return
+        val p = cell.position
+        if (p.y !in target.minHeight until target.maxHeight || !target.isChunkLoaded(p.x shr 4, p.z shr 4)) return
+        val data = target.getBlockAt(p.x, p.y, p.z).blockData
+        if (data.asString != cell.blockData || data.material.isAir) return
+        val at = Location(target, p.x + 0.5, p.y + 0.5, p.z + 0.5)
+        val sound = data.soundGroup
+        target.playSound(at, sound.placeSound, SoundCategory.BLOCKS, (sound.volume * 0.4f).coerceAtMost(0.6f), sound.pitch)
+        target.spawnParticle(Particle.BLOCK, at, 4, 0.20, 0.18, 0.20, 0.02, data)
     }
 
     override fun close() {
