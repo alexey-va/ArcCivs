@@ -11,6 +11,7 @@ import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
+import org.bukkit.util.Transformation
 import ru.arc.paper.npc.PacketPlayerNpc
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
@@ -34,9 +35,13 @@ class CivsHologramsTest : FunSpec({
             val displays = mockk<PaperPacketDisplays>(relaxed = true)
             val handles = mutableListOf<PacketTextDisplay>()
             val spawned = mutableListOf<Location>()
+            val poses = java.util.IdentityHashMap<PacketTextDisplay, Transformation>()
             every { displays.spawnText(any(), any()) } answers {
                 spawned += firstArg<Location>().clone()
-                mockk<PacketTextDisplay>(relaxed = true).also(handles::add)
+                mockk<PacketTextDisplay>(relaxed = true).also { handle ->
+                    handles += handle
+                    every { handle.transformation = any() } answers { poses[handle] = firstArg(); Unit }
+                }
             }
             every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
             val carrier = mockk<PacketPlayerNpc> { every { isValid } returns true }
@@ -53,7 +58,8 @@ class CivsHologramsTest : FunSpec({
                 spawned.first().y shouldBe 65.8
                 verify { handles.first().billboard = Display.Billboard.CENTER; handles.first().viewRange = 1f }
                 verify { handles.first().transformation = match {
-                    kotlin.math.abs(spawned.first().y + it.translation.y - (npc.y + CIVS_NPC_TEXT_OFFSET)) < 0.00001
+                    kotlin.math.abs(spawned.first().y + it.translation.y - (npc.y + 2.00)) < 0.00001 &&
+                        kotlin.math.abs(it.translation.y - .20f) < .00001f
                 } }
                 verify { handles.first().attachTo(carrier) }
                 values = listOf(npc.copy(x = 2.5, status = "walking", health = 17.0), values[1])
@@ -64,6 +70,16 @@ class CivsHologramsTest : FunSpec({
                 values = listOf(values.first().copy(x = 30.0), values[1])
                 renderer.pulse(); paper.performTicks(3)
                 verify { handles.first().teleportDuration = 0 }
+                verify(exactly = 0) { handles.first().teleport(any()) }
+                // Pose and child scale come from the actual carrier, not the status string.
+                for ((height, bottom) in listOf(1.5 to 1.7, .2 to .4, .9 to 1.1, .75 to .95, 1.8 to 2.0)) {
+                    values = listOf(values.first().copy(nativeHeight = height), values[1])
+                    renderer.pulse(); paper.performTicks(3)
+                    val pose = poses.getValue(handles.first())
+                    (kotlin.math.abs(height + pose.translation.y - bottom) < .00001) shouldBe true
+                    pose.scale.x shouldBe .70f
+                }
+                handles.size shouldBe 2
                 verify(exactly = 0) { handles.first().teleport(any()) }
                 values = listOf(values[1])
                 renderer.pulse(); paper.performTicks(3)
@@ -85,7 +101,10 @@ class CivsHologramsTest : FunSpec({
             val label = civsNpcHologramText(text, npc)
             plainText(label) shouldContain "Василий\n"
             plainText(label) shouldContain "\nФермер\n"
-            plainText(label) shouldContain "\n♥ 18.5 / 20"
+            plainText(label) shouldContain "\n♥ 18.5/20 · Сытость 20/20"
+            plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "Сытость 6/20"
+            plainText(civsNpcHologramText(text, npc.copy(child = true, status = "playing"))) shouldContain
+                "\nРебёнок\nИграет\n"
             plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-tool"))) shouldContain "Нужна мотыга"
             plainText(civsNpcHologramText(text, npc.copy(profession = "courier"))) shouldContain "Грузчик"
             plainText(civsNpcHologramText(text, npc.copy(name = "<red>Worker</red>"))) shouldContain "<red>Worker</red>"
@@ -99,6 +118,8 @@ class CivsHologramsTest : FunSpec({
             plainText(construction) shouldContain "37 / 826 блоков"
             plainText(text.buildingHologram(player, city.copy(construction = city.construction!!.copy(blocksPlaced = null)), building))
                 .contains("826") shouldBe false
+            plainText(text.buildingHologram(player, city.copy(constructionQueue = listOf(building.id)),
+                building, "building-status.queued")) shouldContain "В очереди · №1"
             System.getenv("CIVS_NATIVE_PREVIEW_OUT")?.let { directory ->
                 val serializer = LegacyComponentSerializer.builder().character('§').hexColors().useUnusualXRepeatedCharacterHexFormat().build()
                 val out = Path.of(directory)

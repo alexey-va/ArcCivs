@@ -153,6 +153,59 @@ class CivsCitizensTest : FunSpec({
         till.phase shouldBe CitizenPhase.TO_WORK
     }
 
+    test("native field work keeps its status focus and plan while its durable delivery is pending") {
+        val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
+        val work = CivWorldWork(UUID.randomUUID(), 0, farm.id, CivPosition(23, 64, 2), emptyList(),
+            durationMillis = 1_500, status = "working-field")
+        val plan = CitizenPlan(CitizenToken(farm.id, 0, 0, null), farm.control!!, work.standing,
+            BuildingType.FARM, work.durationMillis, null, completeAtWorkplace = true, worldWork = work)
+        val cycle = plan.cycle()
+        cycle.start()
+        cycle.arrive(0)
+        cycle.work(1_500)
+        cycle.phase shouldBe CitizenPhase.READY
+        citizenCurrentPlan(plan, cycle.phase) { error("Completed native work must keep its captured focus") } shouldBe plan
+        citizenWorkStatus(plan, cycle.phase) shouldBe "working-field"
+        citizenWorking(plan, cycle.phase) shouldBe true
+        val ticket = requireNotNull(cycle.beginDelivery(1_500))
+        citizenCurrentPlan(plan, cycle.phase) { error("Do not reread an in-flight item receipt") } shouldBe plan
+        citizenWorkStatus(plan, cycle.phase) shouldBe "working-field"
+        citizenWorking(plan, cycle.phase) shouldBe true
+        cycle.beginDelivery(1_500) shouldBe null
+        cycle.acceptsCompletion(ticket) shouldBe true
+        cycle.close()
+        citizenCurrentPlan(plan, cycle.phase) { null } shouldBe null
+        citizenWorkStatus(plan, cycle.phase) shouldBe null
+    }
+
+    test("children plan play at their persisted home and summon never selects them as workers") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val firstHome = building(BuildingType.HOUSE, CivPosition(10, 64, 0))
+        val ownHome = building(BuildingType.HOUSE, CivPosition(20, 64, 0)).copy(
+            bounds = CivBox(CivPosition(17, 62, -4), CivPosition(24, 68, 4)))
+        val hut = building(BuildingType.BUILDER_HUT, CivPosition(30, 64, 0))
+        val child = CivWorker(UUID.randomUUID(), "Child", null, sex = CivSex.FEMALE, homeId = ownHome.id,
+            parentIds = setOf(UUID.randomUUID(), UUID.randomUUID()), childMinutes = 10)
+        val city = city(listOf(hall, firstHome, ownHome, hut), child, null)
+        val plan = requireNotNull(citizenPlan(city, child))
+        plan.idleReason shouldBe "playing"
+        plan.storage shouldBe ownHome.control
+        plan.workplace shouldBe null
+        plan.courier shouldBe null
+        plan.workMillis shouldBe 0L
+        citizenIdleBuilding(city, child) shouldBe ownHome
+        val target = requireNotNull(citizenShelterTarget(city, child) { true })
+        ownHome.bounds.contains(target.x, target.y, target.z) shouldBe true
+        citizenShelterTarget(city.copy(workers = city.workers.reversed()), child) { true } shouldBe target
+        citizenSummonEligible(city, child, ownHome.id) shouldBe false
+        val adult = child.copy(childMinutes = null, assignment = hut.id)
+        citizenSummonEligible(city, adult, hut.id) shouldBe true
+        citizenSummonEligible(city, adult, firstHome.id) shouldBe false
+        val order = CivConstruction(UUID.randomUUID(), firstHome.id, 2, 2, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = firstHome.copy(level = 2))
+        citizenSummonEligible(city.copy(construction = order), adult, firstHome.id) shouldBe true
+    }
+
     test("work facing uses real eye height so a barrel below the eyes cannot tilt the head into the sky") {
         val focus = Location(null, 0.5, 64.7, -3.5)
         val eye = Location(null, 1.5, 65.62, -3.5)
@@ -256,6 +309,15 @@ class CivsCitizensTest : FunSpec({
         steps.observe(Location(other, 31.3, 65.0, 0.5), true) shouldBe null
         steps.observe(Location(other, Double.NaN, 65.0, 0.5), true) shouldBe null
         steps.observe(Location(other, 31.5, 65.0, 0.5), true) shouldBe null
+        steps.reset()
+        val edge = Location(world, .95, 64.9375, .5)
+        val first = Location(world, 1.15, 64.9375, .5)
+        steps.prime(edge, true)
+        val crossing = requireNotNull(steps.observe(first, true))
+        crossing.first shouldBe edge
+        crossing.second shouldBe first
+        steps.prime(edge, true) // Seeding cannot rewind an already observed journey.
+        steps.observe(Location(world, 1.35, 64.9375, .5), true)?.first shouldBe first
     }
 
     test("completed trips wait indefinitely for inputs storage commits and bounded builder credit") {
@@ -782,6 +844,20 @@ class CivsCitizensTest : FunSpec({
             for (material in listOf(Material.OAK_LOG, Material.OAK_LEAVES)) {
                 floor.type = material
                 citizenIdleTerrain(world, point) shouldBe false
+            }
+            val authored = hall.copy(bounds = CivBox(CivPosition(0, 63, 0), CivPosition(4, 66, 4)))
+            for (material in listOf(Material.OAK_LOG, Material.STRIPPED_OAK_LOG)) {
+                floor.type = material
+                citizenIdleTerrain(world, point, listOf(authored)) shouldBe true
+                citizenIdleTerrain(world, point, listOf(authored.copy(phase = BuildingPhase.SITE))) shouldBe false
+                citizenIdleTerrain(world, point, listOf(authored.copy(
+                    bounds = CivBox(CivPosition(5, 63, 0), CivPosition(9, 66, 4))))) shouldBe false
+                citizenIdleTerrain(world, point, listOf(authored.copy(
+                    bounds = CivBox(CivPosition(0, 65, 0), CivPosition(4, 68, 4))))) shouldBe false
+            }
+            for (material in listOf(Material.OAK_LEAVES, Material.MAGMA_BLOCK, Material.CAMPFIRE)) {
+                floor.type = material
+                citizenIdleTerrain(world, point, listOf(authored)) shouldBe false
             }
         }
     }

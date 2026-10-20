@@ -16,14 +16,18 @@ import org.mockbukkit.mockbukkit.world.WorldMock
 /** Only the native collision/drop operations absent from the pinned MockBukkit are supplied here.
  * BlockData, mutations, loaded chunks and the world remain ordinary MockBukkit state.
  * This is a stone-plane fixture, not evidence of native growth or Citizens navigation. */
-internal class CivsWorksiteWorldFixture(name: String) : WorldMock(Material.STONE, 63) {
+internal class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE) : WorldMock(ground, 63) {
     private val cells = hashMapOf<Coordinate, BlockMock>()
     init { setName(name) }
+
+    override fun getHighestBlockYAt(x: Int, z: Int): Int =
+        (maxOf(63, cells.keys.filter { it.x == x && it.z == z }.maxOfOrNull { it.y } ?: 63) downTo minHeight)
+            .first { !getBlockAt(x, it, z).type.isAir }
 
     override fun getBlockAt(x: Int, y: Int, z: Int): BlockMock = getBlockAt(Coordinate(x, y, z))
 
     override fun getBlockAt(point: Coordinate): BlockMock = cells.getOrPut(point) {
-        object : BlockMock(if (point.y <= 63) Material.STONE else Material.AIR,
+        object : BlockMock(if (point.y <= 63) ground else Material.AIR,
             Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
             override fun getBoundingBox(): BoundingBox {
                 val height = when {

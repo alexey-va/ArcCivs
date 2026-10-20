@@ -74,8 +74,8 @@ class CivsText private constructor(
 
     fun building(player: Player, type: BuildingType): Component = render(player, "building.${type.name.lowercase(Locale.ROOT)}")
 
-    /** A saved building state and assignment count, not an assertion that its resident actor is moving. */
-    fun buildingHologram(player: Player, city: Settlement, building: CivBuilding): Component {
+    /** Current work status when supplied; otherwise the saved building state. */
+    fun buildingHologram(player: Player, city: Settlement, building: CivBuilding, status: String? = null): Component {
         val order = city.construction?.takeIf { it.buildingId == building.id }
         val workers = city.workers.count { it.assignment == building.id }
         val state = when {
@@ -86,10 +86,13 @@ class CivsText private constructor(
             CivsRules.slots(city, building) > 0 -> if (workers > 0) "workers" else "vacant"
             else -> "ready"
         }
+        val currentStatus = status?.takeIf { it in messages.getValue("ru") }?.let {
+            render(player, it, "position" to (city.constructionQueue.orEmpty().indexOf(building.id) + 1))
+        }
         val label = render(player, "hologram.label",
             "name" to this.building(player, building.type).color(TextColor.color(0x9BD48D)),
             "level" to render(player, "hologram.level", "level" to building.level),
-            "state" to render(player, "hologram.$state", "count" to workers).color(TextColor.color(
+            "state" to (currentStatus ?: render(player, "hologram.$state", "count" to workers)).color(TextColor.color(
                 if (state in setOf("waiting", "paused", "vacant")) 0xE4BB75 else 0x92BED8)))
         val placed = order?.blocksPlaced
         val total = order?.blocksRequired

@@ -72,6 +72,25 @@ class CivsStoreTest : FreeSpec({
         }
     }
 
+    "member names survive reconnect and restart while UUIDs retain authority" {
+        val member = UUID.randomUUID()
+        val original = settlement().copy(members = setOf(member))
+        val names = mutableMapOf(original.owner.toString() to "GrocerMC", member.toString() to "OldName")
+        val store = CivsStore(root, directExecutor)
+        store.save(original.copy(memberNames = names)).join()
+        names.clear()
+        val loaded = CivsStore(root, directExecutor).load().join().single()
+        loaded.memberNames shouldBe mapOf(original.owner.toString() to "GrocerMC", member.toString() to "OldName")
+        val renamed = CivsMembership.remember(loaded, mapOf(member to "NewName", UUID.randomUUID() to "Stranger"))
+        renamed.memberNames shouldBe mapOf(original.owner.toString() to "GrocerMC", member.toString() to "NewName")
+        renamed.canManage(member) shouldBe true
+        val removed = CivsMembership.remember(renamed.copy(members = emptySet()), emptyMap())
+        removed.memberNames shouldBe mapOf(original.owner.toString() to "GrocerMC")
+        removed.canManage(member) shouldBe false
+        store.save(renamed.copy(revision = renamed.revision + 1)).join()
+        CivsStore(root, directExecutor).load().join().single().memberNames shouldBe renamed.memberNames
+    }
+
     "rejects duplicate owners and filename identity mismatches during load" {
         val city = settlement()
         val second = settlement(owner = city.owner)

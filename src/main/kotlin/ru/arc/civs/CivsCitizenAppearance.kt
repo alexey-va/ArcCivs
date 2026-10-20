@@ -28,20 +28,22 @@ internal fun loadCitizenSkins(): List<CitizenSkin> {
 internal fun citizenSkin(skins: List<CitizenSkin>, workerId: UUID): CitizenSkin =
     skins[Math.floorMod(workerId.hashCode(), skins.size)]
 
+internal fun citizenScale(worker: CivWorker): Double = if (CivsResidents.isChild(worker)) .5 else 1.0
+
+/** Optional scene props only. Work tools are projected from the resident's actual HAND slot. */
 internal fun citizenTool(plan: CitizenPlan): Material? = plan.courier?.takeIf { it.carrying }?.cargo?.material
     ?.let(Material::getMaterial) ?: when (plan.type) {
     BuildingType.TOWN_HALL -> Material.BOOK
-    BuildingType.BUILDER_HUT -> if (plan.idleReason == "placing") null else Material.IRON_SHOVEL
-    BuildingType.FORESTER, BuildingType.SAWMILL -> Material.IRON_AXE
-    BuildingType.QUARRY, BuildingType.BLACKSMITH, BuildingType.STONEMASON -> Material.IRON_PICKAXE
-    BuildingType.FARM -> Material.IRON_HOE
     BuildingType.LIBRARY -> Material.FEATHER
-    BuildingType.WAREHOUSE -> null
     else -> null
 }
 
 internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
-    plan.type != BuildingType.BUILDER_HUT && plan.idleReason == null && phase == CitizenPhase.WORKING
+    plan.type != BuildingType.BUILDER_HUT && plan.idleReason == null &&
+        (phase == CitizenPhase.WORKING || plan.worldWork != null && phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING))
+
+internal fun citizenWorkStatus(plan: CitizenPlan, phase: CitizenPhase): String? =
+    plan.worldWork?.status?.takeIf { phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING) }
 
 internal fun citizenConstructionWorking(plan: CitizenPlan, phase: CitizenPhase, orderId: UUID): Boolean =
     plan.type == BuildingType.BUILDER_HUT && plan.token.constructionId == orderId &&

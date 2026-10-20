@@ -84,6 +84,8 @@ class CivsUiTest : FunSpec({
             h.open()
             h.screen.id shouldBe "civs.remote"
             h.body() shouldContain "Ваш город находится на сервере survival"
+            h.body().contains("Дубовое бревно") shouldBe false
+            h.body().contains("общий резерв") shouldBe false
             h.screen.buttons.map { it.id.value } shouldBe listOf("transfer")
             plainText(h.screen.buttons.first().label) shouldBe "На сервер survival ›"
             h.click("transfer")
@@ -448,12 +450,16 @@ class CivsUiTest : FunSpec({
                 inventory = base.inventory!!.copy(materials = mapOf("IRON_INGOT" to 3L, "STICK" to 4L)))
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
-            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 6
+            val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
+            offers.size shouldBe 8
+            h.screen.columns shouldBe 1
+            offers.map { it.label.color() }.distinct().size shouldBe 8
+            export("workshops-catalog-first-ru")
             h.click("next")
             h.screen.buttons.filter { it.id.value.startsWith("offer_") }.map { plainText(it.label) } shouldBe
-                listOf("Лесопилка ›", "Кузница ›", "Каменотёсная ›", "Библиотека ›")
+                listOf("Каменотёсная ›", "Библиотека ›")
             export("workshops-catalog-ru")
-            h.click("offer_1")
+            h.click("previous"); h.click("offer_7")
             h.body() shouldContain "1 → 2 → 3"
             h.body() shouldContain "желез"
             export("workshops-smith-offer-ru")
@@ -1251,7 +1257,7 @@ class CivsUiTest : FunSpec({
             val base = settlement(h.player)
             h.city = base.copy(workers = emptyList(), immigration = CivImmigration(4, 30_000))
             h.open(); h.click("workers")
-            h.body() shouldContain "30 seconds"
+            h.body() shouldContain "first five residents"
             h.screen.buttons.map { it.id.value } shouldNotContain "recruit"
             h.city = base
             val idle = base.workers[1]
@@ -1261,6 +1267,68 @@ class CivsUiTest : FunSpec({
             every { h.host.workerStatus(idle.id) } returns "workers.status.unassigned"
             h.ui.openWorker(h.player, base.id, idle.id)
             h.body() shouldContain "Walking around · unassigned"
+        }
+    }
+
+    test("children show their observed activity and hunger without recruitment or work assignment") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val child = base.workers[1].copy(name = "Анна", childMinutes = 0, hunger = 7)
+            h.city = base.copy(workers = base.workers.map { if (it.id == child.id) child else it })
+            every { h.host.workerStatus(child.id) } returns "workers.status.playing"
+            h.open(); h.click("workers")
+            h.body() shouldContain "Первые пять жителей приходят сами"
+            h.screen.buttons.map { it.id.value } shouldNotContain "recruit"
+            h.ui.openWorker(h.player, base.id, child.id)
+            h.body() shouldContain "Ребёнок"
+            h.body() shouldContain "Играет"
+            h.body() shouldContain "7 / 20"
+            h.screen.buttons.map { it.id.value } shouldNotContain "assign"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-child-ru", h.screen, listOf(588, 380)) }
+            val builder = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+            h.ui.openBuilding(h.player, base.id, builder.id); h.click("workers")
+            h.screen.buttons.any { plainText(it.label).contains(child.name) } shouldBe false
+            verify(exactly = 0) { h.host.recruit(any()); h.host.assign(any(), any(), any()) }
+        }
+    }
+
+    test("building actions transfer the current requested item and summon its worker once per visit") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val building = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+            h.city = base
+            every { h.host.buildingStatus(building.id) } returns "building-status.waiting-ladder"
+            every { h.host.buildingRequest(h.player, building.id) } returns CivsBuildingRequest(Material.LADDER, 1, true)
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.body() shouldContain "Нужна лестница"
+            h.body() shouldContain "Нужно: Лестница × 1"
+            plainText(h.screen.buttons.single { it.id.value == "give_request" }.label) shouldBe "Выдать: Лестница"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "building-request-ru", h.screen, listOf(588, 380)) }
+            val giveScreen = h.screen
+            h.click("give_request", screen = giveScreen); h.click("give_request", screen = giveScreen)
+            h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.giveBuildingRequest(h.player, building.id, "LADDER") }
+            val summonScreen = h.screen
+            h.click("summon", screen = summonScreen); h.click("summon", screen = summonScreen)
+            h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.summonWorker(h.player, building.id) }
+            h.screen.id shouldBe "civs.building"
+            every { h.host.buildingRequest(h.player, building.id) } returns CivsBuildingRequest(Material.LADDER, 1, false)
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
+            h.body() shouldContain "Положите нужный предмет в свой инвентарь"
+            every { h.host.buildingRequest(h.player, building.id) } returns CivsBuildingRequest(Material.IRON_HOE, 1, true)
+            h.ui.openBuilding(h.player, base.id, building.id)
+            plainText(h.screen.buttons.single { it.id.value == "give_request" }.label) shouldBe "Выдать мотыгу"
+            h.body() shouldContain "Подойдёт любой материал"
+            h.body().contains("Железная") shouldBe false
+            every { h.host.cityBusy(h.player) } returns true
+            h.ui.openBuilding(h.player, base.id, building.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "summon"
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
+            verify(exactly = 1) { h.host.giveBuildingRequest(any(), any(), any()); h.host.summonWorker(any(), any()) }
         }
     }
 
@@ -1300,6 +1368,7 @@ class CivsUiTest : FunSpec({
             h.screen.buttons.map { it.id.value } shouldBe listOf("stock", "upgrades", "members", "delete_city")
             h.screen.buttons.single { it.id.value == "delete_city" }.label.color() shouldBe TextColor.color(0xFF6B61)
             plainText(h.screen.buttons.last().label) shouldBe "Удалить поселение"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "management-colors-ru", h.screen, listOf(588, 380)) }
             for ((action, screen) in listOf("stock" to "civs.stock", "upgrades" to "civs.upgrades", "members" to "civs.members")) {
                 h.click(action)
                 h.screen.id shouldBe screen
@@ -1308,6 +1377,62 @@ class CivsUiTest : FunSpec({
             }
             h.click("history")
             h.screen.id shouldBe "civs.overview"
+        }
+    }
+
+    test("overview omits item storage and members use saved names with an owner profile instead of an owner table") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val member = UUID(0, 731)
+            h.city = base.copy(members = setOf(member),
+                memberNames = mapOf(h.player.uniqueId.toString() to "MayorSaved", member.toString() to "OfflineResident"),
+                inventory = base.inventory!!.copy(mode = CivStorageMode.VIRTUAL, materials = mapOf("BREAD" to 1497L)))
+            h.open()
+            h.body().contains("Хлеб") shouldBe false
+            h.body().contains("1497") shouldBe false
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "overview-clean-ru", h.screen, listOf(588, 380)) }
+            h.click("management"); h.click("stock"); h.click("materials")
+            h.body() shouldContain "Хлеб"
+            h.open(); h.click("management"); h.click("members")
+            h.body().contains("MayorSaved") shouldBe false
+            plainText(h.screen.buttons.single { it.id.value == "owner" }.label) shouldBe "MayorSaved ›"
+            plainText(h.screen.buttons.single { it.id.value == "member_0" }.label) shouldBe "OfflineResident ›"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "members-saved-names-ru", h.screen, listOf(588, 380)) }
+            h.click("owner")
+            h.body() shouldContain "MayorSaved"
+            h.body() shouldContain "Владелец города"
+            h.body().contains("Удаление") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldNotContain "remove"
+            h.click("history"); h.click("member_0")
+            h.body() shouldContain "OfflineResident"
+            h.screen.buttons.map { it.id.value }.contains("remove") shouldBe true
+            verify(exactly = 0) { h.host.removeMember(any(), any()) }
+        }
+    }
+
+    test("building list presents eight distinct colored rows before pagination") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            h.city = base.copy(buildings = BuildingType.entries.mapIndexed { index, type ->
+                base.buildings.first().copy(id = UUID(0, index.toLong()), type = type)
+            })
+            h.open(); h.click("buildings")
+            val buildings = h.screen.buttons.filter { it.id.value.startsWith("building_") }
+            buildings.size shouldBe 8
+            h.screen.columns shouldBe 1
+            buildings.map { it.label.color() }.distinct().size shouldBe 8
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-rows-ru", h.screen, listOf(588, 380)) }
+            h.click("next")
+            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 3
+            val target = h.city!!.buildings.last()
+            h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), target.id, 3,
+                500, 40, ConstructionPhase.CONSTRUCTING, Stock()))
+            h.open(); h.click("buildings")
+            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 8
+            h.screen.buttons.map { it.id.value }.contains("queue") shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-active-ru", h.screen, listOf(588, 380)) }
         }
     }
 
@@ -1983,6 +2108,14 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         }
         every { host.transferResidentItem(any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.buildingStatus(any()) } returns "building-status.active"
+        every { host.buildingRequest(any(), any()) } returns null
+        every { host.giveBuildingRequest(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.summonWorker(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { host.memberName(any(), any()) } answers {
+            val id = secondArg<UUID>()
+            firstArg<Settlement>().memberNames?.get(id.toString()) ?:
+                if (id == player.uniqueId) player.name else id.toString().take(8)
+        }
         every { host.deleteBuilding(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.confirmPreview(any()) } answers {
             city = settlement(player)

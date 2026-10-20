@@ -64,6 +64,11 @@ class CivsBoundaryRendererTest : FunSpec({
             verify { label.viewRange = 1f }
             h.renderer.pulse(h.player, city); h.paper.performTicks(2)
             verify(exactly = 0) { label.text(any()); label.teleport(any()) }
+            h.renderer.pulse(h.player, city, buildingStatuses = mapOf(building.id to "building-status.waiting-torch"))
+            h.paper.performTicks(2)
+            plainText(h.labelText.getValue(label)) shouldBe "Town hall\nLevel 1\nNeeds a torch"
+            h.labelHandles.size shouldBe 1
+            verify(exactly = 0) { label.teleport(any()) }
             val order = CivConstruction(UUID.randomUUID(), building.id, 2, 100, 40, ConstructionPhase.WAITING_MATERIALS, Stock())
             h.renderer.pulse(h.player, city.copy(construction = order)); h.paper.performTicks(2)
             plainText(h.labelText.getValue(label)) shouldBe "Town hall\nLevel 1\nWaiting for materials"

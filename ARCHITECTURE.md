@@ -47,10 +47,14 @@ targets take priority. `CivsResidentDamageEvent` is the cancellable integration
 boundary for virtual residents; native `EntityDamageEvent` listeners do not receive
 fake entity events. Player attacks also enforce world PvP and optional Lands
 attack permission. Death destroys carried
-supplies without drops or XP and frees the job/population slot. Ordinary recruitment
-still costs 12 bread and also works before hall completion, so losing the first
-builder does not permanently strand the settlement. Arrival receipts are never
-replenished by death or recruitment. `CivsResidentNavigation` incrementally plans
+supplies without drops or XP and frees the job/population slot. Free arrivals
+refill vacancies below five residents, including before hall completion. Above
+five, opposite-sex adults form families in completed houses: 20 active city
+minutes per birth, then 40 to adulthood. Children use half-scale player NPCs,
+play and wander, and cannot take jobs. Progress never catches up offline.
+Working adults lose one hunger per active minute and consume existing bread
+from their bag; hunger at or below six doubles work time. Family, hunger and
+member-name changes use the existing city write queue, without starving behind work. `CivsResidentNavigation` incrementally plans
 bounded routes in loaded chunks, sharing at most 96 search steps or one millisecond
 per tick across residents. Each route visits at most 4096 nodes; an edge checks a
 0.6-by-1.8-block body and at most one block of ascent or descent.
@@ -60,8 +64,12 @@ route may recover to a validated loaded safe endpoint, resetting footsteps.
 The same arrival, work and cycle-token checks still apply. Actual work-route
 crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
 the ordinary permission, protection, terrain progression and persistence pipeline.
-No duplicated pools, schematic cache or display
-transport. No schematic IO or future waiting on the gameplay thread.
+Completed work trips teach a bounded shared corridor preference (32 cities,
+512 outdoor cells each, 16 admitted cells per tick); authored buildings and
+fields remain excluded. Terrain conversion belongs solely to Trails. Support
+height includes paths and slabs. Player movement uses swept resident collision
+bodies; navigation yields to real players without creating native NPC entities.
+No duplicated pools, schematic cache or display transport. No schematic IO or future waiting on the gameplay thread.
 
 Construction uses the host's paced schematic overload: at most one accepted
 block or indivisible pair every five ticks. Its primary-thread readiness check
@@ -134,10 +142,9 @@ on a timer; normal block protection prevents harvesting controls, while external
 requires restoring the missing barrel. Members may restore an eligible missing
 control barrel on an ACTIVE building; existing control blocks remain protected.
 A conflicting block is retained and reported.
-The first pioneer arrives after30s,
-then one per60s while a viewer is nearby; each arrival commits its remaining
-receipt before spawning. A restart never grants four more residents or catches
-up multiple arrivals. At night, residents shelter in their active house when
+The first pioneer arrives after 30s,
+then one per 60s while a viewer is nearby; each arrival commits its remaining
+receipt before spawning. A restart never grants extra residents or catches up multiple arrivals. At night, residents shelter in their active house when
 available and otherwise use the town hall, then enter the native sleeping pose.
 Idle residents choose safe loaded wandering targets within eight blocks of their
 workplace, otherwise home or town hall, at 0.55 of work speed. Base work speed is
@@ -150,9 +157,10 @@ Six distinct safe standing positions avoid controls, fire and occupied seats;
 travel expires after 45 seconds and rest lasts 25–45 seconds. Work, cargo and
 night sheltering supersede leisure. No chunks are loaded for discovery.
 Optional resource-pack speech uses a stable voice profile per worker UUID.
-Only human viewers within 12 blocks hear it; sleeping or moving residents are
-silent. Per-resident intervals are 45–75 seconds, with an eight-second shared
-minimum. Campfire, sleep and actual speech diagnostics are emitted on transitions.
+Only human viewers within 12 blocks hear ambient speech; sleeping or moving
+residents do not speak ambient lines. Per-resident intervals are 15–25 seconds,
+with a three-second shared minimum. Every intentional click greets its viewer,
+independently of the ambient cooldown. Campfire, sleep and actual speech diagnostics are emitted on transitions.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
 builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.
@@ -252,8 +260,9 @@ Item-storage processors use only their current control barrel or virtual buildin
 for ingredients and output; couriers move their goods to the current building endpoint.
 FARM and FORESTER perform work directly at field/tree cells, without a per-cell
 return trip. Legacy abstract-stock producers retain their old return trip. The chosen processor output is persisted
-per building; a full destination pauses delivery. Recruitment consumes12BREAD
-after all population/bed checks. No offline production/catch-up.
+per building; a full destination pauses delivery. Farming takes 1.5 seconds per
+physical action (3 seconds when hungry), retaining native crop growth and drops.
+No offline production/catch-up.
 
 ## Warehouse logistics
 

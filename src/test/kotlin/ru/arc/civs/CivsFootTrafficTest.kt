@@ -44,11 +44,22 @@ class CivsFootTrafficTest : FunSpec({
             submitted.captured.uniqueId() shouldBe npc.uniqueId
             submitted.captured.location() shouldBe to
             submitted.captured.isValid shouldBe true
+            city = city.copy(buildings = listOf(hall.copy(
+                bounds = CivBox(CivPosition(0, 64, 0), CivPosition(4, 64, 2)))))
+            for (height in listOf(64.9375, 64.5)) traffic.record(city.id, worker.id, npc,
+                Location(world, .9, height, .5), Location(world, 1.1, height, .5))
+            verify(exactly = 1) { api.recordStep(any<TrailsFootTrafficActor>(), any(), any(), any()) }
+            city = city.copy(buildings = listOf(hall))
+            val entranceFrom = Location(world, 1.9, 65.0, .5)
+            val entranceTo = Location(world, 2.1, 65.0, .5)
+            every { npc.location } returns entranceTo
+            traffic.record(city.id, worker.id, npc, entranceFrom, entranceTo)
+            verify(exactly = 1) { api.recordStep(any<TrailsFootTrafficActor>(), member, entranceFrom, entranceTo) }
             city = city.copy(workers = emptyList())
             traffic.record(city.id, worker.id, npc, from, to)
             city = city.copy(workers = listOf(worker), members = emptySet())
             traffic.record(city.id, worker.id, npc, from, to)
-            verify(exactly = 1) { api.recordStep(any<TrailsFootTrafficActor>(), any(), any(), any()) }
+            verify(exactly = 2) { api.recordStep(any<TrailsFootTrafficActor>(), any(), any(), any()) }
         }
     }
 

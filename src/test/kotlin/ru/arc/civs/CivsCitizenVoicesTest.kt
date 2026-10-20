@@ -23,11 +23,11 @@ class CivsCitizenVoicesTest : FunSpec({
         citizenVoice(UUID.fromString(first.toString())) shouldBe citizenVoice(first)
         val clock = CitizenVoiceClock()
         clock.admit(first, 0) shouldBe true
-        clock.admit(second, 159) shouldBe false
-        clock.admit(second, 160) shouldBe true
-        clock.admit(first, 899) shouldBe false
-        clock.admit(first, 900) shouldBe true
-        clock.admit(first, 1_060) shouldBe false
+        clock.admit(second, 59) shouldBe false
+        clock.admit(second, 60) shouldBe true
+        clock.admit(first, 299) shouldBe false
+        clock.admit(first, 300) shouldBe true
+        clock.admit(first, 460) shouldBe false
     }
 
     test("only enabled pack events reach nearby human viewers and sleep suppresses speech") {
@@ -52,13 +52,17 @@ class CivsCitizenVoicesTest : FunSpec({
             val config = YamlConfiguration().apply { set("npc-voices.enabled", true) }
             val voices = CivsCitizenVoices(config)
             voices.say(UUID(0, 0), actor, CitizenVoiceEvent.GREET, 0, listOf(viewer, distant))
-            verify(exactly = 1) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.greet", SoundCategory.NEUTRAL, 0.45f, 1f) }
+            verify(exactly = 1) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.greet", SoundCategory.NEUTRAL, 0.85f, 1f) }
             verify(exactly = 0) { distant.playSound(any<Location>(), any<String>(), any<SoundCategory>(), any<Float>(), any<Float>()) }
             sleeping = true
             voices.say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 2_000, listOf(viewer))
             sleeping = false
             CivsCitizenVoices(YamlConfiguration()).say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 4_000, listOf(viewer))
-            verify(exactly = 0) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.work", SoundCategory.NEUTRAL, 0.45f, 1f) }
+            verify(exactly = 0) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.work", SoundCategory.NEUTRAL, 0.85f, 1f) }
+            // A click is explicit, so even consecutive clicks and a sleeping resident answer.
+            sleeping = true
+            repeat(3) { voices.greet(UUID(0, 0), actor, viewer) }
+            verify(exactly = 4) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.greet", SoundCategory.NEUTRAL, 0.85f, 1f) }
         }
     }
 })

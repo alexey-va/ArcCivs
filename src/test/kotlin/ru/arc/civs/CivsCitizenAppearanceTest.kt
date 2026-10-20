@@ -29,18 +29,26 @@ class CivsCitizenAppearanceTest : FunSpec({
         (citizenSkin(skins, UUID(0, Int.MIN_VALUE.toLong())) in skins) shouldBe true
     }
 
-    test("each profession carries a recognizable tool and an unassigned resident has an empty hand") {
+    test("profession props never invent the work tool a resident still needs to receive") {
         citizenTool(appearancePlan(BuildingType.TOWN_HALL)) shouldBe Material.BOOK
-        citizenTool(appearancePlan(BuildingType.BUILDER_HUT)) shouldBe Material.IRON_SHOVEL
         citizenTool(appearancePlan(BuildingType.BUILDER_HUT, "placing")) shouldBe null
-        citizenTool(appearancePlan(BuildingType.FORESTER)) shouldBe Material.IRON_AXE
-        citizenTool(appearancePlan(BuildingType.QUARRY)) shouldBe Material.IRON_PICKAXE
-        citizenTool(appearancePlan(BuildingType.FARM)) shouldBe Material.IRON_HOE
-        citizenTool(appearancePlan(BuildingType.SAWMILL)) shouldBe Material.IRON_AXE
-        citizenTool(appearancePlan(BuildingType.BLACKSMITH)) shouldBe Material.IRON_PICKAXE
-        citizenTool(appearancePlan(BuildingType.STONEMASON)) shouldBe Material.IRON_PICKAXE
+        for (type in listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
+            BuildingType.FARM, BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON)) {
+            citizenTool(appearancePlan(type)) shouldBe null
+            citizenTool(appearancePlan(type, "waiting-tool")) shouldBe null
+        }
         citizenTool(appearancePlan(BuildingType.LIBRARY)) shouldBe Material.FEATHER
         citizenTool(appearancePlan(null, "unassigned")) shouldBe null
+    }
+
+    test("children use half scale and retain the same signed skin after growing up") {
+        val adult = CivWorker(UUID(0, 12), "Resident", null)
+        val child = adult.copy(childMinutes = 0, parentIds = setOf(UUID(0, 10), UUID(0, 11)))
+        citizenScale(child) shouldBe .5
+        citizenScale(child.copy(childMinutes = 39)) shouldBe .5
+        citizenScale(adult) shouldBe 1.0
+        val skins = loadCitizenSkins()
+        citizenSkin(skins, child.id) shouldBe citizenSkin(skins, adult.id)
     }
 
     test("work gestures stop throughout travel delivery waiting pause and closed lifecycle") {

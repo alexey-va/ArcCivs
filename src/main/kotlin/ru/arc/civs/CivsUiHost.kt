@@ -33,6 +33,8 @@ data class CivsPreviewView(
 /** A derived request, fulfilled by one native inventory transfer rather than a separate quest store. */
 data class CivsToolRequest(val material: org.bukkit.Material, val canGive: Boolean)
 
+data class CivsBuildingRequest(val material: org.bukkit.Material, val amount: Long, val canGive: Boolean)
+
 /** Coordinates from the interaction, never a second ray cast after the click. */
 data class CivsGroundTarget(val worldId: UUID, val block: CivPosition)
 
@@ -85,6 +87,10 @@ interface CivsUiHost {
     fun transferHome(player: Player): CompletableFuture<Unit>
     fun workerStatus(workerId: UUID): String
     fun buildingStatus(buildingId: UUID): String
+    fun buildingRequest(player: Player, buildingId: UUID): CivsBuildingRequest? = null
+    fun giveBuildingRequest(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
+    fun summonWorker(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun memberName(city: Settlement, memberId: UUID): String
     fun activeNpcCount(): Int
     fun preview(player: Player): CivsPreviewView?
     fun selection(player: Player): CivsSelectionView?

@@ -39,6 +39,8 @@ data class CivsNpcHologramSnapshot(
     val cargo: Map<String, Int> = emptyMap(),
     val yaw: Float = 0f,
     val nativeHeight: Double = 1.8,
+    val hunger: Int = 20,
+    val child: Boolean = false,
 )
 
 /** Nearby public nameplates. No Bukkit entities, block reads, routing or gameplay state changes. */
@@ -76,7 +78,7 @@ class CivsHolograms internal constructor(
         if (closed || !tasks.isCurrent(epoch)) return
         desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
-            it.health <= it.maxHealth && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
+            it.health <= it.maxHealth && it.hunger in 0..20 && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
             Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) }
             .associate { it.workerId to Desired(it, civsNpcHologramText(text, it)) }
         decor.capture(workplaces())
@@ -104,7 +106,7 @@ class CivsHolograms internal constructor(
             return false
         }
         val location = Location(world, npc.x,
-            npc.y + if (npc.actor == null) CIVS_NPC_TEXT_OFFSET else npc.nativeHeight, npc.z)
+            npc.y + npc.nativeHeight + if (npc.actor == null) CIVS_NPC_TEXT_GAP else 0.0, npc.z)
         val shown = rendered[changed.key] ?: Rendered(displays.spawnText(location, value.text), null).also {
             rendered[changed.key] = it
             it.handle.billboard = Display.Billboard.CENTER
@@ -130,7 +132,7 @@ class CivsHolograms internal constructor(
             if (before != null) shown.handle.teleport(location)
         }
         shown.handle.transformation = Transformation(
-            Vector3f(0f, if (npc.actor == null) 0f else (CIVS_NPC_TEXT_OFFSET - npc.nativeHeight).toFloat(), 0f),
+            Vector3f(0f, if (npc.actor == null) 0f else CIVS_NPC_TEXT_GAP.toFloat(), 0f),
             Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
         if (before != null && before.text != value.text) shown.handle.text(value.text)
         carts.sync(npc)
@@ -165,7 +167,8 @@ class CivsHolograms internal constructor(
 
 internal const val CIVS_NPC_TEXT_SCALE = 0.70f
 internal const val CIVS_NPC_TEXT_WIDTH = 220
-internal const val CIVS_NPC_TEXT_OFFSET = 2.15
+internal const val CIVS_NPC_TEXT_GAP = .20
+internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP
 
 internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): Component {
     fun number(value: Double): String = String.format(Locale.ROOT, "%.1f", value).trimEnd('0').trimEnd('.')
@@ -175,17 +178,18 @@ internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): 
             else -> text.status(null, npc.status)
         }
     } else text.status(null, npc.status)
-    val profession = when (npc.profession) {
+    val profession = when (val key = if (npc.child) "child" else npc.profession) {
         "" , "unassigned" -> text.render("hologram.resident")
         "courier" -> text.render("hologram.courier")
-        else -> text.render("profession.${npc.profession}")
+        else -> text.render("profession.$key")
     }
     return text.render("hologram.npc",
         values = arrayOf(
             "name" to Component.text(npc.name, TextColor.color(0xF3EFE5)),
             "profession" to profession.color(TextColor.color(0xE1C58D)),
             "action" to action.color(TextColor.color(0xCDC7BC)),
-            "health" to text.render("hologram.health", values = arrayOf("health" to number(npc.health), "max" to number(npc.maxHealth)))
+            "health" to text.render("hologram.health", values = arrayOf("health" to number(npc.health),
+                "max" to number(npc.maxHealth), "hunger" to npc.hunger))
                 .color(TextColor.color(0xDC9B8D)),
         ))
 }

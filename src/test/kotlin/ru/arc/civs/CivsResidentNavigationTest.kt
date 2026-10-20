@@ -89,6 +89,161 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("idle route crosses authored log floor beams without allowing an outside tree route") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in 0..5) terrain.blocks[CivPosition(x, 63, 0)] = Material.OAK_PLANKS
+            // medievaloak/townhall1 has log beams across its plank floor, including under
+            // an interior door. A full-width beam must not partition a resident's room.
+            terrain.blocks[CivPosition(2, 63, 0)] = Material.OAK_LOG
+            val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(0, 63, 0), 0,
+                "civs/minecolonies/medievaloak/fundamentals/townhall1",
+                CivBox(CivPosition(0, 63, -1), CivPosition(5, 66, 1)), CivPosition(0, 64, 0), BuildingPhase.ACTIVE)
+            fun route(buildings: List<CivBuilding>) = CitizenPacketRoute(terrain.world,
+                Location(terrain.world, .5, 64.0, .5), Location(terrain.world, 5.5, 64.0, .5),
+                { it.x in 0..5 && it.y == 64 && it.z == 0 && citizenIdleTerrain(terrain.world, it, buildings) },
+                { _, _ -> true }, { 1.0 })
+            val outside = route(emptyList())
+            repeat(2_000) { if (outside.searching) outside.expand() }
+            outside.failure shouldBe "no-path"
+
+            val indoors = route(listOf(hall))
+            repeat(2_000) { if (indoors.searching) indoors.expand() }
+            indoors.failure shouldBe null
+            var at = Location(terrain.world, .5, 64.0, .5)
+            repeat(80) { indoors.move(at, 1.0) { true }?.let { at = it } }
+            indoors.finished shouldBe true
+            at.distanceSquared(Location(terrain.world, 5.5, 64.0, .5)) shouldBe 0.0
+        }
+    }
+
+    test("temporary player collision preserves the waypoint and resumes when the passage clears") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val route = terrain.route()
+            repeat(2_000) { if (route.searching) route.expand() }
+            val waypoint = requireNotNull(route.destination)
+            var at = Location(terrain.world, .5, 64.0, .5)
+            repeat(10) {
+                route.move(at, 1.0, { _, _ -> false }) { true } shouldBe null
+                route.destination shouldBe waypoint
+                route.waitingForCollision shouldBe true
+                route.failure shouldBe null
+                route.navigating shouldBe true
+            }
+            repeat(80) { route.move(at, 1.0, { _, _ -> true }) { true }?.let { at = it } }
+            route.waitingForCollision shouldBe false
+            route.finished shouldBe true
+            route.failure shouldBe null
+            at.distanceSquared(Location(terrain.world, 5.5, 64.0, .5)) shouldBe 0.0
+        }
+    }
+
+    test("five nearby destinations share a walked trunk while a distant parallel trip keeps its short route") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val city = pathsCity().copy(worldId = terrain.world.uid)
+            val paths = CivsPaths()
+            fun walk(fromZ: Int, toZ: Int): Set<CivPosition> {
+                val trip = paths.begin(city)
+                var at = Location(terrain.world, .5, 64.0, fromZ + .5)
+                val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 16.5, 64.0, toZ + .5),
+                    { p -> p.x in 0..16 && p.z in -4..6 && p.y == 64 }, { _, _ -> true },
+                    { block -> trip.cost(block) { 1.0 } })
+                repeat(20_000) { if (route.searching) route.expand() }
+                route.failure shouldBe null
+                route.searching shouldBe false
+                val walked = linkedSetOf<CivPosition>()
+                repeat(400) {
+                    trip.observe(CitizenPoint(at.x, at.y, at.z))
+                    route.move(at, 1.0) { true }?.let { next ->
+                        walked += CivPosition(next.blockX, citizenSupportY(next.y), next.blockZ)
+                        trip.observe(CitizenPoint(next.x, next.y, next.z))
+                        at = next
+                    }
+                }
+                route.finished shouldBe true
+                paths.complete(city, trip)
+                repeat(20) { paths.pulse() }
+                return walked
+            }
+            walk(0, 0)
+            val nearby = listOf(-2, -1, 0, 1, 2).map { walk(0, it) }
+            nearby.all { it.count { p -> p.z == 0 && p.x in 2..12 } >= 9 } shouldBe true
+            paths.remembered(city.id).none { it.x in 2..10 && it.z in setOf(-2, -1, 1, 2) } shouldBe true
+            walk(6, 6).none { it.z == 0 } shouldBe true
+        }
+    }
+
+    test("corridor preference cannot cross a protected footprint or climb an outdoor log") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val city = pathsCity().copy(worldId = terrain.world.uid)
+            val paths = CivsPaths()
+            val learned = paths.begin(city)
+            for (x in 0..5) learned.observe(CitizenPoint(x + .5, 64.0, .5))
+            paths.complete(city, learned)
+            paths.pulse()
+            val preferred = paths.begin(city)
+            val house = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                bounds = CivBox(CivPosition(2, 63, -1), CivPosition(3, 66, 1)))
+            val protectedCity = city.copy(buildings = city.buildings + house)
+            val detour = CitizenPacketRoute(terrain.world, Location(terrain.world, .5, 64.0, .5),
+                Location(terrain.world, 5.5, 64.0, .5),
+                { p -> terrain.allowed(p) && citizenRouteCellAllowed(protectedCity, emptySet(), p.x, p.z) },
+                { _, _ -> true }, { block -> preferred.cost(block) { 1.0 } })
+            repeat(20_000) { if (detour.searching) detour.expand() }
+            detour.failure shouldBe null
+            var at = Location(terrain.world, .5, 64.0, .5)
+            repeat(160) { detour.move(at, 1.0) { true }?.let { next ->
+                citizenRouteCellAllowed(protectedCity, emptySet(), next.blockX, next.blockZ) shouldBe true
+                at = next
+            } }
+            detour.finished shouldBe true
+
+            terrain.blocks[CivPosition(2, 63, 0)] = Material.OAK_LOG
+            val tree = CitizenPacketRoute(terrain.world, Location(terrain.world, .5, 64.0, .5),
+                Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.y == 64 && p.z == 0 },
+                { _, _ -> true }, { block -> preferred.cost(block) { 1.0 } })
+            repeat(2_000) { if (tree.searching) tree.expand() }
+            tree.failure shouldBe "no-path"
+        }
+    }
+
+    test("a path at fifteen sixteenths height reaches its endpoint and emits every actual cell crossing") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in 0..5) terrain.blocks[CivPosition(x, 63, 0)] = Material.DIRT_PATH
+            val trip = CivsPaths().begin(pathsCity().copy(worldId = terrain.world.uid))
+            val first = terrain.world.getBlockAt(0, 63, 0)
+            trip.cost(first) { 5.0 } shouldBe 1.15 // Explicit path wins over a provider's recognized surface.
+            val route = CitizenPacketRoute(terrain.world, Location(terrain.world, .95, 63.9375, .5),
+                Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.z == 0 && p.y in 63..64 },
+                { _, _ -> true }, { block -> trip.cost(block) { 1.0 } })
+            repeat(2_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            route.searching shouldBe false
+            var at = Location(terrain.world, .95, 63.9375, .5)
+            val steps = CitizenFootsteps()
+            val departed = mutableListOf<CivPosition>()
+            repeat(80) {
+                val before = at
+                route.move(at, 1.0) { true }?.let { next ->
+                    steps.prime(before, citizenPacketSupported(terrain.world, CitizenPoint(before.x, before.y, before.z)))
+                    steps.observe(next, citizenPacketSupported(terrain.world, CitizenPoint(next.x, next.y, next.z)))?.let { (from, to) ->
+                        if (from.blockX != to.blockX || from.blockZ != to.blockZ)
+                            departed += CivPosition(from.blockX, citizenSupportY(from.y), from.blockZ)
+                    }
+                    at = next
+                }
+            }
+            route.finished shouldBe true
+            at.y shouldBe 63.9375
+            at.x shouldBe 5.5
+            departed shouldBe (0..4).map { CivPosition(it, 63, 0) }
+        }
+    }
+
     test("heading takes the short turn across wraparound and terrain cannot load a missing chunk") {
         citizenTurn(179f, -179f, 24f) shouldBe 181f
         citizenTurn(0f, 120f, 24f) shouldBe 24f
@@ -123,10 +278,14 @@ private class ResidentRouteTerrain {
             native.getOrPut(point) {
                 val shape = mockk<VoxelShape> {
                     every { boundingBoxes } answers {
-                        if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()
+                        if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0,
+                            if (material(point) == Material.DIRT_PATH) .9375 else 1.0, 1.0)) else emptyList()
                     }
                 }
                 val block = mockk<Block> {
+                    every { x } returns point.x
+                    every { y } returns point.y
+                    every { z } returns point.z
                     every { type } answers { material(point) }
                     every { isLiquid } returns false
                     every { blockData } answers { blockDataByMaterial.getOrPut(material(point)) { material(point).createBlockData() } }
@@ -136,6 +295,7 @@ private class ResidentRouteTerrain {
                 // 48 routes only grows MockK's call history and is not part of this oracle.
                 excludeRecords {
                     block.type; block.isLiquid; block.blockData; block.collisionShape
+                    block.x; block.y; block.z
                     shape.boundingBoxes
                 }
                 block

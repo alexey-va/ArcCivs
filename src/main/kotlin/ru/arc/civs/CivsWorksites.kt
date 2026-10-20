@@ -26,6 +26,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private data class Cached(val building: CivBuilding, val worker: CivWorker, val work: CivWorldWork)
     private val cached = hashMapOf<UUID, Cached>()
     private val cursors = hashMapOf<UUID, Int>()
+    private data class Need(val building: CivBuilding, val cycle: Long, val status: String,
+        val material: String? = null, val amount: Long = 1)
+    private val needs = hashMapOf<UUID, Need>()
     private var cursor = 0
     private val mineCursors = hashMapOf<UUID, Triple<Int, Long, Int>>()
 
@@ -35,7 +38,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             it.worker.items == worker.items && it.worker.inventory == worker.inventory }?.work
     }
 
-    fun invalidate(workerId: UUID) { cached.remove(workerId) }
+    fun invalidate(workerId: UUID) { cached.remove(workerId); needs.remove(workerId) }
 
     /** At most one worker and 16 terrain candidates per pulse, shared across the whole runtime. */
     fun pulse(cities: Collection<Settlement>) {
@@ -47,6 +50,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         } }
         val workerIds = jobs.mapTo(hashSetOf()) { it.second.id }
         cached.keys.retainAll(workerIds)
+        needs.keys.retainAll(workerIds)
         cursors.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
         if (jobs.isEmpty()) return
@@ -54,13 +58,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (plan(city, worker) != null) return
         val world = plugin.server.getWorld(city.worldId) ?: return
         if (world.time in 12_000L..23_000L || city.inventory == null) return
+        needs[worker.id] = Need(building, worker.completedCycles, if (building.type == BuildingType.QUARRY) "searching-work" else "waiting-growth")
         val work = equipTool(city, worker, building, world) ?: when (building.type) {
             BuildingType.FARM -> farm(city, worker, building, world)
             BuildingType.FORESTER -> forest(city, worker, building, world)
             BuildingType.QUARRY -> mine(city, worker, building, world)
             else -> null
         }
-        if (work != null) cached[worker.id] = Cached(building, worker, work)
+        if (work != null) {
+            needs.remove(worker.id)
+            cached[worker.id] = Cached(building, worker, work)
+        }
     }
 
     fun validate(city: Settlement, work: CivWorldWork) {
@@ -80,7 +88,21 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     fun idleReason(city: Settlement, worker: CivWorker): String {
         val building = worker.assignment?.let(city::building) ?: return "unassigned"
         val suffix = toolSuffix(building.type)
-        return if (CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool" else "waiting-growth"
+        return if (CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
+        else currentNeed(city, worker)?.status ?: if (building.type == BuildingType.QUARRY) "searching-work" else "waiting-growth"
+    }
+
+    private fun currentNeed(city: Settlement, worker: CivWorker): Need? = needs[worker.id]?.takeIf {
+        it.building == worker.assignment?.let(city::building) && it.cycle == worker.completedCycles
+    }
+
+    fun requirement(city: Settlement, worker: CivWorker): Pair<String, Long>? = currentNeed(city, worker)?.let {
+        it.material?.let { material -> material to it.amount }
+    }
+
+    private fun blocked(worker: CivWorker, status: String, material: String? = null, amount: Long = 1): CivWorldWork? {
+        needs[worker.id] = needs.getValue(worker.id).copy(status = status, material = material, amount = amount)
+        return null
     }
 
     private fun equipTool(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -121,7 +143,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         for (point in CivsWorksiteLayouts.irrigation(building)) {
             val block = read(city, building, world, point) ?: return null
             if (block.type == Material.WATER) continue
-            if (block.type !in SOILS || (available["WATER_BUCKET"] ?: 0) == 0L) return null
+            if (block.type !in SOILS) return blocked(worker, "worksite-blocked")
+            if ((available["WATER_BUCKET"] ?: 0) == 0L) return blocked(worker, "waiting-water", "WATER_BUCKET")
             val standing = beside(city, building, world, point) ?: return null
             return work(worker, building, standing, listOf(change(block, Material.WATER.createBlockData().asString)),
                 mapOf("WATER_BUCKET" to 1), mapOf("BUCKET" to 1), "working-field")
@@ -156,6 +179,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             if ((available[seed] ?: 0) > 0) return work(worker, building, standing,
                 listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1), status = "working-field")
+            blocked(worker, "waiting-seeds", seed)
         }
         return null
     }
@@ -217,12 +241,15 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             // Fill genuine empty ground only, using a delivered sapling.
             val ground = read(city, building, world, column.copy(y = surface), allowOwn = false) ?: return@repeat
-            if (ground.type !in TREE_SOILS || (stock(city, building.id)[sapling] ?: 0) <= 0) return@repeat
+            if (ground.type !in TREE_SOILS) return@repeat
             val air = read(city, building, world, column.copy(y = surface + 1), allowOwn = false) ?: return@repeat
             if (!air.type.isAir) return@repeat
             val planting = if (timber == Material.DARK_OAK_LOG) darkOakPlot(city, building, world, position(air), Material.AIR)
                 ?: return@repeat else listOf(position(air))
-            if ((stock(city, building.id)[sapling] ?: 0) < planting.size) return@repeat
+            if ((stock(city, building.id)[sapling] ?: 0) < planting.size) {
+                blocked(worker, "waiting-saplings", sapling, planting.size.toLong())
+                return@repeat
+            }
             val standing = beside(city, building, world, position(air), allowOwn = false) ?: return@repeat
             return work(worker, building, standing, planting.map { p ->
                 change(requireNotNull(read(city, building, world, p, allowOwn = false)), Material.valueOf(sapling).createBlockData().asString)
@@ -243,7 +270,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun mine(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
         if (!tool(worker).type.name.endsWith("_PICKAXE")) return null
-        val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("mine") ?: return null
+        val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("mine")
+            ?: return blocked(worker, "worksite-blocked")
         val bottom = CivsWorksiteLayouts.vector(layout["ladderBottom"])
         val floor = layout.getAsJsonArray("floors").last().asJsonObject["feetY"].asInt
         val facing = layout["ladderFacing"].asString
@@ -272,7 +300,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         for ((offset, step) in pending.take(16).withIndex()) {
             val (local, after) = step
             val point = CivsWorksiteLayouts.point(building, local)
-            val block = read(city, building, world, point) ?: return null
+            val block = read(city, building, world, point) ?: return blocked(worker, "worksite-blocked")
             val target = after?.let { Bukkit.createBlockData(it).also { data ->
                 data.rotate(when (Math.floorMod(building.rotation / 90, 4)) {
                     1 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
@@ -282,22 +310,33 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 })
             } }
             val next = scanStart.toLong() + offset + 1
-            if (target?.matches(block.blockData) == true || target == null && block.type.isAir) {
+            // Existing sound shaft walls already support a ladder; replacing them first can
+            // deadlock a miner who must dig the first stone to obtain cobblestone.
+            val shaftSupport = scanStart + offset < (bottom.y - floor) * 2 && local.y < bottom.y && local.x == bottom.x + dx && local.z == bottom.z + dz
+            val soundWall = shaftSupport && target?.material == Material.COBBLESTONE &&
+                block.type.isOccluding && !block.type.hasGravity() && block.type !in UNBREAKABLE
+            if (soundWall || target?.matches(block.blockData) == true || target == null && block.type.isAir) {
                 mineCursors[building.id] = Triple(building.level, progress, next.toInt())
                 // Record skipped already-dug cells with the next actual work, without a save per empty cell.
                 continue
             }
-            if (block.isLiquid || block.type in UNBREAKABLE || block.type.name.endsWith("_ORE") && tool(worker).type == Material.AIR) return null
+            if (block.isLiquid || block.type in UNBREAKABLE) return blocked(worker, "worksite-blocked")
             val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
-            val costs = supportWork?.let { mapOf(it.name to 1L) }.orEmpty()
-            if (costs.any { (key, amount) -> (stock(city, building.id)[key] ?: 0) < amount }) return null
+            // Excavation happens before placing the next ladder, even if supplies have
+            // not arrived yet. Keep the same durable step until its ladder is installed.
+            val excavating = target?.material == Material.LADDER && !block.type.isAir && block.type != Material.LADDER
+            val costs = if (excavating) emptyMap() else supportWork?.let { mapOf(it.name to 1L) }.orEmpty()
+            costs.keys.firstOrNull { (stock(city, building.id)[it] ?: 0) < 1 }?.let { material ->
+                return blocked(worker, "waiting-${material.lowercase()}", material)
+            }
             val near = if (local.x == bottom.x && local.z == bottom.z)
                 CivsWorksiteLayouts.point(building, local.copy(y = local.y + 1)) else point
-            val standing = beside(city, building, world, near, ladder = true) ?: return null
+            val standing = beside(city, building, world, near, ladder = true) ?: return blocked(worker, "worksite-blocked")
             val outputs = if (block.type.isAir || block.type == Material.LADDER || block.type == Material.TORCH) emptyMap() else drops(block, tool(worker))
-            return work(worker, building, standing, listOf(change(block, target?.asString ?: "minecraft:air")), costs, outputs,
-                "digging-mine", duration = 4_000, miningStep = next)
+            return work(worker, building, standing, listOf(change(block, if (excavating) "minecraft:air" else target?.asString ?: "minecraft:air")), costs, outputs,
+                "digging-mine", duration = 4_000, miningStep = if (excavating) next - 1 else next)
         }
+        if (mineCursors[building.id]?.third == steps.size || scanStart == steps.size) blocked(worker, "mine-complete")
         return null
     }
 
@@ -346,7 +385,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             slots.toMutableList().also { it[4] = worn }
         } else null
         return CivWorldWork(worker.id, worker.completedCycles, building.id, standing, changes, inputs, outputs,
-            duration, status, miningStep, after)
+            if (status == "working-field") 1_500 else duration, status, miningStep, after)
     }
 
     private fun drops(block: Block, tool: ItemStack): Map<String, Long> = block.getDrops(tool).filter { !it.type.isAir }

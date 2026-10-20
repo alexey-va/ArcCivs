@@ -110,6 +110,23 @@ class CivsDevelopmentRulesTest : FunSpec({
         city.building(hut.id)!!.phase shouldBe BuildingPhase.ACTIVE
     }
 
+    test("hungry builders keep the same earned rows and wait twice as long before their next session") {
+        val base = builderCity()
+        val hut = base.building(id(2))!!
+        val order = batches(hut, 16).copy(batches = CivConstructionBatches(16, 16), payment = CivConstructionPayment())
+        val fed = CivsRules.startSite(base, base.owner, hut, order)
+        val hungry = fed.copy(workers = fed.workers.map { it.copy(hunger = 6) })
+        val fedAfter = trip(fed)
+        val hungryAfter = trip(hungry)
+        fedAfter.construction!!.workCredit shouldBe CivsRules.BUILDER_SESSION_ROWS
+        hungryAfter.construction!!.workCredit shouldBe fedAfter.construction!!.workCredit
+        val due = fed.workers.single().nextDeliveryAt
+        fedAfter.workers.single().nextDeliveryAt shouldBe due + 2_000
+        hungryAfter.workers.single().nextDeliveryAt shouldBe due + 4_000
+        hungryAfter.stock shouldBe fedAfter.stock
+        hungryAfter.inventory shouldBe fedAfter.inventory
+    }
+
     test("incremental payment and control receipts validate their persisted identity") {
         val city = builderCity()
         val hut = city.building(id(2))!!
@@ -171,10 +188,10 @@ class CivsDevelopmentRulesTest : FunSpec({
         city.workers shouldBe emptyList()
         city.stock shouldBe Stock()
         city.inventory!!.materials shouldBe mapOf("OAK_LOG" to 96L, "COBBLESTONE" to 96L, "BREAD" to 24L)
-        city.immigration shouldBe CivImmigration(4, 31_000)
+        city.immigration shouldBe CivImmigration(5, 31_000)
         CivsRules.slots(city.buildings.single()) shouldBe 0
         CivsRules.isDepot(city.buildings.single()) shouldBe true
-        CivsRules.beds(city) shouldBe 4
+        CivsRules.beds(city) shouldBe 5
         CivsRules.validate(roundTrip(city)) shouldBe city
     }
 
@@ -183,15 +200,16 @@ class CivsDevelopmentRulesTest : FunSpec({
         denied("immigration-not-ready") { CivsRules.immigrate(city, city.owner, id(100), "Первый", 30_999) }
         city = CivsRules.immigrate(city, city.owner, id(100), "Первый", 31_000)
         city.workers.size shouldBe 1
-        city.immigration shouldBe CivImmigration(3, 91_000)
+        city.immigration shouldBe CivImmigration(4, 91_000)
         city = roundTrip(city)
         denied("immigration-not-ready") { CivsRules.immigrate(city, city.owner, id(101), "Второй", 31_000) }
         city = CivsRules.immigrate(city, city.owner, id(101), "Второй", 9_000_000)
         city.workers.size shouldBe 2
-        city.immigration shouldBe CivImmigration(2, 9_060_000)
+        city.immigration shouldBe CivImmigration(3, 9_060_000)
         city = CivsRules.immigrate(city, city.owner, id(102), "Третий", 9_060_000)
         city = CivsRules.immigrate(city, city.owner, id(103), "Четвёртый", 9_120_000)
-        CivsRules.immigrate(roundTrip(city), city.owner, id(104), "Пятый", Long.MAX_VALUE) shouldBe city
+        city = CivsRules.immigrate(city, city.owner, id(104), "Пятый", 9_180_000)
+        CivsRules.immigrate(roundTrip(city), city.owner, id(105), "Шестой", Long.MAX_VALUE) shouldBe city
         city.inventory shouldBe newCity().inventory
         city.stock shouldBe Stock()
         city.workers.all { it.assignment == null && it.completedCycles == 0L } shouldBe true
@@ -286,18 +304,18 @@ class CivsDevelopmentRulesTest : FunSpec({
         city.building(farm.id)!!.level shouldBe 1
     }
 
-    test("funded recruitment and item production advance residents without duplicating abstract resources") {
-        newCity().let { CivsRules.recruitFunded(it, it.owner, id(101), "Замена").workers.size shouldBe 1 }
+    test("paid recruitment is closed and immigrated workers produce without duplicating abstract resources") {
+        newCity().let { denied("population-natural") { CivsRules.recruitFunded(it, it.owner, id(101), "Замена") } }
         var city = builderCity().let { it.copy(buildings = it.buildings.map { b -> b.copy(phase = BuildingPhase.ACTIVE) }) }
         city = CivsRules.validate(city)
-        denied("materials-required") { CivsRules.recruit(city, city.owner, id(101), "Второй") }
-        denied("duplicate-worker") { CivsRules.recruitFunded(city, city.owner, id(100), "Дубль") }
+        denied("population-natural") { CivsRules.recruit(city, city.owner, id(101), "Второй") }
+        denied("population-natural") { CivsRules.recruitFunded(city, city.owner, id(100), "Дубль") }
         denied("not-authorized") { CivsRules.recruitFunded(city, id(999), id(101), "Второй") }
-        city = CivsRules.recruitFunded(city, city.owner, id(101), "Второй")
+        city = CivsRules.immigrate(city, city.owner, id(101), "Второй", 1_000_000)
         city.stock shouldBe Stock()
         val farm = building(3, BuildingType.FARM, 20, BuildingPhase.ACTIVE).copy(production = "CARROT")
         city = CivsRules.validate(city.copy(buildings = city.buildings + farm))
-        city = CivsRules.assign(city, city.owner, id(101), farm.id, 40_000)
+        city = CivsRules.assign(city, city.owner, id(101), farm.id, 1_010_000)
         val worker = city.workers.last()
         denied("materials-required") { CivsRules.deliver(city, city.owner, worker.id, farm.id,
             worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt) }
@@ -310,7 +328,7 @@ class CivsDevelopmentRulesTest : FunSpec({
             worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt, outputHandled = true) }
     }
 
-    test("nullable additions decode old cities without replaying pioneers and malformed new progress fails closed") {
+    test("nullable additions decode old cities without replaying item grants and malformed new progress fails closed") {
         val legacyHall = building(1, BuildingType.TOWN_HALL, 0, BuildingPhase.ACTIVE).copy(control = null)
         val legacy = Settlement(id(10), id(20), "Legacy", id(30), legacyHall.entrance, 96, "nordic", Stock(96, 96, 24),
             listOf(legacyHall), (100..103).map { CivWorker(id(it), "Житель $it", if (it == 100) legacyHall.id else null,
@@ -321,7 +339,10 @@ class CivsDevelopmentRulesTest : FunSpec({
         old.immigration shouldBe null
         old.buildings.single().control shouldBe null
         old.buildings.single().production shouldBe null
-        CivsRules.immigrate(old, old.owner, id(104), "Не повторять", 50_000) shouldBe old
+        val fifth = CivsRules.immigrate(old, old.owner, id(104), "Пятый", 50_000)
+        fifth.workers.size shouldBe 5
+        fifth.stock shouldBe old.stock
+        fifth.inventory shouldBe old.inventory
         denied("workplace-full") { CivsRules.assign(old, old.owner, id(101), legacyHall.id, 50_000) }
         val freeHut = building(2, BuildingType.BUILDER_HUT, 10)
         denied("invalid-construction") { CivsRules.reserveBuild(old, old.owner, freeHut,
@@ -333,7 +354,7 @@ class CivsDevelopmentRulesTest : FunSpec({
             order.copy(materials = mapOf("OAK_LOG" to -1L)), order.copy(cost = Stock(1)), order.copy(workRequired = 3)).forEach {
             denied("invalid-construction") { CivsRules.startSite(fresh, fresh.owner, hut, it) }
         }
-        denied("invalid-state") { CivsRules.validate(newCity().copy(immigration = CivImmigration(5, 31_000))) }
+        denied("invalid-state") { CivsRules.validate(newCity().copy(immigration = CivImmigration(6, 31_000))) }
         val lostPioneers = newCity().copy(immigration = CivImmigration(0, 31_000))
         CivsRules.validate(lostPioneers) shouldBe lostPioneers
         val unfinishedUpgrade = fresh.building(id(1))!!.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)

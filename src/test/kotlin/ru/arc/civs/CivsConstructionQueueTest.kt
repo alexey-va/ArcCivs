@@ -134,7 +134,7 @@ class CivsConstructionQueueTest : FunSpec({
             workers = f.city.workers + (1..2).map { CivWorker(UUID.randomUUID(), "Resident $it", null) })
         val deleted = CivsRules.finishBuildingDeletion(CivsRules.requestDeletion(city, city.owner, house.id), city.owner)
         deleted.workers.size shouldBe 6
-        CivsRules.beds(deleted) shouldBe 4
+        CivsRules.beds(deleted) shouldBe 5
         val warehouse = f.second.copy(type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE)
         val legacy = CivsRules.validate(f.city.copy(inventory = null, stock = Stock(350, 350, 350), buildings = f.city.buildings + warehouse))
         val without = CivsRules.finishBuildingDeletion(CivsRules.requestDeletion(legacy, legacy.owner, warehouse.id), legacy.owner)

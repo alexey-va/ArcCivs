@@ -20,8 +20,8 @@ internal class CivsResidentNavigation {
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
                 stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
-                surfaceSpeed: (org.bukkit.block.Block) -> Double): CitizenPacketRoute =
-        CitizenPacketRoute(world, from, to, allowed, stepAllowed, surfaceSpeed).also(searching::addLast)
+                travelCost: (org.bukkit.block.Block) -> Double): CitizenPacketRoute =
+        CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost).also(searching::addLast)
 
     fun pulse() {
         val deadline = System.nanoTime() + SEARCH_BUDGET_NANOS
@@ -52,7 +52,7 @@ internal class CitizenPacketRoute(
     private val target: Location,
     private val allowed: (CivPosition) -> Boolean,
     private val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
-    private val surfaceSpeed: (org.bukkit.block.Block) -> Double,
+    private val travelCost: (org.bukkit.block.Block) -> Double,
 ) {
     private data class Cell(val x: Int, val y: Double, val z: Int, val climbing: Boolean = false) {
         fun point() = CitizenPoint(x + .5, y, z + .5)
@@ -63,7 +63,7 @@ internal class CitizenPacketRoute(
     private val costs = hashMapOf(start to 0.0)
     private val parents = hashMapOf<Cell, Cell>()
     private val cells = hashMapOf<Triple<Int, Int, Int>, List<Cell>>()
-    private val speeds = hashMapOf<Cell, Double>()
+    private val weights = hashMapOf<Cell, Double>()
     private val path = ArrayDeque<Cell>()
     private var expanding: Entry? = null
     private var edges: Iterator<Cell>? = null
@@ -74,6 +74,8 @@ internal class CitizenPacketRoute(
     var failure: String? = null
         private set
     var finished = false
+        private set
+    var waitingForCollision = false
         private set
     val navigating: Boolean get() = searching || failure == null && !finished
     val destination: Location? get() = path.firstOrNull()?.let { Location(world, it.x + .5, it.y, it.z + .5) }
@@ -144,15 +146,25 @@ internal class CitizenPacketRoute(
         if (abs(p.x - start.point().x) > 96 || abs(p.z - start.point().z) > 96 ||
             abs(p.y - start.y) > 96) return
         val distance = sqrt(previous.cell.point().distanceSquared(p))
-        val speed = speeds.getOrPut(next) { surfaceSpeed(world.getBlockAt(next.x, floor(next.y - .01).toInt(), next.z)).coerceIn(.2, 5.0) }
-        val cost = previous.cost + distance / speed
+        val weight = weights.getOrPut(next) {
+            travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z))
+        }
+        if (!weight.isFinite()) return
+        // Preferences change planning cost, never velocity. The minimum cost remains one.
+        val cost = previous.cost + distance * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
         if (cost >= (costs[next] ?: Double.POSITIVE_INFINITY)) return
         costs[next] = cost
         parents[next] = previous.cell
         open += Entry(next, cost, cost + heuristic(next), serial++)
     }
 
-    private fun heuristic(cell: Cell): Double = sqrt(cell.point().distanceSquared(CitizenPoint(target.x, target.y, target.z)))
+    private fun heuristic(cell: Cell): Double {
+        val dx = cell.x + .5 - target.x
+        val dz = cell.z + .5 - target.z
+        // A path or slab may finish within the admitted half-block vertical tolerance.
+        val dy = max(0.0, abs(cell.y - target.y) - .5)
+        return sqrt(dx * dx + dy * dy + dz * dz)
+    }
 
     private fun standingCells(x: Int, y: Double, z: Int): List<Cell> {
         if (!citizenChunkReady(world, x shr 4, z shr 4)) return emptyList()
@@ -183,13 +195,17 @@ internal class CitizenPacketRoute(
      * Native reads here intentionally bypass the planning cache. A new wall or unloaded chunk
      * stops the route before the actor moves; the domain owner decides retry or safe recovery.
      */
-    fun move(from: Location, speed: Double, openDoor: (Location) -> Boolean): Location? {
+    fun move(from: Location, speed: Double,
+             movementAllowed: (Location, Location) -> Boolean = { _, _ -> true },
+             openDoor: (Location) -> Boolean): Location? {
+        waitingForCollision = false
         if (searching || failure != null || finished) return null
         val next = path.firstOrNull() ?: run { finished = true; return null }
         val to = Location(world, next.x + .5, next.y, next.z + .5)
         if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
             !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
-            !citizenPacketSupported(world, next.point()) || !openDoor(to)) {
+            !citizenPacketSupported(world, next.point()) ||
+            !travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z)).isFinite() || !openDoor(to)) {
             fail("path-changed"); return null
         }
         // Rise before entering an upper block's side. Walk beyond a lower step's edge before
@@ -210,6 +226,12 @@ internal class CitizenPacketRoute(
         val b = CitizenPoint(point.x, point.y, point.z)
         if (!stepAllowed(a, b) || !citizenPacketStepClear(world, a, b, false)) {
             fail("movement-blocked"); return null
+        }
+        // A player can temporarily occupy the next step. Preserve the waypoint; the
+        // domain's existing timeout and safe recovery policy handle prolonged blocking.
+        if (!movementAllowed(from, point)) {
+            waitingForCollision = true
+            return null
         }
         if (delta.x * delta.x + delta.z * delta.z > .00001) {
             val wanted = Math.toDegrees(atan2(-delta.x, delta.z)).toFloat()
@@ -233,7 +255,7 @@ internal class CitizenPacketRoute(
     private fun releaseSearch() {
         open.clear()
         cells.clear()
-        speeds.clear()
+        weights.clear()
         parents.clear()
         costs.clear()
         edges = null
@@ -273,7 +295,7 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint): Boolean 
     val y = floor(point.y + .001).toInt()
     if (!citizenChunkReady(world, x shr 4, z shr 4) || y <= world.minHeight || y >= world.maxHeight) return false
     if (Tag.CLIMBABLE.isTagged(world.getBlockAt(x, y, z).type)) return true
-    val by = floor(point.y - .001).toInt()
+    val by = citizenSupportY(point.y)
     val block = world.getBlockAt(x, by, z)
     if (block.isLiquid) return false
     return block.collisionShape.boundingBoxes.any {

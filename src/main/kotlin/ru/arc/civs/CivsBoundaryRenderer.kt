@@ -63,7 +63,7 @@ class CivsBoundaryRenderer internal constructor(
 
     /** Called by the settlement pulse, with its current local membership snapshot. No world/block scans. */
     fun pulse(player: Player, city: Settlement?, placing: Boolean = false, planned: CivBox? = null,
-              plannedBuildingId: UUID? = null) {
+              plannedBuildingId: UUID? = null, buildingStatuses: Map<UUID, String> = emptyMap()) {
         check(Bukkit.isPrimaryThread()) { "Civs boundary updates require the server thread" }
         if (closed) return
         if (city == null || !city.canManage(player.uniqueId) || !player.isOnline || player.world.uid != city.worldId) {
@@ -76,7 +76,9 @@ class CivsBoundaryRenderer internal constructor(
             if (placing) civsBuildingBoundaryGeometry(city, location.x, location.y, location.z, planned, plannedBuildingId)
             else emptyList()).associate { it.key to it.cuboid }
         val desiredLabels = text?.let { catalog ->
-            civsControlHolograms(city, location.x, location.y, location.z) { catalog.buildingHologram(player, city, it) }
+            civsControlHolograms(city, location.x, location.y, location.z) {
+                catalog.buildingHologram(player, city, it, buildingStatuses[it.id])
+            }
                 .associateBy { it.buildingId }
         }.orEmpty()
         if (desired.isEmpty() && desiredLabels.isEmpty()) {

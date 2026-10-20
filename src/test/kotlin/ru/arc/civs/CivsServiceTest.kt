@@ -19,6 +19,7 @@ import ru.arc.network.BackendServerId
 import ru.arc.paper.network.BackendTransfer
 import ru.arc.paper.network.BackendTransferResult
 import ru.arc.paper.api.*
+import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Path
 import java.util.UUID
@@ -29,6 +30,52 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    for (stillPresent in listOf(true, false)) test("resident minute queues behind work once and rechecks presence=$stillPresent before saving") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first()
+            val worker = h.city.workers.first().copy(assignment = hall.id, nextDeliveryAt = 1,
+                sex = CivSex.MALE, homeId = hall.id, hunger = 20)
+            val ready = h.city.copy(workers = listOf(worker), immigration = CivImmigration(4, Long.MAX_VALUE))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            every { h.citizens.workingResidentIds(ready.id) } returns setOf(worker.id)
+            val viewer = h.paper.addPlayer("ResidentObserver")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            h.start(); h.paper.performTicks(20)
+            val injury = h.service.hurtResident(ready.id, worker.id, 1.0)
+            h.time += 60_001
+            h.paper.performTicks(100)
+            h.saves.size shouldBe 1 // One queued minute, despite five pulses while the save is blocked.
+            if (!stillPresent) viewer.disconnect()
+            h.commit(); injury.join(); h.paper.performTicks(20)
+            h.saves.size shouldBe if (stillPresent) 2 else 1
+            if (stillPresent) {
+                h.saves.last().first.workers.single().hunger shouldBe 19
+                h.commit(); h.paper.performTicks(100)
+                h.saves.size shouldBe 2
+            }
+        }
+    }
+
+    test("remembering a renamed existing member advances the revision without changing membership") {
+        serviceScenario { h ->
+            val memberId = UUID.randomUUID()
+            val ready = h.city.copy(members = setOf(memberId), memberNames = mapOf(memberId.toString() to "OldName"))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            every { h.player.name } returns "Owner"
+            h.start()
+            val member = org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "NewName", memberId).also(h.paper.server::addPlayer)
+            val updated = h.service.addMember(h.player, member.name)
+            h.tick()
+            h.saves.single().first.let {
+                it.revision shouldBe ready.revision + 1
+                it.members shouldBe ready.members
+                it.memberNames!![memberId.toString()] shouldBe "NewName"
+            }
+            h.commit(); updated.join()
+            h.service.city(h.player)!!.memberNames!![memberId.toString()] shouldBe "NewName"
+        }
+    }
+
     test("courier pickup and unload journal both physical endpoints and persist cargo between them") {
         serviceScenario { h ->
             val home = h.city.buildings.last()
@@ -117,7 +164,8 @@ class CivsServiceTest : FunSpec({
             val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.PAPER, 12))
             val member = h.paper.addPlayer("WarehouseMember")
-            member.openInventory(h.paper.server.createInventory(member, 9))
+            (member.openInventory as org.mockbukkit.mockbukkit.inventory.InventoryViewMock)
+                .setTopInventory(h.paper.server.createInventory(member, 9))
             val membership = h.service.addMember(h.player, member.name)
             val deposit = h.service.depositMaterials(h.player, plan.building.id)
             deposit.isDone shouldBe false
@@ -128,7 +176,8 @@ class CivsServiceTest : FunSpec({
             h.commit(); deposit.join()
             h.service.city(h.player)!!.inventory!!.buildingMaterials!![plan.building.id.toString()]!!["PAPER"] shouldBe 12L
             val another = h.paper.addPlayer("WarehouseSecondMember")
-            another.openInventory(h.paper.server.createInventory(another, 9))
+            (another.openInventory as org.mockbukkit.mockbukkit.inventory.InventoryViewMock)
+                .setTopInventory(h.paper.server.createInventory(another, 9))
             val membership2 = h.service.addMember(h.player, another.name)
             val withdrawal = h.service.withdrawMaterial(h.player, plan.building.id, "PAPER")
             withdrawal.isDone shouldBe false
@@ -453,7 +502,8 @@ class CivsServiceTest : FunSpec({
             val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE,
                 control = CivPosition(10, 63, 0))
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
-            val city = h.city.copy(owner = player.uniqueId, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            val city = h.city.copy(owner = player.uniqueId, memberNames = mapOf(player.uniqueId.toString() to player.name),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = listOf(h.city.buildings.first(), hut))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             h.start(); h.paper.performTicks(20)
@@ -495,7 +545,7 @@ class CivsServiceTest : FunSpec({
             val hall = h.city.buildings.first().copy(control = point)
             val receipt = CivControlPlacement(hall.id, point, "minecraft:air")
             val city = h.city.copy(stock = Stock(), workers = emptyList(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-                members = setOf(viewer.uniqueId), buildings = listOf(hall) + h.city.buildings.drop(1), pendingControls = listOf(receipt))
+                members = setOf(viewer.uniqueId), memberNames = mapOf(viewer.uniqueId.toString() to viewer.name), buildings = listOf(hall) + h.city.buildings.drop(1), pendingControls = listOf(receipt))
             val block = h.world.getBlockAt(point.x, point.y, point.z)
             if (alreadyPlaced) {
                 block.type = Material.BARREL
@@ -575,6 +625,7 @@ class CivsServiceTest : FunSpec({
             val viewer = h.paper.addPlayer("ApproachOwner")
             viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
             every { h.player.uniqueId } returns viewer.uniqueId
+            every { h.player.name } returns viewer.name
             val blueprint = h.sitePreview()
             val entrance = blueprint.building.entrance
             val support = h.world.getBlockAt(entrance.x, entrance.y - 1, entrance.z)
@@ -631,6 +682,7 @@ class CivsServiceTest : FunSpec({
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 7))
             val city = h.city.copy(stock = Stock(), workers = emptyList(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = listOf(hall) + h.city.buildings.drop(1), members = setOf(viewer.uniqueId),
+                memberNames = mapOf(viewer.uniqueId.toString() to viewer.name),
                 pendingControls = listOf(CivControlPlacement(hall.id, point, "minecraft:air", cells)))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             h.start(); h.paper.performTicks(20)
@@ -910,7 +962,7 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             every { h.store.saveInventoryTransaction(any()) } returns CompletableFuture.failedFuture(CivsRejection("storage-transaction-too-large"))
             h.start()
-            val rejected = h.service.recruit(h.player); h.tick()
+            val rejected = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD"); h.tick()
             (shouldThrow<CompletionException> { rejected.join() }.cause as CivsRejection).reason shouldBe "storage-transaction-too-large"
             h.service.cityBusy(h.player) shouldBe false
             h.service.ready() shouldBe true
@@ -1431,7 +1483,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("physical recruitment queues each request and debits each durable receipt exactly once") {
+    test("physical resident supplies queue each request and debit each durable receipt exactly once") {
         serviceScenario { h ->
             val control = CivPosition(0, 63, 0)
             h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
@@ -1449,40 +1501,40 @@ class CivsServiceTest : FunSpec({
                 CompletableFuture<Boolean>().also { retirements += it }
             }
             h.start()
-            val recruiting = h.service.recruit(h.player)
+            val recruiting = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD")
             barrel.getItem(0)!!.amount shouldBe 24
             h.saves.size shouldBe 0
-            val queued = h.service.recruit(h.player)
+            val queued = h.service.supplyWorker(h.player, city.workers.first().id, "BREAD")
             queued.isDone shouldBe false
             journals.size shouldBe 1
             journals.first().let { (receipt, durable) -> durable.complete(receipt) }; h.tick()
-            barrel.getItem(0)!!.amount shouldBe 12
+            barrel.getItem(0)!!.amount shouldBe 23
             h.service.city(h.player)!!.workers.size shouldBe 4
             h.saves.size shouldBe 1
             h.commit()
-            h.service.city(h.player)!!.workers.size shouldBe 5
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
             recruiting.isDone shouldBe false
             queued.isDone shouldBe false
             journals.size shouldBe 1
             retirements.single().complete(true); h.tick()
             recruiting.join() shouldBe Unit
-            barrel.getItem(0)!!.amount shouldBe 12
+            barrel.getItem(0)!!.amount shouldBe 23
             journals.size shouldBe 2
             journals.map { it.first.id }.distinct().size shouldBe 2
             journals.last().first.beforeRevision shouldBe journals.first().first.after.revision
             queued.isDone shouldBe false
-            h.service.city(h.player)!!.workers.size shouldBe 5
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
             journals.last().let { (receipt, durable) -> durable.complete(receipt) }; h.tick()
-            barrel.getItem(0) shouldBe null
-            h.service.city(h.player)!!.workers.size shouldBe 5
+            barrel.getItem(0)!!.amount shouldBe 22
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 1
             h.saves.size shouldBe 2
             h.commit()
-            h.service.city(h.player)!!.workers.size shouldBe 6
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "BREAD") shouldBe 2
             queued.isDone shouldBe false
             retirements.size shouldBe 2
             retirements.last().complete(true); h.tick()
             queued.join() shouldBe Unit
-            barrel.getItem(0) shouldBe null
+            barrel.getItem(0)!!.amount shouldBe 22
             verify(exactly = 2) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
         }
     }
@@ -1495,7 +1547,8 @@ class CivsServiceTest : FunSpec({
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.BREAD, 12))
             val before = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = h.city.buildings.mapIndexed { index, b -> if (index == 0) b.copy(control = control) else b })
-            val after = CivsRules.recruitFunded(before, before.owner, UUID.randomUUID(), "Recovered")
+            // A persisted pre-0.1.31 paid recruit receipt remains recoverable after the mechanic is removed.
+            val after = before.copy(workers = before.workers + CivWorker(UUID.randomUUID(), "Recovered", null), revision = before.revision + 1)
             val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
                 listOf(CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("BREAD", 24), CivPlainItem("BREAD", 12))))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(after))
@@ -1524,8 +1577,13 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.ready() shouldBe true
             h.saves.size shouldBe 0
+            // The pinned fixture lacks getHolder(false); expose the real barrel's holder and location for this event.
+            val eventInventory = mockk<org.bukkit.inventory.Inventory> {
+                every { getHolder(false) } returns h.world.getBlockAt(point.x, point.y, point.z).state as org.bukkit.block.Barrel
+                every { location } returns barrel.location
+            }
             val view = mockk<org.bukkit.inventory.InventoryView>()
-            every { view.topInventory } returns barrel
+            every { view.topInventory } returns eventInventory
             every { view.player } returns h.player
             h.paper.callEvent(org.bukkit.event.inventory.InventoryOpenEvent(view)).isCancelled shouldBe true
             barrel.getItem(0)!!.amount shouldBe 64
@@ -1626,7 +1684,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
             h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
-            verify(exactly = 1) { h.boundary.pulse(h.player, h.city, true, null, null) }
+            verify(exactly = 1) { h.boundary.pulse(h.player, h.city, true, null, null, h.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }) }
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             val position = CivPosition(6, 63, 6)
             h.world.getBlockAt(position.x, position.y, position.z).type = Material.GRASS_BLOCK
@@ -2144,38 +2202,38 @@ class CivsServiceTest : FunSpec({
             }
         }
 
-    test("a recruitment becomes visible only after its exact durable acknowledgement") {
+    test("an assignment becomes visible only after its exact durable acknowledgement") {
         serviceScenario { h ->
             h.start()
             val before = h.service.city(h.player)!!
-            val result = h.service.recruit(h.player)
+            val result = h.service.assign(h.player, h.city.workers.first().id, h.city.buildings.first().id)
             result.isDone shouldBe false
             h.service.city(h.player) shouldBe before
             h.saves.size shouldBe 1
-            h.saves.single().first.stock.food shouldBe before.stock.food - 12
+            h.saves.single().first.workers.first().assignment shouldBe h.city.buildings.first().id
             h.commit()
             result.join() shouldBe Unit
-            h.service.city(h.player)!!.workers.size shouldBe 5
-            h.service.city(h.player)!!.stock.food shouldBe 12
+            h.service.city(h.player)!!.workers.first().assignment shouldBe h.city.buildings.first().id
+            h.service.city(h.player)!!.stock.food shouldBe 24
         }
     }
 
     test("an unknown write outcome blocks further mutations until authoritative reload") {
         serviceScenario { h ->
             h.start()
-            val first = h.service.recruit(h.player)
+            val first = h.service.assign(h.player, h.city.workers.first().id, h.city.buildings.first().id)
             val persisted = h.saves.single().first
             h.saves.single().second.completeExceptionally(IllegalStateException("acknowledgement lost"))
             h.tick()
             first.isCompletedExceptionally shouldBe true
-            h.service.recruit(h.player).isCompletedExceptionally shouldBe true
+            h.service.assign(h.player, h.city.workers.first().id, h.city.buildings.first().id).isCompletedExceptionally shouldBe true
             h.saves.size shouldBe 1
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(persisted))
             val reload = h.service.reload(h.player)
             h.tick()
             reload.join() shouldBe Unit
             h.service.city(h.player) shouldBe persisted
-            h.service.city(h.player)!!.stock.food shouldBe 12
+            h.service.city(h.player)!!.stock.food shouldBe 24
         }
     }
 
@@ -2183,7 +2241,7 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             h.start()
             val before = h.service.city(h.player)
-            val result = h.service.recruit(h.player)
+            val result = h.service.assign(h.player, h.city.workers.first().id, h.city.buildings.first().id)
             h.tasks.close()
             h.service.close()
             h.commit()
@@ -2519,7 +2577,9 @@ class CivsServiceTest : FunSpec({
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
     action: (ServiceScenario) -> Unit) =
-    MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory).use(action) }
+    failOnUnsupportedMockBukkitOperation {
+        MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory).use(action) }
+    }
 
 private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
     worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?) : AutoCloseable {
@@ -2565,7 +2625,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         val home = hall.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, level = 1, anchor = CivPosition(10, 64, 0),
             bounds = CivBox(CivPosition(8, 63, -2), CivPosition(12, 68, 2)), entrance = CivPosition(10, 64, -2))
         city = CivsRules.validate(Settlement(UUID.randomUUID(), owner, "Oak Town", world.uid, CivPosition(0, 64, 0), 96,
-            "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }))
+            "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }, createdAt = time))
         every { store.load() } returns CompletableFuture.completedFuture(if (empty) emptyList() else listOf(city))
         every { store.homeServer() } returns null
         every { store.lookup(any()) } returns CompletableFuture.completedFuture(null)
@@ -2586,7 +2646,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     fun supplySite(owner: UUID, logs: Int): CivPlacementPlan {
         val site = city.buildings.last().copy(phase = BuildingPhase.SITE, control = CivPosition(10, 63, 0))
         world.getBlockAt(10, 63, 0).type = Material.BARREL
-        val ready = city.copy(owner = owner, stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+        val ready = city.copy(owner = owner, memberNames = paper.server.getPlayer(owner)?.name?.let { mapOf(owner.toString() to it) },
+            stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
             buildings = listOf(city.buildings.first(), site))
         val plan = CivPlacementPlan(site.id, ready.id, world.uid, site.copy(phase = BuildingPhase.CONSTRUCTING),
             List(logs) { i -> CivPlanBlock(CivPosition(8 + i % 5, 64 + i / 25, -2 + i / 5 % 5),

@@ -21,10 +21,12 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         if (city.worldId != from.world?.uid || city.worldId != to.world?.uid ||
             city.workers.none { it.id == workerId } || !city.contains(from.blockX, from.blockZ) ||
             !city.contains(to.blockX, to.blockZ)) return
-        // Buildings keep their authored floors. Even a valid destination never receives trail wear.
-        if (city.buildings.any { it.bounds.contains(from.blockX, from.blockY - 1, from.blockZ) ||
-                it.bounds.contains(to.blockX, to.blockY - 1, to.blockZ) || CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ) ||
-                CivsWorksiteLayouts.isField(it, to.blockX, to.blockZ) }) return
+        // Trails counts the departed support cell. Entering a building must not erase the
+        // final outdoor step, while its authored floor and fields never receive wear.
+        if (civsProtectedBuildings(city).any {
+                it.bounds.contains(from.blockX, citizenSupportY(from.y), from.blockZ) ||
+                    CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ)
+            }) return
         val authority = (sequenceOf(city.owner) + city.members.asSequence()).mapNotNull(plugin.server::getPlayer)
             .firstOrNull { it.isOnline && !it.hasMetadata("NPC") && it.world.uid == city.worldId } ?: return
         try {

@@ -1,0 +1,217 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.31: active population and hunger",
+  "assumptions": [
+    "Low/base/high: 1/10/16 independent cities; one active worker for 1/2/4 hours daily. This is scenario arithmetic, not measured ArcCivs activity.",
+    "Recurring auto immigration fills up to 5 living residents. Above 5: one birth per city minute at most, each housed pair needs 20 active minutes, adulthood after 40 active minutes. No offline catchup.",
+    "Total population limit stays 12; town hall level caps change 4/8/12 to 5/8/12. Housing changes 2/4/6 to 3/4/6; basic hall beds 4 to 5.",
+    "Working adult loses 1 food per active minute. Bread restores 6 food at <=14. Steady upper rate is 10 bread per working hour; initial 20 food postpones the first meal. Hungry <=6 doubles work duration, with unchanged output per action.",
+    "No direct Vault/tokens/player XP changes. Native item outputs may still reach existing SELL; future contract-only economy is not assumed active.",
+    "Summoning saves travel time only, preserving job duration and paid inputs. Tools and materials move from existing inventories; no ordinary free issuance.",
+    "Disposable bread savings are unknown; set to zero, so no accumulation time is claimed.",
+    "Owner requested a faster farmer: base native farm action 3000ms -> 1500ms. The theoretical action ceiling doubles 1200 -> 2400 per working hour; crop growth, movement, receipts and finite soil still constrain actual harvest. Hungry new farmer takes3000ms, and outputs per native block do not change."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "replacement_bread",
+          "kind": "item",
+          "source": "CivsRules / CivsPopulation / CivsResidents",
+          "basis": "Removed purchased recruit: replacement below5 becomes immigration; above5 needs family time.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              "0.1",
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              "0.1",
+              1
+            ]
+          }
+        },
+        {
+          "id": "working_food_consumed",
+          "kind": "item",
+          "source": "CivsRules / CivsPopulation / CivsResidents",
+          "basis": "Bread consumed, not issued; one continuously working adult, steady-state ceiling.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              20,
+              40
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              20,
+              40
+            ]
+          }
+        },
+        {
+          "id": "manual_meals_consumed",
+          "kind": "item",
+          "source": "CivsRules / CivsPopulation / CivsResidents",
+          "basis": "Unchanged one-bread cost; restores up to6 HP and6 food if either is low.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              1,
+              4
+            ]
+          }
+        }
+      ],
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      }
+    },
+    "resident_entitlement": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "first_wave",
+          "kind": "item",
+          "source": "CivsRules / CivsPopulation / CivsResidents",
+          "basis": "One-time first settlement wave per city, not recurring daily income; scenario day is founding day.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              4,
+              4
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              5,
+              5
+            ]
+          }
+        }
+      ]
+    },
+    "farm_action": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "farm_action_ceiling",
+          "kind": "item",
+          "source": "CivsWorksites.work",
+          "basis": "Theoretical native actions for one fed farmer,1/2/4activehours; NOT harvested items or money.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1200,
+              2400,
+              4800
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2400,
+              4800,
+              9600
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [
+    {
+      "id": "recruit",
+      "currency": "bread",
+      "before": {
+        "value": "12",
+        "unit": "major"
+      },
+      "after": null
+    }
+  ]
+}

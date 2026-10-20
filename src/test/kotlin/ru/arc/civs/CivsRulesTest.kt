@@ -24,15 +24,16 @@ class CivsRulesTest : FunSpec({
         rejects("invalid-damage") { CivsRules.hurtResident(city, owner, worker.id, Double.NaN) }
     }
 
-    test("lost starter builders can be replaced before town hall completion at the existing bread price") {
+    test("lost starter builders refill through timed immigration without a second item grant") {
         val started = CivsRules.found(uuid(10), owner, "Settlement", uuid(30), CivPosition(0, 64, 0),
             100, "medieval", building(1, BuildingType.TOWN_HALL, 0), 1_000)
         val resident = CivsRules.immigrate(started, owner, uuid(100), "Pioneer", 31_000)
         val lost = CivsRules.hurtResident(resident, owner, uuid(100), 20.0)
-        val replacement = CivsRules.recruitFunded(lost, owner, uuid(101), "Replacement")
+        rejects("population-natural") { CivsRules.recruitFunded(lost, owner, uuid(101), "Replacement") }
+        val replacement = CivsRules.immigrate(lost, owner, uuid(101), "Replacement", 91_000)
         replacement.workers.size shouldBe 1
-        replacement.immigration shouldBe resident.immigration
-        replacement.inventory shouldBe lost.inventory // Caller supplies the existing12-bread receipt.
+        replacement.immigration shouldBe CivImmigration(4, 151_000)
+        replacement.inventory shouldBe lost.inventory
     }
 
     test("personal supplies enforce slot limits and only carried bread heals") {
@@ -208,8 +209,10 @@ class CivsRulesTest : FunSpec({
         val warehouse = building(2, BuildingType.WAREHOUSE, x = 10)
         val order = orderFor(warehouse)
         rejects("not-authorized") { CivsRules.reserveBuild(city, outsider, warehouse, order) }
-        val reserved = CivsRules.reserveBuild(invited, member, warehouse, order)
+        val named = invited.copy(memberNames = mapOf(owner.toString() to "GrocerMC", member.toString() to "Member"))
+        val reserved = CivsRules.reserveBuild(named, member, warehouse, order)
         val removed = CivsRules.removeMember(reserved, owner, member)
+        removed.memberNames shouldBe mapOf(owner.toString() to "GrocerMC")
         rejects("not-authorized") { CivsRules.deliver(removed, member, removed.workers.first().id, hallId, 0, removed.workers.first().nextDeliveryAt, 50_000) }
         rejects("not-authorized") { CivsRules.pauseConstruction(removed, member, order.id, "blocked") }
         rejects("not-authorized") { CivsRules.beginPlacement(removed, member, order.id) }
@@ -230,18 +233,17 @@ class CivsRulesTest : FunSpec({
         city = CivsRules.assign(city, owner, uuid(101), uuid(3), 1_000)
         city = CivsRules.assign(city, owner, uuid(102), uuid(4), 1_000)
         city = CivsRules.assign(city, owner, uuid(103), uuid(5), 1_000)
-        rejects("population-full") { CivsRules.recruit(city, owner, uuid(104), "Fifth") }
+        rejects("population-natural") { CivsRules.recruit(city, owner, uuid(104), "Fifth") }
         city = fund(city, CivsRules.cost(BuildingType.TOWN_HALL, 2))
         city = construct(city, city.building(hallId)!!.copy(level = 2, schematicId = "hall-2"))
         CivsRules.populationLimit(city) shouldBe 8
-        rejects("no-beds") { CivsRules.recruit(city, owner, uuid(104), "Fifth") }
+        CivsRules.beds(city) shouldBe 5
         val house = building(6, BuildingType.HOUSE, x = 50)
         city = fund(city, CivsRules.cost(house.type, 1))
         city = construct(city, house)
-        city = fund(city, Stock(food = 12))
-        val beforeRecruit = city.stock
-        city = CivsRules.recruit(city, owner, uuid(104), "Fifth")
-        city.stock shouldBe beforeRecruit.copy(food = beforeRecruit.food - 12)
+        val beforeArrival = city.stock
+        city = CivsRules.immigrate(city, owner, uuid(104), "Fifth", 1_000_000)
+        city.stock shouldBe beforeArrival
         city = fund(city, CivsRules.cost(BuildingType.TOWN_HALL, 3))
         city = construct(city, city.building(hallId)!!.copy(level = 3, schematicId = "hall-3"))
         CivsRules.populationLimit(city) shouldBe 12
@@ -258,17 +260,26 @@ class CivsRulesTest : FunSpec({
             }
         }
         CivsRules.capacity(city) shouldBe 1152L
-        CivsRules.beds(city) shouldBe 10
+        CivsRules.beds(city) shouldBe 11
         CivsRules.slots(city.building(uuid(3))!!) shouldBe 3
         CivsRules.deliveryAmount(city.building(uuid(3))!!) shouldBe 12L
         CivsRules.deliveryAmount(city.building(uuid(4))!!) shouldBe 9L
         CivsRules.deliveryAmount(city.building(uuid(5))!!) shouldBe 9L
         val secondHouse = building(7, BuildingType.HOUSE, x = 60)
         city = construct(fund(city, CivsRules.cost(secondHouse.type, 1)), secondHouse)
-        CivsRules.beds(city) shouldBe 12
-        for (workerId in 105..111) city = CivsRules.recruit(fund(city, Stock(food = 12)), owner, uuid(workerId), "Resident $workerId")
+        CivsRules.beds(city) shouldBe 14
+        for (level in 2..3) {
+            val upgrade = city.building(secondHouse.id)!!.copy(level = level, schematicId = "house-$level")
+            city = construct(fund(city, CivsRules.cost(upgrade.type, level)), upgrade)
+        }
+        var nextResident = 105
+        repeat(80) {
+            city = CivsPopulation.advance(city, emptySet(), { _, id, _ -> "Resident ${id.leastSignificantBits}" },
+                { uuid(nextResident++) })
+        }
         city.workers.size shouldBe 12
-        rejects("population-full") { CivsRules.recruit(city, owner, uuid(112), "Thirteenth") }
+        CivsRules.immigrate(city, owner, uuid(112), "Thirteenth", 1_000_000) shouldBe city
+        rejects("population-natural") { CivsRules.recruit(city, owner, uuid(112), "Thirteenth") }
         city = CivsRules.assign(city, owner, uuid(104), uuid(3), 1_000)
         city = CivsRules.assign(city, owner, uuid(105), uuid(3), 1_000)
         rejects("workplace-full") { CivsRules.assign(city, owner, uuid(106), uuid(3), 1_000) }
@@ -411,8 +422,14 @@ class CivsRulesTest : FunSpec({
             city.copy(buildings = city.buildings.map { it.copy(level = 4) }),
             city.copy(buildings = city.buildings.map { it.copy(phase = BuildingPhase.CONSTRUCTING) }),
             city.copy(members = setOf(owner)),
+            city.copy(memberNames = mapOf(uuid(900).toString() to "Outsider")),
+            city.copy(memberNames = mapOf(owner.toString() to " ")),
+            city.copy(memberNames = mapOf(owner.toString() to "A".repeat(33))),
+            city.copy(memberNames = mapOf(owner.toString() to "Bad\nName")),
         )
         invalid.forEach { snapshot -> rejects("invalid-state") { CivsRules.validate(snapshot) } }
+        val named = city.copy(memberNames = mapOf(owner.toString() to "GrocerMC"))
+        CivsRules.validate(named) shouldBe named
         rejects("invalid-state") { CivsRules.validate(Gson().fromJson("{}", Settlement::class.java)) }
         val nullWorkers = Gson().toJsonTree(city).asJsonObject.apply { add("workers", JsonNull.INSTANCE) }
         rejects("invalid-state") { CivsRules.validate(Gson().fromJson(nullWorkers, Settlement::class.java)) }

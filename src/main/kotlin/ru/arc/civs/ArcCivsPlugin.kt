@@ -103,7 +103,10 @@ open class ArcCivsPlugin : JavaPlugin() {
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
             val service = lifecycle.own(CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
+                offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
+                    val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors))
+                    citizens.residentStepAllowed = collisions::canResidentMove
                     val labels = CivsHolograms(this, lifecycle.tasks, text, citizens::hologramSnapshots, queue, citizens::workplaceSnapshots)
                     lifecycle.own(AutoCloseable {
                         labels.close()

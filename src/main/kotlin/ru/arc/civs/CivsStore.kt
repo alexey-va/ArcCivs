@@ -407,7 +407,8 @@ class CivsStore(
 
     private fun snapshotCity(city: Settlement): Settlement = city.copy(
         buildings = city.buildings.toList(), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
-            inventory = it.inventory?.toMap(), items = it.items?.toList()) }, members = city.members.toSet(),
+            inventory = it.inventory?.toMap(), items = it.items?.toList(), parentIds = it.parentIds?.toSet()) }, members = city.members.toSet(),
+        memberNames = city.memberNames?.toMap(), families = city.families?.toList(),
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),

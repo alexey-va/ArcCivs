@@ -6,6 +6,7 @@ enum class Resource { WOOD, STONE, FOOD }
 enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }
+enum class CivSex { MALE, FEMALE }
 
 data class Stock(val wood: Long = 0, val stone: Long = 0, val food: Long = 0) {
     operator fun get(resource: Resource): Long = when (resource) {
@@ -57,7 +58,18 @@ data class CivWorker(
     val cargo: CivCargo? = null,
     /** Six equipment slots followed by 27 bag slots; null migrates the old plain personal store. */
     val items: List<CivResidentItem?>? = null,
+    /** Nullable additions keep old snapshots readable; migration never changes an existing name or skin. */
+    val sex: CivSex? = null,
+    val homeId: UUID? = null,
+    val parentIds: Set<UUID>? = null,
+    /** Null means adult. Only active city minutes advance a child's age from zero to adulthood. */
+    val childMinutes: Int? = null,
+    /** Twenty is fully fed. Legacy null is fully fed, without granting food items. */
+    val hunger: Int? = null,
 )
+
+/** A stable pair occupies one house. Progress records active minutes, never wall-clock catch-up. */
+data class CivFamily(val firstParentId: UUID, val secondParentId: UUID, val homeId: UUID, val activeMinutes: Int)
 
 /** Captured placement bytes live under this order's UUID, independently of mutable source files. */
 data class CivConstruction(
@@ -86,7 +98,7 @@ data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: 
 data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, val before: String,
     val approach: List<CivPlanBlock>? = null)
 
-/** A durable remaining grant. Null in legacy snapshots means the pioneers already arrived. */
+/** Next recurring immigration admission; remaining is the current shortfall below five residents. */
 data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
 
 /** Null buildingId retires the whole city. Native control cleanup follows this durable intent. */
@@ -114,6 +126,8 @@ data class Settlement(
     val pendingDeletion: CivDeletion? = null,
     /** Next shaft/tunnel operation per mine; actual terrain and drops remain in the item journal. */
     val mineProgress: Map<String, Long>? = null,
+    val families: List<CivFamily>? = null,
+    val memberNames: Map<String, String>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

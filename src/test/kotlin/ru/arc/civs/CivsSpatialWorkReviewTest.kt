@@ -41,6 +41,79 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    test("dark oak forester requests four saplings and forgets that request when production changes") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("sapling-request", Material.DIRT).also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("ForestRequest")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val forest = spatialBuilding("nordic", "lumberjack", 1, CivPosition(0, 63, 0)).copy(production = "DARK_OAK_LOG")
+                val worker = spatialWorker(forest, "IRON_AXE")
+                val city = spatialCity(world.uid, listOf(forest), worker)
+                for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe null
+                    runtime.requirement(city, worker) shouldBe ("DARK_OAK_SAPLING" to 4L)
+                    runtime.idleReason(city, worker) shouldBe "waiting-saplings"
+                    val changed = city.copy(buildings = city.buildings.map { if (it.id == forest.id) it.copy(production = "OAK_LOG") else it })
+                    runtime.requirement(changed, worker) shouldBe null
+                    runtime.pulse(listOf(changed))
+                    runtime.requirement(changed, worker) shouldBe ("OAK_SAPLING" to 1L)
+                }
+                tasks.close()
+            }
+        }
+    }
+
+    test("miner excavates native stone before requesting its next ladder and never waits for crop growth") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-bootstrap").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineBootstrap")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
+                val facing = layout["ladderFacing"].asString
+                for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                    Bukkit.createBlockData("minecraft:ladder[facing=$facing,waterlogged=false]")
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                val stock = mutableMapOf<String, Long>()
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false })
+                    runtime.pulse(listOf(city))
+                    val first = requireNotNull(runtime.plan(city, city.workers.single()))
+                    first.inputs shouldBe emptyMap()
+                    first.changes.single().after shouldBe "minecraft:air"
+                    first.status shouldBe "digging-mine"
+                    first.outputs["COBBLESTONE"] shouldBe 1L
+                    first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                        .setBlockData(Bukkit.createBlockData(cell.after), false) }
+                    val worker = city.workers.single()
+                    city = city.copy(workers = listOf(worker.copy(completedCycles = 1, items = first.equipmentAfter)),
+                        mineProgress = mapOf(mine.id.toString() to requireNotNull(first.miningStep)))
+                    runtime.invalidate(worker.id)
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, city.workers.single()) shouldBe null
+                    runtime.idleReason(city, city.workers.single()) shouldBe "waiting-ladder"
+                    runtime.requirement(city, city.workers.single()) shouldBe ("LADDER" to 1L)
+                    val moved = city.workers.single().copy(assignment = city.buildings.last().id)
+                    runtime.requirement(city, moved) shouldBe null
+                    val changed = city.copy(buildings = city.buildings.map { if (it.id == mine.id) it.copy(production = "STONE") else it })
+                    runtime.requirement(changed, city.workers.single()) shouldBe null
+                    runtime.requirement(city, city.workers.single().copy(completedCycles = 2)) shouldBe null
+                    stock["LADDER"] = 1
+                    runtime.pulse(listOf(city))
+                    requireNotNull(runtime.plan(city, city.workers.single())).inputs shouldBe mapOf("LADDER" to 1L)
+                }
+                tasks.close()
+            }
+        }
+    }
+
     test("the actual quarry metadata keeps its below-foundation work route inside its own allowed footprint") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) {
             val mine = spatialBuilding(style, "miner", 3, CivPosition(0, 63, 0))
