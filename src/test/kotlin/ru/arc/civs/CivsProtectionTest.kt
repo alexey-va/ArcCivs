@@ -41,6 +41,27 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("owner attributed terrain wear may enter buildings but respects strangers and receipt locks") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("interior-trails")
+            val owner = paper.addPlayer("Owner")
+            val stranger = paper.addPlayer("Stranger")
+            val city = protectionCity(world.uid, owner.uniqueId, protectionBuilding(0, 2))
+            val soil = world.getBlockAt(1, 64, 1).also { it.type = Material.DIRT }
+            var locked = false
+            val listener = CivsProtection({ listOf(city) }, worldLocked = { _, _ -> locked })
+            fun wear(actor: Player): Boolean {
+                val event = org.bukkit.event.entity.EntityChangeBlockEvent(actor, soil, Material.DIRT_PATH.createBlockData())
+                listener.entityChange(event)
+                return event.isCancelled
+            }
+            wear(owner) shouldBe false
+            wear(stranger) shouldBe true
+            locked = true
+            wear(owner) shouldBe true
+        }
+    }
+
     test("hopper and member inventory checks retain a protected right half without snapshots or duplicate endpoints") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("right-half-protection")

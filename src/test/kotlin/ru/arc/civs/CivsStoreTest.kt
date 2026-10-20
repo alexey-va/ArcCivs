@@ -39,6 +39,27 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe false
     }
 
+    "legacy bread farms reload without rewriting history and select crop harvesting" {
+        val base = settlement()
+        val hall = base.buildings.single()
+        val farm = hall.copy(id = UUID.randomUUID(), type = BuildingType.FARM, production = "BREAD",
+            anchor = CivPosition(8, 64, 0), bounds = CivBox(CivPosition(6, 60, -2), CivPosition(10, 68, 2)),
+            entrance = CivPosition(8, 64, -3), control = CivPosition(8, 64, 0), phase = BuildingPhase.ACTIVE)
+        val city = base.copy(buildings = listOf(hall, farm))
+        val store = CivsStore(root, directExecutor)
+        store.save(city).join()
+        val restored = CivsStore(root, directExecutor).load().join().single().buildings.last()
+        restored.production shouldBe "BREAD"
+        CivsProduction.options(BuildingType.FARM) shouldBe listOf("WHEAT", "CARROT", "POTATO")
+        CivsProduction.material(restored) shouldBe "WHEAT"
+        CivsProduction.inputs(restored) shouldBe emptyMap()
+        val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
+            city.copy(revision = city.revision + 1), listOf(CivInventorySlotChange(requireNotNull(farm.control),
+                "BARREL", 0, CivPlainItem("WHEAT", 3), CivPlainItem("BREAD", 1))))
+        store.saveInventoryTransaction(receipt).join()
+        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(receipt)
+    }
+
     "queue session credit and deletion intent roundtrip through the existing city journal without aliasing" {
         val base = settlement()
         val hall = base.buildings.single().copy(phase = BuildingPhase.CONSTRUCTING)

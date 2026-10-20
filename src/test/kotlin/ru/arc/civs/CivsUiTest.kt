@@ -504,15 +504,14 @@ class CivsUiTest : FunSpec({
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
             val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
-            offers.size shouldBe 8
-            h.screen.columns shouldBe 1
-            offers.map { it.label.color() }.distinct().size shouldBe 8
+            offers.size shouldBe 10
+            h.screen.columns shouldBe 2
+            offers.map { it.label.color() }.distinct().size shouldBe 10
+            h.screen.buttons.map { it.id.value } shouldNotContain "next"
             export("workshops-catalog-first-ru")
-            h.click("next")
-            h.screen.buttons.filter { it.id.value.startsWith("offer_") }.map { plainText(it.label) } shouldBe
+            offers.takeLast(2).map { plainText(it.label) } shouldBe
                 listOf("Каменотёсная ›", "Библиотека ›")
-            export("workshops-catalog-ru")
-            h.click("previous"); h.click("offer_7")
+            h.click("offer_7")
             h.body() shouldContain "1 → 2 → 3"
             h.body() shouldContain "желез"
             export("workshops-smith-offer-ru")
@@ -1514,26 +1513,25 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("building list presents eight distinct colored rows before pagination") {
+    test("building list presents eight rows in two columns with distinct building colors") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
-            h.city = base.copy(buildings = BuildingType.entries.mapIndexed { index, type ->
+            h.city = base.copy(buildings = (BuildingType.entries + List(5) { BuildingType.HOUSE }).mapIndexed { index, type ->
                 base.buildings.first().copy(id = UUID(0, index.toLong()), type = type)
             })
             h.open(); h.click("buildings")
             val buildings = h.screen.buttons.filter { it.id.value.startsWith("building_") }
-            buildings.size shouldBe 8
-            h.screen.columns shouldBe 1
-            buildings.map { it.label.color() }.distinct().size shouldBe 8
+            buildings.size shouldBe 16
+            h.screen.columns shouldBe 2
+            buildings.map { it.label.color() }.distinct().size shouldBe 11
+            h.screen.buttons.map { it.id.value } shouldNotContain "next"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-rows-ru", h.screen, listOf(588, 380)) }
-            h.click("next")
-            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 3
             val target = h.city!!.buildings.last()
             h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), target.id, 3,
                 500, 40, ConstructionPhase.CONSTRUCTING, Stock()))
             h.open(); h.click("buildings")
-            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 8
+            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 16
             h.screen.buttons.map { it.id.value }.contains("queue") shouldBe true
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-active-ru", h.screen, listOf(588, 380)) }
         }

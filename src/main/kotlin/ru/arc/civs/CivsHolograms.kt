@@ -165,7 +165,7 @@ class CivsHolograms internal constructor(
     }
 }
 
-internal const val CIVS_NPC_TEXT_SCALE = 0.70f
+internal const val CIVS_NPC_TEXT_SCALE = 0.55f
 internal const val CIVS_NPC_TEXT_WIDTH = 220
 internal const val CIVS_NPC_TEXT_GAP = .20
 internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP

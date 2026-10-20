@@ -256,6 +256,12 @@ def render_cart_states(args, client, core, stack, labels, projection):
             cameras += [("front", feet + (0, 1.62, 5.0), feet + (0, 1.2, .5), (0, 1, 0), 60),
                         ("side", feet + (5, 1.62, .7), feet + (0, .8, .7), (0, 1, 0), 60),
                         ("plan", feet + (0, 6, .7), feet + (0, 0, .7), (0, 0, -1), 50)]
+        if parcel and state["id"] == "food-load":
+            angle = math.radians(-state["yaw"])
+            x, z = 2.5, -3.5
+            cameras.append(("cargo", feet + (x * math.cos(angle) + z * math.sin(angle), 1.62,
+                                             -x * math.sin(angle) + z * math.cos(angle)),
+                            feet + (0, 1.15, 0), (0, 1, 0), 60))
         for name, eye, target, up, fov in cameras:
             view = projection.View(eye, target, width=1280, height=720, fov=fov, up=up)
             for x in range(-12, 15):
@@ -269,7 +275,8 @@ def render_cart_states(args, client, core, stack, labels, projection):
                     points = transformed(face, actor, feet, 0)
                     view.quad(points, np.asarray(skin.crop(parcel_skin_uvs[part][index] if parcel else uv)), shade(points))
             if parcel and state.get("parcel"):
-                textures = [vanilla("block/barrel_" + name) for name in ("top", "bottom", "side", "side", "side", "side")]
+                textures = [vanilla("block/barrel_" + name) for name in
+                            ("top_open" if data.get("open") else "top", "bottom", "side", "side", "side", "side")]
                 for face, texture in zip(cube_faces((0, 0, 0), (1, 1, 1)), textures):
                     points = transformed(face, state["parcel"], feet, state["nativeHeight"])
                     # cube_faces has inward winding; draw only the exterior face seen by this camera.
@@ -280,7 +287,47 @@ def render_cart_states(args, client, core, stack, labels, projection):
                 points = transformed(face["positions_item_display_base"], state["cart"], feet, state["nativeHeight"])
                 uv = [(u, 1 - v) for u, v in face["uv_normalized"]]
                 view.quad(points, model_texture(face["texture"]), shade(points), uv=uv)
-            for piece in state["cargo"] if not parcel else []:
+            for piece in state.get("cargo", []):
+                if parcel:
+                    if piece["itemDisplayTransform"] != "NONE" or state["actualCargo"].get(piece["material"], 0) != piece["amount"]:
+                        raise ValueError("Parcel samples must use the exported NONE transform and actual carried material")
+
+                    def cargo_face(vertices, texture, normal_sign=1):
+                        # NONE has no item-context transform; native ItemDisplay adds Y180 before T*L*S*R.
+                        vertices = np.asarray(vertices) * (-1, 1, -1)
+                        points = transformed(vertices, piece["transform"], feet, state["nativeHeight"])
+                        normal = np.cross(points[1] - points[0], points[2] - points[0]) * normal_sign
+                        if normal @ (view.eye - points.mean(axis=0)) > 0:
+                            view.quad(points, texture, shade(points))
+                            return 1
+                        return 0
+
+                    if piece["block"]:
+                        if piece["material"] != "COBBLESTONE":
+                            raise ValueError("The parcel fixture renderer supports the verified cobblestone cube only")
+                        for face in cube_faces((-.5, -.5, -.5), (1, 1, 1)):
+                            cargo_face(face, vanilla("block/cobblestone"), normal_sign=-1)
+                    else:
+                        if piece["material"] not in {"BREAD", "WHEAT_SEEDS"}:
+                            raise ValueError("The parcel fixture renderer supports verified generated bread/seeds only")
+                        texture = vanilla("item/" + piece["material"].lower())
+                        broad_faces = sum(cargo_face([(-.5, .5, z), (.5, .5, z), (.5, -.5, z), (-.5, -.5, z)],
+                                                    texture, normal_sign=1 if z < 0 else -1)
+                                          for z in (-1 / 32, 1 / 32))
+                        assert broad_faces <= 1, "Opposite item faces must not duplicate a single cargo sample"
+                        height, width = texture.shape[:2]
+                        opaque = texture[..., 3] > 0
+                        for y, x in np.argwhere(opaque):
+                            a, b = x / width - .5, (x + 1) / width - .5
+                            c, d = .5 - y / height, .5 - (y + 1) / height
+                            edges = [((a, c), (b, c), y - 1, x), ((b, c), (b, d), y, x + 1),
+                                     ((b, d), (a, d), y + 1, x), ((a, d), (a, c), y, x - 1)]
+                            for start, end, ny, nx in edges:
+                                if 0 <= ny < height and 0 <= nx < width and opaque[ny, nx]:
+                                    continue
+                                cargo_face([(*start, 1 / 32), (*end, 1 / 32), (*end, -1 / 32), (*start, -1 / 32)],
+                                           texture[y:y + 1, x:x + 1])
+                    continue
                 if piece["block"]:
                     # Exported fixture uses cobblestone, whose six actual block faces share one texture.
                     texture = vanilla("block/" + piece["material"].lower())
@@ -319,7 +366,10 @@ def render_cart_states(args, client, core, stack, labels, projection):
         storyboard.paste(frame, (x, y + 32))
         pen.text((x + 12, y + 10), f"{state['timeMillis']} ms | {state['id']} | yaw {state['yaw']} deg", fill=(231, 214, 183))
     storyboard.save(args.out / ("parcel-motion-states.png" if parcel else "cart-motion-states.png"))
-    provenance = {"sourceSha256": data["sourceSha256"], "block": "minecraft:barrel[facing=up]", "maxParts": 1} if parcel else {
+    provenance = {"sourceSha256": data["sourceSha256"], "block": f"minecraft:barrel[facing=up,open={str(data.get('open', False)).lower()}]",
+                  "maxParts": data.get("maxParts", 1), "cargoContext": "NONE + native Y180; no custom-model data",
+                  "cargoStates": {state["id"]: [{"material": piece["material"], "amount": piece["amount"]}
+                                                for piece in state.get("cargo", [])] for state in data["states"]}} if parcel else {
         "modelGroundingSha256": digest(args.cart_grounding), "modelProvenance": model["model_provenance"], "modelFaces": len(model["render"]["faces"])}
     return {"fixture": fixture.name, "sha256": digest(fixture), **provenance, "views": outputs,
             "emptyStatusSamples": empty_statuses, "emptyStatusSource": "ru.workers.status in canonical locales.yml; sampled preview states"}

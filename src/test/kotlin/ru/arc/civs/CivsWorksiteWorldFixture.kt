@@ -35,7 +35,9 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
     override fun getBlockAt(point: Coordinate): BlockMock = cells.getOrPut(point) {
         object : BlockMock(if (point.y <= 63) ground else Material.AIR,
             Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
-            override fun isPassable(): Boolean = !type.isSolid
+            // CraftBlock uses an empty collision shape, not Material.isSolid(). A ladder
+            // is nonpassable even though a centered resident fits beside its thin shape.
+            override fun isPassable(): Boolean = collisionShape.boundingBoxes.isEmpty()
 
             override fun getCollisionShape(): VoxelShape {
                 val bounds = boundingBox
@@ -49,8 +51,13 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
             override fun getBoundingBox(): BoundingBox {
                 val height = when {
                     type == Material.FARMLAND -> 15.0 / 16.0
-                    type == Material.LADDER -> return BoundingBox(x.toDouble(), y.toDouble(), z + 0.875,
-                        x + 1.0, y + 1.0, z + 1.0)
+                    // Paper 1.21.11 LadderBlock: full height/width and 3/16 thickness.
+                    type == Material.LADDER -> return when (Regex("facing=([a-z]+)").find(blockData.asString)?.groupValues?.get(1)) {
+                        "south" -> BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 3.0 / 16.0)
+                        "west" -> BoundingBox(x + 13.0 / 16.0, y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
+                        "east" -> BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 3.0 / 16.0, y + 1.0, z + 1.0)
+                        else -> BoundingBox(x.toDouble(), y.toDouble(), z + 13.0 / 16.0, x + 1.0, y + 1.0, z + 1.0)
+                    }
                     type.isSolid -> 1.0
                     else -> 0.0
                 }

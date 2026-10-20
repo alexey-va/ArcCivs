@@ -4,7 +4,7 @@ import org.bukkit.entity.Player
 import ru.arc.logging.ArcLogging
 import ru.arc.observability.StructuredDebugLine
 
-/** Source-owned events only. No inventory, SQL credentials, raw packets or tick/frame traces. */
+/** Source-owned events and committed material counts; no item metadata, credentials, packets or frame traces. */
 internal object CivsDiagnostics {
     private val format = StructuredDebugLine("ARC_CIVS")
 

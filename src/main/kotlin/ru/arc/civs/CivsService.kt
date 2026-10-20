@@ -1012,7 +1012,12 @@ class CivsService(
                 }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
                     if (requireNotNull(supplied).result.moved == 0L) before
                     else before.copy(inventory = inventory, revision = before.revision + 1)
-                }.thenApply { Unit }
+                }.thenApply { saved ->
+                    CivsDiagnostics.event("building_supply_committed", "city" to saved.id, "building" to buildingId,
+                        "player" to player.uniqueId, "material" to material,
+                        "amount" to requireNotNull(supplied).result.moved, "revision" to saved.revision)
+                    Unit
+                }
             }
         }
 
@@ -1090,7 +1095,17 @@ class CivsService(
                     storage.prepareWork(current, assignment, work.storageInputs(currentWorker), work.outputs, work.changes)
                 }, keepViewersOpen = true) { before, inventory ->
                     CivsRules.finishWorldWork(before, work, at).copy(inventory = inventory)
-                }.whenCompleteSync(tasks) { _, _ ->
+                }.whenCompleteSync(tasks) { saved, failure ->
+                    if (failure == null && saved != null) {
+                        val completed = saved.workers.first { it.id == workerId }
+                        CivsDiagnostics.event("world_work_committed", "city" to cityId, "worker" to workerId,
+                            "building" to assignment, "cycle" to cycle, "revision" to saved.revision,
+                            "point" to work.focus, "blocks" to work.changes.size, "inputs" to work.inputs,
+                            "carried_before" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(worker, material) },
+                            "carried_after" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(completed, material) },
+                            "storage_inputs" to work.storageInputs(worker), "outputs" to work.outputs,
+                            "mining_step" to work.miningStep)
+                    }
                     worksites.invalidate(workerId)
                 }.toCompletableFuture()
             } else {
@@ -1136,6 +1151,11 @@ class CivsService(
                 citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
                 inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.pickup(before, workerId, cargo).copy(inventory = inventory)
+                }.thenApply { saved ->
+                    CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,
+                        "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
+                        "source" to cargo.sourceBuildingId, "revision" to saved.revision)
+                    saved
                 }
             }
         }
@@ -1149,8 +1169,13 @@ class CivsService(
                 citizens.requireStorageArrival(cityId, workerId, destinationId)
                 inventoryMutation(cityId, { storage.prepareCargoDropoff(it, cargo, destinationId) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.unload(before, workerId, cargo.id, now()).copy(inventory = inventory)
-                }.whenComplete { _, failure ->
-                    if (failure == null) nextMaterialCheckAt = 0L
+                }.whenComplete { saved, failure ->
+                    if (failure == null) {
+                        nextMaterialCheckAt = 0L
+                        CivsDiagnostics.event("cargo_dropoff_committed", "city" to cityId, "worker" to workerId,
+                            "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
+                            "destination" to destinationId, "revision" to saved.revision)
+                    }
                 }
             }
         }
@@ -1253,6 +1278,18 @@ class CivsService(
                 storage.unlock(tx.id)
                 physics.enqueue(tx.after.worldId, tx.worldChanges.orEmpty())
                 CivsDiagnostics.event("inventory_committed", "city" to tx.cityId, "transaction" to tx.id, "revision" to tx.after.revision)
+                tx.residentTransfer?.let { transfer ->
+                    val before = transfer.before.filterNotNull().groupingBy { it.material }.fold(0) { total, item -> total + item.amount }
+                    val after = CivsEquipment.materials(tx.after.workers.first { it.id == transfer.workerId })
+                    for (material in (before.keys + after.keys).sorted()) {
+                        val previous = before[material]?.toLong() ?: 0L
+                        val current = after[material] ?: 0L
+                        if (previous != current) CivsDiagnostics.event("resident_transfer_committed",
+                            "city" to tx.cityId, "transaction" to tx.id, "worker" to transfer.workerId,
+                            "player" to transfer.playerId, "material" to material, "before" to previous,
+                            "after" to current, "delta" to current - previous)
+                    }
+                }
                 result?.complete(cities.getValue(tx.cityId))
             }
             updateHealth()

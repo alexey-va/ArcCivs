@@ -23,36 +23,43 @@ reads current items and updates only changed cells. Back opens the resident's
 card; Escape retains ordinary native inventory behavior. Feeding is an explicit
 action on the resident card.
 
-`CivsHolograms` receives the actual Citizens Player carrier plus current
-profession, status and health. Its packet TextDisplay is a native client
-passenger, within 16 blocks, at feet +2.15 and scale 0.70. Its local Y subtracts
-the carrier's native height. Core 2.7.45 captures Citizens carriers separately
-from online viewers; no second world-position follower or five-tick teleport
+`CivsHolograms` receives the actual packet player carrier plus current
+profession, status, health and hunger. Its packet TextDisplay is a native client
+passenger, within 64 blocks, at feet + native carrier height +0.20 and scale
+0.55. The local Y is +0.20 above the carrier's mount origin, including crouching,
+sleeping and child poses. No second world-position follower or five-tick teleport
 interpolation moves the label. Content updates remain dirty and bounded. The
 permanent profession uses warm gold, the separate action uses neutral gray,
 and health uses muted red. A missing tool names the required hoe, axe or pickaxe.
 
-The resident detail page derives a request from `CivsUiHost.toolRequest`.
-When eligible, its single action delegates `giveRequestedTool`; the service
-owns selection and the existing item receipt. Otherwise the request remains
-visible as noninteractive explanatory text. The native inventory is unchanged.
+The resident detail page derives a request from `CivsUiHost.workerRequest`.
+Its action delegates `giveWorkerRequest`; the service owns tool selection,
+partial supply batches and the existing item receipt. The action remains visible
+in red with a short hint when the player has nothing to give. The native inventory
+is unchanged.
 
-`CivsCourierCart` shares the same packet owner, so the label, cart and cargo
-merge into one passenger set. It uses the existing ItemsAdder
-`elitecreatures:medieval_market_decoration_v1_cart_2` in GROUND context at scale
-3, with its measured wheel correction +0.5625. The body is one block **ahead**
-of body yaw. Position follows the carrier; only changed heading/height updates
-the local pose. The cart persists while the snapshot requests it, including
-empty pickup and post-unload states. Up to three representative cargo pieces
-derive only from the current accepted cargo map, never the planned pickup.
-They sit on the measured 22.5-degree bed. These pieces represent a shipment;
-they are not one visible object per inventory item.
+`CivsCourierCart` shares the same packet owner, so the label, backpack and cargo
+merge into one passenger set. The backpack is one upward-facing open barrel
+BlockDisplay, 0.40 × 0.60 × 0.11 blocks against the back. Its horizontal corner
+radius remains below 0.298 throughout turns, inside the resident's 0.6-block
+width. Position follows the carrier; only changed heading/height updates the
+local pose. It exists only during a delivery with positive accepted cargo and
+disappears on empty pickup, after unloading and off duty.
 
-`CivsWorkplaceDecor` adds two small profession items outside the control barrel's
-side and below its upper face. Its snapshot contains building ID, world ID,
+At most two stable ItemDisplays show distinct positive materials from that
+accepted cargo map; the usual single-material shipment uses two total parts
+including the backpack. NONE context preserves the centered native model before
+the native ItemDisplay Y180 rotation. Block samples rest on the top; flat supplies
+are partly tucked into the mouth. Quantity changes do not multiply or respawn
+the sample. These are shipment samples, not a visualization of all personal
+tools or food, and they never grant or consume items.
+
+`CivsWorkplaceDecor` adds a seven-part work tray on top of the control barrel:
+wooden base, cloth lining, two side rails and three flat themed items.
+Its snapshot contains building ID, world ID,
 current canonical control, building type and rotation. Relocation replaces
 the old decoration. The packet items have no native entity or hitbox, so the
-barrel retains its normal interaction. Labels, carts and decorations use one
+barrel retains its normal interaction. Labels, backpacks and decorations use one
 renderer and the existing shutdown drain. Absent actors/buildings are removed.
 
 During placement or selection, `CivsBoundaryRenderer` also shows nearby saved
@@ -66,6 +73,8 @@ placement ends. The service triggers the same renderer on selection and preview
 transitions; the shared queue retains its normal per-tick work budget.
 
 The existing building control label stays owned by `CivsBoundaryRenderer`.
+Its scale is 0.60 and lower anchor is 1.40 blocks above the control block's
+bottom, leaving about 0.30 blocks above the tray's highest rail.
 `CivsText.buildingHologram` adds `blocksPlaced / blocksRequired` only when the
 actual nullable counters are present and valid. Legacy batch progress is never
 converted into a fabricated block count. Names remain literal components.
@@ -75,7 +84,7 @@ converted into a fabricated block count. Names remain literal components.
 Run the presenter, lifecycle and text fixtures, with an optional source export:
 
 ```sh
-CIVS_NATIVE_PREVIEW_OUT=/private/output ./gradlew test \
+CIVS_NATIVE_PREVIEW_OUT=/private/output CIVS_BOUNDARY_PREVIEW_OUT=/private/boundary ./gradlew :test \
   --tests ru.arc.civs.CivsEquipmentMenuTest \
   --tests ru.arc.civs.CivsHologramsTest \
   --tests ru.arc.civs.CivsCourierCartTest \
@@ -92,11 +101,14 @@ the command's named arguments. `--only equipment-equipped` renders a first
 representative inventory before the remaining states. The renderer records
 source, export and asset hashes with its limitations.
 
-For the cart, pass `--cart-grounding` with the measured export of that exact
-model. The renderer verifies the current model's source hashes and renders all
-authored textured faces using the compiled local transforms. The compact review
-set includes empty/loading/walking/45-degree and 90-degree turns/unloaded states,
-front/side/plan views, and farmer/miner barrel props at player eye height.
+For the backpack, include `courier-parcel.json`; no ItemsAdder model or grounding
+argument is needed. The renderer checks the compiled source hash and applies the
+exported local transforms, native Y180, backface culling and generated-item edge
+thickness. Its bounded cargo fixtures use the verified cobblestone cube and
+generated bread/seeds; unsupported sample models fail explicitly. `--cart-grounding`
+is retained only for historical cart comparisons. The compact review set includes
+empty/loading/walking/45-degree and 90-degree turns/unloaded states, real-material
+and mixed-cargo samples, front/side/plan views, and barrel props at player eye height.
 Timestamps identify sampled states; they do not claim observed client playback.
 The selection and overlap comparison renders the compiled neighbour marks.
 Low stone masses locate saved bounds, and a translucent orange area annotates

@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.33"
+version = "0.1.34"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.19"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -44,7 +44,7 @@ dependencies {
 }
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
-    maxHeapSize = "1g"
+    maxHeapSize = "2g"
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
     maxParallelForks = 1
 }

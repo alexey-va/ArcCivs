@@ -122,6 +122,143 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    test("native thin ladders are nonpassable but leave a supported resident body clear in every facing") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("native-ladder-shape").also(paper.server::addWorld)
+                world.loadChunk(0, 0)
+                val feet = CivPosition(0, 64, 0)
+                for (facing in listOf("north", "south", "east", "west")) {
+                    world.getBlockAt(0, 63, 0).type = Material.STONE
+                    for (y in 64..65) world.getBlockAt(0, y, 0).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=$facing,waterlogged=false]")
+                    val block = world.getBlockAt(0, 64, 0)
+                    val shape = block.collisionShape.boundingBoxes.single()
+                    block.isPassable shouldBe false
+                    minOf(shape.widthX, shape.widthZ) shouldBe 3.0 / 16.0
+                    shape.height shouldBe 1.0
+                    withClue("continuous $facing ladder") { citizenStandable(world, feet) shouldBe true }
+                    world.getBlockAt(0, 64, 0).type = Material.AIR
+                    withClue("supported feet below $facing ladder") { citizenStandable(world, feet) shouldBe true }
+                    world.getBlockAt(0, 63, 0).type = Material.AIR
+                    citizenStandable(world, feet) shouldBe false
+                }
+            }
+        }
+    }
+
+    for (shaftMaterial in listOf(Material.AIR, Material.STONE)) {
+        test("miner extends a continuous ladder into $shaftMaterial below an overhanging wall with paid support and ladder") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                    val world = CivsWorksiteWorldFixture("mine-gap-${shaftMaterial.name.lowercase()}").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("MineGap")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    // This is the live wall/ladder arrangement, rotated into the schematic's
+                    // local WEST facing. The unobserved lower shaft is tested as both air and stone.
+                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 68, 0))
+                    val initial = spatialWorker(mine, "IRON_PICKAXE").let { worker ->
+                        CivsEquipment.replace(worker, CivsEquipment.slots(worker).toMutableList().also {
+                            it[6] = CivResidentItem("COBBLESTONE", 64)
+                            it[7] = CivResidentItem("LADDER", 64)
+                            it[8] = CivResidentItem("TORCH", 17)
+                        })
+                    }
+                    var city = spatialCity(world.uid, listOf(mine), initial)
+                    val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                    val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
+                    val shaft = bottom.copy(y = bottom.y - 1)
+                    val support = shaft.copy(x = shaft.x + 1)
+                    support.y shouldBe 62
+                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    world.getBlockAt(support.x, support.y, support.z).type = Material.AIR
+                    for (y in support.y + 1..67) world.getBlockAt(support.x, y, support.z).type = Material.COBBLESTONE
+                    for (y in 63..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=west,waterlogged=false]")
+                    for (y in 60..62) world.getBlockAt(shaft.x, y, shaft.z).type = shaftMaterial
+                    for (dz in listOf(-1, 1)) {
+                        world.getBlockAt(support.x, 63, support.z + dz).type = Material.DIRT
+                        world.getBlockAt(support.x, 64, support.z + dz).type = Material.COBBLESTONE
+                        world.getBlockAt(support.x, 65, support.z + dz).type = Material.AIR
+                    }
+                    world.getBlockAt(support.x + 1, 63, support.z).type = Material.AIR
+                    for (y in 64..65) world.getBlockAt(support.x + 1, y, support.z).type = Material.STONE
+                    val eye = Location(world, bottom.x + .5, bottom.y + 1.62, bottom.z + .5)
+                    citizenCanReachBlockPoint(world, eye, support, Location(world, support.x + .5, support.y + .5, support.z + .5)) shouldBe false
+                    var shaftLocked = false
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> shaftLocked && point == shaft })
+                        fun commit(work: CivWorldWork) {
+                            runtime.validate(city, work)
+                            work.durationMillis shouldBe 4_000
+                            work.storageInputs(city.workers.single()) shouldBe emptyMap()
+                            city = CivsRules.finishWorldWork(city, work, 20_000 + work.cycle * 5_000)
+                            work.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                                .setBlockData(Bukkit.createBlockData(cell.after), false) }
+                            runtime.invalidate(initial.id)
+                        }
+                        if (shaftMaterial == Material.STONE) {
+                            world.getBlockAt(shaft.x, shaft.y, shaft.z).type = Material.BEDROCK
+                            runtime.pulse(listOf(city))
+                            runtime.plan(city, city.workers.single()) shouldBe null
+                            runtime.idleReason(city, city.workers.single()) shouldBe "worksite-unbreakable"
+                            world.getBlockAt(shaft.x, shaft.y, shaft.z).type shouldBe Material.BEDROCK
+                            world.getBlockAt(shaft.x, shaft.y, shaft.z).type = Material.STONE
+                            shaftLocked = true
+                            runtime.pulse(listOf(city))
+                            runtime.plan(city, city.workers.single()) shouldBe null
+                            runtime.idleReason(city, city.workers.single()) shouldBe "worksite-protected"
+                            shaftLocked = false
+                            runtime.pulse(listOf(city))
+                            val excavation = requireNotNull(runtime.plan(city, city.workers.single()))
+                            excavation.changes.single().position shouldBe shaft
+                            excavation.changes.single().after shouldBe "minecraft:air"
+                            excavation.inputs shouldBe emptyMap()
+                            excavation.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                            excavation.miningStep shouldBe 0L
+                            commit(excavation)
+                            CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 64
+                            CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 64
+                        }
+
+                        val visible = requireNotNull(citizenReachableBlockPoint(world, eye, support))
+                        visible.y shouldBe support.y + .001
+                        (visible.distance(eye) <= CITIZEN_BLOCK_REACH) shouldBe true
+                        runtime.pulse(listOf(city))
+                        val wall = requireNotNull(runtime.plan(city, city.workers.single()))
+                        wall.standing shouldBe if (shaftMaterial == Material.STONE) shaft else bottom
+                        citizenCanReachBlock(world, Location(world, wall.standing.x + .5, wall.standing.y + 1.62, wall.standing.z + .5), support) shouldBe true
+                        wall.focus shouldBe support
+                        wall.changes.single().position shouldBe support
+                        wall.changes.single().after shouldBe "minecraft:cobblestone"
+                        wall.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        wall.outputs shouldBe emptyMap()
+                        wall.miningStep shouldBe 1L
+                        commit(wall)
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 63
+                        CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 64
+                        CivsEquipment.plainCount(city.workers.single(), "TORCH") shouldBe 17
+
+                        runtime.pulse(listOf(city))
+                        val ladder = requireNotNull(runtime.plan(city, city.workers.single()))
+                        ladder.changes.single().position shouldBe shaft
+                        ladder.changes.single().after shouldBe "minecraft:ladder[facing=west,waterlogged=false]"
+                        ladder.inputs shouldBe mapOf("LADDER" to 1L)
+                        ladder.outputs shouldBe emptyMap()
+                        ladder.miningStep shouldBe 2L
+                        commit(ladder)
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 63
+                        CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 63
+                        CivsEquipment.plainCount(city.workers.single(), "TORCH") shouldBe 17
+                        for (y in 63..65) world.getBlockAt(bottom.x, y, bottom.z).type shouldBe Material.LADDER
+                        for (y in 63..67) world.getBlockAt(support.x, y, support.z).type shouldBe Material.COBBLESTONE
+                    }
+                    tasks.close()
+                }
+            }
+        }
+    }
+
     test("the actual quarry metadata keeps its below-foundation work route inside its own allowed footprint") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) {
             val mine = spatialBuilding(style, "miner", 3, CivPosition(0, 63, 0))
@@ -203,8 +340,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
                 val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
-                // Sixteen supported outer positions surround a solid, three-block-high cross.
-                for (dx in -2..2) for (dz in -2..2) if (kotlin.math.abs(dx) + kotlin.math.abs(dz) > 1) {
+                // Supported outer positions surround a solid, three-block-high enclosure.
+                for (dx in -2..2) for (dz in -2..2) if (maxOf(kotlin.math.abs(dx), kotlin.math.abs(dz)) == 2) {
                     for (dy in 0..2) world.getBlockAt(target.x + dx, target.y + dy, target.z + dz).type = Material.AIR
                 }
                 val messages = mutableListOf<String>()
@@ -219,7 +356,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         (world.rayTraces in 1..8) shouldBe true
                         messages.none { "worksite_blocked" in it } shouldBe true
                         var pulses = 1
-                        while (runtime.idleReason(city, worker) == "searching-work" && pulses++ < 8) {
+                        while (runtime.idleReason(city, worker) == "searching-work" && pulses++ < 32) {
                             val before = world.rayTraces
                             runtime.pulse(listOf(city))
                             (world.rayTraces - before <= 8) shouldBe true

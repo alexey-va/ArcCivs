@@ -37,7 +37,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val reason: String? = null, val blockMaterial: String? = null)
     private val needs = hashMapOf<UUID, Need>()
     private data class WorkSpotSearch(val buildingId: UUID, val target: CivPosition, val allowOwn: Boolean,
-        val ladder: Boolean, var next: Int = 0, var sawStanding: Boolean = false)
+        val ladder: Boolean, var next: Int = 0, var nextAim: Int = 0, var sawStanding: Boolean = false)
     private val workSpots = hashMapOf<UUID, WorkSpotSearch>()
     private data class ReportedNeed(val need: Need, val tick: Int)
     private val reportedNeeds = hashMapOf<UUID, ReportedNeed>()
@@ -176,10 +176,6 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (!tool(worker).type.name.endsWith("_HOE")) return null
         val selected = CivsProduction.material(building)
         val available by lazy { CivsEquipment.available(worker, stock(city, building.id)) }
-        if (selected == "BREAD" && (available["WHEAT"] ?: 0) >= 3) {
-            val standing = citizenStorageTarget(city, building, world) ?: return null
-            return work(worker, building, standing, emptyList(), mapOf("WHEAT" to 3), mapOf("BREAD" to 1), "working-field")
-        }
         val (crop, seed) = when (selected) {
             "CARROT" -> Material.CARROTS to "CARROT"
             "POTATO" -> Material.POTATOES to "POTATO"
@@ -380,6 +376,22 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 reason = "liquid", blockMaterial = block.type.name)
             if (block.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = point,
                 reason = "unbreakable", blockMaterial = block.type.name)
+            // An unfinished wall below the existing ladder is reached through the shaft.
+            // Clear only its corresponding shaft cell first, using the ordinary receipt;
+            // do not advance past the unpaid wall or remove an existing ladder's support.
+            if (shaftSupport) {
+                val shaftPoint = CivsWorksiteLayouts.point(building, CivPosition(bottom.x, local.y, bottom.z))
+                val shaft = read(city, building, world, shaftPoint, worker = worker) ?: return null
+                if (shaft.isLiquid) return blocked(worker, "worksite-liquid", point = shaftPoint,
+                    reason = "liquid", blockMaterial = shaft.type.name)
+                if (shaft.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = shaftPoint,
+                    reason = "unbreakable", blockMaterial = shaft.type.name)
+                if (!shaft.type.isAir && shaft.type != Material.LADDER) {
+                    val standing = beside(city, worker, building, world, shaftPoint, ladder = true) ?: return null
+                    return work(worker, building, standing, listOf(change(shaft, "minecraft:air")),
+                        outputs = drops(shaft, tool(worker)), status = "digging-mine", duration = 4_000, miningStep = next - 1)
+                }
+            }
             val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
             // Excavation happens before placing the next ladder, even if supplies have
             // not arrived yet. Keep the same durable step until its ladder is installed.
@@ -430,27 +442,33 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             blocked(worker, "searching-work")
             return null
         }
+        fun nextPosition() { search.next++; search.nextAim = 0 }
         while (search.next < offsets.size) {
             if (spotChecksRemaining == 0) return pending()
             spotChecksRemaining--
-            val offset = offsets[search.next++]
+            val offset = offsets[search.next]
             val coordinates = listOf(target.x.toLong() + offset.x, target.y.toLong() + offset.y, target.z.toLong() + offset.z)
-            if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) continue
+            if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) { nextPosition(); continue }
             val p = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
             if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
                 civsProtectedBuildings(city).any { (!allowOwn || it.id != building.id) &&
                     (p.x in it.bounds.min.x..it.bounds.max.x && p.z in it.bounds.min.z..it.bounds.max.z ||
-                        CivsWorksiteLayouts.isField(it, p.x, p.z)) }) continue
-            if (!citizenStandable(world, p)) continue
-            if (offset.x == 0 && offset.z == 0 && world.getBlockAt(p.x, p.y, p.z).type != Material.LADDER) continue
-            if (!citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) continue
+                        CivsWorksiteLayouts.isField(it, p.x, p.z)) }) { nextPosition(); continue }
+            if (!citizenStandable(world, p)) { nextPosition(); continue }
+            if (offset.x == 0 && offset.z == 0 && world.getBlockAt(p.x, p.y, p.z).type != Material.LADDER) { nextPosition(); continue }
+            if (!citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) { nextPosition(); continue }
             search.sawStanding = true
-            if (spotRaysRemaining == 0) { search.next--; return pending() }
-            spotRaysRemaining--
-            if (citizenCanReachBlock(world, Location(world, p.x + .5, p.y + 1.62, p.z + .5), target)) {
-                workSpots.remove(worker.id)
-                return p
+            val eye = Location(world, p.x + .5, p.y + 1.62, p.z + .5)
+            val aims = citizenBlockAimPoints(eye, target)
+            while (search.nextAim < aims.size) {
+                if (spotRaysRemaining == 0) return pending()
+                spotRaysRemaining--
+                if (citizenCanReachBlockPoint(world, eye, target, aims[search.nextAim++])) {
+                    workSpots.remove(worker.id)
+                    return p
+                }
             }
+            nextPosition()
         }
         workSpots.remove(worker.id)
         blocked(worker, "worksite-no-access", point = target,

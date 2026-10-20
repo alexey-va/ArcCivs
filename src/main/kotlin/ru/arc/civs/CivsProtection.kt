@@ -219,7 +219,13 @@ class CivsProtection(
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun entityChange(event: EntityChangeBlockEvent) { if (protected(event.block)) event.isCancelled = true }
+    fun entityChange(event: EntityChangeBlockEvent) {
+        val block = event.block
+        val player = event.entity as? org.bukkit.entity.Player
+        // Trails attributes its transition to the real online owner/member, as a manual edit would.
+        val denied = if (player != null) protected(block, player.uniqueId) else protected(block)
+        if (denied || worldLocked(block.world.uid, CivPosition(block.x, block.y, block.z))) event.isCancelled = true
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun entityInteract(event: EntityInteractEvent) { if (protected(event.block)) event.isCancelled = true }

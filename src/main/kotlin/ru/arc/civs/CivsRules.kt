@@ -704,7 +704,10 @@ object CivsRules {
             city.contains(building.anchor.x, building.anchor.z) && city.contains(building.entrance.x, building.entrance.z) &&
             (building.phase != BuildingPhase.SITE || building.level == 1) &&
             (building.control?.let { city.contains(it.x, it.z) } != false) &&
-            (building.production?.let { it in CivsProduction.options(building.type) } != false)
+            // Old farms may still store BREAD; their effective selection is now wheat.
+            // Preserve the stored value and previously accepted receipts on reload.
+            (building.production?.let { it in CivsProduction.options(building.type) ||
+                building.type == BuildingType.FARM && it == "BREAD" } != false)
 
     private fun intersectsApproach(city: Settlement, building: CivBuilding): Boolean = city.pendingControls.orEmpty().any {
         it.buildingId != building.id && it.approach.orEmpty().any { cell ->

@@ -23,11 +23,14 @@ class CivsResidentWorkReachTest : FunSpec({
             val target = CivPosition(2, 64, 0)
             f.hit = f.hitAt(target)
             citizenCanReachBlock(f.npc, target) shouldBe true
+            f.rays shouldBe 1 // The normal centre ray remains the fast path.
             f.hit = f.hitAt(CivPosition(1, 65, 0))
             citizenCanReachBlock(f.npc, target) shouldBe false
+            val blockedRays = f.rays - 1
+            (blockedRays in 2..7) shouldBe true // A real wall rejects every bounded face sample.
             f.hit = null
             citizenCanReachBlock(f.npc, target) shouldBe true
-            f.rays shouldBe 3
+            f.rays shouldBe blockedRays + 2
             f.lastRayStart shouldBe Location(f.world, .5, 65.62, .5)
             (requireNotNull(f.lastRayLength) <= 3.0) shouldBe true
         }

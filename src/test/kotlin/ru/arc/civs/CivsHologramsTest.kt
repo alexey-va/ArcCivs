@@ -77,7 +77,7 @@ class CivsHologramsTest : FunSpec({
                     renderer.pulse(); paper.performTicks(3)
                     val pose = poses.getValue(handles.first())
                     (kotlin.math.abs(height + pose.translation.y - bottom) < .00001) shouldBe true
-                    pose.scale.x shouldBe .70f
+                    pose.scale.x shouldBe .55f
                 }
                 handles.size shouldBe 2
                 verify(exactly = 0) { handles.first().teleport(any()) }

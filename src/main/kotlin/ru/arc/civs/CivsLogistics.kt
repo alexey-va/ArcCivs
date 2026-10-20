@@ -53,18 +53,24 @@ object CivsLogistics {
                 ?.let { request(order.buildingId, it, true) }
         }
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.control != null && !CivsRules.isBuilder(city, it) }.forEach { building ->
-            val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
-            if (workers > 0) request(building.id, (CivsProduction.inputs(building) + when (building.type) {
-                BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "IRON_HOE" to 1L,
-                    "WATER_BUCKET" to if (CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")?.get("irrigationExisting")?.asBoolean == false) 1L else 0L)
-                BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
-                BuildingType.QUARRY -> mapOf("COBBLESTONE" to 32L, "LADDER" to 16L, "TORCH" to 8L, "IRON_PICKAXE" to 1L)
-                else -> emptyMap()
-            }).filterValues { it > 0 }.mapValues { (_, amount) ->
-                Math.multiplyExact(amount, workers.toLong())
-            }, false)
+            val required = desiredStock(city, building)
+            if (required.isNotEmpty()) request(building.id, required, false)
         }
         return requests
+    }
+
+    private fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
+        val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
+        if (workers == 0) return emptyMap()
+        return (CivsProduction.inputs(building) + when (building.type) {
+            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "IRON_HOE" to 1L,
+                "WATER_BUCKET" to if (CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")?.get("irrigationExisting")?.asBoolean == false) 1L else 0L)
+            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
+            BuildingType.QUARRY -> mapOf("COBBLESTONE" to 32L, "LADDER" to 16L, "TORCH" to 8L, "IRON_PICKAXE" to 1L)
+            else -> emptyMap()
+        }).filterValues { it > 0 }.mapValues { (_, amount) ->
+            Math.multiplyExact(amount, workers.toLong())
+        }
     }
 
     fun plan(city: Settlement, worker: CivWorker, stock: (UUID) -> Map<String, Long>): CivCourierPlan? {
@@ -92,7 +98,8 @@ object CivsLogistics {
             if (source.phase != BuildingPhase.ACTIVE || source.control == null || CivsRules.isBuilder(city, source)) continue
             if (!withinRoute(source.control, requireNotNull(warehouse.control))) continue
             val material = CivsProduction.material(source) ?: continue
-            val amount = minOf(MAX_CARGO, stock(source.id)[material] ?: 0L)
+            val reserve = desiredStock(city, source)[material] ?: 0L
+            val amount = minOf(MAX_CARGO, ((stock(source.id)[material] ?: 0L) - reserve).coerceAtLeast(0))
             if (amount > 0) candidates += job(city, worker, warehouse, source, warehouse, material, amount)
         }
         // The durable completed-trip counter rotates ordinary supply and collection together.

@@ -72,6 +72,67 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a miner waiting for a tool walks from the hall to its quarry through an upward ingress step") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry()
+            h.idleReason = "waiting-tool"
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, .5, 66.0, .5))
+            h.world.getBlockAt(0, 65, 0).type = Material.STONE
+            h.world.getBlockAt(1, 66, 0).type = Material.STONE
+            h.world.getBlockAt(2, 65, 0).type = Material.STONE
+            h.world.getBlockAt(3, 64, 0).type = Material.STONE
+            h.owner.pulse(2_000)
+            val control = requireNotNull(quarry.control)
+            val destination = Location(h.world, control.x + .5, control.y.toDouble(), control.z + .5)
+            // Drain the real 1ms search budget without advancing the recovery timeout.
+            // Cold mock block reads may need more calls, but every movement must stay continuous.
+            for (index in 0 until 2_000) {
+                val before = actor.location
+                h.owner.activateNavigating()
+                if ((index + 1) % 20 == 0) h.owner.pulse(2_000L)
+                (before.distance(actor.location) <= .215001) shouldBe true
+                if (actor.location.distanceSquared(destination) <= 8.0 * 8.0) break
+            }
+            val at = actor.location
+            (at.distanceSquared(destination) <= 8.0 * 8.0) shouldBe true
+            (at.blockX != control.x || at.blockZ != control.z) shouldBe true
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-tool"
+            h.spawns shouldBe 1
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+        }
+    }
+
+    test("an unreachable waiting miner recovers beside its quarry without completing work or returning to the hall") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry()
+            h.idleReason = "waiting-tool"
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, .5, 64.0, .5))
+            for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
+                for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+            h.owner.pulse(2_000)
+            var recovered = false
+            repeat(80) { index ->
+                val before = actor.location
+                h.owner.activateNavigating()
+                if ((index + 1) % 20 == 0) h.owner.pulse(2_000L + (index + 1) * 50)
+                if (before.distance(actor.location) > 8.0) recovered = true
+            }
+            val control = requireNotNull(quarry.control)
+            val at = actor.location
+            recovered shouldBe true
+            (at.distanceSquared(Location(h.world, control.x + .5, control.y.toDouble(), control.z + .5)) <= 8.0 * 8.0) shouldBe true
+            (at.blockX != control.x || at.blockZ != control.z) shouldBe true
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-tool"
+            h.spawns shouldBe 1
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+            h.pendingDelivery.isDone shouldBe false
+        }
+    }
+
     test("summoned farmer starts a supplied work plan at the barrel and keeps its delivery receipt fenced") {
         residentRuntime { h ->
             val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
@@ -205,6 +266,29 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("storage approach stops at the first usable side between coarse work pulses") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 15.5, 64.0, .5))
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(21, 64, 0), emptyList(),
+                durationMillis = 1_500, status = "equipping-tool")
+            h.owner.pulse(2_000)
+            repeat(160) { h.owner.activateNavigating() }
+            val arrival = actor.location
+            citizenAtStorage(h.world, CitizenPoint(arrival.x, arrival.y, arrival.z), requireNotNull(farm.control)) shouldBe true
+            (arrival.x < 20.0) shouldBe true
+            repeat(40) { h.owner.activateNavigating() }
+            actor.location shouldBe arrival
+            h.deliveries shouldBe 0
+            h.owner.pulse(3_000)
+            h.owner.pulse(4_500)
+            h.deliveries shouldBe 1
+            h.owner.requireStorageArrival(h.city.id, h.workerId, farm.id)
+            actor.location shouldBe arrival
+        }
+    }
+
     test("physical nudges preserve a pending receipt and stop at native walls") {
         residentRuntime { h ->
             val farm = h.assignFarm()
@@ -249,6 +333,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var hits = 0
     var deliveries = 0
     var work: CivWorldWork? = null
+    var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
     val pending = CompletableFuture<Settlement>()
     private var damage = 0.0
@@ -293,7 +378,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 pendingDelivery
             },
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
-            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> "waiting-inputs" }, packetOwner = packets)
+            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets)
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -309,6 +394,9 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             workers = city.workers.map { it.copy(assignment = farm.id, nextDeliveryAt = 1) },
             inventory = CivInventory(CivStorageMode.PHYSICAL)))
         return farm
+    }
+    fun assignQuarry(): CivBuilding = assignFarm().copy(type = BuildingType.QUARRY, schematicId = "miner1", production = "COBBLESTONE").also { quarry ->
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
     }
     fun commitHit() {
         city = CivsRules.hurtResident(city, city.owner, workerId, damage)

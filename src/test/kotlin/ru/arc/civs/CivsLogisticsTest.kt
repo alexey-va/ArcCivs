@@ -159,6 +159,70 @@ class CivsLogisticsTest : FunSpec({
         plan.cargo.amount shouldBe 64L
     }
 
+    test("quarry collection keeps its requested cobblestone reserve and takes only the surplus") {
+        val city = logisticsProducerCity(BuildingType.QUARRY, "COBBLESTONE")
+        val quarry = city.buildings.last()
+        var cobblestone = 32L
+        val stock: (UUID) -> Map<String, Long> = { if (it == quarry.id) mapOf("COBBLESTONE" to cobblestone) else emptyMap() }
+        CivsLogistics.plan(city, city.workers.first(), stock) shouldBe null
+        cobblestone = 64L
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), stock))
+        plan.cargo.sourceBuildingId shouldBe quarry.id
+        plan.cargo.targetBuildingId shouldBe city.buildings[1].id
+        plan.cargo.material shouldBe "COBBLESTONE"
+        plan.cargo.amount shouldBe 32L
+    }
+
+    test("the retained quarry reserve scales with its assigned miners") {
+        val base = logisticsProducerCity(BuildingType.QUARRY, "COBBLESTONE")
+        val quarry = base.buildings.last().copy(level = 2)
+        val city = base.copy(buildings = base.buildings.dropLast(1) + quarry,
+            workers = base.workers + CivWorker(UUID.randomUUID(), "Second miner", quarry.id, nextDeliveryAt = 1))
+            .let(CivsRules::validate)
+        var cobblestone = 64L
+        val stock: (UUID) -> Map<String, Long> = { if (it == quarry.id) mapOf("COBBLESTONE" to cobblestone) else emptyMap() }
+        CivsLogistics.plan(city, city.workers.first(), stock) shouldBe null
+        cobblestone = 96L
+        CivsLogistics.plan(city, city.workers.first(), stock)!!.cargo.amount shouldBe 32L
+    }
+
+    test("a delivered quarry supply does not become an immediate reverse collection") {
+        val city = logisticsProducerCity(BuildingType.QUARRY, "COBBLESTONE")
+        val warehouse = city.buildings[1]
+        val quarry = city.buildings.last()
+        var warehouseStock = 32L
+        var quarryStock = 0L
+        val stock: (UUID) -> Map<String, Long> = { id -> when (id) {
+            warehouse.id -> mapOf("COBBLESTONE" to warehouseStock)
+            quarry.id -> mapOf("COBBLESTONE" to quarryStock)
+            else -> emptyMap()
+        } }
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), stock))
+        plan.cargo.sourceBuildingId shouldBe warehouse.id
+        plan.cargo.targetBuildingId shouldBe quarry.id
+        plan.cargo.amount shouldBe 32L
+        val picked = CivsLogistics.pickup(city, city.workers.first().id, plan.cargo)
+        warehouseStock -= plan.cargo.amount
+        quarryStock += plan.cargo.amount
+        val delivered = CivsLogistics.unload(picked, picked.workers.first().id, plan.cargo.id, 10_000)
+        CivsLogistics.requests(delivered, stock).none { it.buildingId == quarry.id && it.material == "COBBLESTONE" } shouldBe true
+        CivsLogistics.plan(delivered, delivered.workers.first(), stock) shouldBe null
+    }
+
+    for (material in listOf("CARROT", "POTATO")) test("$material collection retains the farm's requested planting stock") {
+        val city = logisticsProducerCity(BuildingType.FARM, material)
+        val farm = city.buildings.last()
+        var crops = 16L
+        val stock: (UUID) -> Map<String, Long> = { if (it == farm.id) mapOf(material to crops) else emptyMap() }
+        CivsLogistics.plan(city, city.workers.first(), stock) shouldBe null
+        crops = 20L
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), stock))
+        plan.cargo.sourceBuildingId shouldBe farm.id
+        plan.cargo.targetBuildingId shouldBe city.buildings[1].id
+        plan.cargo.material shouldBe material
+        plan.cargo.amount shouldBe 4L
+    }
+
     test("malformed or unbacked legacy cargo fails snapshot validation") {
         val city = logisticsCity()
         val plan = CivsLogistics.plan(city, city.workers.first()) { if (it == city.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap() }!!
@@ -182,4 +246,11 @@ private fun logisticsCity(): Settlement {
         listOf(CivWorker(UUID.randomUUID(), "Courier 1", buildings[1].id, nextDeliveryAt = 1),
             CivWorker(UUID.randomUUID(), "Courier 2", buildings[1].id, nextDeliveryAt = 1),
             CivWorker(UUID.randomUUID(), "Smith", buildings[2].id, nextDeliveryAt = 1)), inventory = CivInventory(CivStorageMode.VIRTUAL)))
+}
+
+private fun logisticsProducerCity(type: BuildingType, production: String): Settlement {
+    val base = logisticsCity()
+    val producer = base.buildings.last().copy(type = type, production = production)
+    return base.copy(buildings = base.buildings.dropLast(1) + producer,
+        workers = base.workers + CivWorker(UUID.randomUUID(), "Producer", producer.id, nextDeliveryAt = 1)).let(CivsRules::validate)
 }

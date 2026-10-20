@@ -209,9 +209,9 @@ class CivsBoundaryRenderer internal constructor(
     fun drained(): CompletableFuture<Void> = terminal?.copy() ?: CompletableFuture.completedFuture(null)
 }
 
-internal const val CIVS_CONTROL_TEXT_SCALE = 0.75f
+internal const val CIVS_CONTROL_TEXT_SCALE = 0.60f
 internal const val CIVS_CONTROL_TEXT_WIDTH = 180
-internal const val CIVS_CONTROL_TEXT_OFFSET = 1.90
+internal const val CIVS_CONTROL_TEXT_OFFSET = 1.40
 internal data class CivsControlHologram(val buildingId: UUID, val x: Double, val y: Double, val z: Double, val text: Component)
 
 /** Only saved controls qualify: no guessed anchor, planned upgrade marker, world scan or block lookup. */

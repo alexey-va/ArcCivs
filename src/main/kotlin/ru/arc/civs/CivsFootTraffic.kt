@@ -21,12 +21,9 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         if (city.worldId != from.world?.uid || city.worldId != to.world?.uid ||
             city.workers.none { it.id == workerId } || !city.contains(from.blockX, from.blockZ) ||
             !city.contains(to.blockX, to.blockZ)) return
-        // Trails counts the departed support cell. Entering a building must not erase the
-        // final outdoor step, while its authored floor and fields never receive wear.
-        if (civsProtectedBuildings(city).any {
-                it.bounds.contains(from.blockX, citizenSupportY(from.y), from.blockZ) ||
-                    CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ)
-            }) return
+        // Building soil may wear too; Trails owns the terrain palette and permission checks.
+        // Cultivated plots remain crops rather than shortcuts through a field.
+        if (civsProtectedBuildings(city).any { CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ) }) return
         val authority = (sequenceOf(city.owner) + city.members.asSequence()).mapNotNull(plugin.server::getPlayer)
             .firstOrNull { it.isOnline && !it.hasMetadata("NPC") && it.world.uid == city.worldId } ?: return
         try {

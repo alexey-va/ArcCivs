@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.34: farmer harvests crops without baking",
+  "assumptions": [
+    "Low/base/high: 1/10/16 independent cities with one farmer, 1/2/4 active hours daily, 1/4/16 bakes per minute before removal. Scenario assumptions, not measured telemetry.",
+    "All three farm levels: the native baking action consumed 3 wheat and issued 1 bread. Fed action duration is 1500ms, hungry 3000ms; theoretical ceiling 2400/1200 actions per hour, constrained by wheat, travel and durable commits.",
+    "New baking jobs are disabled. Existing accepted receipts finish with their original quantities; legacy farm production=BREAD remains loadable and selects wheat harvesting. Native crop drops and growth are unchanged.",
+    "No new profession, reward, price, currency or XP flow. Existing bread remains edible and transferable, including bread manually crafted by players.",
+    "Existing SELL may monetize physical crops; the future contract-only economy is not assumed active. Wheat versus bread SELL price effects are not measured and no conversion rate is invented.",
+    "Prior read-only 168-hour ledger is admin-dominated and does not measure city items. It is not used as an ordinary player-income baseline.",
+    "Deleting the recipe reduces automatic transformation only; stacking and alternate accounts cannot re-enable it. No duplicate inputs or outputs on restart. Housing and population limits are unchanged."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "bread_produced": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "farmer_bread_output",
+          "kind": "item",
+          "source": "CivsWorksites.farm / CivsProduction",
+          "basis": "Bread produced per completed baking action, not coins.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              480,
+              3840
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "wheat_consumed": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "farmer_wheat_input",
+          "kind": "item",
+          "source": "CivsWorksites.farm / CivsProduction",
+          "basis": "Wheat consumed by baking only; reduced consumption leaves existing wheat in custody.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              480,
+              3840
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

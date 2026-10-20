@@ -342,7 +342,7 @@ class CivsUi internal constructor(
             notice(player, "civs.stock", "stock.title", text.reason(player, "materials-migration-pending")) { showOverview(player) }
             return
         }
-        val current = page.coerceIn(0, lastPage(city.buildings.size))
+        val current = page.coerceIn(0, lastPage(city.buildings.size, BUILDINGS_PAGE_SIZE))
         val physical = inventory.mode == CivStorageMode.PHYSICAL
         val pending = inventory.materials.values.sum() + inventory.buildingMaterials.orEmpty().values.sumOf { it.values.sum() }
         val busy = host.cityBusy(player)
@@ -540,14 +540,14 @@ class CivsUi internal constructor(
             if (hasQueue) {
                 add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
             }
-            city.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
+            city.buildings.drop(current * BUILDINGS_PAGE_SIZE).take(BUILDINGS_PAGE_SIZE).forEachIndexed { index, building ->
                 add(valueButton(player, "building_$index", "common.destination", buildingName(player, building.type, building.level), buildingColor(building.type),
                     buildingStatus(player, city, building)) {
                     showBuilding(player, building.id)
                 })
             }
             if (city.buildings.size < CivsRules.MAX_BUILDINGS) add(button(player, "catalog", "buildings.catalog", PERSONAL) { showCatalog(player) })
-            pages(player, current, city.buildings.size) { showBuildings(player, it) }
+            pages(player, current, city.buildings.size, BUILDINGS_PAGE_SIZE) { showBuildings(player, it) }
         }, reopen = { showBuildings(player, current) })
     }
 
@@ -579,13 +579,13 @@ class CivsUi internal constructor(
     private fun showCatalog(player: Player, page: Int = 0) {
         city(player) ?: return
         val types = BuildingType.entries.filter { it != BuildingType.TOWN_HALL }
-        val current = page.coerceIn(0, lastPage(types.size, CATALOG_PAGE_SIZE))
+        val current = page.coerceIn(0, lastPage(types.size, BUILDINGS_PAGE_SIZE))
         present(player, "civs.catalog", "buildings.catalog-title", listOf(body(player, "buildings.catalog-help")),
             buildList {
-                types.drop(current * CATALOG_PAGE_SIZE).take(CATALOG_PAGE_SIZE).forEachIndexed { index, type ->
+                types.drop(current * BUILDINGS_PAGE_SIZE).take(BUILDINGS_PAGE_SIZE).forEachIndexed { index, type ->
                     add(valueButton(player, "offer_$index", "common.destination", text.building(player, type), buildingColor(type)) { showOffer(player, type) })
                 }
-                pages(player, current, types.size, CATALOG_PAGE_SIZE) { showCatalog(player, it) }
+                pages(player, current, types.size, BUILDINGS_PAGE_SIZE) { showCatalog(player, it) }
             }, reopen = { if (city(player) != null) showCatalog(player, current) })
     }
 
@@ -1294,7 +1294,7 @@ class CivsUi internal constructor(
         }) }
         runtime.open(player, PaperDialogScreen(id = id, title = tint(tr(player, title), screenColor(id)), body = bodies,
             inputs = inputs, buttons = guarded,
-            columns = if (guarded.size == 1 || id in setOf("civs.buildings", "civs.catalog")) 1 else 2,
+            columns = if (guarded.size == 1) 1 else 2,
             exitButton = button(player, "history", footerKey).copy(width = 200),
         ), reopen, {
             CivsDiagnostics.event("ui_dismiss", "player" to player.uniqueId, "screen" to id, "visit" to visit.id,
@@ -1414,7 +1414,7 @@ class CivsUi internal constructor(
 
     private companion object {
         const val PAGE_SIZE = 8
-        const val CATALOG_PAGE_SIZE = 8
+        const val BUILDINGS_PAGE_SIZE = 16
         const val SKILLS_PAGE_SIZE = 6
         const val LOGISTICS_PAGE_SIZE = 3
         const val MATERIALS_PAGE_SIZE = 16
