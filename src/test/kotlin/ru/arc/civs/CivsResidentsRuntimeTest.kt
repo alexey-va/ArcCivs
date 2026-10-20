@@ -1,21 +1,27 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
+import io.mockk.verify
+import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.util.BoundingBox
+import org.bukkit.util.RayTraceResult
+import org.bukkit.util.Vector
 import org.bukkit.util.VoxelShape
 import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.world.ChunkMock
 import org.mockbukkit.mockbukkit.world.Coordinate
 import org.mockbukkit.mockbukkit.world.WorldMock
 import ru.arc.paper.npc.PacketPlayerNpc
+import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.npc.PaperPacketNpcs
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
@@ -88,7 +94,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             // Publication of supplied seeds makes a new field plan available on the next pulse.
             h.city = h.city.copy(revision = h.city.revision + 1,
                 inventory = requireNotNull(h.city.inventory).copy(buildingMaterials = mapOf(farm.id.toString() to mapOf("WHEAT_SEEDS" to 1L))))
-            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0), emptyList(),
+            val focus = CivPosition(25, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")), focus = focus,
                 inputs = mapOf("WHEAT_SEEDS" to 1L), durationMillis = 1_500, status = "working-field")
             h.owner.pulse(3_000)
             actor.location shouldBe summoned
@@ -104,6 +112,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (h.deliveries != 0) break
             }
             h.deliveries shouldBe 1
+            (actor.location.x > summoned.x) shouldBe true
             h.spawns shouldBe 1
             h.owner.status(h.workerId) shouldBe "workers.status.working-field"
             h.city.workers.single().completedCycles shouldBe 0
@@ -112,6 +121,111 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.summon(h.city, farm.id) shouldBe false // Never abandon an admitted receipt.
             h.owner.pulse(12_000)
             h.deliveries shouldBe 1
+        }
+    }
+
+    test("reachable work stays at the observed position faces the real block and rechecks LOS at receipt admission") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            val observed = Location(h.world, 22.5, 64.0, .5)
+            actor.teleport(observed)
+            val focus = CivPosition(23, 63, 0)
+            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_500, status = "working-field", focus = focus)
+            h.work = work
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.working-field"
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            repeat(20) { h.owner.activateNavigating() }
+            actor.location shouldBe observed
+            verify(atLeast = 1) { actor.swingMainHand() }
+            verify(atLeast = 1) { actor.pitch = match { it > 45f } }
+            h.owner.pulse(3_499)
+            h.deliveries shouldBe 0
+            h.owner.pulse(3_500)
+            h.deliveries shouldBe 1
+            actor.location shouldBe observed
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+
+            // A city wait must not let an already admitted action work through a newly placed wall.
+            h.world.getBlockAt(23, 64, 0).type = Material.STONE
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            h.world.getBlockAt(23, 64, 0).type = Material.AIR
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            actor.teleport(Location(h.world, 27.5, 64.0, .5))
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0
+        }
+    }
+
+    test("an out-of-reach worker approaches only until the actual block becomes reachable") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 21.5, 64.0, .5))
+            val focus = CivPosition(25, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_500, status = "working-field", focus = focus)
+            h.owner.pulse(2_000)
+            h.deliveries shouldBe 0
+            for (tick in 1..160) {
+                val before = actor.location
+                h.owner.activateNavigating()
+                (before.distance(actor.location) <= .215001) shouldBe true
+                if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
+                if (h.deliveries != 0) break
+            }
+            h.deliveries shouldBe 1
+            citizenCanReachBlock(actor, focus) shouldBe true
+            (actor.location.x > 21.5 && actor.location.x < 24.0) shouldBe true
+            (actor.location.distance(Location(h.world, 24.5, 64.0, .5)) > .65) shouldBe true
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, requireNotNull(h.work))
+        }
+    }
+
+    test("a worker already at another side of its barrel does not route to the preferred side") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            val otherSide = Location(h.world, 19.5, 64.0, .5)
+            actor.teleport(otherSide)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(21, 64, 0), emptyList(),
+                durationMillis = 1_500, status = "equipping-tool")
+            h.owner.pulse(2_000)
+            repeat(20) { h.owner.activateNavigating() }
+            actor.location shouldBe otherSide
+            h.owner.pulse(3_500)
+            h.deliveries shouldBe 1
+            h.owner.requireStorageArrival(h.city.id, h.workerId, farm.id)
+            actor.location shouldBe otherSide
+        }
+    }
+
+    test("physical nudges preserve a pending receipt and stop at native walls") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 22.5, 64.0, .5))
+            val focus = CivPosition(23, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_500, status = "working-field", focus = focus)
+            h.owner.pulse(2_000)
+            h.owner.pulse(3_500)
+            h.deliveries shouldBe 1
+            h.owner.nudgeResident(actor, Vector(.05, 0.0, 0.0)) shouldBe true
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, requireNotNull(h.work))
+            h.owner.pulse(4_000)
+            h.deliveries shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            actor.teleport(Location(h.world, 22.7, 64.0, .5))
+            h.world.getBlockAt(23, 64, 0).type = Material.STONE
+            h.owner.nudgeResident(actor, Vector(.05, 0.0, 0.0)) shouldBe false
+            actor.location.x shouldBe 22.7
         }
     }
 })
@@ -154,12 +268,19 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             spawns++
             var position = firstArg<Location>().clone()
             var valid = true
+            var npcScale = 1.0
+            var npcPose = PacketNpcPose.STANDING
             mockk<PacketPlayerNpc>(relaxed = true) {
+                every { uniqueId } returns workerId
                 every { isValid } answers { valid }
                 every { location } answers { position.clone() }
                 every { world } returns this@ResidentRuntime.world
-                every { height } returns 1.8
-                every { eyeHeight } returns 1.62
+                every { height } answers { 1.8 * npcScale }
+                every { eyeHeight } answers { 1.62 * npcScale }
+                every { scale } answers { npcScale }
+                every { scale = any() } answers { npcScale = firstArg() }
+                every { pose } answers { npcPose }
+                every { pose = any() } answers { npcPose = firstArg() }
                 every { teleport(any()) } answers { position = firstArg<Location>().clone(); Unit }
                 every { remove() } answers { valid = false; Unit }
             }
@@ -178,6 +299,17 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     }
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
+    fun assignFarm(): CivBuilding {
+        val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
+            "farm1", CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)), CivPosition(20, 64, 0),
+            BuildingPhase.ACTIVE, control = CivPosition(20, 64, 0), production = "WHEAT")
+        for (z in -1..1) world.loadChunk(2, z)
+        world.getBlockAt(20, 64, 0).type = Material.BARREL
+        city = CivsRules.validate(city.copy(buildings = city.buildings + farm,
+            workers = city.workers.map { it.copy(assignment = farm.id, nextDeliveryAt = 1) },
+            inventory = CivInventory(CivStorageMode.PHYSICAL)))
+        return farm
+    }
     fun commitHit() {
         city = CivsRules.hurtResident(city, city.owner, workerId, damage)
         pending.complete(city)
@@ -199,6 +331,23 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
                 x + 1.0, y + if (type.isAir) 0.0 else 1.0, z + 1.0)
             override fun getCollisionShape(): VoxelShape = if (type.isAir) EMPTY_SHAPE else FULL_SHAPE
         }
+    }
+
+    /** Pinned WorldMock omits this native API. This fixture contains only full cubes and air. */
+    override fun rayTraceBlocks(start: Location, direction: Vector, maxDistance: Double,
+        fluidCollisionMode: FluidCollisionMode, ignorePassableBlocks: Boolean): RayTraceResult? {
+        val end = start.clone().add(direction.clone().normalize().multiply(maxDistance))
+        var nearest: RayTraceResult? = null
+        for (x in minOf(start.blockX, end.blockX)..maxOf(start.blockX, end.blockX))
+            for (y in minOf(start.blockY, end.blockY)..maxOf(start.blockY, end.blockY))
+                for (z in minOf(start.blockZ, end.blockZ)..maxOf(start.blockZ, end.blockZ)) {
+                    val block = getBlockAt(x, y, z)
+                    if (block.type.isAir) continue
+                    val hit = block.boundingBox.rayTrace(start.toVector(), direction, maxDistance) ?: continue
+                    if (nearest == null || hit.hitPosition.distanceSquared(start.toVector()) < nearest.hitPosition.distanceSquared(start.toVector()))
+                        nearest = RayTraceResult(hit.hitPosition, block, hit.hitBlockFace)
+                }
+        return nearest
     }
 
     override fun getChunkAt(x: Int, z: Int, generate: Boolean): ChunkMock {

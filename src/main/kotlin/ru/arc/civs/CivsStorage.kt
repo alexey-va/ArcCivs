@@ -331,12 +331,13 @@ class CivsStorage(private val plugin: Plugin,
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
     fun isWorldLocked(worldId: UUID, position: CivPosition): Boolean = Key(worldId, position) in lockedWorld
 
-    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null): CivResidentTransferPlan {
+    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null, requestedSupply: Pair<Material, Long>? = null): CivResidentTransferPlan {
         checkClaim(city)
         reject(!city.canManage(player.uniqueId) || !player.isOnline, "not-authorized")
         reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-        val (updated, changes) = if (requestedTool != null) CivsEquipment.giveRequestedTool(worker, player, requestedTool)
+        val (updated, changes) = if (requestedSupply != null) CivsEquipment.giveRequestedSupply(worker, player, requestedSupply.first, requestedSupply.second)
+            else if (requestedTool != null) CivsEquipment.giveRequestedTool(worker, player, requestedTool)
             else CivsEquipment.transfer(worker, player, npcSlot, playerSlot, click)
         val transfer = CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), changes)
         return CivResidentTransferPlan(CivStoragePlan(requireNotNull(city.inventory), emptyList(), residentTransfer = transfer), updated)
@@ -506,11 +507,13 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     /** Consume local recipe inputs and insert local output in the same snapshots and durable receipt. */
-    fun prepareProduction(city: Settlement, building: CivBuilding): CivStoragePlan {
+    fun prepareProduction(city: Settlement, building: CivBuilding, worker: CivWorker? = null): CivStoragePlan {
         checkClaim(city)
         reject(city.building(building.id) != building, "not-authorized")
         val material = CivsProduction.material(building) ?: throw CivsRejection("invalid-production")
-        return prepareWork(city, building.id, CivsProduction.inputs(building), mapOf(material to CivsProduction.amount(building)), emptyList())
+        val inputs = CivsProduction.inputs(building)
+        return prepareWork(city, building.id, worker?.let { CivsEquipment.storageInputs(it, inputs) } ?: inputs,
+            mapOf(material to CivsProduction.amount(building)), emptyList())
     }
 
     fun prepareWork(city: Settlement, buildingId: UUID, inputs: Map<String, Long>, outputs: Map<String, Long>, worldChanges: List<CivPlanBlock>): CivStoragePlan {

@@ -611,8 +611,7 @@ class CivsUi internal constructor(
         val building = city.building(buildingId) ?: return showBuildings(player)
         val assigned = city.workers.count { it.assignment == buildingId }
         val request = host.buildingRequest(player, buildingId)
-        val requestTool = request?.material?.name?.substringAfterLast('_')?.lowercase(Locale.ROOT)
-            ?.takeIf { it in setOf("hoe", "axe", "pickaxe") }
+        val requestTool = requestTool(request)
         val busy = host.cityBusy(player)
         val queued = queuePosition(city, buildingId) != null
         val legacyControl = building.phase == BuildingPhase.ACTIVE && (building.control == null || building.control == building.anchor)
@@ -644,24 +643,11 @@ class CivsUi internal constructor(
                     success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
             }.copy(tooltip = tr(player, "buildings.summon-help")))
             if (request != null) {
-                val canGive = request.canGive && !busy
-                val color = if (canGive) COMMIT else DANGER
-                val tooltip = tr(player, when {
-                    busy -> "reason.city-busy"
-                    !request.canGive -> if (requestTool == null) "buildings.request-unavailable" else "workers.tool-request-unavailable"
-                    requestTool != null -> "workers.give-tool-help"
-                    else -> "buildings.give-help"
-                })
-                val give = {
-                    if (canGive) perform(player, "civs.building", "buildings.detail-title",
+                add(requestButton(player, request, "buildings.request-unavailable", "buildings.give-help", give = {
+                    perform(player, "civs.building", "buildings.detail-title",
                         { host.giveBuildingRequest(player, buildingId, request.material.name) },
                         success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
-                    else showBuilding(player, buildingId)
-                }
-                add(if (requestTool != null) button(player, "give_request", "buildings.give-tool-$requestTool", color) { give() }
-                    .copy(tooltip = tooltip)
-                else valueButton(player, "give_request", "buildings.give", materialName(player, request.material.name),
-                    color, tooltip, give))
+                }, refresh = { showBuilding(player, buildingId) }))
             }
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
@@ -1002,9 +988,8 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
         val building = worker.assignment?.let(city::building)
-        val toolRequest = host.toolRequest(player, workerId)
-        val toolKind = toolRequest?.material?.name?.substringAfterLast('_')?.lowercase(Locale.ROOT)
-        val canGiveTool = toolRequest?.canGive == true && !host.cityBusy(player)
+        val request = host.workerRequest(player, workerId)
+        val toolKind = requestTool(request)
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(tint(text.literal(worker.name), PEOPLE)), table(listOf(
                 tr(player, "workers.health-label") to workerHealth(player, worker),
@@ -1015,18 +1000,18 @@ class CivsUi internal constructor(
                     else building?.let { CivsRules.profession(city, it) } ?: "unassigned"}").let { tint(it, PEOPLE) },
                 tr(player, "label.state") to workerStatus(player, worker),
                 tr(player, "label.deliveries") to text.literal(worker.completedCycles),
-            )), toolRequest?.let { body(tint(tr(player, "workers.tool-request-$toolKind"), STOCK)) },
-            if (toolRequest != null && !canGiveTool) body(tint(tr(player, "workers.tool-request-unavailable"), STOCK)) else null,
+            )), request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
+                else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
             worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to materialName(player, cargo.material),
                 "amount" to cargo.amount, "target" to (CivsLogistics.destination(city, cargo)?.let {
                     buildingName(player, it.type, it.level) } ?: tr(player, "buildings.generic")))) },
             if (worker.cargo != null) body(player, "logistics.cargo-help") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
-            if (canGiveTool) add(button(player, "give_tool", "workers.give-tool-$toolKind", COMMIT) {
-                perform(player, "civs.worker", "workers.detail-title", { host.giveRequestedTool(player, workerId) },
+            if (request != null) add(requestButton(player, request, "workers.supply-unavailable", "workers.supply-help", give = {
+                perform(player, "civs.worker", "workers.detail-title", { host.giveWorkerRequest(player, workerId, request.material.name) },
                     success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
-            }.copy(tooltip = tr(player, "workers.give-tool-help")))
+            }, refresh = { showWorker(player, workerId) }))
             add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId) })
             add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId) })
             if (!host.cityBusy(player) && CivsEquipment.plainCount(worker, "BREAD") > 0 &&
@@ -1334,6 +1319,26 @@ class CivsUi internal constructor(
         tooltip: Component = Component.empty(), action: () -> Unit): PaperDialogButton =
         PaperDialogButton(PaperDialogActionId.of(id), tint(tr(player, key, "value" to value), color), tooltip,
             width = 230, onClick = { action() })
+
+    private fun requestTool(request: CivsBuildingRequest?): String? =
+        request?.material?.name?.substringAfterLast('_')?.lowercase(Locale.ROOT)?.takeIf { it in setOf("hoe", "axe", "pickaxe") }
+
+    private fun requestButton(player: Player, request: CivsBuildingRequest, unavailableKey: String, helpKey: String,
+        give: () -> Unit, refresh: () -> Unit): PaperDialogButton {
+        val tool = requestTool(request)
+        val busy = host.cityBusy(player)
+        val canGive = request.canGive && !busy
+        val color = if (canGive) COMMIT else DANGER
+        val tooltip = tr(player, when {
+            busy -> "reason.city-busy"
+            !request.canGive -> if (tool == null) unavailableKey else "workers.tool-request-unavailable"
+            tool != null -> "workers.give-tool-help"
+            else -> helpKey
+        })
+        val action = { if (canGive) give() else refresh() }
+        return if (tool != null) button(player, "give_request", "buildings.give-tool-$tool", color) { action() }.copy(tooltip = tooltip)
+            else valueButton(player, "give_request", "buildings.give", materialName(player, request.material.name), color, tooltip, action)
+    }
 
     private fun tint(value: Component, color: TextColor): Component =
         value.color(color).children(value.children().map { tint(it, color) })

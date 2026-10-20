@@ -320,7 +320,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("resident tool request exposes an eligible one-shot handoff and keeps missing inventory noninteractive") {
+    test("resident tool request stays visible and exposes an eligible one-shot handoff") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -328,28 +328,81 @@ class CivsUiTest : FunSpec({
             h.city = base.copy(buildings = base.buildings.map { building ->
                 if (building.id == worker.assignment) building.copy(type = BuildingType.FARM, schematicId = "medieval-oak/farm") else building
             }, workers = base.workers.map { if (it.id == worker.id) worker else it })
-            var request: CivsToolRequest? = CivsToolRequest(Material.IRON_HOE, false)
-            every { h.host.toolRequest(h.player, worker.id) } answers { request }
+            var request: CivsBuildingRequest? = CivsBuildingRequest(Material.IRON_HOE, 1, false)
+            every { h.host.workerRequest(h.player, worker.id) } answers { request }
             every { h.host.workerStatus(worker.id) } returns "workers.status.waiting-tool"
             h.ui.openWorker(h.player, base.id, worker.id)
             h.body() shouldContain "Для работы нужна мотыга"
-            h.body() shouldContain "Передать пока нельзя"
-            h.screen.buttons.map { it.id.value } shouldNotContain "give_tool"
+            val missing = h.screen.buttons.single { it.id.value == "give_request" }
+            plainText(missing.label) shouldBe "Выдать мотыгу"
+            missing.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(missing.tooltip) shouldContain "Передать пока нельзя"
+            h.click("give_request")
+            verify(exactly = 0) { h.host.giveWorkerRequest(any(), any(), any()) }
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-tool-unavailable-ru", h.screen, listOf(588, 380)) }
             request = request!!.copy(canGive = true)
             val handoff = CompletableFuture<Unit>()
-            every { h.host.giveRequestedTool(h.player, worker.id) } returns handoff
+            every { h.host.giveWorkerRequest(h.player, worker.id, "IRON_HOE") } returns handoff
             h.ui.openWorker(h.player, base.id, worker.id)
-            plainText(h.screen.buttons.first().label) shouldBe "Передать мотыгу"
+            plainText(h.screen.buttons.first().label) shouldBe "Выдать мотыгу"
+            h.screen.buttons.first().label.color() shouldBe TextColor.color(0x9BD48D)
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-tool-ready-ru", h.screen, listOf(588, 380)) }
             val ready = h.screen
-            h.click("give_tool"); h.click("give_tool", screen = ready)
-            verify(exactly = 1) { h.host.giveRequestedTool(h.player, worker.id) }
+            h.click("give_request"); h.click("give_request", screen = ready)
+            verify(exactly = 1) { h.host.giveWorkerRequest(h.player, worker.id, "IRON_HOE") }
             request = null
             handoff.complete(Unit); h.paper.performTicks(2)
             h.screen.id shouldBe "civs.worker"
-            h.screen.buttons.map { it.id.value } shouldNotContain "give_tool"
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
             h.body().contains("Для работы нужна мотыга") shouldBe false
+        }
+    }
+
+    test("resident supplies show the batch remainder and hand it directly to the clicked resident") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val worker = base.workers.first().copy(name = "Фёдор")
+            h.city = base.copy(buildings = base.buildings.map {
+                if (it.id == worker.assignment) it.copy(type = BuildingType.QUARRY) else it
+            }, workers = base.workers.map { if (it.id == worker.id) worker else it })
+            var request: CivsBuildingRequest? = CivsBuildingRequest(Material.COBBLESTONE, 64, false)
+            every { h.host.workerRequest(h.player, worker.id) } answers { request }
+            every { h.host.workerStatus(worker.id) } returns "workers.status.waiting-cobblestone"
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.body() shouldContain "Нужно: Булыжник × 64"
+            val missing = h.screen.buttons.single { it.id.value == "give_request" }
+            plainText(missing.label) shouldBe "Выдать: Булыжник"
+            missing.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(missing.tooltip) shouldBe "Нет предмета в инвентаре или места у жителя."
+            val actions = h.screen.buttons.map { it.id }
+            val rows = h.screen.body.size
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-supply-missing-ru", h.screen, listOf(588, 380)) }
+            h.click("give_request")
+            verify(exactly = 0) { h.host.giveWorkerRequest(any(), any(), any()); h.host.giveBuildingRequest(any(), any(), any()) }
+            h.click("skills")
+            h.screen.id shouldBe "civs.worker-skills"
+
+            request = request!!.copy(canGive = true)
+            val handoff = CompletableFuture<Unit>()
+            every { h.host.giveWorkerRequest(h.player, worker.id, "COBBLESTONE") } returns handoff
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.screen.buttons.single { it.id.value == "give_request" }.label.color() shouldBe TextColor.color(0x9BD48D)
+            h.screen.buttons.map { it.id } shouldBe actions
+            h.screen.body.size shouldBe rows
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-supply-ready-ru", h.screen, listOf(588, 380)) }
+            val ready = h.screen
+            h.click("give_request"); h.click("give_request", screen = ready)
+            verify(exactly = 1) { h.host.giveWorkerRequest(h.player, worker.id, "COBBLESTONE") }
+            request = request!!.copy(amount = 48, canGive = false)
+            handoff.complete(Unit); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.worker"
+            h.body() shouldContain "Нужно: Булыжник × 48"
+            h.screen.buttons.single { it.id.value == "give_request" }.label.color() shouldBe TextColor.color(0xFF6B61)
+            request = null
+            h.ui.openWorker(h.player, base.id, worker.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
+            verify(exactly = 0) { h.host.giveBuildingRequest(any(), any(), any()) }
         }
     }
 
@@ -2151,6 +2204,8 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"
         every { host.toolRequest(any(), any()) } returns null
+        every { host.workerRequest(any(), any()) } returns null
+        every { host.giveWorkerRequest(any(), any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { host.residentItems(any(), any()) } answers {
             val workerId = secondArg<UUID>()
             city?.workers?.firstOrNull { it.id == workerId }?.let { worker -> CivsEquipment.slots(worker).map { it?.stack() } }

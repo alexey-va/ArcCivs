@@ -30,6 +30,53 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("worker and building requests prioritize a missing recipe ingredient before topping up another") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("ScribeSupplier").also { it.isOp = true; it.teleport(Location(h.world, 0.0, 65.0, 0.0)) }
+            val hall = h.city.buildings.first()
+            val worker = h.city.workers.first().copy(assignment = hall.id, nextDeliveryAt = 1)
+            val ready = h.city.copy(owner = player.uniqueId, workers = listOf(worker), stock = Stock(),
+                inventory = CivInventory(CivStorageMode.VIRTUAL, buildingMaterials = mapOf(hall.id.toString() to mapOf("PAPER" to 3L))))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.LEATHER, 16))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.start()
+            h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.LEATHER, 64, true)
+            h.service.buildingRequest(player, hall.id) shouldBe CivsBuildingRequest(Material.LEATHER, 64, false)
+        }
+    }
+
+    test("personal batch supplies wait for the journal and reduce the next request by the real donated amount") {
+        serviceScenario(storageFactory = { CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() } }) { h ->
+            val player = h.paper.addPlayer("MasonSupplier").also { it.isOp = true; it.teleport(Location(h.world, 0.0, 65.0, 0.0)) }
+            val mason = h.city.buildings.last().copy(type = BuildingType.STONEMASON, production = "STONE_BRICKS")
+            val worker = h.city.workers.first().copy(assignment = mason.id, nextDeliveryAt = 1)
+            val ready = h.city.copy(owner = player.uniqueId, buildings = listOf(h.city.buildings.first(), mason),
+                workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 16))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.STONE, 64, true)
+            val transfer = h.service.giveWorkerRequest(player, worker.id, "STONE")
+            player.inventory.getItem(0)!!.amount shouldBe 16
+            CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), "STONE") shouldBe 0
+            journal.complete(requireNotNull(receipt)); h.tick()
+            player.inventory.getItem(0) shouldBe null
+            transfer.isDone shouldBe false
+            h.commit(); h.tick(); transfer.join()
+            val supplied = h.service.city(player)!!.workers.single()
+            CivsEquipment.plainCount(supplied, "STONE") shouldBe 16
+            h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.STONE, 48, false)
+            val produced = CivsRules.deliver(h.service.city(player)!!, player.uniqueId, worker.id, mason.id,
+                supplied.completedCycles, supplied.nextDeliveryAt, h.time, outputHandled = true)
+            CivsEquipment.plainCount(produced.workers.single(), "STONE") shouldBe 12
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     for (stillPresent in listOf(true, false)) test("resident minute queues behind work once and rechecks presence=$stillPresent before saving") {
         serviceScenario { h ->
             val hall = h.city.buildings.first()

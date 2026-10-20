@@ -7,7 +7,7 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
-ArcCore host 0.1.19 and bundled Core helpers 2.7.48 are mandatory; the shared
+ArcCore host 0.1.19 and bundled Core helpers 2.7.50 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
@@ -15,10 +15,9 @@ schematic service. Human residents use Core's `PaperPacketNpcs` and
 No resident Bukkit entity, native inventory or hitbox is registered. Core owns
 profile/spawn/metadata packets, viewer/chunk lifecycle and validated interactions;
 ArcCivs owns authoritative positions, paths, work and health. Resident nameplates
-and courier carts attach to the same packet actor through an admitted per-viewer
+and courier parcels attach to the same packet actor through an admitted per-viewer
 carrier lease. Skins are stable per worker UUID; no profile network lookup occurs.
-Work props never enter city storage. Supplied personal tools, armor and
-bread are recorded separately in the city snapshot. Residents expose a native
+Work props never enter city storage. Supplied personal tools, armor, food and consumables are recorded separately in the city snapshot. Residents expose a native
 inventory menu backed by 33 saved slots: six equipment slots and 27 bag slots. Quick transfers preserve
 item metadata and use the same inventory journal; returned items go to the player's
 inventory, not the warehouse. One bread heals six health points. The legacy supply
@@ -34,7 +33,12 @@ recipes consume actual inputs; gathering requires the corresponding world work.
 The worker tool request is derived from the current active assignment and equipment,
 not a persisted quest or reward. It transfers one real matching tool: lowest material
 tier first, then the existing enchantment/durability ordering. The debit uses the
-existing native inventory journal.
+existing native inventory journal. Consumable requests target one native stack,
+minus personal and local stocks; ingredients missing for the next recipe take
+priority over reserve top-ups. The same red/green request action appears in the
+resident card and building menu. Personal donations accept partial amounts and
+consume carried plain ingredients before the warehouse remainder in the existing
+work receipt. Renamed/custom supplies are excluded from automatic consumption.
 
 Damage from players, monsters and the environment enters the virtual resident
 damage owner. The actor stops work while its injury waits for the current city
@@ -67,8 +71,15 @@ the ordinary permission, protection, terrain progression and persistence pipelin
 Completed work trips teach a bounded shared corridor preference (32 cities,
 512 outdoor cells each, 16 admitted cells per tick); authored buildings and
 fields remain excluded. Terrain conversion belongs solely to Trails. Support
-height includes paths and slabs. Player movement uses swept resident collision
-bodies; navigation yields to real players without creating native NPC entities.
+height includes paths and slabs. Player movement is never cancelled or rewritten
+by resident contact. Overlapping bodies receive at most one horizontal 0.05 push
+per tick; the resident yields into supported, collision-free space or a free side.
+A trapped resident remains passable to the player. Navigation still yields to
+real players without creating native NPC entities. Native world work uses a
+three-block eye-to-focus reach and unobstructed ray, stopping travel as soon as
+that real block is reachable. Storage accepts any visible valid side of its
+actual barrel. A courier shows one compact back parcel only while carrying goods;
+it remains inside the normal resident's horizontal body envelope.
 No duplicated pools, schematic cache or display transport. No schematic IO or future waiting on the gameplay thread.
 
 Construction uses the host's paced schematic overload: at most one accepted
@@ -246,7 +257,7 @@ then the common initial/legacy reserve. No direct player-inventory automation.
 Scribes and the four processors remain observed 60-second work sessions with
 real ingredients and outputs. FARM, FORESTER and QUARRY are physical worksites,
 not timed item grants: FARM tills real soil, plants and waits for mature crops
-before harvesting native drops (3 seconds per action); its bread recipe consumes
+before harvesting native drops (1.5 seconds per action); its bread recipe consumes
 3 actual WHEAT for 1 BREAD. FORESTER fells a real tree of at most 128 logs per
 action, taking max(6 seconds, 1 second per log), yields native tool drops and
 replants only after spending locally stocked saplings: one for ordinary trees,
@@ -256,8 +267,8 @@ non-air source blocks.
 QUARRY advances an authored real shaft across multiple floors, spending local
 ladders, cobblestone and torches and harvesting native drops one block per
 4-second action. The three worksites therefore do not mint resources on a timer.
-Item-storage processors use only their current control barrel or virtual building map
-for ingredients and output; couriers move their goods to the current building endpoint.
+Item-storage processors consume carried ingredients first, then their current
+control barrel or virtual building map; output remains in the building store; couriers move their goods to the current building endpoint.
 FARM and FORESTER perform work directly at field/tree cells, without a per-cell
 return trip. Legacy abstract-stock producers retain their old return trip. The chosen processor output is persisted
 per building; a full destination pauses delivery. Farming takes 1.5 seconds per

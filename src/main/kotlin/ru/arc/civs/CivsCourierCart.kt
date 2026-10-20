@@ -1,141 +1,75 @@
 package ru.arc.civs
 
-import dev.lone.itemsadder.api.CustomStack
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.BlockFace
+import org.bukkit.block.data.type.Barrel
 import org.bukkit.entity.Display
-import org.bukkit.entity.ItemDisplay
-import ru.arc.paper.npc.PacketPlayerNpc
-import org.bukkit.inventory.ItemStack
 import org.bukkit.util.Transformation
 import org.joml.Quaternionf
 import org.joml.Vector3f
 import ru.arc.paper.display.PacketBlockDisplay
-import ru.arc.paper.display.PacketDisplay
-import ru.arc.paper.display.PacketItemDisplay
 import ru.arc.paper.display.PaperPacketDisplays
+import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
-import kotlin.math.cos
-import kotlin.math.sin
-import kotlin.math.tan
 
-/** Savva's existing model, on the same packet carrier and packet owner as the nameplate. */
-internal class CivsCourierCart(
-    private val displays: PaperPacketDisplays,
-    private val resolveItem: () -> ItemStack? = { CustomStack.getInstance(CIVS_COURIER_CART_ITEM)?.itemStack?.clone() },
-) : AutoCloseable {
-    private data class Cart(val body: PacketItemDisplay, var carrier: PacketPlayerNpc,
-        val cargo: MutableList<PacketDisplay> = mutableListOf(), var samples: List<Material> = emptyList(),
+/** One compact parcel replaces the forward cart; it follows the same packet carrier as the nameplate. */
+internal class CivsCourierCart(private val displays: PaperPacketDisplays) : AutoCloseable {
+    private data class Parcel(val body: PacketBlockDisplay, var carrier: PacketPlayerNpc,
         var yaw: Float = Float.NaN, var height: Double = Double.NaN)
-    private val carts = linkedMapOf<UUID, Cart>()
-    private var model: ItemStack? = null
+    private val parcels = linkedMapOf<UUID, Parcel>()
 
     fun sync(npc: CivsNpcHologramSnapshot) {
         val carrier = npc.actor
-        if (!npc.courierCart || carrier == null || !carrier.isValid) { remove(npc.workerId); return }
-        val cart = carts[npc.workerId] ?: run {
-            if (model == null) model = runCatching(resolveItem).getOrNull()
-            val item = model ?: return
-            val handle = displays.spawnItem(at(npc), item)
-            handle.itemDisplayTransform = ItemDisplay.ItemDisplayTransform.GROUND
-            configure(handle)
-            Cart(handle, carrier).also { carts[npc.workerId] = it }
+        if (!npc.courierCart || npc.cargo.values.none { it > 0 } || carrier == null || !carrier.isValid) {
+            remove(npc.workerId)
+            return
         }
-        if (cart.carrier !== carrier) {
-            cart.carrier = carrier
-            cart.yaw = Float.NaN
+        val parcel = parcels[npc.workerId] ?: run {
+            val block = (Material.BARREL.createBlockData() as Barrel).apply { facing = BlockFace.UP }
+            val handle = displays.spawnBlock(Location(carrier.world, npc.x, npc.y, npc.z), block)
+            handle.billboard = Display.Billboard.FIXED
+            handle.viewRange = 1f
+            handle.displayWidth = 3f
+            handle.displayHeight = 3f
+            handle.interpolationDelay = -1
+            // A rotated block corner must not interpolate separately from its rotation and sweep outside the carrier.
+            handle.interpolationDuration = 0
+            handle.teleportDuration = 0
+            handle.shadowRadius = 0f
+            handle.shadowStrength = 0f
+            Parcel(handle, carrier).also { parcels[npc.workerId] = it }
         }
-        val samples = civsCourierCargoSamples(npc.cargo)
-        if (cart.samples != samples) {
-            // A pickup/unload changes the cargo, not the cart's identity or pose.
-            cart.cargo.forEach(PacketDisplay::remove)
-            cart.cargo.clear()
-            cart.samples = samples
-            for (material in samples) {
-                val piece: PacketDisplay = if (material.isBlock) displays.spawnBlock(at(npc), material.createBlockData())
-                    else displays.spawnItem(at(npc), ItemStack(material)).apply {
-                        itemDisplayTransform = ItemDisplay.ItemDisplayTransform.FIXED
-                    }
-                configure(piece)
-                cart.cargo += piece
-            }
-            cart.yaw = Float.NaN
+        if (parcel.carrier !== carrier) {
+            parcel.carrier = carrier
+            parcel.yaw = Float.NaN
         }
-        applyPose(cart, npc.yaw, npc.nativeHeight)
+        applyPose(parcel, npc.yaw, npc.nativeHeight)
     }
 
-    /** Position follows native client motion. Only changing body heading/stance sends a local pose. */
+    /** Client mounting owns position; only changing body heading/stance changes the local pose. */
     fun updatePoses() {
-        for ((id, cart) in carts.toMap()) {
-            if (!cart.carrier.isValid) { remove(id); continue }
-            applyPose(cart, cart.carrier.bodyYaw, cart.carrier.height)
+        for ((id, parcel) in parcels.toMap()) {
+            if (!parcel.carrier.isValid) { remove(id); continue }
+            applyPose(parcel, parcel.carrier.bodyYaw, parcel.carrier.height)
         }
     }
 
-    private fun applyPose(cart: Cart, yaw: Float, height: Double) {
-        if (!yaw.isFinite() || !height.isFinite() || height <= 0 || cart.yaw == yaw && cart.height == height) return
-        cart.body.transformation = civsCourierCartTransform(yaw, height)
-        cart.body.attachTo(cart.carrier)
-        cart.cargo.forEachIndexed { index, handle ->
-            handle.transformation = civsCourierCargoTransform(yaw, height, index, cart.cargo.size, handle is PacketBlockDisplay)
-            handle.attachTo(cart.carrier)
-        }
-        cart.yaw = yaw
-        cart.height = height
+    private fun applyPose(parcel: Parcel, yaw: Float, height: Double) {
+        if (!yaw.isFinite() || !height.isFinite() || height <= 0 || parcel.yaw == yaw && parcel.height == height) return
+        parcel.body.transformation = civsCourierParcelTransform(yaw, height)
+        parcel.body.attachTo(parcel.carrier)
+        parcel.yaw = yaw
+        parcel.height = height
     }
 
-    private fun configure(handle: PacketDisplay) {
-        handle.billboard = Display.Billboard.FIXED
-        handle.viewRange = 1f
-        handle.displayWidth = 3f
-        handle.displayHeight = 3f
-        handle.interpolationDelay = -1
-        handle.interpolationDuration = 1
-        handle.teleportDuration = 0
-        handle.shadowRadius = 0f
-        handle.shadowStrength = 0f
-    }
-
-    fun remove(id: UUID) {
-        val cart = carts.remove(id) ?: return
-        cart.cargo.forEach(PacketDisplay::remove)
-        cart.body.remove()
-    }
-
-    override fun close() { carts.keys.toList().forEach(::remove); model = null }
-    private fun at(npc: CivsNpcHologramSnapshot) = Location(requireNotNull(npc.actor).world, npc.x, npc.y, npc.z)
+    fun remove(id: UUID) { parcels.remove(id)?.body?.remove() }
+    override fun close() { parcels.keys.toList().forEach(::remove) }
 }
 
-internal const val CIVS_COURIER_CART_ITEM = "elitecreatures:medieval_market_decoration_v1_cart_2"
-
-/** At most three representative pieces; material and density derive only from accepted current cargo. */
-internal fun civsCourierCargoSamples(cargo: Map<String, Int>): List<Material> = buildList {
-    for ((key, amount) in cargo.toSortedMap()) {
-        val material = Material.matchMaterial(key)?.takeIf { it.isItem && !it.isAir } ?: continue
-        if (amount <= 0) continue
-        repeat(((amount.toLong() + 23) / 24).coerceAtMost(3 - size.toLong()).toInt()) { add(material) }
-        if (size == 3) break
-    }
-}
-
-/** GROUND ×3 has its lowest wheel at -0.5625; forward is Bukkit (-sin yaw, 0, cos yaw). */
-internal fun civsCourierCartTransform(yaw: Float, height: Double): Transformation {
-    val radians = Math.toRadians(yaw.toDouble())
-    return Transformation(Vector3f(-sin(radians).toFloat(), (0.5625 - height).toFloat(), cos(radians).toFloat()),
-        Quaternionf().rotationY((Math.PI - radians).toFloat()), Vector3f(3f), Quaternionf())
-}
-
-/** The measured cart bed slopes 22.5°; its top plane is y=0.534585666-z*tan(22.5°). */
-internal fun civsCourierCargoTransform(yaw: Float, height: Double, index: Int, count: Int, block: Boolean): Transformation {
-    val radians = Math.toRadians(yaw.toDouble())
-    val z = if (count == 1) 0.15 else -0.20 + index * 0.35
-    val bed = Vector3f(0f, (0.536585666 - z * tan(Math.PI / 8)).toFloat(), z.toFloat())
-    val frame = Quaternionf().rotationY(-radians.toFloat())
-    frame.transform(bed)
-    bed.add(-sin(radians).toFloat(), -height.toFloat(), cos(radians).toFloat())
-    val rotation = Quaternionf(frame).rotateX(if (block) (Math.PI / 8).toFloat() else (-3 * Math.PI / 8).toFloat())
-    val scale = if (block) Vector3f(0.30f, 0.22f, 0.28f) else Vector3f(0.42f)
-    if (block) bed.add(rotation.transform(Vector3f(-scale.x / 2, 0f, -scale.z / 2)))
-    else bed.y += 0.018f
-    return Transformation(bed, rotation, scale, Quaternionf())
+/** 32×42×14 cm against the back. Every horizontal corner stays within radius 0.289, inside the 0.6-wide actor. */
+internal fun civsCourierParcelTransform(yaw: Float, height: Double): Transformation {
+    val rotation = Quaternionf().rotationY(-Math.toRadians(yaw.toDouble()).toFloat())
+    val corner = rotation.transform(Vector3f(-.16f, (height * .6 - .21 - height).toFloat(), -.24f))
+    return Transformation(corner, rotation, Vector3f(.32f, .42f, .14f), Quaternionf())
 }

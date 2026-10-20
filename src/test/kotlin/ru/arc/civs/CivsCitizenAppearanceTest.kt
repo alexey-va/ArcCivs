@@ -41,6 +41,15 @@ class CivsCitizenAppearanceTest : FunSpec({
         citizenTool(appearancePlan(null, "unassigned")) shouldBe null
     }
 
+    test("a courier parcel does not duplicate its cargo as an oversized hand prop") {
+        val warehouse = UUID(0, 20)
+        val destination = UUID(0, 21)
+        val cargo = CivCargo(UUID(0, 22), warehouse, warehouse, destination, CivPosition(0, 64, 0), "OAK_LOG", 64)
+        val courier = CivCourierPlan(cargo, destination, CivPosition(4, 64, 0), true)
+        citizenTool(appearancePlan(BuildingType.WAREHOUSE).copy(courier = courier)) shouldBe null
+        citizenTool(appearancePlan(BuildingType.WAREHOUSE).copy(courier = courier.copy(carrying = false))) shouldBe null
+    }
+
     test("children use half scale and retain the same signed skin after growing up") {
         val adult = CivWorker(UUID(0, 12), "Resident", null)
         val child = adult.copy(childMinutes = 0, parentIds = setOf(UUID(0, 10), UUID(0, 11)))

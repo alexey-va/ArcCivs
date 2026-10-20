@@ -547,7 +547,9 @@ object CivsRules {
         }
         val interval = CivsResidents.workDuration(worker,
             if (isBuilder(city, building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(city, building))
-        val updated = CivsResidents.trained(worker.copy(completedCycles = add(worker.completedCycles, 1),
+        val supplied = if (!isBuilder(city, building) && city.inventory != null && outputHandled)
+            CivsEquipment.consumeInputs(worker, CivsProduction.inputs(building)) else worker
+        val updated = CivsResidents.trained(supplied.copy(completedCycles = add(worker.completedCycles, 1),
             nextDeliveryAt = add(now, interval)), effectiveWorkType(city, building))
         return changed(city, city.copy(stock = stock, construction = construction,
             workers = city.workers.map { if (it.id == workerId) updated else it }))
@@ -560,7 +562,8 @@ object CivsRules {
         check(worker.assignment == building.id && worker.completedCycles == work.cycle && worker.cargo == null, "stale-delivery")
         check(productionAvailable(city, building) && building.type in CivsWorksites.TYPES, "invalid-assignment")
         val equipped = work.equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
-        val progressed = equipped.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
+        val supplied = if (work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
+        val progressed = supplied.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
         val updated = if (work.changes.isEmpty()) progressed else CivsResidents.trained(progressed, building.type)
         val progress = work.miningStep?.let { next ->
             city.mineProgress.orEmpty() + (building.id.toString() to next)

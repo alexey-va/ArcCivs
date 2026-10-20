@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import org.bukkit.Bukkit
 import org.bukkit.GameMode
 import org.bukkit.Location
 import org.bukkit.entity.Player
@@ -14,22 +15,28 @@ import org.bukkit.util.BoundingBox
 import org.bukkit.util.Vector
 import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.npc.PacketPlayerNpc
+import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.floor
 
 /**
  * Physical resident bodies belong to this domain, not to the packet renderer.
- * Paper owns the player's correction; there is no teleport/velocity timer or native NPC.
+ * Native-style contact adds a small horizontal impulse; a resident is never a solid
+ * barrier or a reason to rewrite/cancel the player's observed movement.
  */
 internal class CivsResidentCollisions(
     plugin: Plugin,
     private val actors: () -> Collection<PacketPlayerNpc>,
+    private val nudgeResident: (PacketPlayerNpc, Vector) -> Boolean,
 ) : Listener, AutoCloseable {
     private var closed = false
+    private var contactTick = Int.MIN_VALUE
+    private val pushedPlayers = hashSetOf<UUID>()
+    private val pushedResidents = hashSetOf<UUID>()
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onMove(event: PlayerMoveEvent) {
         if (closed || event is PlayerTeleportEvent || !event.hasChangedPosition()) return
         val player = event.player
@@ -38,31 +45,13 @@ internal class CivsResidentCollisions(
         val to = event.to ?: return
         if (from.world != to.world || player.world != from.world) return
         val nativeBody = player.boundingBox
-        val halfX = nativeBody.widthX / 2
-        val halfZ = nativeBody.widthZ / 2
-        val height = nativeBody.height
+        val body = bodyAt(to.toVector(), nativeBody.widthX / 2, nativeBody.height, nativeBody.widthZ / 2)
         // ponytail: the resident runtime owns the hard 48-actor cap. No world/entity scan.
-        val bodies = actors().mapNotNull { npc ->
-            if (!npc.isValid || npc.world != from.world || npc.pose == PacketNpcPose.SLEEPING) null
-            else residentBody(npc, npc.location)
+        for (npc in actors()) {
+            if (!npc.isValid || npc.world != from.world || npc.pose == PacketNpcPose.SLEEPING ||
+                !residentBody(npc, npc.location).overlaps(body)) continue
+            pushApart(player, to.toVector(), npc, to.toVector().subtract(from.toVector()))
         }
-        val resolved = citizenSlideBody(from.toVector(), to.toVector(), halfX, height, halfZ, bodies) ?: return
-        var at = resolved.position
-        if (at.distanceSquared(resolved.contact) > CONTACT_EPSILON * CONTACT_EPSILON) {
-            // Redirecting a move must not slide the player into/through a native wall.
-            // The union conservatively covers all remaining, axis-clipped slide segments.
-            val slide = bodyAt(resolved.contact, halfX, height, halfZ).union(bodyAt(at, halfX, height, halfZ))
-            val world = requireNotNull(from.world)
-            val loaded = slide.widthX <= 16 && slide.widthZ <= 16 &&
-                ((floor(slide.minX).toInt() shr 4)..(floor(slide.maxX).toInt() shr 4)).all { x ->
-                    ((floor(slide.minZ).toInt() shr 4)..(floor(slide.maxZ).toInt() shr 4)).all { z ->
-                        world.isChunkLoaded(x, z)
-                    }
-                }
-            if (!loaded || player.wouldCollideUsing(slide)) at = resolved.contact
-        }
-        if (at.distanceSquared(to.toVector()) <= CONTACT_EPSILON * CONTACT_EPSILON) return
-        event.to = to.clone().apply { x = at.x; y = at.y; z = at.z }
     }
 
     /** Called before navigation consumes a waypoint; false means wait for the player. */
@@ -78,23 +67,76 @@ internal class CivsResidentCollisions(
         val world = requireNotNull(from.world)
         val center = Location(world, sweep.centerX, sweep.centerY, sweep.centerZ)
         val players = world.getNearbyPlayers(center, sweep.widthX / 2, sweep.height / 2, sweep.widthZ / 2)
-            .asSequence().filter(::participates).map(Player::getBoundingBox).toList()
-        if (from.x == to.x && from.y == to.y && from.z == to.z) return players.none(last::overlaps)
-        return citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
-            first.height, first.widthZ / 2, players) == null
+            .filter(::participates)
+        val bodies = players.map(Player::getBoundingBox)
+        // Recovery admission is a read-only occupancy probe, never an impulse source.
+        if (from.x == to.x && from.y == to.y && from.z == to.z) return bodies.none(last::overlaps)
+        if (citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
+                first.height, first.widthZ / 2, bodies) == null) return true
+        for (player in players) if (first.overlaps(player.boundingBox) || last.overlaps(player.boundingBox))
+            pushApart(player, player.location.toVector(), npc, from.toVector().subtract(to.toVector()))
+        return false
+    }
+
+    private fun pushApart(player: Player, playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
+        val tick = Bukkit.getCurrentTick()
+        if (contactTick != tick) {
+            contactTick = tick
+            pushedPlayers.clear()
+            pushedResidents.clear()
+        }
+        val away = npc.location.toVector().subtract(playerAt).setY(0.0)
+        if (away.lengthSquared() < .000001) away.copy(movement).setY(0.0)
+        if (away.lengthSquared() < .000001) away.setX(1.0)
+        // Entity.push uses a horizontal 0.05 impulse. Bound each body to one contact
+        // per tick so repeated move packets or a crowd cannot stack stronger pushes.
+        away.normalize().multiply(.05)
+        if (pushedPlayers.add(player.uniqueId)) player.velocity = player.velocity.clone().subtract(away)
+        if (!pushedResidents.add(npc.uniqueId)) return
+        if (nudgeResident(npc, away.clone())) return
+        // A wall behind the resident may leave either side free. If all three are
+        // blocked the player still passes; no velocity or position correction grows.
+        val tangent = Vector(-away.z, 0.0, away.x)
+        if (!nudgeResident(npc, tangent)) nudgeResident(npc, tangent.clone().multiply(-1.0))
     }
 
     override fun close() {
         if (closed) return
         closed = true
+        pushedPlayers.clear()
+        pushedResidents.clear()
         HandlerList.unregisterAll(this)
     }
 
     private fun participates(player: Player): Boolean = player.isOnline && player.isValid && !player.isDead &&
-        player.gameMode != GameMode.SPECTATOR && !player.isInsideVehicle && !player.isSleeping
+        player.gameMode != GameMode.SPECTATOR && !player.isInsideVehicle && !player.isSleeping && player.isCollidable
 
     private fun residentBody(npc: PacketPlayerNpc, at: Location) =
         bodyAt(at.toVector(), .3 * npc.scale, npc.height, .3 * npc.scale)
+}
+
+/** A scaled body may move a single small horizontal step only through loaded, supported space. */
+internal fun citizenResidentNudgeClear(npc: PacketPlayerNpc, from: Location, to: Location): Boolean {
+    if (!npc.isValid || from.world != to.world || from.world != npc.world || from.y != to.y ||
+        !from.x.isFinite() || !from.y.isFinite() || !from.z.isFinite() ||
+        !to.x.isFinite() || !to.z.isFinite() || from.distanceSquared(to) > .050001 * .050001) return false
+    val world = npc.world
+    val half = .3 * npc.scale - .001
+    val body = bodyAt(from.toVector().add(Vector(0.0, .001, 0.0)), half, npc.height - .002, half)
+        .union(bodyAt(to.toVector().add(Vector(0.0, .001, 0.0)), half, npc.height - .002, half))
+    for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
+        for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt()) {
+            if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+            // Fences and walls can project above the block row below the resident's feet.
+            for (y in (floor(body.minY).toInt() - 1)..floor(body.maxY).toInt()) {
+                if (y !in world.minHeight until world.maxHeight) return false
+                val block = world.getBlockAt(x, y, z)
+                if (block.isLiquid || block.collisionShape.boundingBoxes.any {
+                    body.overlaps(it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()))
+                }) return false
+            }
+        }
+    return citizenPacketSupported(world, CitizenPoint(to.x, to.y, to.z))
 }
 
 internal data class CitizenCollisionMove(val position: Vector, val contact: Vector)

@@ -91,6 +91,28 @@ class CivsCitizens(
         return actors.values.map { it.npc }
     }
 
+    /** A small physical push changes only the observed position, never a work or cargo receipt. */
+    internal fun nudgeResident(npc: PacketPlayerNpc, impulse: Vector): Boolean {
+        checkMainThread()
+        if (closed.get() || !npc.isValid || npc.pose == PacketNpcPose.SLEEPING) return false
+        val actor = actors.values.firstOrNull { it.npc === npc } ?: return false
+        val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
+        val from = npc.location
+        val to = from.clone().add(impulse)
+        if (npc.world.uid != city.worldId || !citizenResidentNudgeClear(npc, from, to)) return false
+        val target = actor.plan.workplace ?: actor.plan.storage
+        val allowed = actor.route?.allowedBuildings ?: citizenRouteBuildings(city, actor.plan, target,
+            CivPosition(from.blockX, from.blockY, from.blockZ))
+        val halfWidth = .3 * npc.scale
+        for (x in kotlin.math.floor(to.x - halfWidth).toInt()..kotlin.math.floor(to.x + halfWidth).toInt())
+            for (z in kotlin.math.floor(to.z - halfWidth).toInt()..kotlin.math.floor(to.z + halfWidth).toInt())
+                if (!citizenRouteCellAllowed(city, allowed, x, z)) return false
+        if (!citizenControlStepClear(city, from.point(), to.point())) return false
+        npc.teleport(to)
+        actor.footsteps.reset()
+        return true
+    }
+
     init {
         require(maxActive in 1..48 && viewerRange in 1..96)
         checkMainThread()
@@ -352,7 +374,22 @@ class CivsCitizens(
         val entity = actor.npc
         if (entity.world.uid != city.worldId || actor.workerId in pendingHarm ||
             actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
-            !citizenAtStorage(entity.world, entity.location.point(), control)) throw CivsRejection("route-unreachable")
+            !citizenAtStorage(entity.world, entity.location.point(), control) ||
+            !citizenCanReachBlock(entity, control)) throw CivsRejection("route-unreachable")
+    }
+
+    /** The receipt owner rechecks the same real block after an asynchronous city wait. */
+    internal fun requireWorldWorkArrival(cityId: UUID, workerId: UUID, work: CivWorldWork) {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid }
+            ?: throw CivsRejection("route-unreachable")
+        val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        if (closed.get() || actor.sheltering || actor.workerId in pendingHarm ||
+            actor.cycle.phase != CitizenPhase.DELIVERING || actor.plan.worldWork != work ||
+            work.workerId != workerId || worker.assignment != work.buildingId ||
+            worker.completedCycles != work.cycle || actor.npc.world.uid != city.worldId ||
+            !canWorkFrom(actor, work)) throw CivsRejection("route-unreachable")
     }
 
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
@@ -426,6 +463,15 @@ class CivsCitizens(
                 continue
             }
             val motion = route.motion
+            // Stop at the first genuinely reachable work position, including while a path is
+            // still being searched. The ordinary pulse starts the unchanged work duration.
+            if (actor.cycle.phase == CitizenPhase.TO_WORK && !actor.sheltering &&
+                actor.plan.worldWork?.let { canWorkFrom(actor, it) } == true) {
+                motion.cancel()
+                route.trip?.let { paths.complete(city, it) }
+                route.completion = CitizenNavigationCompletion(null)
+                continue
+            }
             if (motion.searching) continue
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
             if (motion.failure != null) { route.completion = CitizenNavigationCompletion(motion.failure); continue }
@@ -594,7 +640,9 @@ class CivsCitizens(
         if (!arrivedAt(actor, city, world, workplace)) return
         if (!actor.animation.swing(now)) return
         val player = actor.npc
-        val focus = if (city.buildings.any { it.control == workplace })
+        val focus = actor.plan.worldWork?.let(::citizenWorkFocus)?.let {
+            Location(world, it.x + .5, it.y + .5, it.z + .5)
+        } ?: if (city.buildings.any { it.control == workplace })
             Location(world, workplace.x + 0.5, workplace.y + 0.7, workplace.z + 0.5)
         else citizenWorkBuilding(city, actor.plan)?.bounds?.let { bounds ->
             Location(world,
@@ -821,11 +869,18 @@ class CivsCitizens(
         wake(actor)
         val from = actor.npc.location
         val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
-        val storage = citizenControlBuilding(city, target)
+        // A valid hand reach does not depend on the availability of the preferred standing
+        // cell. Likewise, any visible side of the real storage barrel is a valid arrival.
+        if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing") && arrivedAt(actor, city, world, target)) {
+            actor.cycle.arrive(now)
+            return true
+        }
+        val storage = storageForTarget(actor, city, target)
         if (storage != null) {
-            val cached = actor.targets[target]?.takeIf { citizenAtStorage(world, it.point(), target) && citizenStandable(world, it) }
+            val control = requireNotNull(storage.control)
+            val cached = actor.targets[target]?.takeIf { citizenAtStorage(world, it.point(), control) && citizenStandable(world, it) }
             val standing = cached ?: citizenStorageTarget(city, storage, world)
-                ?: storage.takeIf { !citizenStorageReady(world, target) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
+                ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
                     ?.entrance?.takeIf { citizenStandable(world, it) }
             if (standing == null) {
                 actor.targets.remove(target)
@@ -850,10 +905,6 @@ class CivsCitizens(
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {
             if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing")) pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now)
             return false
-        }
-        if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing") && arrivedAt(actor, city, world, target)) {
-            actor.cycle.arrive(now)
-            return true
         }
         val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ))
         val trip = if (citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering)) paths.begin(city) else null
@@ -888,11 +939,27 @@ class CivsCitizens(
 
     private fun resolvedTarget(actor: Actor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
+    private fun canWorkFrom(actor: Actor, work: CivWorldWork): Boolean =
+        citizenWorkFocus(work)?.let { citizenCanReachBlock(actor.npc, it) } == true
+
+    private fun storageForTarget(actor: Actor, city: Settlement, target: CivPosition): CivBuilding? {
+        val work = actor.plan.worldWork
+        return if (target == actor.plan.workplace && work != null && work.changes.isEmpty())
+            city.building(work.buildingId)?.takeIf { it.control != null }
+        else citizenControlBuilding(city, target)
+    }
+
     private fun arrivedAt(actor: Actor, city: Settlement, world: World, target: CivPosition): Boolean {
+        val work = actor.plan.worldWork
+        if (!actor.sheltering && target == actor.plan.workplace && work != null && work.changes.isNotEmpty())
+            return canWorkFrom(actor, work)
+        val storage = storageForTarget(actor, city, target)
+        val control = storage?.control ?: target
+        if (storage != null && citizenAtStorage(world, actor.npc.location.point(), control) &&
+            citizenCanReachBlock(actor.npc, control)) return true
         if (!arrived(actor.npc.location, resolvedTarget(actor, target).location(world))) return false
-        val storage = citizenControlBuilding(city, target) ?: return true
-        return citizenAtStorage(world, actor.npc.location.point(), target) ||
-            !citizenStorageReady(world, target) && storage.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == storage.id &&
+        if (storage == null) return true
+        return !citizenStorageReady(world, control) && storage.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == storage.id &&
             resolvedTarget(actor, target) == storage.entrance
     }
 
@@ -915,7 +982,7 @@ class CivsCitizens(
                 citizenControlClear(city, candidate) && citizenRouteCellAllowed(city, failed.allowedBuildings, candidate.x, candidate.z) &&
                 citizenHasViewer(city.worldId, candidate.point(), viewers, viewerRange)
         }
-        val storage = citizenControlBuilding(city, authored)
+        val storage = storageForTarget(actor, city, authored)
         val point = (if (storage != null) citizenStorageTarget(city, storage, entity.world, safe)
             else citizenRecoveryTarget(city, authored, safe)) ?: return false
         val destination = point.location(entity.world)
@@ -1486,6 +1553,35 @@ internal fun citizenAtStorage(world: World, from: CitizenPoint, control: CivPosi
     val dz = from.z - (control.z + 0.5)
     return abs(from.y - control.y) <= 1.5 && dx * dx + dz * dz <= 1.75 * 1.75 &&
         (kotlin.math.floor(from.x).toInt() != control.x || kotlin.math.floor(from.z).toInt() != control.z)
+}
+
+/** Batched actions keep one actual reachable focus (for example the trunk's lowest cut). */
+internal fun citizenWorkFocus(work: CivWorldWork): CivPosition? =
+    (work.focus ?: work.changes.minByOrNull { it.position.point().distanceSquared(work.standing.point()) }?.position)
+        ?.takeIf { focus -> work.changes.any { it.position == focus } }
+
+/** A short eye-to-block ray is the authority for work and storage access; no chunk is loaded. */
+internal fun citizenCanReachBlock(npc: PacketPlayerNpc, target: CivPosition): Boolean =
+    npc.isValid && citizenCanReachBlock(npc.world, npc.location.clone().add(0.0, npc.eyeHeight, 0.0), target)
+
+internal const val CITIZEN_BLOCK_REACH = 3.0
+
+/** Planning uses the same ray contract as the observed actor and its durable receipt. */
+internal fun citizenCanReachBlock(world: World, eye: Location, target: CivPosition): Boolean {
+    if (eye.world != world || !eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite() ||
+        target.y !in world.minHeight until world.maxHeight) return false
+    val focus = Vector(target.x + .5, target.y + .5, target.z + .5)
+    val delta = focus.subtract(eye.toVector())
+    val distance = delta.length()
+    if (!distance.isFinite() || distance > CITIZEN_BLOCK_REACH) return false
+    for (x in (minOf(eye.blockX, target.x) shr 4)..(maxOf(eye.blockX, target.x) shr 4))
+        for (z in (minOf(eye.blockZ, target.z) shr 4)..(maxOf(eye.blockZ, target.z) shr 4))
+            if (!world.isChunkLoaded(x, z)) return false
+    if (distance < .001) return true
+    val hit = world.rayTraceBlocks(eye, delta.multiply(1.0 / distance), distance,
+        FluidCollisionMode.ALWAYS, true) ?: return true
+    val block = hit.hitBlock ?: return false
+    return block.x == target.x && block.y == target.y && block.z == target.z
 }
 
 private fun citizenStorageReady(world: World, control: CivPosition): Boolean =

@@ -12,6 +12,8 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
+import java.util.logging.Handler
+import java.util.logging.LogRecord
 
 class CivsSpatialWorkReviewTest : FunSpec({
     test("a neighbouring forester never plants in the authored field outside the farm hut bounds") {
@@ -41,7 +43,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
-    test("dark oak forester requests four saplings and forgets that request when production changes") {
+    test("dark oak forester requests a batch of saplings and forgets that request when production changes") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open().use { paper ->
                 val world = CivsWorksiteWorldFixture("sapling-request", Material.DIRT).also(paper.server::addWorld)
@@ -55,12 +57,12 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
                     runtime.pulse(listOf(city))
                     runtime.plan(city, worker) shouldBe null
-                    runtime.requirement(city, worker) shouldBe ("DARK_OAK_SAPLING" to 4L)
+                    runtime.requirement(city, worker) shouldBe ("DARK_OAK_SAPLING" to 64L)
                     runtime.idleReason(city, worker) shouldBe "waiting-saplings"
                     val changed = city.copy(buildings = city.buildings.map { if (it.id == forest.id) it.copy(production = "OAK_LOG") else it })
                     runtime.requirement(changed, worker) shouldBe null
                     runtime.pulse(listOf(changed))
-                    runtime.requirement(changed, worker) shouldBe ("OAK_SAPLING" to 1L)
+                    runtime.requirement(changed, worker) shouldBe ("OAK_SAPLING" to 64L)
                 }
                 tasks.close()
             }
@@ -99,15 +101,21 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     runtime.pulse(listOf(city))
                     runtime.plan(city, city.workers.single()) shouldBe null
                     runtime.idleReason(city, city.workers.single()) shouldBe "waiting-ladder"
-                    runtime.requirement(city, city.workers.single()) shouldBe ("LADDER" to 1L)
+                    runtime.requirement(city, city.workers.single()) shouldBe ("LADDER" to 64L)
                     val moved = city.workers.single().copy(assignment = city.buildings.last().id)
                     runtime.requirement(city, moved) shouldBe null
                     val changed = city.copy(buildings = city.buildings.map { if (it.id == mine.id) it.copy(production = "STONE") else it })
                     runtime.requirement(changed, city.workers.single()) shouldBe null
                     runtime.requirement(city, city.workers.single().copy(completedCycles = 2)) shouldBe null
-                    stock["LADDER"] = 1
+                    val supplied = city.workers.single().let { miner ->
+                        CivsEquipment.replace(miner, CivsEquipment.slots(miner).toMutableList().also { it[6] = CivResidentItem("LADDER", 64) })
+                    }
+                    city = city.copy(workers = listOf(supplied))
                     runtime.pulse(listOf(city))
-                    requireNotNull(runtime.plan(city, city.workers.single())).inputs shouldBe mapOf("LADDER" to 1L)
+                    val ladderWork = requireNotNull(runtime.plan(city, city.workers.single()))
+                    ladderWork.inputs shouldBe mapOf("LADDER" to 1L)
+                    ladderWork.storageInputs(supplied) shouldBe emptyMap()
+                    CivsEquipment.plainCount(CivsRules.finishWorldWork(city, ladderWork, 20_000).workers.single(), "LADDER") shouldBe 63
                 }
                 tasks.close()
             }
@@ -134,6 +142,160 @@ class CivsSpatialWorkReviewTest : FunSpec({
         citizenNearEndpoint(CitizenPoint(-6.5, 64.0, 11.5), destination) shouldBe true
         citizenNearEndpoint(CitizenPoint(-7.5, 64.0, 11.5), destination) shouldBe false
         citizenNearEndpoint(CitizenPoint(-6.5, 65.0, 11.5), destination) shouldBe false
+    }
+
+    test("a miner reaches the real block from two cells away when every adjacent standing cell is unavailable") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-reach").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineReach")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = spatialWorker(mine, "IRON_PICKAXE")
+                val city = spatialCity(world.uid, listOf(mine), worker)
+                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
+                val standing = target.copy(x = target.x - 2)
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                for (y in target.y..target.y + 2) world.getBlockAt(standing.x, y, standing.z).type = Material.AIR
+                // A gap permits the ray, but offers no floor for any of the old adjacent probes.
+                for (y in target.y - 4..target.y + 2) world.getBlockAt(target.x - 1, y, target.z).type = Material.AIR
+                for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (dy in listOf(0, 1, -1, -2)) {
+                    citizenStandable(world, target.copy(x = target.x + dx, y = target.y + 1 + dy, z = target.z + dz)) shouldBe false
+                }
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    runtime.pulse(listOf(city))
+                    val work = requireNotNull(runtime.plan(city, worker))
+                    work.standing shouldBe standing
+                    work.focus shouldBe target
+                    citizenCanReachBlock(world, Location(world, standing.x + .5, standing.y + 1.62, standing.z + .5), target) shouldBe true
+                    work.changes.single().position shouldBe target
+                    work.changes.single().after shouldBe "minecraft:air"
+                    work.durationMillis shouldBe 4_000
+                    work.inputs shouldBe emptyMap()
+                    work.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                    world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
+                    worker.completedCycles shouldBe 0L
+
+                    // Expanding the search radius must not turn a neighbour's footprint into a work position.
+                    val protected = city.copy(buildings = city.buildings.map { building ->
+                        if (building.type == BuildingType.TOWN_HALL) building.copy(bounds = CivBox(standing, standing)) else building
+                    })
+                    runtime.invalidate(worker.id)
+                    repeat(4) { runtime.pulse(listOf(protected)) }
+                    runtime.plan(protected, worker) shouldBe null
+                }
+                tasks.close()
+            }
+        }
+    }
+
+    test("work position search continues within its shared ray budget and reports an actual blocked ray only after exhaustion") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-occluded").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineOccluded")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = spatialWorker(mine, "IRON_PICKAXE")
+                val city = spatialCity(world.uid, listOf(mine), worker)
+                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                // Sixteen supported outer positions surround a solid, three-block-high cross.
+                for (dx in -2..2) for (dz in -2..2) if (kotlin.math.abs(dx) + kotlin.math.abs(dz) > 1) {
+                    for (dy in 0..2) world.getBlockAt(target.x + dx, target.y + dy, target.z + dz).type = Material.AIR
+                }
+                val messages = mutableListOf<String>()
+                val handler = worksiteLogHandler(messages)
+                plugin.logger.addHandler(handler)
+                try {
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "searching-work"
+                        (world.rayTraces in 1..8) shouldBe true
+                        messages.none { "worksite_blocked" in it } shouldBe true
+                        var pulses = 1
+                        while (runtime.idleReason(city, worker) == "searching-work" && pulses++ < 8) {
+                            val before = world.rayTraces
+                            runtime.pulse(listOf(city))
+                            (world.rayTraces - before <= 8) shouldBe true
+                        }
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "worksite-no-access"
+                        val blocked = messages.single { "worksite_blocked" in it }
+                        ("line-of-sight-blocked" in blocked) shouldBe true
+                        (target.toString() in blocked) shouldBe true
+                        ("STONE" in blocked) shouldBe true
+                        repeat(4) { runtime.pulse(listOf(city)) }
+                        messages.count { "worksite_blocked" in it } shouldBe 1
+
+                        for (dy in 0..2) world.getBlockAt(target.x - 1, target.y + dy, target.z).type = Material.AIR
+                        runtime.invalidate(worker.id)
+                        runtime.pulse(listOf(city))
+                        requireNotNull(runtime.plan(city, worker)).focus shouldBe target
+                        messages.count { "worksite_recovered" in it } shouldBe 1
+                        runtime.pulse(listOf(city))
+                        messages.count { "worksite_recovered" in it } shouldBe 1
+                    }
+                } finally {
+                    plugin.logger.removeHandler(handler)
+                    tasks.close()
+                }
+            }
+        }
+    }
+
+    test("a miner reports liquid unbreakable and locked target causes without mutating the world") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-causes").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineCauses")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = spatialWorker(mine, "IRON_PICKAXE")
+                val city = spatialCity(world.uid, listOf(mine), worker)
+                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                val block = world.getBlockAt(target.x, target.y, target.z)
+                block.type = Material.WATER
+                var locked = false
+                val messages = mutableListOf<String>()
+                val handler = worksiteLogHandler(messages)
+                plugin.logger.addHandler(handler)
+                try {
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == target })
+                        repeat(3) { runtime.pulse(listOf(city)) }
+                        runtime.idleReason(city, worker) shouldBe "worksite-liquid"
+                        messages.count { "worksite_blocked" in it } shouldBe 1
+                        messages.any { "liquid" in it && "WATER" in it && target.toString() in it } shouldBe true
+                        block.type shouldBe Material.WATER
+                        paper.performTicks(100)
+                        block.type = Material.BEDROCK
+                        runtime.pulse(listOf(city))
+                        runtime.idleReason(city, worker) shouldBe "worksite-unbreakable"
+                        messages.any { "unbreakable" in it && "BEDROCK" in it } shouldBe true
+                        paper.performTicks(100)
+                        locked = true
+                        runtime.pulse(listOf(city))
+                        runtime.idleReason(city, worker) shouldBe "worksite-protected"
+                        messages.any { "world-operation-locked" in it && target.toString() in it } shouldBe true
+                        runtime.plan(city, worker) shouldBe null
+                        world.rayTraces shouldBe 0
+                        block.type shouldBe Material.BEDROCK
+                        worker.completedCycles shouldBe 0L
+                    }
+                } finally {
+                    plugin.logger.removeHandler(handler)
+                    tasks.close()
+                }
+            }
+        }
     }
 
     for (style in listOf("nordic", "medievaloak", "caledonia")) {
@@ -233,4 +395,10 @@ private fun spatialCity(worldId: UUID, buildings: List<CivBuilding>, worker: Civ
         control = CivPosition(50, 64, 3))
     return Settlement(UUID.randomUUID(), UUID.randomUUID(), "Spatial", worldId, CivPosition(0, 64, 0), 80, "test", Stock(),
         buildings + hall, listOf(worker), inventory = CivInventory(CivStorageMode.VIRTUAL))
+}
+
+private fun worksiteLogHandler(messages: MutableList<String>): Handler = object : Handler() {
+    override fun publish(record: LogRecord) { messages += record.message }
+    override fun flush() = Unit
+    override fun close() = Unit
 }

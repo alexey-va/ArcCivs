@@ -1,12 +1,16 @@
 package ru.arc.civs
 
 import org.bukkit.Location
+import org.bukkit.FluidCollisionMode
 import org.bukkit.Material
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.data.BlockData
 import org.bukkit.block.structure.StructureRotation
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
+import org.bukkit.util.RayTraceResult
+import org.bukkit.util.Vector
+import org.bukkit.util.VoxelShape
 import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.ServerMock
 import org.mockbukkit.mockbukkit.block.data.BlockDataMock
@@ -15,9 +19,11 @@ import org.mockbukkit.mockbukkit.world.WorldMock
 
 /** Only the native collision/drop operations absent from the pinned MockBukkit are supplied here.
  * BlockData, mutations, loaded chunks and the world remain ordinary MockBukkit state.
- * This is a stone-plane fixture, not evidence of native growth or Citizens navigation. */
+ * This is a stone-plane fixture, not evidence of native growth or resident navigation. */
 internal class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE) : WorldMock(ground, 63) {
     private val cells = hashMapOf<Coordinate, BlockMock>()
+    var rayTraces = 0
+        private set
     init { setName(name) }
 
     override fun getHighestBlockYAt(x: Int, z: Int): Int =
@@ -29,6 +35,17 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
     override fun getBlockAt(point: Coordinate): BlockMock = cells.getOrPut(point) {
         object : BlockMock(if (point.y <= 63) ground else Material.AIR,
             Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
+            override fun isPassable(): Boolean = !type.isSolid
+
+            override fun getCollisionShape(): VoxelShape {
+                val bounds = boundingBox
+                val boxes = if (bounds.height == 0.0) emptyList() else listOf(bounds.shift(-x.toDouble(), -y.toDouble(), -z.toDouble()))
+                return object : VoxelShape {
+                    override fun getBoundingBoxes(): Collection<BoundingBox> = boxes
+                    override fun overlaps(other: BoundingBox): Boolean = boxes.any { it.overlaps(other) }
+                }
+            }
+
             override fun getBoundingBox(): BoundingBox {
                 val height = when {
                     type == Material.FARMLAND -> 15.0 / 16.0
@@ -51,6 +68,29 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
                 else -> error("Unspecified fixture drops for $type")
             }
         }
+    }
+
+    /** Native box intersection supplies the ray API missing from pinned MockBukkit. */
+    override fun rayTraceBlocks(start: Location, direction: Vector, maxDistance: Double,
+        fluidCollisionMode: FluidCollisionMode, ignorePassableBlocks: Boolean): RayTraceResult? {
+        rayTraces++
+        val end = start.clone().add(direction.clone().normalize().multiply(maxDistance))
+        var nearest: RayTraceResult? = null
+        for (x in minOf(start.blockX, end.blockX)..maxOf(start.blockX, end.blockX))
+            for (y in minOf(start.blockY, end.blockY)..maxOf(start.blockY, end.blockY))
+                for (z in minOf(start.blockZ, end.blockZ)..maxOf(start.blockZ, end.blockZ)) {
+                    val block = getBlockAt(x, y, z)
+                    if (block.type.isAir || ignorePassableBlocks && block.isPassable && !block.isLiquid) continue
+                    val boxes = if (block.isLiquid && fluidCollisionMode != FluidCollisionMode.NEVER)
+                        listOf(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))
+                    else block.collisionShape.boundingBoxes.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) }
+                    for (box in boxes) {
+                        val hit = box.rayTrace(start.toVector(), direction, maxDistance) ?: continue
+                        if (nearest == null || hit.hitPosition.distanceSquared(start.toVector()) < nearest.hitPosition.distanceSquared(start.toVector()))
+                            nearest = RayTraceResult(hit.hitPosition, block, hit.hitBlockFace)
+                    }
+                }
+        return nearest
     }
 }
 

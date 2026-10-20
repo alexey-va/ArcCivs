@@ -175,19 +175,27 @@ def render_workplace_states(args, client, projection):
 
 
 def render_cart_states(args, client, core, stack, labels, projection):
-    fixture = args.fixtures / "courier-cart.json"
-    if not fixture.is_file() or args.cart_grounding is None:
+    parcel_fixture = args.fixtures / "courier-parcel.json"
+    parcel = parcel_fixture.is_file()
+    fixture = parcel_fixture if parcel else args.fixtures / "courier-cart.json"
+    if not fixture.is_file() or not parcel and args.cart_grounding is None:
         return None
     data = json.loads(fixture.read_text())
-    model = json.loads(args.cart_grounding.read_text())
+    model = None if parcel else json.loads(args.cart_grounding.read_text())
     statuses = yaml.safe_load((Path(__file__).parent.parent / "src/main/resources/locales.yml").read_text())["ru"]["workers"]["status"]
-    empty_statuses = {"empty-before-pickup": "moving-to-pickup", "return-empty": "waiting-orders"}
-    if data["item"] != model["identity"]["itemsadder_id"]:
-        raise ValueError("The cart fixture and measured model refer to different ItemsAdder items")
-    for source in model["model_provenance"]:
-        if digest(source["path"]) != source["sha256"]:
-            raise ValueError("The current cart model differs from the measured grounding export")
-    texture_root = Path(model["identity"]["resourcepack_root"])
+    empty_statuses = {"empty-before-pickup": "moving-to-pickup", "return-empty": "waiting-orders", "off-duty": "waiting-orders"}
+    if parcel:
+        if data["kind"] != "parcel" or data["material"] != "BARREL" or data["facing"] != "UP":
+            raise ValueError("The parcel preview requires the exported upward-facing barrel block")
+        for path, value in data["sourceSha256"].items():
+            if digest(Path(__file__).parent.parent / path) != value:
+                raise ValueError("The parcel source changed after the compiled export")
+    else:
+        if data["item"] != model["identity"]["itemsadder_id"]:
+            raise ValueError("The cart fixture and measured model refer to different ItemsAdder items")
+        for source in model["model_provenance"]:
+            if digest(source["path"]) != source["sha256"]:
+                raise ValueError("The current cart model differs from the measured grounding export")
     textures = {}
 
     def model_texture(key):
@@ -212,6 +220,16 @@ def render_cart_states(args, client, core, stack, labels, projection):
                   ("left-arm", (-.46875, .703125, -.1172), (.2344, .703125, .2344), (20, 20, 28, 32)),
                   ("right-arm", (.2344, .703125, -.1172), (.2344, .703125, .2344), (20, 20, 28, 32))]
 
+    # Up/down/front/back/+X/-X faces. A repeated front UV falsely puts a face on the back of a carried parcel's owner.
+    parcel_skin_uvs = {
+        "head": [(8, 0, 16, 8), (16, 0, 24, 8), (8, 8, 16, 16), (24, 8, 32, 16), (16, 8, 24, 16), (0, 8, 8, 16)],
+        "body": [(20, 16, 28, 20), (28, 16, 36, 20), (20, 20, 28, 32), (32, 20, 40, 32), (28, 20, 32, 32), (16, 20, 20, 32)],
+        "left-leg": [(4, 16, 8, 20), (8, 16, 12, 20), (4, 20, 8, 32), (12, 20, 16, 32), (8, 20, 12, 32), (0, 20, 4, 32)],
+        "right-leg": [(20, 48, 24, 52), (24, 48, 28, 52), (20, 52, 24, 64), (28, 52, 32, 64), (24, 52, 28, 64), (16, 52, 20, 64)],
+        "left-arm": [(44, 16, 48, 20), (48, 16, 52, 20), (44, 20, 48, 32), (52, 20, 56, 32), (48, 20, 52, 32), (40, 20, 44, 32)],
+        "right-arm": [(36, 48, 40, 52), (40, 48, 44, 52), (36, 52, 40, 64), (44, 52, 48, 64), (40, 52, 44, 64), (32, 52, 36, 64)],
+    }
+
     def cube_faces(origin, size):
         x, y, z = origin
         xx, yy, zz = np.asarray(origin) + size
@@ -232,7 +250,8 @@ def render_cart_states(args, client, core, stack, labels, projection):
     frames = []
     for state in data["states"]:
         feet = np.asarray(state["feet"])
-        cameras = [("player", feet + (3.5, 1.62, 5.5), feet + (0, 1.30, .50), (0, 1, 0), 60)]
+        cameras = [("player", feet + ((2.5, 1.62, -3.5) if parcel else (3.5, 1.62, 5.5)),
+                    feet + ((0, 1.15, 0) if parcel else (0, 1.30, .50)), (0, 1, 0), 60)]
         if state["id"] == "loaded":
             cameras += [("front", feet + (0, 1.62, 5.0), feet + (0, 1.2, .5), (0, 1, 0), 60),
                         ("side", feet + (5, 1.62, .7), feet + (0, .8, .7), (0, 1, 0), 60),
@@ -242,18 +261,26 @@ def render_cart_states(args, client, core, stack, labels, projection):
             for x in range(-12, 15):
                 for z in range(-12, 15):
                     view.quad([(x, 0, z), (x + 1, 0, z), (x + 1, 0, z + 1), (x, 0, z + 1)], grass)
-            # The mannequin supplies familiar player scale; the cart uses every authored model face.
+            # The mannequin supplies familiar player scale; each prop uses its exported native transform.
             radians = math.radians(-state["yaw"])
             actor = dict(scale=[1, 1, 1], translation=[0, 0, 0], rotation=[0, math.sin(radians / 2), 0, math.cos(radians / 2)])
-            for _, origin, size, uv in skin_parts:
-                for face in cube_faces(origin, size):
+            for part, origin, size, uv in skin_parts:
+                for index, face in enumerate(cube_faces(origin, size)):
                     points = transformed(face, actor, feet, 0)
-                    view.quad(points, np.asarray(skin.crop(uv)), shade(points))
-            for face in model["render"]["faces"]:
+                    view.quad(points, np.asarray(skin.crop(parcel_skin_uvs[part][index] if parcel else uv)), shade(points))
+            if parcel and state.get("parcel"):
+                textures = [vanilla("block/barrel_" + name) for name in ("top", "bottom", "side", "side", "side", "side")]
+                for face, texture in zip(cube_faces((0, 0, 0), (1, 1, 1)), textures):
+                    points = transformed(face, state["parcel"], feet, state["nativeHeight"])
+                    # cube_faces has inward winding; draw only the exterior face seen by this camera.
+                    normal = np.cross(points[1] - points[0], points[2] - points[0])
+                    if normal @ (view.eye - points.mean(axis=0)) < 0:
+                        view.quad(points, texture, shade(points))
+            for face in model["render"]["faces"] if model else []:
                 points = transformed(face["positions_item_display_base"], state["cart"], feet, state["nativeHeight"])
                 uv = [(u, 1 - v) for u, v in face["uv_normalized"]]
                 view.quad(points, model_texture(face["texture"]), shade(points), uv=uv)
-            for piece in state["cargo"]:
+            for piece in state["cargo"] if not parcel else []:
                 if piece["block"]:
                     # Exported fixture uses cobblestone, whose six actual block faces share one texture.
                     texture = vanilla("block/" + piece["material"].lower())
@@ -279,7 +306,7 @@ def render_cart_states(args, client, core, stack, labels, projection):
                 top = bottom + view.up * texture.height / 2 * .025 * value["scale"]
                 view.quad([top - right, top + right, bottom + right, bottom - right], np.asarray(texture))
             output = view.image()
-            filename = f"cart-{state['id']}-{name}.png"
+            filename = f"{'parcel' if parcel else 'cart'}-{state['id']}-{name}.png"
             output.save(args.out / filename)
             outputs.append({"image": filename, "state": state["id"], "timeMillis": state["timeMillis"],
                             "eye": eye.tolist(), "target": target.tolist(), "yaw": state["yaw"]})
@@ -291,9 +318,10 @@ def render_cart_states(args, client, core, stack, labels, projection):
         x, y = index % 2 * 640, index // 2 * 400
         storyboard.paste(frame, (x, y + 32))
         pen.text((x + 12, y + 10), f"{state['timeMillis']} ms | {state['id']} | yaw {state['yaw']} deg", fill=(231, 214, 183))
-    storyboard.save(args.out / "cart-motion-states.png")
-    return {"fixture": fixture.name, "sha256": digest(fixture), "modelGroundingSha256": digest(args.cart_grounding),
-            "modelProvenance": model["model_provenance"], "modelFaces": len(model["render"]["faces"]), "views": outputs,
+    storyboard.save(args.out / ("parcel-motion-states.png" if parcel else "cart-motion-states.png"))
+    provenance = {"sourceSha256": data["sourceSha256"], "block": "minecraft:barrel[facing=up]", "maxParts": 1} if parcel else {
+        "modelGroundingSha256": digest(args.cart_grounding), "modelProvenance": model["model_provenance"], "modelFaces": len(model["render"]["faces"])}
+    return {"fixture": fixture.name, "sha256": digest(fixture), **provenance, "views": outputs,
             "emptyStatusSamples": empty_statuses, "emptyStatusSource": "ru.workers.status in canonical locales.yml; sampled preview states"}
 
 

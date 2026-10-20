@@ -65,6 +65,42 @@ internal object CivsEquipment {
     fun plainCount(worker: CivWorker, material: String): Int = slots(worker).filterNotNull()
         .filter { it.material == material && it.data == null }.sumOf(CivResidentItem::amount)
 
+    fun available(worker: CivWorker, stock: Map<String, Long>): Map<String, Long> = stock.toMutableMap().also { total ->
+        slots(worker).filterNotNull().filter { it.data == null }.forEach { total.merge(it.material, it.amount.toLong(), Long::plus) }
+    }
+
+    /** Carried plain supplies are consumed first; native storage owns only the remainder. */
+    fun storageInputs(worker: CivWorker, inputs: Map<String, Long>): Map<String, Long> = inputs.mapValues { (material, count) ->
+        (count - plainCount(worker, material)).coerceAtLeast(0)
+    }.filterValues { it > 0 }
+
+    fun consumeInputs(worker: CivWorker, inputs: Map<String, Long>): CivWorker = inputs.entries.fold(worker) { current, (material, count) ->
+        val carried = minOf(count, plainCount(current, material).toLong()).toInt()
+        if (carried == 0) current else consume(current, material, carried)
+    }
+
+    fun supplyRoom(worker: CivWorker, material: Material): Int = slots(worker).drop(BAG).sumOf {
+        when { it == null -> material.maxStackSize; it.material == material.name && it.data == null -> material.maxStackSize - it.amount; else -> 0 }
+    }
+
+    fun giveRequestedSupply(worker: CivWorker, player: Player, material: Material, amount: Long): Pair<CivWorker, List<CivNativePlayerSlot>> {
+        require(amount in 1..material.maxStackSize.toLong())
+        val items = slots(worker).toMutableList()
+        val changes = mutableListOf<CivNativePlayerSlot>()
+        var remaining = amount.toInt()
+        for (slot in 0..35) {
+            if (remaining == 0) break
+            val native = player.inventory.getItem(slot)?.takeIf { it.type == material && it.amount > 0 && it.isSimilar(ItemStack(material)) } ?: continue
+            val before = requireNotNull(CivResidentItem.of(native))
+            val moved = insert(items, before, minOf(remaining, before.amount), material.maxStackSize)
+            if (moved == 0) break
+            changes += CivNativePlayerSlot(slot, before, before.copy(amount = before.amount - moved).takeIf { it.amount > 0 })
+            remaining -= moved
+        }
+        if (changes.isEmpty()) throw CivsRejection(if (supplyRoom(worker, material) == 0) "resident-inventory-full" else "resident-item-missing")
+        return replace(worker, items) to changes
+    }
+
     fun requestedTool(city: Settlement, worker: CivWorker): Material? {
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE } ?: return null
         val type = CivsRules.effectiveWorkType(city, building)

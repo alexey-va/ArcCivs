@@ -171,6 +171,48 @@ class CivsStorageTest : FunSpec({
         CivsEquipment.requestedTool(receipt.after, prepared.worker) shouldBe null
     }
 
+    test("requested supplies move a bounded batch from multiple player stacks and replay only once") {
+        val player = paper.addPlayer("SupplyDonor")
+        val worker = CivWorker(UUID.randomUUID(), "Miner", null, items = MutableList<CivResidentItem?>(33) { null }.also {
+            it[4] = CivResidentItem("IRON_PICKAXE", 1)
+            it[6] = CivResidentItem("COBBLESTONE", 12)
+        })
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.inventory.setItem(0, ItemStack(Material.COBBLESTONE, 24))
+        player.inventory.setItem(1, named(Material.COBBLESTONE, 64))
+        player.inventory.setItem(2, ItemStack(Material.COBBLESTONE, 40))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, null, null, ClickType.LEFT,
+            requestedSupply = Material.COBBLESTONE to 52L)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        CivsEquipment.plainCount(prepared.worker, "COBBLESTONE") shouldBe 64
+        player.inventory.getItem(0)!!.amount shouldBe 24 // Planning is not a native debit.
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe null
+        player.inventory.getItem(1)!!.amount shouldBe 64 // Named supplies are never silently consumed.
+        player.inventory.getItem(2)!!.amount shouldBe 12
+        prepared.worker.items!![4]!!.material shouldBe "IRON_PICKAXE"
+    }
+
+    test("requested supply accepts a partial donation and respects the resident bag capacity") {
+        val player = paper.addPlayer("PartialSupplyDonor")
+        val worker = CivWorker(UUID.randomUUID(), "Farmer", null, items = MutableList<CivResidentItem?>(33) { index ->
+            if (index >= 6) CivResidentItem("STONE", 64) else null
+        }.also { it[6] = CivResidentItem("WHEAT_SEEDS", 61) })
+        player.inventory.setItem(0, ItemStack(Material.WHEAT_SEEDS, 8))
+        val (filled, debit) = CivsEquipment.giveRequestedSupply(worker, player, Material.WHEAT_SEEDS, 64)
+        CivsEquipment.plainCount(filled, "WHEAT_SEEDS") shouldBe 64
+        debit.single().after!!.amount shouldBe 5
+        val emptyBag = worker.copy(items = List(33) { null })
+        val (partial, partialDebit) = CivsEquipment.giveRequestedSupply(emptyBag, player, Material.WHEAT_SEEDS, 64)
+        CivsEquipment.plainCount(partial, "WHEAT_SEEDS") shouldBe 8
+        partialDebit.single().after shouldBe null
+        player.inventory.getItem(0)!!.amount shouldBe 8
+    }
+
     test("resident receipts wait for rejoin and retry an already applied player change after a failed save") {
         val player = paper.addPlayer("ReturningEquipmentOwner")
         player.openInventory(paper.server.createInventory(player, 9))

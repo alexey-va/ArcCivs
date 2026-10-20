@@ -30,9 +30,8 @@ internal fun citizenSkin(skins: List<CitizenSkin>, workerId: UUID): CitizenSkin 
 
 internal fun citizenScale(worker: CivWorker): Double = if (CivsResidents.isChild(worker)) .5 else 1.0
 
-/** Optional scene props only. Work tools are projected from the resident's actual HAND slot. */
-internal fun citizenTool(plan: CitizenPlan): Material? = plan.courier?.takeIf { it.carrying }?.cargo?.material
-    ?.let(Material::getMaterial) ?: when (plan.type) {
+/** Optional scene props only. Cargo has one attached parcel; work tools come from the actual HAND slot. */
+internal fun citizenTool(plan: CitizenPlan): Material? = when (plan.type) {
     BuildingType.TOWN_HALL -> Material.BOOK
     BuildingType.LIBRARY -> Material.FEATHER
     else -> null

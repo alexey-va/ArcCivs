@@ -22,7 +22,7 @@ class CivsPhysicalWorkTest : FunSpec({
                 CivBox(CivPosition(-4, 63, -22), CivPosition(18, 80, -1)), CivPosition(0, 64, 0),
                 BuildingPhase.ACTIVE, control = CivPosition(0, 64, -3), production = "WHEAT")
             val worker = CivWorker(UUID.randomUUID(), "Фермер", farm.id, nextDeliveryAt = 1,
-                inventory = mapOf("IRON_HOE" to 1))
+                inventory = mapOf("IRON_HOE" to 1, "WHEAT_SEEDS" to 64))
             val city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Farm", world.uid, CivPosition(0, 64, 0),
                 48, "medievaloak", Stock(), listOf(farm, farm.copy(id = UUID.randomUUID(), type = BuildingType.TOWN_HALL,
                     schematicId = "test", bounds = CivBox(CivPosition(-10, 63, 1), CivPosition(-4, 70, 6)),
@@ -35,7 +35,7 @@ class CivsPhysicalWorkTest : FunSpec({
                 world.getBlockAt(x, 64, z).type = Material.DIRT
             }
             water.forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
-            val counts = mutableMapOf("WHEAT_SEEDS" to 10L)
+            val counts = mutableMapOf<String, Long>()
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                 val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false })
                 runtime.pulse(listOf(city))
@@ -56,6 +56,11 @@ class CivsPhysicalWorkTest : FunSpec({
                 repeat(8) { runtime.pulse(listOf(city)) }
                 val plant = requireNotNull(runtime.plan(city, worker))
                 plant.inputs shouldBe mapOf("WHEAT_SEEDS" to 1L)
+                plant.storageInputs(worker) shouldBe emptyMap()
+                val plantedCity = CivsRules.finishWorldWork(city, plant, 10_000)
+                CivsEquipment.plainCount(plantedCity.workers.single(), "WHEAT_SEEDS") shouldBe 63
+                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(plantedCity, plant, 10_001) }
+                runtime.requirement(city, worker) shouldBe ("WHEAT_SEEDS" to 64L)
                 val p = plant.changes.single().position
                 world.getBlockAt(p.x, p.y, p.z).setBlockData(org.bukkit.Bukkit.createBlockData(plant.changes.single().after), false)
                 runtime.invalidate(worker.id)

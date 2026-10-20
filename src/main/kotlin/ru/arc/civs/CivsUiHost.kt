@@ -112,6 +112,8 @@ interface CivsUiHost {
     fun feedWorker(player: Player, workerId: UUID): CompletableFuture<Unit>
     fun toolRequest(player: Player, workerId: UUID): CivsToolRequest? = null
     fun giveRequestedTool(player: Player, workerId: UUID): CompletableFuture<Unit> = CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
+    fun workerRequest(player: Player, workerId: UUID): CivsBuildingRequest? = null
+    fun giveWorkerRequest(player: Player, workerId: UUID, material: String): CompletableFuture<Unit> = CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
     fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
     fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
