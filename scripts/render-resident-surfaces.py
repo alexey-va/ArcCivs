@@ -102,7 +102,7 @@ def render_workplace_states(args, client, projection):
                     ([(.5, 1, -.5), (-.5, 1, -.5), (-.5, 0, -.5), (.5, 0, -.5)], lid, .85),
                     ([(.5, 1, .5), (.5, 1, -.5), (.5, 0, -.5), (.5, 0, .5)], side, .85),
                     ([(-.5, 1, -.5), (-.5, 1, .5), (-.5, 0, .5), (-.5, 0, -.5)], side, .8)]
-    outputs = []
+    outputs, item_faces = [], {}
     for state in states:
         view = projection.View((3.2, 1.62, -3.4), (0, .55, 0), width=1280, height=720, fov=60)
         for x in range(-10, 11):
@@ -110,22 +110,67 @@ def render_workplace_states(args, client, projection):
                 view.quad([(x, 0, z), (x + 1, 0, z), (x + 1, 0, z + 1), (x, 0, z + 1)], grass)
         for face, pixels, shade in barrel_faces:
             view.quad(face, pixels, shade)
+        item_faces[state["id"]] = []
         for piece in state["pieces"]:
+            def points(vertices):
+                vertices = np.asarray(vertices, dtype=float)
+                q = np.asarray(piece["transform"].get("rightRotation", [0, 0, 0, 1]))
+                vertices = vertices + 2 * np.cross(q[:3], np.cross(q[:3], vertices) + q[3] * vertices)
+                return transformed(vertices, piece["transform"], (0, 0, 0), 0)
+
+            def face(vertices, pixels, normal_sign=1, shade=1):
+                world = points(vertices)
+                normal = np.cross(world[1] - world[0], world[2] - world[0]) * normal_sign
+                if np.dot(normal, view.eye - world.mean(axis=0)) <= 0:
+                    return 0
+                view.quad(world, pixels, shade)
+                return 1
+
+            if piece.get("kind") == "block":
+                pixels = texture("block/" + piece["material"].lower())
+                faces = [
+                    ([(0, 1, 0), (1, 1, 0), (1, 1, 1), (0, 1, 1)], 1),
+                    ([(0, 0, 1), (1, 0, 1), (1, 0, 0), (0, 0, 0)], .6),
+                    ([(0, 1, 1), (1, 1, 1), (1, 0, 1), (0, 0, 1)], .9),
+                    ([(1, 1, 0), (0, 1, 0), (0, 0, 0), (1, 0, 0)], .85),
+                    ([(1, 1, 1), (1, 1, 0), (1, 0, 0), (1, 0, 1)], .85),
+                    ([(0, 1, 0), (0, 1, 1), (0, 0, 1), (0, 0, 0)], .8),
+                ]
+                for vertices, shade in faces:
+                    face(vertices, pixels, normal_sign=-1, shade=shade)
+                continue
             if piece.get("itemDisplayTransform", "FIXED") != "FIXED" or piece.get("entityYaw", 0) or piece.get("entityPitch", 0):
                 raise ValueError("Workplace preview supports the exported zero-yaw/pitch FIXED items only")
             # Generated/handheld FIXED Y180 is followed by ItemDisplayRenderer's Y180.
             # They cancel before right rotation -> scale -> left rotation -> translation.
-            # Keep both native faces at +/-1/32; thin alpha-boundary edge faces are not drawn.
+            # Native backface culling is essential: drawing the underside through the
+            # transparent silhouette makes one physical item look like two shifted sprites.
+            pixels = texture("item/" + piece["material"].lower())
+            broad_faces = 0
             for z in (-1 / 32, 1 / 32):
-                points = np.asarray([(-.5, .5, z), (.5, .5, z), (.5, -.5, z), (-.5, -.5, z)])
-                q = np.asarray(piece["transform"].get("rightRotation", [0, 0, 0, 1]))
-                points = points + 2 * np.cross(q[:3], np.cross(q[:3], points) + q[3] * points)
-                points = transformed(points, piece["transform"], (0, 0, 0), 0)
-                view.quad(points, texture("item/" + piece["material"].lower()))
+                broad_faces += face([(-.5, .5, z), (.5, .5, z), (.5, -.5, z), (-.5, -.5, z)],
+                                    pixels, normal_sign=1 if z < 0 else -1)
+            assert broad_faces <= 1, "An item cannot expose both opposite broad faces to one camera"
+            # Extrude only opaque texture boundaries, closing the 1/16-deep item.
+            # These solid edge strips use the boundary pixel; native UV inset is approximated.
+            height, width = pixels.shape[:2]
+            opaque = pixels[..., 3] > 0
+            edge_faces = 0
+            for y, x in np.argwhere(opaque):
+                a, b = x / width - .5, (x + 1) / width - .5
+                c, d = .5 - y / height, .5 - (y + 1) / height
+                edges = [((a, c), (b, c), y - 1, x), ((b, c), (b, d), y, x + 1),
+                         ((b, d), (a, d), y + 1, x), ((a, d), (a, c), y, x - 1)]
+                for start, end, ny, nx in edges:
+                    if 0 <= ny < height and 0 <= nx < width and opaque[ny, nx]:
+                        continue
+                    edge_faces += face([(*start, 1 / 32), (*end, 1 / 32), (*end, -1 / 32), (*start, -1 / 32)],
+                                       pixels[y:y + 1, x:x + 1])
+            item_faces[state["id"]].append({"material": piece["material"], "broadFaces": broad_faces, "edgeFaces": edge_faces})
         filename = f"workplace-{state['id']}-player.png"
         view.image().save(args.out / filename)
         outputs.append(filename)
-    return {"fixture": fixture.name, "sha256": digest(fixture), "views": outputs,
+    return {"fixture": fixture.name, "sha256": digest(fixture), "views": outputs, "visibleItemFaces": item_faces,
             "barrel": "Default north-facing barrel, actual side and end textures; decorative items have no hitbox"}
 
 
