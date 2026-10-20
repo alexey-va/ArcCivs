@@ -637,24 +637,31 @@ class CivsUi internal constructor(
             if (legacyControl && city.construction?.buildingId == buildingId) body(player, "reason.construction-busy") else null,
             request?.let { body(tint(if (requestTool != null) tr(player, "workers.tool-request-$requestTool")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
-            if (request != null && !request.canGive) body(tint(tr(player,
-                if (requestTool == null) "buildings.request-unavailable" else "workers.tool-request-unavailable"), STOCK)) else null,
             error?.let(::body),
         ), buildList {
             if (assigned > 0 && !busy) add(button(player, "summon", "buildings.summon", NAVIGATION) {
                 perform(player, "civs.building", "buildings.detail-title", { host.summonWorker(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
             }.copy(tooltip = tr(player, "buildings.summon-help")))
-            if (request?.canGive == true && !busy) {
+            if (request != null) {
+                val canGive = request.canGive && !busy
+                val color = if (canGive) COMMIT else DANGER
+                val tooltip = tr(player, when {
+                    busy -> "reason.city-busy"
+                    !request.canGive -> if (requestTool == null) "buildings.request-unavailable" else "workers.tool-request-unavailable"
+                    requestTool != null -> "workers.give-tool-help"
+                    else -> "buildings.give-help"
+                })
                 val give = {
-                    perform(player, "civs.building", "buildings.detail-title",
+                    if (canGive) perform(player, "civs.building", "buildings.detail-title",
                         { host.giveBuildingRequest(player, buildingId, request.material.name) },
                         success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
+                    else showBuilding(player, buildingId)
                 }
-                add(if (requestTool != null) button(player, "give_request", "buildings.give-tool-$requestTool", COMMIT) { give() }
-                    .copy(tooltip = tr(player, "workers.give-tool-help"))
+                add(if (requestTool != null) button(player, "give_request", "buildings.give-tool-$requestTool", color) { give() }
+                    .copy(tooltip = tooltip)
                 else valueButton(player, "give_request", "buildings.give", materialName(player, request.material.name),
-                    COMMIT, tr(player, "buildings.give-help"), give))
+                    color, tooltip, give))
             }
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })

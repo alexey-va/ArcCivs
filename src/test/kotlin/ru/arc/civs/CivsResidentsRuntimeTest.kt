@@ -10,6 +10,7 @@ import org.bukkit.Material
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.util.BoundingBox
+import org.bukkit.util.VoxelShape
 import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.world.ChunkMock
 import org.mockbukkit.mockbukkit.world.Coordinate
@@ -64,6 +65,55 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.visualHealth shouldBe 20.0
         }
     }
+
+    test("summoned farmer starts a supplied work plan at the barrel and keeps its delivery receipt fenced") {
+        residentRuntime { h ->
+            val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
+                "farm1", CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)),
+                CivPosition(20, 64, 0), BuildingPhase.ACTIVE, control = CivPosition(20, 64, 0), production = "WHEAT")
+            for (z in -1..1) h.world.loadChunk(2, z) // Loaded search margin east of the farm's chunk.
+            h.world.getBlockAt(20, 64, 0).type = Material.BARREL
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + farm,
+                workers = h.city.workers.map { it.copy(assignment = farm.id, nextDeliveryAt = 1) },
+                inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            h.owner.pulse(2_000) // A waiting farmer may already have an idle route from the former position.
+            h.owner.activeCount() shouldBe 1
+            val actor = h.owner.collisionActors().single()
+            val previous = actor.location
+            h.owner.summon(h.city, farm.id) shouldBe true
+            val summoned = actor.location
+            (previous.distance(summoned) > 8.0) shouldBe true
+            h.deliveries shouldBe 0
+
+            // Publication of supplied seeds makes a new field plan available on the next pulse.
+            h.city = h.city.copy(revision = h.city.revision + 1,
+                inventory = requireNotNull(h.city.inventory).copy(buildingMaterials = mapOf(farm.id.toString() to mapOf("WHEAT_SEEDS" to 1L))))
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0), emptyList(),
+                inputs = mapOf("WHEAT_SEEDS" to 1L), durationMillis = 1_500, status = "working-field")
+            h.owner.pulse(3_000)
+            actor.location shouldBe summoned
+            h.spawns shouldBe 1
+            h.deliveries shouldBe 0
+            for (tick in 1..160) {
+                val before = actor.location
+                h.owner.activateNavigating()
+                if (tick % 20 == 0) h.owner.pulse(3_000L + tick * 50)
+                // A fresh plan walks from the summon, without a stale route or recovery jump.
+                (before.distance(actor.location) <= .215001) shouldBe true
+                (actor.location.x >= summoned.x) shouldBe true
+                if (h.deliveries != 0) break
+            }
+            h.deliveries shouldBe 1
+            h.spawns shouldBe 1
+            h.owner.status(h.workerId) shouldBe "workers.status.working-field"
+            h.city.workers.single().completedCycles shouldBe 0
+            h.city.inventory?.buildingStock(farm.id) shouldBe mapOf("WHEAT_SEEDS" to 1L)
+            h.pendingDelivery.isDone shouldBe false
+            h.owner.summon(h.city, farm.id) shouldBe false // Never abandon an admitted receipt.
+            h.owner.pulse(12_000)
+            h.deliveries shouldBe 1
+        }
+    }
 })
 
 private fun residentRuntime(block: (ResidentRuntime) -> Unit) {
@@ -77,12 +127,15 @@ private fun residentRuntime(block: (ResidentRuntime) -> Unit) {
 
 private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
-    private val world = ResidentRuntimeWorld().also(paper.server::addWorld)
+    val world = ResidentRuntimeWorld().also(paper.server::addWorld)
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
     val workerId = UUID.randomUUID()
     var viewing = true
     var spawns = 0
     var hits = 0
+    var deliveries = 0
+    var work: CivWorldWork? = null
+    val pendingDelivery = CompletableFuture<Settlement>()
     val pending = CompletableFuture<Settlement>()
     private var damage = 0.0
     var city: Settlement
@@ -99,7 +152,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             96, "nordic", Stock(), listOf(hall), listOf(CivWorker(workerId, "Resident", null))))
         every { packets.spawnPlayer(any(), any()) } answers {
             spawns++
-            val position = firstArg<Location>().clone()
+            var position = firstArg<Location>().clone()
             var valid = true
             mockk<PacketPlayerNpc>(relaxed = true) {
                 every { isValid } answers { valid }
@@ -107,13 +160,19 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 every { world } returns this@ResidentRuntime.world
                 every { height } returns 1.8
                 every { eyeHeight } returns 1.62
+                every { teleport(any()) } answers { position = firstArg<Location>().clone(); Unit }
                 every { remove() } answers { valid = false; Unit }
             }
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
         owner = CivsCitizens(plugin, { if (viewing) listOf(city) else emptyList() },
-            { _, _, _, _, _, _, _ -> CompletableFuture.failedFuture(AssertionError("idle resident cannot deliver")) },
-            { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending }, packetOwner = packets)
+            { _, _, _, _, _, _, _ ->
+                check(work != null) { "idle resident cannot deliver" }
+                deliveries++
+                pendingDelivery
+            },
+            { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
+            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> "waiting-inputs" }, packetOwner = packets)
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -138,6 +197,7 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
             override fun isPassable(): Boolean = type.isAir
             override fun getBoundingBox(): BoundingBox = BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(),
                 x + 1.0, y + if (type.isAir) 0.0 else 1.0, z + 1.0)
+            override fun getCollisionShape(): VoxelShape = if (type.isAir) EMPTY_SHAPE else FULL_SHAPE
         }
     }
 
@@ -148,5 +208,14 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
                 every { chunk.getTileEntities(any<Predicate<Block>>(), false) } returns emptyList<BlockState>()
             }
         }
+    }
+
+    companion object {
+        private fun shape(boxes: List<BoundingBox>) = object : VoxelShape {
+            override fun getBoundingBoxes(): Collection<BoundingBox> = boxes
+            override fun overlaps(other: BoundingBox): Boolean = boxes.any { it.overlaps(other) }
+        }
+        private val EMPTY_SHAPE = shape(emptyList())
+        private val FULL_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
     }
 }

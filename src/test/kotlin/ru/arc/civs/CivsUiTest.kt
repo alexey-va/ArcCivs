@@ -1317,8 +1317,9 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.building"
             every { h.host.buildingRequest(h.player, building.id) } returns CivsBuildingRequest(Material.LADDER, 1, false)
             h.ui.openBuilding(h.player, base.id, building.id)
-            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
-            h.body() shouldContain "Положите нужный предмет в свой инвентарь"
+            val unavailable = h.screen.buttons.single { it.id.value == "give_request" }
+            unavailable.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(unavailable.tooltip) shouldBe "Нет в инвентаре."
             every { h.host.buildingRequest(h.player, building.id) } returns CivsBuildingRequest(Material.IRON_HOE, 1, true)
             h.ui.openBuilding(h.player, base.id, building.id)
             plainText(h.screen.buttons.single { it.id.value == "give_request" }.label) shouldBe "Выдать мотыгу"
@@ -1327,8 +1328,57 @@ class CivsUiTest : FunSpec({
             every { h.host.cityBusy(h.player) } returns true
             h.ui.openBuilding(h.player, base.id, building.id)
             h.screen.buttons.map { it.id.value } shouldNotContain "summon"
-            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
+            h.screen.buttons.single { it.id.value == "give_request" }.label.color() shouldBe TextColor.color(0xFF6B61)
+            h.click("give_request")
+            h.screen.id shouldBe "civs.building"
             verify(exactly = 1) { h.host.giveBuildingRequest(any(), any(), any()); h.host.summonWorker(any(), any()) }
+        }
+    }
+
+    test("building supply keeps the same request button visible when the player lacks the item") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val building = base.buildings.first { it.type == BuildingType.BUILDER_HUT }.copy(type = BuildingType.QUARRY)
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it })
+            every { h.host.buildingStatus(building.id) } returns "building-status.waiting-cobblestone"
+            var request: CivsBuildingRequest? = CivsBuildingRequest(Material.COBBLESTONE, 1, false)
+            every { h.host.buildingRequest(h.player, building.id) } answers { request }
+            fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
+
+            h.ui.openBuilding(h.player, base.id, building.id)
+            val missing = h.screen.buttons.single { it.id.value == "give_request" }
+            plainText(missing.label) shouldBe "Выдать: Булыжник"
+            missing.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(missing.tooltip) shouldBe "Нет в инвентаре."
+            h.body() shouldContain "Нужно: Булыжник × 1"
+            val actionIds = h.screen.buttons.map { it.id }
+            val bodyRows = h.screen.body.size
+            export("building-request-missing-ru")
+
+            h.click("give_request")
+            h.click("give_request")
+            verify(exactly = 0) { h.host.giveBuildingRequest(any(), any(), any()) }
+            // An unavailable click refreshes the visit instead of consuming every other action.
+            h.click("workers")
+            h.screen.id shouldBe "civs.building-workers"
+
+            request = request!!.copy(canGive = true)
+            h.ui.openBuilding(h.player, base.id, building.id)
+            val available = h.screen.buttons.single { it.id.value == "give_request" }
+            plainText(available.label) shouldBe plainText(missing.label)
+            available.label.color() shouldBe TextColor.color(0x9BD48D)
+            plainText(available.tooltip) shouldBe "Передать нужный предмет из своего инвентаря."
+            h.screen.buttons.map { it.id } shouldBe actionIds
+            h.screen.body.size shouldBe bodyRows
+            export("building-request-ready-ru")
+            val readyScreen = h.screen
+            h.click("give_request", screen = readyScreen)
+            h.click("give_request", screen = readyScreen)
+            request = null
+            h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.giveBuildingRequest(h.player, building.id, "COBBLESTONE") }
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
         }
     }
 
