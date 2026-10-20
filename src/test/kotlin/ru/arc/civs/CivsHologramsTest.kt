@@ -11,7 +11,7 @@ import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
-import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
@@ -25,7 +25,7 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsHologramsTest : FunSpec({
-    test("native carriers move nameplates without a second teleport follower and despawn removes the label") {
+    test("packet carriers move nameplates without a second teleport follower and despawn removes the label") {
         MockBukkitTestRuntime.open().use { paper ->
             val plugin = paper.createSimplePlugin("CivsHologramsTest")
             val player = paper.addPlayer("Viewer").apply { setLocale(Locale.forLanguageTag("ru-RU")) }
@@ -39,9 +39,9 @@ class CivsHologramsTest : FunSpec({
                 mockk<PacketTextDisplay>(relaxed = true).also(handles::add)
             }
             every { displays.closeAsync() } returns CompletableFuture.completedFuture(null)
-            val carrier = mockk<Player> { every { isValid } returns true }
+            val carrier = mockk<PacketPlayerNpc> { every { isValid } returns true }
             val npc = CivsNpcHologramSnapshot(UUID(0, 1), player.world.uid, 2.0, 64.0, 3.0, "Василий", "working", 18.5, 20.0,
-                entity = carrier, profession = "farmer")
+                actor = carrier, profession = "farmer")
             var values = listOf(npc, npc.copy(workerId = UUID(0, 2), x = 5.0))
             val renderer = CivsHolograms(plugin, tasks, CivsText.fromYaml(civsLocaleSource()), { values }, displays, budget)
             try {

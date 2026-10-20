@@ -17,6 +17,7 @@ FORBIDDEN_CLASS_PREFIXES = (
     "net/kyori/adventure/",
     "org/slf4j/",
     "com/sk89q/",
+    "net/citizensnpcs/",
     "ru/ruscrafting/trails/api/",
     "ru/arc/paper/api/",
     "ru/arc/paper/schematics/",
@@ -31,7 +32,7 @@ FORBIDDEN_CLASS_PREFIXES = (
 
 # Inspect the actual feature and the Core preview transport it constructs. Other
 # bundled Core helpers can serve optional ARC-only features that ArcCivs never uses.
-HOST_API_CONSUMERS = ("ru/arc/civs/", "ru/arc/paper/display/", "ru/arc/paper/packet/PaperVisualPackets")
+HOST_API_CONSUMERS = ("ru/arc/civs/", "ru/arc/paper/display/", "ru/arc/paper/npc/", "ru/arc/paper/packet/PaperVisualPackets")
 PREVIEW_CLASSES = (
     "ru/arc/civs/CivsPreviewRenderer.class",
     "ru/arc/paper/display/PaperPacketDisplays.class",
@@ -125,6 +126,12 @@ def verify(jar_path: Path, host_path: Path) -> None:
             raise ValueError(
                 "plugin.yml must declare exactly one top-level name: ArcCivs"
             )
+        if "Citizens" in descriptor:
+            raise ValueError("ArcCivs must not declare a Citizens dependency")
+        for name in entries:
+            if name.startswith("ru/arc/civs/") and name.endswith(".class"):
+                if b"net/citizensnpcs/" in archive.read(name):
+                    raise ValueError(f"Citizens linkage remains in {name}")
 
         leaked = sorted(
             name

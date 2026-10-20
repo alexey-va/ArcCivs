@@ -4,10 +4,13 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.slot
 import io.mockk.verify
 import org.bukkit.Location
 import org.bukkit.plugin.ServicePriority
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.npc.PacketPlayerNpc
+import ru.ruscrafting.trails.api.TrailsFootTrafficActor
 import ru.ruscrafting.trails.api.TrailsFootTrafficService
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -20,26 +23,32 @@ class CivsFootTrafficTest : FunSpec({
             val trails = paper.createSimplePlugin("Trails")
             val member = paper.addPlayer("Member")
             member.teleport(Location(world, 2.0, 65.0, 2.0))
-            val npc = paper.addPlayer("Resident")
-            npc.teleport(Location(world, 1.1, 65.0, 0.5))
+            val npc = mockk<PacketPlayerNpc>()
+            every { npc.location } answers { Location(world, 1.1, 65.0, 0.5) }
+            every { npc.uniqueId } returns UUID.randomUUID()
+            every { npc.isValid } returns true
             val worker = CivWorker(UUID.randomUUID(), "Resident", null)
             val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(3, 64, 0), 0,
                 "test", CivBox(CivPosition(2, 64, 0), CivPosition(4, 65, 2)), CivPosition(3, 64, 3), BuildingPhase.ACTIVE)
             var city = CivsRules.found(UUID.randomUUID(), UUID.randomUUID(), "Footsteps", world.uid,
                 CivPosition(0, 64, 0), 16, "nordic", hall, 1_000).copy(members = setOf(member.uniqueId), workers = listOf(worker))
             val api = mockk<TrailsFootTrafficService>()
-            every { api.recordStep(any(), any(), any(), any()) } returns CompletableFuture.completedFuture(TrailsFootTrafficService.StepResult.COUNTED)
+            val submitted = slot<TrailsFootTrafficActor>()
+            every { api.recordStep(capture(submitted), any(), any(), any()) } returns CompletableFuture.completedFuture(TrailsFootTrafficService.StepResult.COUNTED)
             paper.server.servicesManager.register(TrailsFootTrafficService::class.java, api, trails, ServicePriority.Normal)
             val traffic = CivsFootTraffic(plugin) { listOf(city) }
             val from = Location(world, 0.9, 65.0, 0.5)
             val to = npc.location
             traffic.record(city.id, worker.id, npc, from, to)
-            verify(exactly = 1) { api.recordStep(npc, member, from, to) }
+            verify(exactly = 1) { api.recordStep(any<TrailsFootTrafficActor>(), member, from, to) }
+            submitted.captured.uniqueId() shouldBe npc.uniqueId
+            submitted.captured.location() shouldBe to
+            submitted.captured.isValid shouldBe true
             city = city.copy(workers = emptyList())
             traffic.record(city.id, worker.id, npc, from, to)
             city = city.copy(workers = listOf(worker), members = emptySet())
             traffic.record(city.id, worker.id, npc, from, to)
-            verify(exactly = 1) { api.recordStep(any(), any(), any(), any()) }
+            verify(exactly = 1) { api.recordStep(any<TrailsFootTrafficActor>(), any(), any(), any()) }
         }
     }
 
@@ -47,7 +56,7 @@ class CivsFootTrafficTest : FunSpec({
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("no-trails")
             val plugin = paper.createSimplePlugin("ArcCivsFootsteps")
-            val npc = paper.addPlayer("Resident")
+            val npc = mockk<PacketPlayerNpc>()
             val calls = mutableListOf<UUID>()
             val traffic = CivsFootTraffic(plugin) { calls += UUID.randomUUID(); emptyList() }
             traffic.record(UUID.randomUUID(), UUID.randomUUID(), npc, Location(world, 0.9, 65.0, 0.5), Location(world, 1.1, 65.0, 0.5))
@@ -62,6 +71,7 @@ class CivsFootTrafficTest : FunSpec({
             val owner = paper.addPlayer("Owner")
             owner.teleport(Location(world, 0.9, 65.0, 0.5))
             val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+            val npc = mockk<PacketPlayerNpc>(relaxed = true)
             val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(3, 64, 0), 0,
                 "test", CivBox(CivPosition(2, 64, 0), CivPosition(4, 65, 2)), CivPosition(3, 64, 3), BuildingPhase.ACTIVE)
             val city = CivsRules.found(UUID.randomUUID(), owner.uniqueId, "Old Trails", world.uid,
@@ -84,11 +94,11 @@ class CivsFootTrafficTest : FunSpec({
             val type = isolated.loadClass("ru.arc.civs.CivsFootTraffic")
             val instance = type.getConstructor(org.bukkit.plugin.Plugin::class.java, kotlin.jvm.functions.Function0::class.java)
                 .newInstance(plugin, { listOf(city) })
-            val record = type.getMethod("record", UUID::class.java, UUID::class.java, org.bukkit.entity.Entity::class.java,
+            val record = type.getMethod("record", UUID::class.java, UUID::class.java, PacketPlayerNpc::class.java,
                 Location::class.java, Location::class.java)
-            record.invoke(instance, city.id, worker.id, owner, owner.location, Location(world, 1.1, 65.0, 0.5))
+            record.invoke(instance, city.id, worker.id, npc, owner.location, Location(world, 1.1, 65.0, 0.5))
             paper.createSimplePlugin("Trails") // Simulates an installed old provider without exposing any API bytecode.
-            repeat(2) { record.invoke(instance, city.id, worker.id, owner, owner.location, Location(world, 1.1, 65.0, 0.5)) }
+            repeat(2) { record.invoke(instance, city.id, worker.id, npc, owner.location, Location(world, 1.1, 65.0, 0.5)) }
             plugin.isEnabled shouldBe true
         }
     }

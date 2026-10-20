@@ -6,7 +6,7 @@ import org.bukkit.Bukkit
 import org.bukkit.Color
 import org.bukkit.Location
 import org.bukkit.entity.Display
-import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
 import org.bukkit.entity.TextDisplay
 import org.bukkit.plugin.Plugin
 import org.bukkit.util.Transformation
@@ -22,7 +22,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
-/** Actual spawned-actor feet and current observed state, captured by the Citizens owner. */
+/** Actual spawned-actor feet and current observed state, captured by the resident simulation. */
 data class CivsNpcHologramSnapshot(
     val workerId: UUID,
     val worldId: UUID,
@@ -33,7 +33,7 @@ data class CivsNpcHologramSnapshot(
     val status: String,
     val health: Double,
     val maxHealth: Double,
-    val entity: Player? = null,
+    val actor: PacketPlayerNpc? = null,
     val profession: String = "",
     val courierCart: Boolean = false,
     val cargo: Map<String, Int> = emptyMap(),
@@ -77,7 +77,7 @@ class CivsHolograms internal constructor(
         desired = snapshots().asSequence().filter { it.x.isFinite() && it.y.isFinite() && it.z.isFinite() &&
             it.health.isFinite() && it.maxHealth.isFinite() && it.health >= 0 && it.maxHealth > 0 &&
             it.health <= it.maxHealth && it.nativeHeight.isFinite() && it.nativeHeight > 0 &&
-            Bukkit.getWorld(it.worldId) != null && (it.entity == null || it.entity.isValid) }
+            Bukkit.getWorld(it.worldId) != null && (it.actor == null || it.actor.isValid) }
             .associate { it.workerId to Desired(it, civsNpcHologramText(text, it)) }
         decor.capture(workplaces())
         if (pending || decor.current() && rendered.size == desired.size && rendered.all { (id, shown) -> samePresentation(shown.value, desired[id]) }) return
@@ -89,7 +89,7 @@ class CivsHolograms internal constructor(
         }
     }
 
-    /** One actor's bounded presentation per shared step; native movement belongs to its carrier. */
+    /** One actor's bounded presentation per shared step; movement belongs to its carrier. */
     private fun reconcileOne(): Boolean {
         rendered.keys.firstOrNull { it !in desired }?.let {
             rendered.remove(it)!!.handle.remove()
@@ -104,7 +104,7 @@ class CivsHolograms internal constructor(
             return false
         }
         val location = Location(world, npc.x,
-            npc.y + if (npc.entity == null) CIVS_NPC_TEXT_OFFSET else npc.nativeHeight, npc.z)
+            npc.y + if (npc.actor == null) CIVS_NPC_TEXT_OFFSET else npc.nativeHeight, npc.z)
         val shown = rendered[changed.key] ?: Rendered(displays.spawnText(location, value.text), null).also {
             rendered[changed.key] = it
             it.handle.billboard = Display.Billboard.CENTER
@@ -122,15 +122,15 @@ class CivsHolograms internal constructor(
             it.handle.teleportDuration = 0
         }
         val before = shown.value
-        if (npc.entity != null) {
-            shown.handle.attachTo(npc.entity)
+        if (npc.actor != null) {
+            shown.handle.attachTo(npc.actor)
         } else {
-            // Static export/fixture support. Spawned Citizens always supply the native carrier.
+            // Static export/fixture support. Spawned residents always supply the packet carrier.
             shown.handle.detach()
             if (before != null) shown.handle.teleport(location)
         }
         shown.handle.transformation = Transformation(
-            Vector3f(0f, if (npc.entity == null) 0f else (CIVS_NPC_TEXT_OFFSET - npc.nativeHeight).toFloat(), 0f),
+            Vector3f(0f, if (npc.actor == null) 0f else (CIVS_NPC_TEXT_OFFSET - npc.nativeHeight).toFloat(), 0f),
             Quaternionf(), Vector3f(CIVS_NPC_TEXT_SCALE), Quaternionf())
         if (before != null && before.text != value.text) shown.handle.text(value.text)
         carts.sync(npc)
@@ -157,9 +157,9 @@ class CivsHolograms internal constructor(
         if (first == null || second == null) return first == second
         val a = first.snapshot
         val b = second.snapshot
-        return first.text == second.text && a.entity === b.entity && a.nativeHeight == b.nativeHeight &&
+        return first.text == second.text && a.actor === b.actor && a.nativeHeight == b.nativeHeight &&
             a.courierCart == b.courierCart && a.cargo == b.cargo &&
-            (a.entity != null || a.worldId == b.worldId && a.x == b.x && a.y == b.y && a.z == b.z)
+            (a.actor != null || a.worldId == b.worldId && a.x == b.x && a.y == b.y && a.z == b.z)
     }
 }
 

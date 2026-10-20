@@ -33,6 +33,10 @@ class ArtifactLinkageTest(unittest.TestCase):
                 private ru.arc.paper.display.PaperPacketDisplays displays;
             }""",
             "kotlin/collections/CollectionsKt": "public class CollectionsKt {}",
+            "net/citizensnpcs/api/npc/NPC": "public interface NPC {}",
+            "ru/arc/civs/ForbiddenResident": """public class ForbiddenResident {
+                private net.citizensnpcs.api.npc.NPC actor;
+            }""",
         }
         files = []
         for name, body in sources.items():
@@ -48,12 +52,17 @@ class ArtifactLinkageTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.workspace.cleanup()
 
-    def archives(self, missing=(), duplicate_api=False, missing_runtime=False):
+    def archives(self, missing=(), duplicate_api=False, missing_runtime=False,
+                 citizens_reference=False, citizens_dependency=False):
         feature = self.root / "ArcCivs.jar"
         host = self.root / "ArcCore.jar"
         with zipfile.ZipFile(feature, "w") as archive:
-            archive.writestr("plugin.yml", "name: ArcCivs\ndepend: [ArcCore, packetevents, WorldEdit, Citizens]\n")
+            archive.writestr("plugin.yml", "name: ArcCivs\ndepend: [ArcCore, packetevents, WorldEdit"
+                             + (", Citizens" if citizens_dependency else "") + "]\n")
             for name, data in self.classes.items():
+                if name.startswith("net/citizensnpcs/") or (
+                        name == "ru/arc/civs/ForbiddenResident.class" and not citizens_reference):
+                    continue
                 if not name.startswith("ru/arc/paper/api/") and name != verifier.HOST_VISUAL_RUNTIME:
                     archive.writestr(name, data)
             if duplicate_api:
@@ -86,6 +95,12 @@ class ArtifactLinkageTest(unittest.TestCase):
     def test_a_private_api_copy_cannot_satisfy_the_host_contract(self):
         with self.assertRaisesRegex(ValueError, "API/provider classes were shaded:.*ArcVisualPacketBudget"):
             verifier.verify(*self.archives(duplicate_api=True))
+
+    def test_citizens_descriptor_and_bytecode_dependencies_are_rejected(self):
+        with self.assertRaisesRegex(ValueError, "must not declare a Citizens dependency"):
+            verifier.verify(*self.archives(citizens_dependency=True))
+        with self.assertRaisesRegex(ValueError, "Citizens linkage remains"):
+            verifier.verify(*self.archives(citizens_reference=True))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,8 @@ import org.bukkit.Location
 import org.bukkit.SoundCategory
 import org.bukkit.configuration.file.YamlConfiguration
 import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
+import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
@@ -31,13 +33,14 @@ class CivsCitizenVoicesTest : FunSpec({
     test("only enabled pack events reach nearby human viewers and sleep suppresses speech") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("voices")
-            val actor = mockk<Player>()
+            val actor = mockk<PacketPlayerNpc>()
             val viewer = mockk<Player>(relaxed = true)
             val distant = mockk<Player>(relaxed = true)
             var sleeping = false
             every { actor.isValid } returns true
-            every { actor.isSleeping } answers { sleeping }
-            every { actor.eyeLocation } returns Location(world, 0.5, 65.6, 0.5)
+            every { actor.pose } answers { if (sleeping) PacketNpcPose.SLEEPING else PacketNpcPose.STANDING }
+            every { actor.location } answers { Location(world, 0.5, 64.0, 0.5) }
+            every { actor.eyeHeight } returns 1.6
             every { actor.world } returns world
             for (player in listOf(viewer, distant)) {
                 every { player.isOnline } returns true

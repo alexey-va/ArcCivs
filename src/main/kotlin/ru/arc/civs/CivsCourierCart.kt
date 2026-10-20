@@ -5,7 +5,7 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.entity.Display
 import org.bukkit.entity.ItemDisplay
-import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.Transformation
 import org.joml.Quaternionf
@@ -19,19 +19,19 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.tan
 
-/** Savva's existing model, on the same native carrier and packet owner as the nameplate. */
+/** Savva's existing model, on the same packet carrier and packet owner as the nameplate. */
 internal class CivsCourierCart(
     private val displays: PaperPacketDisplays,
     private val resolveItem: () -> ItemStack? = { CustomStack.getInstance(CIVS_COURIER_CART_ITEM)?.itemStack?.clone() },
 ) : AutoCloseable {
-    private data class Cart(val body: PacketItemDisplay, var carrier: Player,
+    private data class Cart(val body: PacketItemDisplay, var carrier: PacketPlayerNpc,
         val cargo: MutableList<PacketDisplay> = mutableListOf(), var samples: List<Material> = emptyList(),
         var yaw: Float = Float.NaN, var height: Double = Double.NaN)
     private val carts = linkedMapOf<UUID, Cart>()
     private var model: ItemStack? = null
 
     fun sync(npc: CivsNpcHologramSnapshot) {
-        val carrier = npc.entity
+        val carrier = npc.actor
         if (!npc.courierCart || carrier == null || !carrier.isValid) { remove(npc.workerId); return }
         val cart = carts[npc.workerId] ?: run {
             if (model == null) model = runCatching(resolveItem).getOrNull()
@@ -103,7 +103,7 @@ internal class CivsCourierCart(
     }
 
     override fun close() { carts.keys.toList().forEach(::remove); model = null }
-    private fun at(npc: CivsNpcHologramSnapshot) = Location(requireNotNull(npc.entity).world, npc.x, npc.y, npc.z)
+    private fun at(npc: CivsNpcHologramSnapshot) = Location(requireNotNull(npc.actor).world, npc.x, npc.y, npc.z)
 }
 
 internal const val CIVS_COURIER_CART_ITEM = "elitecreatures:medieval_market_decoration_v1_cart_2"

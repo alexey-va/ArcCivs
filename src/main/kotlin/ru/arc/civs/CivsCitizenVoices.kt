@@ -3,6 +3,8 @@ package ru.arc.civs
 import org.bukkit.SoundCategory
 import org.bukkit.configuration.ConfigurationSection
 import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
+import ru.arc.paper.npc.PacketNpcPose
 import java.util.UUID
 
 internal enum class CitizenVoiceEvent(val key: String) { IDLE("idle"), WORK("work"), GREET("greet") }
@@ -15,9 +17,9 @@ internal class CivsCitizenVoices(config: ConfigurationSection) {
     }
     private val clock = CitizenVoiceClock()
 
-    fun say(workerId: UUID, actor: Player, event: CitizenVoiceEvent, tick: Int, viewers: Collection<Player>) {
-        if (!enabled || !actor.isValid || actor.isSleeping) return
-        val at = actor.eyeLocation
+    fun say(workerId: UUID, actor: PacketPlayerNpc, event: CitizenVoiceEvent, tick: Int, viewers: Collection<Player>) {
+        if (!enabled || !actor.isValid || actor.pose == PacketNpcPose.SLEEPING) return
+        val at = actor.location.add(0.0, actor.eyeHeight, 0.0)
         val audience = viewers.filter { it.isOnline && !it.hasMetadata("NPC") && it.world == actor.world &&
             it.location.distanceSquared(at) <= 12.0 * 12.0 }
         if (audience.isEmpty() || !clock.admit(workerId, tick)) return

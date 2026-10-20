@@ -74,7 +74,7 @@ class CivsText private constructor(
 
     fun building(player: Player, type: BuildingType): Component = render(player, "building.${type.name.lowercase(Locale.ROOT)}")
 
-    /** A saved building state and assignment count, not an assertion that its Citizens actor is moving. */
+    /** A saved building state and assignment count, not an assertion that its resident actor is moving. */
     fun buildingHologram(player: Player, city: Settlement, building: CivBuilding): Component {
         val order = city.construction?.takeIf { it.buildingId == building.id }
         val workers = city.workers.count { it.assignment == building.id }

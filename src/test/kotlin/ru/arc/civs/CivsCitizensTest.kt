@@ -6,9 +6,6 @@ import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
-import net.citizensnpcs.api.npc.NPC
-import net.citizensnpcs.api.npc.NPCRegistry
-import net.citizensnpcs.api.event.NPCOpenDoorEvent
 import org.bukkit.Chunk
 import org.bukkit.Location
 import org.bukkit.Material
@@ -186,23 +183,22 @@ class CivsCitizensTest : FunSpec({
                 val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
                 val worker = CivWorker(UUID.randomUUID(), "Писарь", hall.id)
                 val city = city(listOf(hall), worker, null).copy(worldId = world.uid)
-                val npc = mockk<NPC>()
                 val lower = world.getBlockAt(0, 64, 0)
                 val upper = world.getBlockAt(0, 65, 0)
                 fun close() {
                     lower.setBlockData(org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=lower,open=false]"), false)
                     upper.setBlockData(org.bukkit.Bukkit.createBlockData("minecraft:oak_door[half=upper,open=false]"), false)
                 }
-                var action: (NPCOpenDoorEvent) -> Unit = {}
+                var action: (CivsResidentOpenDoorEvent) -> Unit = {}
                 var events = 0
                 paper.server.pluginManager.registerEvents(object : Listener {
                     @EventHandler
-                    fun door(event: NPCOpenDoorEvent) { events++; action(event) }
+                    fun door(event: CivsResidentOpenDoorEvent) { events++; action(event) }
                 }, paper.createSimplePlugin("CitizenDoors"))
                 val at = Location(world, 0.5, 64.0, -1.5)
                 val door = CivPosition(0, 64, 0)
                 fun open(current: Settlement = city, blocked: (UUID, CivPosition) -> Boolean = { _, _ -> false }) =
-                    citizenOpenRouteDoor(npc, current, setOf(hall.id), at, door, blocked)
+                    citizenOpenRouteDoor(current, setOf(hall.id), at, door, blocked)
                 close()
                 open() shouldBe true
                 events shouldBe 1
@@ -227,8 +223,8 @@ class CivsCitizensTest : FunSpec({
                 }
                 close()
                 open(city.copy(pendingDeletion = CivDeletion(null))) shouldBe false
-                citizenOpenRouteDoor(npc, city, setOf(hall.id), at.clone().also { it.x = 30.0 }, door) { _, _ -> false } shouldBe false
-                citizenOpenRouteDoor(npc, city, emptySet(), at, door) { _, _ -> false } shouldBe false
+                citizenOpenRouteDoor(city, setOf(hall.id), at.clone().also { it.x = 30.0 }, door) { _, _ -> false } shouldBe false
+                citizenOpenRouteDoor(city, emptySet(), at, door) { _, _ -> false } shouldBe false
                 action = { upper.type = Material.STONE }
                 open() shouldBe false
                 upper.type shouldBe Material.STONE
@@ -282,60 +278,6 @@ class CivsCitizensTest : FunSpec({
                 cycle.phase shouldBe CitizenPhase.READY
             }
             (cycle.beginDelivery(now) != null) shouldBe true
-        }
-    }
-
-    test("external activation only ticks our spawned moving NPC with a viewer and an entity ticking route") {
-        MockBukkitTestRuntime.open().use { paper ->
-            val world = paper.addSimpleWorld("vanilla")
-            world.loadChunk(-1, -1)
-            val registry = mockk<NPCRegistry>()
-            val npc = mockk<NPC>()
-            val entity = mockk<Entity>()
-            every { npc.owningRegistry } returns registry
-            every { npc.isSpawned } returns true
-            every { npc.navigator.isNavigating } returns true
-            every { npc.entity } returns entity
-            every { entity.isValid } returns true
-            every { entity.world } returns world
-            every { entity.location } returns Location(world, -8.9, 1.0, -11.5)
-            var viewers = listOf(CitizenViewer(world.uid, CitizenPoint(-60.5, 1.0, -7.5)))
-            var loaded = true
-            var activations = 0
-            fun tick() = activateCitizenRoute(npc, registry, world.uid, viewers, 96, { loaded }) {
-                it shouldBe entity
-                activations++
-            }
-
-            repeat(2) { tick() shouldBe true }
-            activations shouldBe 2
-            loaded = false
-            tick() shouldBe false
-            loaded = true
-            viewers = listOf(CitizenViewer(world.uid, CitizenPoint(90.0, 1.0, -11.5)))
-            tick() shouldBe false
-            viewers = listOf(CitizenViewer(UUID.randomUUID(), CitizenPoint(-8.9, 1.0, -11.5)))
-            tick() shouldBe false
-            viewers = listOf(CitizenViewer(world.uid, CitizenPoint(-60.5, 1.0, -7.5)))
-            every { npc.navigator.isNavigating } returns false
-            tick() shouldBe false
-            every { npc.navigator.isNavigating } returns true
-            every { npc.isSpawned } returns false
-            tick() shouldBe false
-            every { npc.isSpawned } returns true
-            every { entity.isValid } returns false
-            tick() shouldBe false
-            every { entity.isValid } returns true
-            every { npc.owningRegistry } returns mockk<NPCRegistry>()
-            tick() shouldBe false
-            activations shouldBe 2
-            every { npc.owningRegistry } returns registry
-            world.unloadChunk(-1, -1)
-            tick() shouldBe false
-            activations shouldBe 2
-            world.loadChunk(-1, -1)
-            tick() shouldBe true
-            activations shouldBe 3
         }
     }
 
@@ -408,7 +350,7 @@ class CivsCitizensTest : FunSpec({
         citizenRouteWithinReach(origin, CitizenPoint(0.0, 153.001, 0.0)) shouldBe false
     }
 
-    test("a native null completion remains distinct from no callback and requires verified arrival") {
+    test("a successful route completion remains distinct from a pending route and requires verified arrival") {
         val completed = CitizenNavigationCompletion(null)
         citizenNavigationOutcome(completed, false, 1_000, 10_000, false) shouldBe
             CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
@@ -417,7 +359,7 @@ class CivsCitizensTest : FunSpec({
         citizenNavigationOutcome(null, true, 1_000, 10_000, true) shouldBe CitizenNavigationOutcome.ARRIVED
     }
 
-    test("Citizens cancellation retains its reason and cannot count as an arrival") {
+    test("route cancellation retains its reason and cannot count as an arrival") {
         val cancelled = CitizenNavigationCompletion("STUCK")
         cancelled.cancelReason shouldBe "STUCK"
         citizenNavigationOutcome(cancelled, true, 90_001, 90_000, false) shouldBe CitizenNavigationOutcome.CANCELLED
@@ -425,7 +367,7 @@ class CivsCitizensTest : FunSpec({
         citizenNavigationOutcome(null, false, 90_000, 90_000, true) shouldBe CitizenNavigationOutcome.PENDING
     }
 
-    test("early native player completion cannot count work and recovery starts a fresh observed interval") {
+    test("early packet route completion cannot count work and recovery starts a fresh observed interval") {
         val cycle = CitizenCycle(token(), 1_000)
         cycle.start()
         cycle.arrive(0) // Storage reached; the worker has not reached its workplace yet.
@@ -444,25 +386,6 @@ class CivsCitizensTest : FunSpec({
         cycle.work(62_000)
         cycle.phase shouldBe CitizenPhase.RETURNING
         cycle.beginDelivery(62_000) shouldBe null
-    }
-
-    test("path diagnostics preserve the endpoint but inspect at most 256 nodes") {
-        citizenPathSnapshot(emptyList()) shouldBe null
-        val start = CitizenPoint(-9.0, 1.0, -12.0)
-        val end = CitizenPoint(15.0, 1.0, -12.0)
-        citizenPathSnapshot(listOf(start, end)) shouldBe CitizenPathSnapshot(2, end, false)
-        var reads = 0
-        val unbounded = Iterable {
-            object : Iterator<CitizenPoint> {
-                override fun hasNext() = true
-                override fun next(): CitizenPoint {
-                    check(reads < 256) { "Diagnostic exceeded its path budget" }
-                    return CitizenPoint(reads++.toDouble(), 1.0, -12.0)
-                }
-            }
-        }
-        citizenPathSnapshot(unbounded) shouldBe CitizenPathSnapshot(256, CitizenPoint(255.0, 1.0, -12.0), true)
-        reads shouldBe 256
     }
 
     test("storage reassignment resets an actor only beyond the bounded new leg") {

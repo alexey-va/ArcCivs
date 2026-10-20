@@ -7,7 +7,6 @@ dependencyResolutionManagement {
             content { includeGroup("ru.ruscrafting.arc"); includeGroup("ru.ruscrafting") }
         }
         maven("https://repo.papermc.io/repository/maven-public/")
-        maven("https://maven.citizensnpcs.co/repo") { content { includeGroup("net.citizensnpcs") } }
         maven("https://repo.codemc.io/repository/maven-public/") { content { includeGroup("com.github.retrooper") } }
         maven("https://jitpack.io") { content { includeGroup("com.github.angeschossen"); includeGroup("com.github.LoneDev6") } }
     }

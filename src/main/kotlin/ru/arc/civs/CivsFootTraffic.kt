@@ -1,9 +1,10 @@
 package ru.arc.civs
 
 import org.bukkit.Location
-import org.bukkit.entity.Entity
 import org.bukkit.entity.Player
 import org.bukkit.plugin.Plugin
+import ru.arc.paper.npc.PacketPlayerNpc
+import ru.ruscrafting.trails.api.TrailsFootTrafficActor
 import ru.ruscrafting.trails.api.TrailsFootTrafficService
 import java.util.UUID
 import java.util.concurrent.CompletionStage
@@ -13,7 +14,7 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
     private var incompatible: Plugin? = null
     private var nextFailureLog = 0L
 
-    fun record(cityId: UUID, workerId: UUID, entity: Entity, from: Location, to: Location) {
+    fun record(cityId: UUID, workerId: UUID, entity: PacketPlayerNpc, from: Location, to: Location) {
         val provider = plugin.server.pluginManager.getPlugin("Trails")?.takeIf { it.isEnabled } ?: return
         if (incompatible === provider) return
         val city = cities().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return
@@ -57,6 +58,11 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
 private object CivsTrailsAdapter {
     fun speed(plugin: Plugin, ground: org.bukkit.block.Block): Double =
         plugin.server.servicesManager.load(TrailsFootTrafficService::class.java)?.speedMultiplier(ground) ?: 1.0
-    fun record(plugin: Plugin, entity: Entity, authority: Player, from: Location, to: Location): CompletionStage<*>? =
-        plugin.server.servicesManager.load(TrailsFootTrafficService::class.java)?.recordStep(entity, authority, from, to)
+    fun record(plugin: Plugin, entity: PacketPlayerNpc, authority: Player, from: Location, to: Location): CompletionStage<*>? =
+        plugin.server.servicesManager.load(TrailsFootTrafficService::class.java)?.recordStep(
+            object : TrailsFootTrafficActor {
+                override fun uniqueId(): UUID = entity.uniqueId
+                override fun location(): Location = entity.location
+                override fun isValid(): Boolean = entity.isValid
+            }, authority, from, to)
 }

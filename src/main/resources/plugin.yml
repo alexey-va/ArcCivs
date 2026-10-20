@@ -4,7 +4,7 @@ main: ru.arc.civs.ArcCivsPlugin
 api-version: '1.21.11'
 authors: [RusCrafting]
 description: Player settlements, construction and working citizens
-depend: [ArcCore, packetevents, WorldEdit, Citizens]
+depend: [ArcCore, packetevents, WorldEdit]
 softdepend: [Lands, Trails, ItemsAdder]
 commands:
   civs:

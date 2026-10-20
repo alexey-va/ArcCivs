@@ -9,7 +9,7 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.bukkit.Location
 import org.bukkit.Material
-import org.bukkit.entity.Player
+import ru.arc.paper.npc.PacketPlayerNpc
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.Transformation
 import org.joml.Vector3f
@@ -28,7 +28,7 @@ class CivsCourierCartTest : FunSpec({
         MockBukkitTestRuntime.open().use { paper ->
             val viewer = paper.addPlayer("Viewer")
             var yaw = 0f
-            val carrier = mockk<Player> {
+            val carrier = mockk<PacketPlayerNpc> {
                 every { isValid } returns true
                 every { world } returns viewer.world
                 every { bodyYaw } answers { yaw }
@@ -43,7 +43,7 @@ class CivsCourierCartTest : FunSpec({
             }
             val owner = CivsCourierCart(displays) { ItemStack(Material.PAPER) }
             val npc = CivsNpcHologramSnapshot(UUID(0, 1), viewer.world.uid, 0.0, 64.0, 0.0,
-                "Савва", "walking", 20.0, 20.0, entity = carrier, profession = "courier", courierCart = true)
+                "Савва", "walking", 20.0, 20.0, actor = carrier, profession = "courier", courierCart = true)
             owner.sync(npc)
             pieces.size shouldBe 0
             owner.sync(npc.copy(cargo = mapOf("COBBLESTONE" to 64)))

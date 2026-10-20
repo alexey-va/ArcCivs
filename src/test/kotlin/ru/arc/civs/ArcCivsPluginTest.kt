@@ -30,11 +30,11 @@ class ArcCivsPluginTest : FunSpec({
         }
     }
 
-    for (dependency in listOf("ArcCore", "packetevents", "WorldEdit", "Citizens")) {
+    for (dependency in listOf("ArcCore", "packetevents", "WorldEdit")) {
         test("startup stops before configuration or services when $dependency is present but disabled") {
             failOnUnsupportedMockBukkitOperation {
                 MockBukkitTestRuntime.open().use { paper ->
-                    val dependencies = listOf("ArcCore", "packetevents", "WorldEdit", "Citizens")
+                    val dependencies = listOf("ArcCore", "packetevents", "WorldEdit")
                         .associateWith(paper::createSimplePlugin)
                     paper.server.pluginManager.disablePlugin(dependencies.getValue(dependency))
                     val plugin = paper.server.pluginManager.loadPlugin(ArcCivsPlugin::class.java) as ArcCivsPlugin

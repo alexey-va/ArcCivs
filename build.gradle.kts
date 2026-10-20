@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.29"
+version = "0.1.30"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.19"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -18,30 +18,28 @@ configurations["integrationTestImplementation"].extendsFrom(configurations["test
 configurations["integrationTestRuntimeOnly"].extendsFrom(configurations["testRuntimeOnly"])
 dependencies {
     implementation(kotlin("stdlib"))
-    implementation("ru.ruscrafting.arc:arc-core:2.7.47")
-    implementation("ru.ruscrafting.arc:arc-core-logging:2.7.47")
-    implementation("ru.ruscrafting.arc:arc-core-menu:2.7.47")
-    implementation("ru.ruscrafting.arc:arc-core-paper:2.7.47")
-    implementation("ru.ruscrafting.arc:arc-core-paper-menu:2.7.47")
-    implementation("ru.ruscrafting.arc:arc-core-sql:2.7.47")
+    implementation("ru.ruscrafting.arc:arc-core:2.7.48")
+    implementation("ru.ruscrafting.arc:arc-core-logging:2.7.48")
+    implementation("ru.ruscrafting.arc:arc-core-menu:2.7.48")
+    implementation("ru.ruscrafting.arc:arc-core-paper:2.7.48")
+    implementation("ru.ruscrafting.arc:arc-core-paper-menu:2.7.48")
+    implementation("ru.ruscrafting.arc:arc-core-sql:2.7.48")
     implementation("com.google.code.gson:gson:2.11.0")
-    compileOnly("ru.ruscrafting.arc:arc-core-paper-api:2.7.47")
+    compileOnly("ru.ruscrafting.arc:arc-core-paper-api:2.7.48")
     compileOnly("io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT")
     compileOnly("com.github.retrooper:packetevents-spigot:2.12.1") { exclude(group = "io.netty") }
-    compileOnly("net.citizensnpcs:citizens-main:2.0.42-SNAPSHOT") { isTransitive = false }
     compileOnly("com.github.angeschossen:LandsAPI:6.26.18")
-    compileOnly("ru.ruscrafting:trails-api:2.3.19")
+    compileOnly("ru.ruscrafting:trails-api:2.3.20")
     compileOnly("com.github.LoneDev6:api-itemsadder:3.6.1")
-    testImplementation("ru.ruscrafting.arc:arc-core-paper-testing:2.7.47")
-    testImplementation("ru.ruscrafting.arc:arc-core-integration-testing:2.7.47")
-    testImplementation("ru.ruscrafting.arc:arc-core-paper-api:2.7.47")
-    testImplementation("ru.ruscrafting:trails-api:2.3.19")
+    testImplementation("ru.ruscrafting.arc:arc-core-paper-testing:2.7.48")
+    testImplementation("ru.ruscrafting.arc:arc-core-integration-testing:2.7.48")
+    testImplementation("ru.ruscrafting.arc:arc-core-paper-api:2.7.48")
+    testImplementation("ru.ruscrafting:trails-api:2.3.20")
     testImplementation("com.github.LoneDev6:api-itemsadder:3.6.1")
     testImplementation("io.kotest:kotest-runner-junit5:6.0.7")
     testImplementation("io.kotest:kotest-assertions-core:6.0.7")
     testImplementation("io.mockk:mockk:1.14.7")
     testImplementation("com.github.retrooper:packetevents-spigot:2.12.1") { exclude(group = "io.netty") }
-    testImplementation("net.citizensnpcs:citizens-main:2.0.42-SNAPSHOT") { isTransitive = false }
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 tasks.withType<Test>().configureEach {

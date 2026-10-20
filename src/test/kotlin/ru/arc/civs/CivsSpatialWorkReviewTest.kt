@@ -4,11 +4,6 @@ import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
-import net.citizensnpcs.api.ai.NavigatorParameters
-import net.citizensnpcs.api.astar.pathfinder.BlockSource
-import net.citizensnpcs.api.astar.pathfinder.Path
-import net.citizensnpcs.api.astar.pathfinder.VectorGoal
-import net.citizensnpcs.api.astar.pathfinder.VectorNode
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
@@ -61,19 +56,11 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
-    test("the pinned Citizens path ends at the integer goal and ArcCivs accepts that native endpoint") {
+    test("arrival accepts the actual centered endpoint and rejects a nearby different cell") {
         val destination = CivPosition(-7, 64, 11)
-        val nativeGoal = VectorGoal(Location(null, destination.x + 0.5, 64.0, destination.z + 0.5), 0.35f)
-        val start = VectorNode(nativeGoal, Location(null, -10.5, 64.0, 11.5), mockk<BlockSource>(), NavigatorParameters())
-        val node = start.createChild(destination.x, destination.y, destination.z)
-        nativeGoal.isFinished(node) shouldBe true
-        nativeGoal.isFinished(start.createChild(destination.x - 1, destination.y, destination.z)) shouldBe false
-        val endpoint = (node.buildPlan() as Path).path.last()
-        endpoint.x shouldBe destination.x.toDouble()
-        endpoint.z shouldBe destination.z.toDouble()
-        citizenNearEndpoint(CitizenPoint(endpoint.x, endpoint.y, endpoint.z), destination) shouldBe true
-        citizenNearEndpoint(CitizenPoint(endpoint.x - 0.34, endpoint.y, endpoint.z), destination) shouldBe true
-        citizenNearEndpoint(CitizenPoint(endpoint.x - 1.0, endpoint.y, endpoint.z), destination) shouldBe false
+        citizenNearEndpoint(CitizenPoint(-6.5, 64.0, 11.5), destination) shouldBe true
+        citizenNearEndpoint(CitizenPoint(-7.5, 64.0, 11.5), destination) shouldBe false
+        citizenNearEndpoint(CitizenPoint(-6.5, 65.0, 11.5), destination) shouldBe false
     }
 
     for (style in listOf("nordic", "medievaloak", "caledonia")) {

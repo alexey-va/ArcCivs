@@ -7,17 +7,19 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
-ArcCore host 0.1.19 and bundled Core helpers 2.7.47 are mandatory; the shared
+ArcCore host 0.1.19 and bundled Core helpers 2.7.48 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
-schematic service. Human residents use transient Citizens PLAYER actors with
-bundled signed skins, native hand equipment and work-only arm swings. Resident
-nameplates and courier carts attach as native passengers to that Citizens PLAYER
-actor; the bridge supports PLAYER NPCs, not online-player viewer entities. Skins are
-stable per worker UUID; lookup/update is disabled. Work props never enter city
-storage and NPC item pickup/drops are disabled. Supplied personal tools, armor and
-bread are recorded separately in the city snapshot. Residents have a native
-33-slot inventory: six equipment slots and 27 bag slots. Quick transfers preserve
+schematic service. Human residents use Core's `PaperPacketNpcs` and
+`PacketPlayerNpc` with bundled signed skins, equipment and work-only arm swings.
+No resident Bukkit entity, native inventory or hitbox is registered. Core owns
+profile/spawn/metadata packets, viewer/chunk lifecycle and validated interactions;
+ArcCivs owns authoritative positions, paths, work and health. Resident nameplates
+and courier carts attach to the same packet actor through an admitted per-viewer
+carrier lease. Skins are stable per worker UUID; no profile network lookup occurs.
+Work props never enter city storage. Supplied personal tools, armor and
+bread are recorded separately in the city snapshot. Residents expose a native
+inventory menu backed by 33 saved slots: six equipment slots and 27 bag slots. Quick transfers preserve
 item metadata and use the same inventory journal; returned items go to the player's
 inventory, not the warehouse. One bread heals six health points. The legacy supply
 action offers up to 16 bread; the native bag uses its actual slot capacity. Armor
@@ -34,22 +36,30 @@ not a persisted quest or reward. It transfers one real matching tool: lowest mat
 tier first, then the existing enchantment/durability ordering. The debit uses the
 existing native inventory journal.
 
-Damage from players, monsters and the environment is intercepted before native
-death. The actor stops work while its injury waits for the current city write;
-health or permanent removal is committed before native health/despawn changes.
+Damage from players, monsters and the environment enters the virtual resident
+damage owner. The actor stops work while its injury waits for the current city
+write; health or permanent removal is committed before visual health/despawn changes.
 Failed/unknown injury commits remain frozen until a successful canonical reload.
-Native regeneration is disabled. Viewer/chunk retirement preserves stored health
+There is no native regeneration. Viewer/chunk retirement preserves stored health
 and personal inventory; it cannot heal or resurrect a dead worker. Nearby idle
-monsters may target residents through bounded round-robin checks; existing monster
-targets and cancelled protection events are respected. Death destroys carried
+monsters approach residents through bounded round-robin checks; existing monster
+targets take priority. `CivsResidentDamageEvent` is the cancellable integration
+boundary for virtual residents; native `EntityDamageEvent` listeners do not receive
+fake entity events. Player attacks also enforce world PvP and optional Lands
+attack permission. Death destroys carried
 supplies without drops or XP and frees the job/population slot. Ordinary recruitment
 still costs 12 bread and also works before hall completion, so losing the first
 builder does not permanently strand the settlement. Arrival receipts are never
-replenished by death or recruitment. NPCs use Citizens native Minecraft
-bounded point-to-point navigation, with ArcCivs checking actual arrival separately
-from the navigator's completion callback. A failed or stuck route is retried on
-foot through a safe nearby endpoint; route recovery does not teleport. The same
-arrival, work and cycle-token checks still apply. There is no Core packet-NPC API.
+replenished by death or recruitment. `CivsResidentNavigation` incrementally plans
+bounded routes in loaded chunks, sharing at most 96 search steps or one millisecond
+per tick across residents. Each route visits at most 4096 nodes; an edge checks a
+0.6-by-1.8-block body and at most one block of ascent or descent.
+Movement revalidates live collision and support before accepting a step; work
+checks the actual position independently of planner completion. A failed or stuck
+route may recover to a validated loaded safe endpoint, resetting footsteps.
+The same arrival, work and cycle-token checks still apply. Actual work-route
+crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
+the ordinary permission, protection, terrain progression and persistence pipeline.
 No duplicated pools, schematic cache or display
 transport. No schematic IO or future waiting on the gameplay thread.
 
@@ -90,7 +100,7 @@ membership fails closed. SQL city writes never update the legacy files. Immutabl
 construction plans and captured schematics remain local to the home backend.
 `maximum-settlements` is per home backend, as the old file limit was per runtime.
 
-Only `loadOwned(server-id)` records reach protection, construction and Citizens.
+Only `loadOwned(server-id)` records reach protection, construction and resident actors.
 Foreign snapshots occupy a separate UI-only map and cannot be mutated or paid
 out locally. `/civs` reads membership afresh on every open; Refresh repeats it,
 with no background sync. Read failure shows an inline error and never presents
@@ -130,7 +140,8 @@ receipt before spawning. A restart never grants four more residents or catches
 up multiple arrivals. At night, residents shelter in their active house when
 available and otherwise use the town hall, then enter the native sleeping pose.
 Idle residents choose safe loaded wandering targets within eight blocks of their
-workplace, otherwise home or town hall, at speed 0.55. Routes avoid horizontal footprints
+workplace, otherwise home or town hall, at 0.55 of work speed. Base work speed is
+0.215 blocks per tick before the current surface multiplier. Routes avoid horizontal footprints
 of foreign buildings and farm fields; idle wandering does not generate Trails wear.
 Idle/evening campfire visits use existing lit campfires within 24 blocks of the
 resident's anchor. Discovery examines at most one loaded chunk per pulse, caches
