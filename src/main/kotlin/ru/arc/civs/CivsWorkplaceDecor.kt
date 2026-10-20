@@ -16,7 +16,7 @@ import java.util.UUID
 data class CivsWorkplaceSnapshot(val buildingId: UUID, val worldId: UUID, val control: CivPosition,
     val type: BuildingType, val rotation: Int)
 
-/** A large tool behind its resource, both resting above the barrel lid with no entity or hitbox. */
+/** A large tool and its resource laid flat on the barrel lid with no entity or hitbox. */
 internal class CivsWorkplaceDecor(private val displays: PaperPacketDisplays) : AutoCloseable {
     private data class Shown(val value: CivsWorkplaceSnapshot, val handles: List<PacketItemDisplay>)
     private val shown = linkedMapOf<UUID, Shown>()
@@ -73,10 +73,12 @@ internal fun civsWorkplaceItems(type: BuildingType): List<Material> = when (type
 
 internal fun civsWorkplaceTransform(rotation: Int, index: Int): Transformation {
     val facing = Quaternionf().rotationY(Math.toRadians(90.0 - rotation).toFloat())
-    // Generated FIXED items have a 1/16-block depth. Keep their complete lower edge
-    // above y=1, with the smaller resource in front of the inclined tool.
-    val position = if (index == 0) Vector3f(-.08f, 1.35f, -.08f) else Vector3f(.22f, 1.17f, .18f)
+    val scale = if (index == 0) .60f else .34f
+    // Generated/handheld FIXED Y180 cancels the native ItemDisplayRenderer Y180.
+    // Their XY faces need a full X90 turn; centered 1/16 depth then rests 0.006 above the lid.
+    val height = 1.006f + scale / 32
+    // Separate complete model footprints by 0.02, retaining 0.02 at the lid edges.
+    val position = if (index == 0) Vector3f(-.18f, height, -.06f) else Vector3f(.31f, height, .18f)
     facing.transform(position)
-    val tilt = Math.toRadians(if (index == 0) 35.0 else 55.0).toFloat()
-    return Transformation(position, facing.rotateX(tilt), Vector3f(if (index == 0) .78f else .50f), Quaternionf())
+    return Transformation(position, facing.rotateX(Math.toRadians(90.0).toFloat()), Vector3f(scale), Quaternionf())
 }

@@ -111,9 +111,17 @@ def render_workplace_states(args, client, projection):
         for face, pixels, shade in barrel_faces:
             view.quad(face, pixels, shade)
         for piece in state["pieces"]:
-            # Vanilla generated/handheld FIXED context rotates the item 180 degrees around Y.
-            points = transformed([(.5, .5, 0), (-.5, .5, 0), (-.5, -.5, 0), (.5, -.5, 0)], piece["transform"], (0, 0, 0), 0)
-            view.quad(points, texture("item/" + piece["material"].lower()))
+            if piece.get("itemDisplayTransform", "FIXED") != "FIXED" or piece.get("entityYaw", 0) or piece.get("entityPitch", 0):
+                raise ValueError("Workplace preview supports the exported zero-yaw/pitch FIXED items only")
+            # Generated/handheld FIXED Y180 is followed by ItemDisplayRenderer's Y180.
+            # They cancel before right rotation -> scale -> left rotation -> translation.
+            # Keep both native faces at +/-1/32; thin alpha-boundary edge faces are not drawn.
+            for z in (-1 / 32, 1 / 32):
+                points = np.asarray([(-.5, .5, z), (.5, .5, z), (.5, -.5, z), (-.5, -.5, z)])
+                q = np.asarray(piece["transform"].get("rightRotation", [0, 0, 0, 1]))
+                points = points + 2 * np.cross(q[:3], np.cross(q[:3], points) + q[3] * points)
+                points = transformed(points, piece["transform"], (0, 0, 0), 0)
+                view.quad(points, texture("item/" + piece["material"].lower()))
         filename = f"workplace-{state['id']}-player.png"
         view.image().save(args.out / filename)
         outputs.append(filename)
