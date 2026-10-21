@@ -681,6 +681,46 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("corpse inventory identifies the deceased and killer and only transfers belongings out") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val worker = base.workers.first().copy(name = "Василий", health = 0.0)
+            val corpse = CivCorpse(worker, base.center, 1, Long.MAX_VALUE, "<red>Mayor", "PLAYER", "ENTITY_ATTACK")
+            h.city = base.copy(workers = base.workers.filterNot { it.id == worker.id }, corpses = listOf(corpse))
+            every { h.host.corpseItems(h.player, worker.id) } returns List(33) { if (it == 4) ItemStack(Material.IRON_PICKAXE) else null }
+            every { h.host.transferCorpseItem(h.player, worker.id, 4, ClickType.LEFT) } returns CompletableFuture()
+            h.ui.openCorpse(h.player, base.id, worker.id)
+            val view = h.player.openInventory.topInventory
+            plainText(h.player.openInventory.title()) shouldBe "Погибший · Василий"
+            fun details() = plainText(view.getItem(49)!!.itemMeta.lore().orEmpty().fold(Component.empty(), Component::append))
+            details() shouldContain "Убийца: <red>Mayor"
+            details().contains("Кликните свой предмет") shouldBe false
+            h.player.inventory.setItem(9, ItemStack(Material.DIAMOND))
+            h.nativeClick(54).isCancelled shouldBe true
+            h.player.setItemOnCursor(ItemStack(Material.DIAMOND))
+            h.nativeClick(18).isCancelled shouldBe true
+            verify(exactly = 0) { h.host.transferResidentItem(any(), any(), any(), any(), any()); h.host.transferCorpseItem(any(), any(), any(), any()) }
+            h.player.setItemOnCursor(null)
+            h.nativeClick(6)
+            h.nativeClick(6)
+            verify(exactly = 1) { h.host.transferCorpseItem(h.player, worker.id, 4, ClickType.LEFT) }
+
+            for ((changed, expected) in listOf(
+                corpse.copy(killerName = null, killerType = "ZOMBIE") to "Убийца: Зомби",
+                corpse.copy(killerName = null, killerType = null, cause = "FALL") to "Причина смерти: Падение",
+            )) {
+                h.city = h.city!!.copy(corpses = listOf(changed))
+                h.ui.openCorpse(h.player, base.id, worker.id)
+                plainText(h.player.openInventory.topInventory.getItem(49)!!.itemMeta.lore().orEmpty()
+                    .fold(Component.empty(), Component::append)) shouldContain expected
+            }
+            h.city = h.city!!.copy(corpses = listOf(corpse.copy(worker = worker.copy(name = "Анна", sex = CivSex.FEMALE))))
+            h.ui.openCorpse(h.player, base.id, worker.id)
+            plainText(h.player.openInventory.title()) shouldBe "Погибшая · Анна"
+        }
+    }
+
     test("worker list and detail preserve concrete source-owned reasons") {
         withUi { h ->
             h.city = settlement(h.player)
@@ -977,17 +1017,19 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Строим: Лесорубка · ур. 2 · 40/475"
             h.body() shouldContain "Припасы попадут в этот дом строителя"
             h.body() shouldContain "В очереди: 1"
-            tableText().lineSequence().count { it.contains(" / ") } shouldBe 9
+            materialTableCells(h.screen).size shouldBe 9
+            materialTableCells(h.screen).first() shouldBe listOf("Предмет", "Запас", "Нужно", "У вас")
             tableText() shouldContain "Резная книжная полка"
-            tableText() shouldContain "3 / 4 / 64"
+            materialTableCells(h.screen).single { it.first() == "Булыжник" } shouldBe listOf("Булыжник", "3", "4", "64")
+            tableText().contains(" / ") shouldBe false
             tableText().contains("Факел") shouldBe false
             h.screen.buttons.single { it.id.value == "supply" }.label.color() shouldBe TextColor.color(0x9BD48D)
             export("builder-hut-materials-ready-ru")
             val firstPage = tableText()
             h.click("next"); h.paper.performTicks(2)
-            tableText().lineSequence().count { it.contains(" / ") } shouldBe 6
+            materialTableCells(h.screen).size shouldBe 6
             tableText() shouldContain "Факел"
-            tableText() shouldContain "0 / 34 / 0"
+            materialTableCells(h.screen).last() shouldBe listOf("Факел", "0", "34", "0")
             export("builder-hut-materials-page-2-ru")
             h.click("previous"); h.paper.performTicks(2)
             tableText() shouldBe firstPage
@@ -1036,7 +1078,7 @@ class CivsUiTest : FunSpec({
             stored = 7L
             h.player.inventory.clear()
             hutTransfer.complete(CivsSupplyResult(5L, 13L, false)); h.paper.performTicks(2)
-            h.body() shouldContain "7 / 20 / 0"
+            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "7", "20", "0")
             h.body() shouldContain "Передано: 5. Ещё нужно: 13."
             h.body().contains("Освободите место и повторите.") shouldBe false
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "builder-hut-materials-partial-ru", h.screen, listOf(588, 380)) }
@@ -1080,7 +1122,7 @@ class CivsUiTest : FunSpec({
             val grant = h.screen.buttons.single { it.id.value == "grant" }
             plainText(grant.label) shouldBe "Выдать всё"
             grant.label.color() shouldBe TextColor.color(0x9BD48D)
-            h.body() shouldContain "0 / 20 / 0"
+            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "0", "20", "0")
             h.screen.buttons.map { it.id.value } shouldNotContain "supply"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "builder-hut-materials-creative-ru", h.screen, listOf(588, 380)) }
             val before = h.screen
@@ -1552,7 +1594,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "guide")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "hall_inventory", "guide")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"
@@ -1572,7 +1614,33 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("overview omits item storage and members use saved names with an owner profile instead of an owner table") {
+    test("town overview opens its exact hall barrel in either storage mode and hides unavailable access") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val hall = base.buildings.first { it.type == BuildingType.TOWN_HALL }
+            for (mode in CivStorageMode.entries) {
+                h.city = base.copy(inventory = base.inventory!!.copy(mode = mode))
+                h.open()
+                h.screen.id shouldBe "civs.overview"
+                val action = h.screen.buttons.single { it.id.value == "hall_inventory" }
+                plainText(action.label) shouldBe "Инвентарь ратуши ›"
+                val before = h.screen
+                h.click("hall_inventory"); h.click("hall_inventory", screen = before)
+                h.ui.showingDialog(h.player) shouldBe false
+            }
+            verify(exactly = 2) { h.host.openBuildingInventory(h.player, hall.id) }
+            every { h.host.cityBusy(h.player) } returns true
+            h.open()
+            h.screen.buttons.map { it.id.value } shouldNotContain "hall_inventory"
+            every { h.host.cityBusy(h.player) } returns false
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == hall.id) it.copy(control = null) else it })
+            h.open()
+            h.screen.buttons.map { it.id.value } shouldNotContain "hall_inventory"
+        }
+    }
+
+    test("overview omits stock quantities and members use saved names with an owner profile instead of an owner table") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -2384,6 +2452,12 @@ private fun preview() = CivsPreviewView(BuildingType.TOWN_HALL, 1, "medieval-oak
 private fun materialEstimate() = mapOf("COBBLESTONE" to 73L, "COBBLESTONE_STAIRS" to 22L,
     "COBBLESTONE_WALL" to 28L, "DIRT" to 516L, "OAK_PLANKS" to 48L, "RED_BED" to 1L,
     "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 90L, "SPRUCE_PLANKS" to 2_000_003L)
+
+private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> = screen.body
+    .single { plainText(it.text).contains('\uE570') }.let { plainText(it.text) }.lineSequence()
+    .filter { it.contains('\uE574') }.map { line -> line.split('\uE575').map { cell -> buildString {
+        cell.codePoints().filter { it !in 0xE570..0xE57E && it !in 0xF0F01..0xF0F11 }.forEach(::appendCodePoint)
+    } } }.toList()
 
 private fun builderMaterialEstimate() = mapOf("CHISELED_BOOKSHELF" to 2L, "COBBLESTONE" to 4L,
     "CRAFTING_TABLE" to 1L, "DIRT" to 161L, "GRAVEL" to 47L, "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 83L,

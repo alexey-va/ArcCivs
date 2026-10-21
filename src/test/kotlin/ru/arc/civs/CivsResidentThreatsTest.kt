@@ -34,6 +34,14 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsResidentThreatsTest : FunSpec({
+    test("children and wounded adults retreat while healthy residents can defend") {
+        val adult = CivWorker(UUID.randomUUID(), "Иван", null)
+        citizenRetreats(adult) shouldBe false
+        citizenRetreats(adult.copy(health = 7.0)) shouldBe true
+        citizenRetreats(adult.copy(health = 8.0)) shouldBe false
+        citizenRetreats(adult.copy(childMinutes = 1, parentIds = setOf(UUID.randomUUID(), UUID.randomUUID()))) shouldBe true
+    }
+
     test("a cancelled native explosion and cancelled resident event never submit an injury") {
         threatRuntime { paper ->
             val plugin = paper.createSimplePlugin("VirtualResidentDamage")

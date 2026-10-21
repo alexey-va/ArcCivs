@@ -23,7 +23,12 @@ class CivsWorkforceTest : FunSpec({
     test("normal hall scribes require an item receipt and earn only their new profession experience") {
         val base = workforceCity()
         val hall = base.buildings.first()
-        val worker = base.workers.first().copy(assignment = hall.id, completedCycles = 100)
+        val worker = base.workers.first().copy(assignment = hall.id, completedCycles = 100,
+            items = List(CivsEquipment.SLOTS) { when (it) {
+                CivsEquipment.BAG -> CivResidentItem("PAPER", 3)
+                CivsEquipment.BAG + 1 -> CivResidentItem("LEATHER", 1)
+                else -> null
+            } })
         val city = CivsRules.validate(base.copy(workers = listOf(worker)))
         CivsRules.effectiveWorkType(city, hall) shouldBe BuildingType.TOWN_HALL
         CivsRules.profession(city, hall) shouldBe "scribe"
@@ -65,37 +70,40 @@ class CivsWorkforceTest : FunSpec({
     }
 
     test("builders add observed credit while one row places without replacing each others work") {
-        var city = workforceOrder(20)
+        var city = workforceOrder(188)
         val (first, second, third) = city.workers
         val secondPlan = citizenPlan(city, second)
         val before = city
         city = workforceTrip(city, first)
-        city.construction!!.workCredit shouldBe 8
+        city.construction!!.workCredit shouldBe 64
         citizenPlan(city, second) shouldBe secondPlan!!.copy(idleReason = "placing")
         city = workforceTrip(city, second)
-        city.construction!!.workCredit shouldBe 16
+        city.construction!!.workCredit shouldBe 128
         city.construction!!.workDone shouldBe 0
         workforceDenied("stale-delivery") { workforceTrip(city, first) }
         val orderId = city.construction!!.id
+        city = city.copy(workers = city.workers.mapIndexed { index, resident -> if (index == 0)
+            resident.copy(items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("STONE", 1) else null })
+            else resident })
         city = CivsRules.payBatch(city, city.owner, orderId, 0, mapOf("STONE" to 1L))
         val thirdPlan = citizenPlan(before, third)
         citizenPlan(city, third) shouldBe thirdPlan!!.copy(idleReason = "placing")
         city = workforceRoundTrip(workforceTrip(city, third))
         city.construction!!.phase shouldBe ConstructionPhase.PLACING
         city.construction!!.payment!!.reservedBatch shouldBe 0
-        city.construction!!.workCredit shouldBe 20
+        city.construction!!.workCredit shouldBe 188
         city.workers.map { it.completedCycles } shouldBe listOf(1L, 1L, 1L)
         workforceDenied("construction-credit-full") { workforceTrip(city, city.workers.first()) }
         city = CivsRules.hurtResident(city, city.owner, second.id, 100.0)
-        city.construction!!.workCredit shouldBe 20
+        city.construction!!.workCredit shouldBe 188
         city = CivsRules.completeBatch(workforceRoundTrip(city), city.owner, orderId)
         city.construction!!.workDone shouldBe 1
-        city.construction!!.workCredit shouldBe 19
+        city.construction!!.workCredit shouldBe 187
         city.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
     }
 
     test("builder credit remains bounded and paused or missing-material work earns nothing") {
-        var city = workforceOrder(200)
+        var city = workforceOrder(CivsRules.MAX_BUILDER_WORK_CREDIT + 1)
         repeat(CivsRules.MAX_POPULATION) { city = workforceTrip(city, city.workers.first()) }
         city.construction!!.workCredit shouldBe CivsRules.MAX_BUILDER_WORK_CREDIT
         workforceDenied("construction-credit-full") { workforceTrip(city, city.workers.first()) }

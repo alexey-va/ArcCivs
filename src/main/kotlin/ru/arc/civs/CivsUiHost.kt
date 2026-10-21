@@ -116,6 +116,9 @@ interface CivsUiHost {
     fun giveWorkerRequest(player: Player, workerId: UUID, material: String): CompletableFuture<Unit> = CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
     fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
     fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
+    fun corpseItems(player: Player, workerId: UUID): List<ItemStack?> = throw CivsRejection("worker-not-found")
+    fun transferCorpseItem(player: Player, workerId: UUID, npcSlot: Int, click: ClickType): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("worker-not-found"))
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>

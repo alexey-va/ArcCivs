@@ -132,6 +132,119 @@ class CivsStorageTest : FunSpec({
         taken.after.workers.single().items!![4] shouldBe null
     }
 
+    test("cursor equipment stages to player storage then targets the exact resident slot through a replayable receipt") {
+        val player = paper.addPlayer("CursorEquipmentOwner")
+        player.openInventory(paper.server.createInventory(player, 9))
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        val pickaxe = named(Material.IRON_PICKAXE, 1)
+        player.setItemOnCursor(pickaxe)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, 4, CIVS_RESIDENT_CURSOR_SLOT, ClickType.LEFT)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        prepared.worker.items!![4]!!.stack() shouldBe pickaxe
+        player.itemOnCursor.type.isAir shouldBe true
+        player.inventory.getItem(0) shouldBe pickaxe
+        receipt.residentTransfer!!.changes.single().slot shouldBe 0
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe null
+    }
+
+    test("cursor right click moves one item into the chosen bag slot and retains its remainder") {
+        val player = paper.addPlayer("CursorSupplyOwner")
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.setItemOnCursor(ItemStack(Material.STONE, 8))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, 9, CIVS_RESIDENT_CURSOR_SLOT, ClickType.RIGHT)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        prepared.worker.items!![9] shouldBe CivResidentItem("STONE", 1)
+        prepared.worker.items!![6] shouldBe null
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe ItemStack(Material.STONE, 7)
+    }
+
+    test("rejected cursor equipment planning leaves the same item owned by the player") {
+        val player = paper.addPlayer("RejectedCursorOwner")
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        val pickaxe = named(Material.IRON_PICKAXE, 1)
+        player.setItemOnCursor(pickaxe)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        shouldThrow<CivsRejection> {
+            storage.prepareResidentTransfer(city, worker.id, player, 0, CIVS_RESIDENT_CURSOR_SLOT, ClickType.LEFT)
+        }.reason shouldBe "resident-slot-occupied"
+        player.inventory.getItem(0) shouldBe pickaxe
+        player.itemOnCursor.type.isAir shouldBe true
+        CivsEquipment.slots(worker).all { it == null } shouldBe true
+    }
+
+    test("a full player inventory prevents cursor staging without changing either endpoint") {
+        val player = paper.addPlayer("FullCursorOwner")
+        val worker = CivWorker(UUID.randomUUID(), "Resident", null)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        repeat(36) { player.inventory.setItem(it, ItemStack(Material.STONE, 64)) }
+        val pickaxe = ItemStack(Material.IRON_PICKAXE)
+        player.setItemOnCursor(pickaxe)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        shouldThrow<CivsRejection> {
+            storage.prepareResidentTransfer(city, worker.id, player, 4, CIVS_RESIDENT_CURSOR_SLOT, ClickType.LEFT)
+        }.reason shouldBe "storage-full"
+        player.itemOnCursor shouldBe pickaxe
+        player.inventory.getItem(0) shouldBe ItemStack(Material.STONE, 64)
+    }
+
+    test("mission cargo remains visible but only the resident's surplus can be taken") {
+        val player = paper.addPlayer("CargoOwner")
+        val shipment = CivCargo(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+            CivPosition(0, 64, 0), "BREAD", 2, inventoryBacked = true)
+        val worker = CivWorker(UUID.randomUUID(), "Courier", null, cargo = shipment,
+            items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("BREAD", 3) else null })
+        val (updated, changes) = CivsEquipment.transfer(worker, player, 6, null, ClickType.LEFT)
+        changes.single().after shouldBe CivResidentItem("BREAD", 1)
+        updated.items!![6] shouldBe CivResidentItem("BREAD", 2)
+        shouldThrow<CivsRejection> { CivsEquipment.transfer(updated, player, 6, null, ClickType.RIGHT) }
+            .reason shouldBe "resident-item-reserved"
+    }
+
+    test("corpse loot journals exact belongings and cannot repeat the same withdrawal") {
+        val player = paper.addPlayer("CorpseLootOwner")
+        val pickaxe = named(Material.IRON_PICKAXE, 1)
+        val dead = CivWorker(UUID.randomUUID(), "Fallen", null, items = List(CivsEquipment.SLOTS) {
+            if (it == 4) CivResidentItem.of(pickaxe) else null
+        })
+        val corpse = CivCorpse(dead, CivPosition(0, 64, 0), 1_000, 301_000, "Zombie", "ZOMBIE", "ENTITY_ATTACK")
+        city = city.copy(owner = player.uniqueId, corpses = listOf(corpse))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, dead.id, player, 4, null, ClickType.LEFT)
+        val after = city.copy(corpses = listOf(corpse.copy(worker = prepared.worker)), revision = city.revision + 1)
+        val receipt = CivInventoryTransaction(id, city.id, city.revision, after, prepared.plan.changes,
+            residentTransfer = prepared.plan.residentTransfer).validated()
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe pickaxe
+        after.corpses!!.single().worker.items!![4] shouldBe null
+        after.workers shouldBe city.workers
+        storage.unlock(id)
+        val repeated = UUID.randomUUID()
+        storage.reserve(after, repeated, player)
+        shouldThrow<CivsRejection> { storage.prepareResidentTransfer(after, dead.id, player, 4, null, ClickType.LEFT) }
+            .reason shouldBe "resident-item-missing"
+        player.inventory.getItem(0) shouldBe pickaxe
+        shouldThrow<CivsRejection> { storage.prepareResidentTransfer(after, dead.id, player, null, 0, ClickType.LEFT) }
+            .reason shouldBe "not-authorized"
+    }
+
     test("requested tool selects the cheapest worn plain tier and equips it through the existing receipt once") {
         val player = paper.addPlayer("ToolDonor")
         val farm = addLocalBuilding(BuildingType.FARM)
@@ -426,12 +539,24 @@ class CivsStorageTest : FunSpec({
         storage.constructionAvailable(city, target.id) shouldBe mapOf("STONE" to 6L)
         val remaining = CivsRules.constructionStorageInputs(city, target.id, required)
         remaining shouldBe mapOf("STONE" to 3L)
+        shouldThrow<CivsRejection> { CivsRules.payBatch(city, city.owner, order.id, 0, required) }.reason shouldBe "materials-missing"
+        val pickupId = UUID.randomUUID()
+        storage.reserve(city, pickupId)
+        val pickup = residentTransaction(pickupId, city, storage.prepareBuilderPickup(city, builder.id)).validated()
+        pickup.changes.map { it.container }.toSet() shouldBe setOf(requireNotNull(hut.control), CivPosition(7, 64, 1))
+        CivsEquipment.plainCount(pickup.after.workers.single(), "STONE") shouldBe 5
+        storage.seal(pickup)
+        storage.reconcile(pickup) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(pickup) shouldBe CivInventoryApplyResult.Applied
+        storage.unlock(pickupId)
+        city = pickup.after
         val id = UUID.randomUUID()
         storage.reserve(city, id)
-        val plan = requireNotNull(storage.prepareConstructionDebitBackground(city, remaining, target.id))
+        val plan = requireNotNull(storage.prepareConstructionDebitBackground(city,
+            CivsRules.constructionStorageInputs(city, target.id, required), target.id))
         val paid = CivsRules.payBatch(city, city.owner, order.id, 0, required).copy(inventory = plan.inventoryAfter)
         val receipt = CivInventoryTransaction(id, city.id, city.revision, paid, plan.changes).validated()
-        plan.changes.map { it.container }.toSet() shouldBe setOf(requireNotNull(hut.control), CivPosition(7, 64, 1))
+        plan.changes shouldBe emptyList()
         CivsEquipment.plainCount(paid.workers.single(), "STONE") shouldBe 0
         paid.workers.single().items!![7] shouldBe builder.items!![7]
         storage.seal(receipt)
@@ -442,6 +567,172 @@ class CivsStorageTest : FunSpec({
         storage.buildingAvailable(city, warehouse.id)["STONE"] shouldBe 64L
         storage.buildingAvailable(city, target.id)["STONE"] shouldBe 64L
         shouldThrow<CivsRejection> { CivsRules.payBatch(paid, paid.owner, order.id, 0, required) }.reason shouldBe "stale-construction"
+    }
+
+    test("builder pickup carries multiple stacks for future rows and never borrows another building's stock") {
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val target = addLocalBuilding(BuildingType.HOUSE, 10).copy(phase = BuildingPhase.CONSTRUCTING)
+        val native = cargo(world.getBlockAt(6, 64, 0))
+        repeat(4) { native.setItem(it, ItemStack(Material.STONE, 64)) }
+        barrel.setItem(0, ItemStack(Material.OAK_LOG, 64))
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("STONE", 2) else null })
+        val required = mapOf("STONE" to 400L, "OAK_LOG" to 64L)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 30, 0, ConstructionPhase.READY_TO_PLACE,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(30, 16), materials = required,
+            payment = CivConstructionPayment())
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(worker), construction = order))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val prepared = storage.prepareBuilderPickup(city, worker.id)
+        CivsEquipment.plainCount(prepared.worker, "STONE") shouldBe 258
+        CivsEquipment.plainCount(prepared.worker, "OAK_LOG") shouldBe 0
+        val receipt = residentTransaction(id, city, prepared).validated()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        native.isEmpty shouldBe true
+        barrel.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 64)
+    }
+
+    test("a full builder bag returns spare blocks to make room for the next row") {
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val target = addLocalBuilding(BuildingType.HOUSE, 10).copy(phase = BuildingPhase.CONSTRUCTING)
+        val native = cargo(world.getBlockAt(6, 64, 0))
+        native.setItem(0, ItemStack(Material.TORCH, 16))
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { if (it >= CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 64) else null })
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 30, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(30, 16),
+            materials = mapOf("COBBLESTONE" to 2000L, "TORCH" to 16L),
+            payment = CivConstructionPayment(awaiting = mapOf("TORCH" to 16L)))
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(worker), construction = order))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val prepared = storage.prepareBuilderPickup(city, worker.id)
+        CivsEquipment.plainCount(prepared.worker, "TORCH") shouldBe 16
+        CivsEquipment.plainCount(prepared.worker, "COBBLESTONE") shouldBe 26 * 64
+        val receipt = residentTransaction(id, city, prepared).validated()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        native.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 64)
+    }
+
+    test("a full builder bag returns surplus of a required ingredient to carry the complete next row") {
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val target = addLocalBuilding(BuildingType.HOUSE, 10).copy(phase = BuildingPhase.CONSTRUCTING)
+        val native = cargo(world.getBlockAt(6, 64, 0))
+        native.setItem(0, ItemStack(Material.OAK_SAPLING, 16))
+        val required = CivsMaterials.requirements("minecraft:potted_oak_sapling").mapValues { (_, count) -> count * 16 }
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { if (it >= CivsEquipment.BAG) CivResidentItem("FLOWER_POT", 64) else null })
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 30, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(30, 16),
+            materials = required + ("FLOWER_POT" to 2000L), payment = CivConstructionPayment(awaiting = required))
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(worker), construction = order))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val prepared = storage.prepareBuilderPickup(city, worker.id)
+        CivsEquipment.plainCount(prepared.worker, "FLOWER_POT") shouldBe 26 * 64
+        CivsEquipment.plainCount(prepared.worker, "OAK_SAPLING") shouldBe 16
+        native.getItem(0) shouldBe ItemStack(Material.OAK_SAPLING, 16)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        CivsRules.constructionStorageInputs(receipt.after, target.id, required) shouldBe emptyMap()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        native.getItem(0) shouldBe ItemStack(Material.FLOWER_POT, 64)
+    }
+
+    test("builder priority exchange retains the exact next row requirement before returning other supplies") {
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val target = addLocalBuilding(BuildingType.HOUSE, 10).copy(phase = BuildingPhase.CONSTRUCTING)
+        val native = cargo(world.getBlockAt(6, 64, 0))
+        native.setItem(0, ItemStack(Material.OAK_SAPLING, 16))
+        val required = CivsMaterials.requirements("minecraft:potted_oak_sapling").mapValues { (_, count) -> count * 16 }
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { when {
+                it == CivsEquipment.SLOTS - 1 -> CivResidentItem("FLOWER_POT", 16)
+                it >= CivsEquipment.BAG -> CivResidentItem("COBBLESTONE", 64)
+                else -> null
+            } })
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 30, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(30, 16),
+            materials = required + ("COBBLESTONE" to 2000L), payment = CivConstructionPayment(awaiting = required))
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(worker), construction = order))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val prepared = storage.prepareBuilderPickup(city, worker.id)
+        prepared.worker.items!![CivsEquipment.SLOTS - 1] shouldBe CivResidentItem("FLOWER_POT", 16)
+        CivsEquipment.plainCount(prepared.worker, "COBBLESTONE") shouldBe 25 * 64
+        CivsEquipment.plainCount(prepared.worker, "OAK_SAPLING") shouldBe 16
+        val receipt = residentTransaction(id, city, prepared).validated()
+        CivsRules.constructionStorageInputs(receipt.after, target.id, required) shouldBe emptyMap()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        native.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 64)
+    }
+
+    for ((material, block) in mapOf("REDSTONE" to "redstone_wire", "STRING" to "tripwire", "WHEAT_SEEDS" to "wheat"))
+        test("builder priority exchange accepts plain construction ingredient $material and preserves personal items") {
+            CivsMaterials.requirements("minecraft:$block") shouldBe mapOf(material to 1L)
+            Material.valueOf(material).isBlock shouldBe false
+            val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+            val target = addLocalBuilding(BuildingType.HOUSE, 10).copy(phase = BuildingPhase.CONSTRUCTING)
+            val native = cargo(world.getBlockAt(6, 64, 0))
+            native.setItem(0, ItemStack(Material.TORCH, 16))
+            val custom = CivResidentItem.of(named(Material.valueOf(material), 1))
+            val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1,
+                items = List(CivsEquipment.SLOTS) { when (it) {
+                    6 -> CivResidentItem("BREAD", 4)
+                    7 -> CivResidentItem("IRON_PICKAXE", 1)
+                    8 -> custom
+                    in 9 until CivsEquipment.SLOTS -> CivResidentItem(material, 64)
+                    else -> null
+                } })
+            val required = mapOf("TORCH" to 16L)
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 30, 0, ConstructionPhase.WAITING_MATERIALS,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(30, 16),
+                materials = required + (material to 2000L), payment = CivConstructionPayment(awaiting = required))
+            city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+                workers = listOf(worker), construction = order))
+            val id = UUID.randomUUID()
+            storage.reserve(city, id)
+            val prepared = storage.prepareBuilderPickup(city, worker.id)
+            prepared.worker.items!!.subList(6, 9) shouldBe worker.items!!.subList(6, 9)
+            CivsEquipment.plainCount(prepared.worker, material) shouldBe 23 * 64
+            CivsEquipment.plainCount(prepared.worker, "TORCH") shouldBe 16
+            val receipt = residentTransaction(id, city, prepared).validated()
+            storage.seal(receipt)
+            storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+            storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+            native.getItem(0) shouldBe ItemStack(Material.valueOf(material), 64)
+        }
+
+    test("resident food pickup debits only the town hall and carries real bread in the same receipt") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val worker = CivWorker(UUID.randomUUID(), "Hungry", null, hunger = 8)
+        city = city.copy(workers = listOf(worker))
+        barrel.setItem(0, ItemStack(Material.BREAD, 6))
+        cargo(world.getBlockAt(6, 64, 0)).setItem(0, ItemStack(Material.BREAD, 64))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val prepared = storage.prepareResidentPickup(city, worker.id, city.buildings.first().id, mapOf("BREAD" to 4L))
+        CivsEquipment.plainCount(prepared.worker, "BREAD") shouldBe 4
+        barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 6)
+        val receipt = residentTransaction(id, city, prepared).validated()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0) shouldBe ItemStack(Material.BREAD, 2)
+        storage.buildingAvailable(city, warehouse.id)["BREAD"] shouldBe 64L
+        CivsEquipment.plainCount(receipt.after.workers.single(), "BREAD") shouldBe 4
     }
 
     test("builder bulk deposits conserve multiple materials metadata and partial bag capacity across replay") {

@@ -69,7 +69,8 @@ data class CivResidentTransfer(val playerId: UUID, val workerId: UUID,
     fun validated(city: Settlement) {
         require(city.canManage(playerId) && changes.size in 1..36 && changes.map { it.slot }.distinct().size == changes.size)
         CivsEquipment.validate(before)
-        val after = city.workers.first { it.id == workerId }.items ?: error("Missing resident inventory")
+        val after = (city.workers.firstOrNull { it.id == workerId }
+            ?: city.corpses.orEmpty().first { it.worker.id == workerId }.worker).items ?: error("Missing resident inventory")
         CivsEquipment.validate(after)
         val delta = mutableMapOf<Pair<String, String?>, Long>()
         fun count(item: CivResidentItem?, sign: Long) {
@@ -261,7 +262,8 @@ class CivsStorage(private val plugin: Plugin,
                 position in claim.positions && (claim.positions[position] == null || claim.positions[position] == type)
             }) { "Prepared inventory receipt does not match its reservation" }
         transaction.residentTransfer?.let { transfer ->
-            require(transfer.before == CivsEquipment.slots(claim.city.workers.first { it.id == transfer.workerId }))
+            require(transfer.before == CivsEquipment.slots(claim.city.workers.firstOrNull { it.id == transfer.workerId }
+                ?: claim.city.corpses.orEmpty().first { it.worker.id == transfer.workerId }.worker))
         }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
@@ -334,14 +336,29 @@ class CivsStorage(private val plugin: Plugin,
     fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null, requestedSupply: Pair<Material, Long>? = null, requestedSupplies: Map<String, Long>? = null): CivResidentTransferPlan {
         checkClaim(city)
         reject(!city.canManage(player.uniqueId) || !player.isOnline, "not-authorized")
-        reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
-        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        val resident = city.workers.firstOrNull { it.id == workerId }
+        val worker = resident ?: city.corpses.orEmpty().firstOrNull { it.worker.id == workerId }?.worker
+            ?: throw CivsRejection("worker-not-found")
+        reject(resident == null && (npcSlot == null || playerSlot != null || requestedTool != null ||
+            requestedSupply != null || requestedSupplies != null), "not-authorized")
+        val sourceSlot = if (playerSlot == CIVS_RESIDENT_CURSOR_SLOT) {
+            require(npcSlot != null && click in setOf(org.bukkit.event.inventory.ClickType.LEFT, org.bukkit.event.inventory.ClickType.RIGHT))
+            val cursor = CivResidentItem.of(player.itemOnCursor) ?: throw CivsRejection("resident-item-missing")
+            // This reversible move keeps ownership with the player if planning/journalling subsequently fails.
+            val free = (0..35).firstOrNull { isEmpty(player.inventory.getItem(it)) } ?: throw CivsRejection("storage-full")
+            player.inventory.setItem(free, cursor.stack())
+            player.setItemOnCursor(null)
+            free
+        } else {
+            reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
+            playerSlot
+        }
         val (updated, changes) = if (requestedSupplies != null) {
             validateAmounts(requestedSupplies)
             CivsEquipment.giveRequestedSupplies(worker, player, requestedSupplies)
         } else if (requestedSupply != null) CivsEquipment.giveRequestedSupply(worker, player, requestedSupply.first, requestedSupply.second)
             else if (requestedTool != null) CivsEquipment.giveRequestedTool(worker, player, requestedTool)
-            else CivsEquipment.transfer(worker, player, npcSlot, playerSlot, click)
+            else CivsEquipment.transfer(worker, player, npcSlot, sourceSlot, click)
         val transfer = changes.takeIf { it.isNotEmpty() }?.let { CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), it) }
         return CivResidentTransferPlan(CivStoragePlan(requireNotNull(city.inventory), emptyList(), residentTransfer = transfer), updated)
     }
@@ -521,6 +538,60 @@ class CivsStorage(private val plugin: Plugin,
         return prepareBuildingCredit(city, destinationBuildingId, cargo.material, cargo.amount)
     }
 
+    /** The returned resident and local storage plan belong in the same durable city receipt. */
+    fun prepareResidentPickup(city: Settlement, workerId: UUID, buildingId: UUID, required: Map<String, Long>): CivResidentTransferPlan {
+        checkClaim(city)
+        validateAmounts(required)
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        val supplied = CivsEquipment.collectSupplies(worker, required)
+        return CivResidentTransferPlan(prepareBuildingDebit(city, buildingId, required), supplied)
+    }
+
+    /** Fill a useful carried batch from the assigned hut; a site never remotely spends hut stock. */
+    fun prepareBuilderPickup(city: Settlement, workerId: UUID,
+        nextMaterials: Map<String, Long> = city.construction?.payment?.awaiting.orEmpty()): CivResidentTransferPlan {
+        checkClaim(city)
+        val order = city.construction?.takeIf { it.payment != null } ?: throw CivsRejection("no-construction")
+        val worker = CivsRules.constructionWorkers(city, order.buildingId).firstOrNull { it.id == workerId }
+            ?: throw CivsRejection("invalid-assignment")
+        val source = worker.assignment?.let(city::building)?.takeIf { it in CivsRules.constructionStores(city, order.buildingId) }
+            ?: throw CivsRejection("storage-building-required")
+        val stock = buildingAvailable(city, source.id)
+        var supplied = worker
+        val moved = mutableMapOf<String, Long>()
+        val returned = mutableMapOf<String, Long>()
+        fun missing(required: Map<String, Long>) = required.mapValues { (material, count) ->
+            minOf((count - CivsEquipment.usableCount(supplied, material)).coerceAtLeast(0),
+                ((stock[material] ?: 0L) - (moved[material] ?: 0L)).coerceAtLeast(0))
+        }.filterValues { it > 0 }
+        fun collect(required: Map<String, Long>) {
+            val (updated, picked) = CivsEquipment.grantSupplies(supplied, required)
+            supplied = updated
+            picked.forEach { (material, amount) -> moved.merge(material, amount, Math::addExact) }
+        }
+        val remaining = CivsMaterials.unpaid(order.materials.orEmpty())
+        // Keep the next row's full recipe, returning only surplus ordinary construction supplies.
+        // Nonblock ingredients come from this order's price; personal tools, food and custom items stay.
+        collect(missing(nextMaterials))
+        for (slot in (CivsEquipment.BAG until CivsEquipment.SLOTS).reversed()) {
+            if (missing(nextMaterials).isEmpty()) break
+            val items = CivsEquipment.slots(supplied).toMutableList()
+            val item = items[slot]?.takeIf { it.data == null &&
+                (Material.valueOf(it.material).isBlock || it.material in remaining) } ?: continue
+            val amount = minOf(item.amount.toLong(),
+                (CivsEquipment.usableCount(supplied, item.material) - (nextMaterials[item.material] ?: 0L)).coerceAtLeast(0)).toInt()
+            if (amount == 0) continue
+            items[slot] = item.copy(amount = item.amount - amount).takeIf { it.amount > 0 }
+            supplied = CivsEquipment.replace(supplied, items)
+            returned.merge(item.material, amount.toLong(), Math::addExact)
+            collect(missing(nextMaterials))
+        }
+        // One stack of each needed material before bulk fill avoids a bag of only the first stone.
+        collect(missing(remaining).mapValues { (material, count) -> minOf(count, Material.valueOf(material).maxStackSize.toLong()) })
+        collect(missing(remaining))
+        return CivResidentTransferPlan(prepareWork(city, source.id, moved, returned, emptyList()), supplied)
+    }
+
     private fun debit(snapshots: Sequence<Snapshot>, missing: MutableMap<String, Long>, candidate: ((CivPosition) -> Boolean)? = null) {
         var changedSlots = 0
         val iterator = snapshots.iterator()
@@ -549,7 +620,8 @@ class CivsStorage(private val plugin: Plugin,
         reject(city.building(building.id) != building, "not-authorized")
         val material = CivsProduction.material(building) ?: throw CivsRejection("invalid-production")
         val inputs = CivsProduction.inputs(building)
-        return prepareWork(city, building.id, worker?.let { CivsEquipment.storageInputs(it, inputs) } ?: inputs,
+        if (worker != null) reject(!CivsEquipment.inputsReady(worker, inputs, emptyMap()), "materials-missing")
+        return prepareWork(city, building.id, if (worker == null) inputs else emptyMap(),
             mapOf(material to CivsProduction.amount(building)), emptyList())
     }
 

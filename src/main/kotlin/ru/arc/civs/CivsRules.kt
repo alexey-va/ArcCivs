@@ -11,7 +11,7 @@ object CivsRules {
     const val PRODUCTION_INTERVAL = 60_000L
     const val BUILDER_INTERVAL = 10_000L
     const val BUILDER_SESSION_INTERVAL = 2_000L
-    const val BUILDER_SESSION_ROWS = 8
+    const val BUILDER_SESSION_ROWS = 64
     const val MAX_BUILDER_WORK_CREDIT = MAX_POPULATION * BUILDER_SESSION_ROWS
     const val FIRST_IMMIGRATION_DELAY = 30_000L
     const val IMMIGRATION_INTERVAL = 60_000L
@@ -292,7 +292,7 @@ object CivsRules {
         }))
     }
 
-    fun hurtResident(city: Settlement, actor: UUID, workerId: UUID, damage: Double): Settlement {
+    fun hurtResident(city: Settlement, actor: UUID, workerId: UUID, damage: Double, death: CivDeathContext? = null): Settlement {
         authorized(city, actor)
         check(damage.isFinite() && damage > 0, "invalid-damage")
         val worker = city.workers.find { it.id == workerId } ?: reject("worker-not-found")
@@ -301,7 +301,9 @@ object CivsRules {
             else city.workers.map { if (it.id == workerId) it.copy(health = health) else it },
             families = if (health <= 0) city.families?.filterNot {
                 it.firstParentId == workerId || it.secondParentId == workerId
-            } else city.families))
+            } else city.families,
+            corpses = if (health <= 0 && death != null) city.corpses.orEmpty() + CivsCorpses.create(worker, death)
+                else city.corpses))
     }
 
     /** The caller includes the exact town-storage debit/credit in this same revision's receipt. */
@@ -451,6 +453,7 @@ object CivsRules {
             order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS), "stale-construction")
         check(validMaterials(materials) && materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
         check(payment.awaiting == null || CivsMaterials.unpaid(payment.awaiting) == materials, "invalid-construction")
+        check(constructionStorageInputs(city, order.buildingId, materials).isEmpty(), "materials-missing")
         val remaining = CivsMaterials.unpaid(order.materials.orEmpty()).mapValues { (key, value) -> value - materials.getOrDefault(key, 0) }.filterValues { it > 0 }
         var storageInputs = materials
         val builders = constructionWorkers(city, order.buildingId).map(CivWorker::id).toSet()
@@ -568,7 +571,10 @@ object CivsRules {
                 check(!outputHandled, "invalid-delivery")
                 check(capacity(city) - stock[resource] >= amount, "storage-full")
                 stock = stock.with(resource, add(stock[resource], amount))
-            } else check(outputHandled, "materials-required")
+            } else {
+                check(outputHandled, "materials-required")
+                check(CivsEquipment.inputsReady(worker, CivsProduction.inputs(building), emptyMap()), "materials-missing")
+            }
         }
         val interval = CivsResidents.workDuration(worker,
             if (isBuilder(city, building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(city, building))
@@ -660,6 +666,7 @@ object CivsRules {
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
             snapshot(city.workers.size in 0..MAX_POPULATION &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
+            CivsCorpses.validate(city)
             city.mineProgress?.let { progress -> snapshot(progress.size <= MAX_BUILDINGS && progress.all { (id, step) ->
                 java.util.UUID.fromString(id).toString() == id && step in 0..100_000 }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }
@@ -669,6 +676,9 @@ object CivsRules {
                 CivsResidents.validated(worker)
                 present(worker.id) && validText(worker.name, 32) && worker.completedCycles >= 0 && worker.nextDeliveryAt >= 0 &&
                     CivsLogistics.validCargo(city, worker.cargo) &&
+                    (worker.cargo?.takeIf { it.inventoryBacked }?.let {
+                        CivsEquipment.plainCount(worker, it.material) >= it.amount
+                    } != false) &&
                     (worker.assignment == null || worker.nextDeliveryAt > 0 && city.building(worker.assignment)?.let {
                         slots(city, it) > 0 || (it.type == BuildingType.TOWN_HALL && isFounding(city))
                     } == true)

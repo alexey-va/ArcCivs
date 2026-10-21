@@ -26,6 +26,13 @@ object CivsNames {
         Ульяна Фаина Феврония Флора Христина Элина Юлия Яна Ярослава
     """.trimIndent().split(Regex("\\s+"))
 
+    /** Older residents predate the persisted sex field; retain their known original given name. */
+    fun knownSex(name: String): CivSex? = when (name.trim().substringBefore(' ')) {
+        in female -> CivSex.FEMALE
+        in male -> CivSex.MALE
+        else -> null
+    }
+
     fun name(city: Settlement, workerId: UUID, sex: CivSex): String {
         city.workers.firstOrNull { it.id == workerId }?.let { return it.name }
         val pool = if (sex == CivSex.MALE) male else female

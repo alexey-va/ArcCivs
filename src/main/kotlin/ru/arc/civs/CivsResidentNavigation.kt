@@ -37,7 +37,7 @@ internal class CivsResidentNavigation {
     fun clear() { searching.forEach(CitizenPacketRoute::cancel); searching.clear() }
 
     companion object {
-        const val SEARCH_OPERATIONS_PER_TICK = 96
+        const val SEARCH_OPERATIONS_PER_TICK = 384
         const val SEARCH_BUDGET_NANOS = 1_000_000L
     }
 }
@@ -59,10 +59,12 @@ internal class CitizenPacketRoute(
     }
     private data class Entry(val cell: Cell, val cost: Double, val score: Double, val order: Int)
     private val start = Cell(from.blockX, from.y, from.blockZ)
+    private val origin = CitizenPoint(from.x, from.y, from.z)
     private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
     private val costs = hashMapOf(start to 0.0)
     private val parents = hashMapOf<Cell, Cell>()
-    private val cells = hashMapOf<Triple<Int, Int, Int>, List<Cell>>()
+    private val cells = hashMapOf<Triple<Int, Double, Int>, List<Cell>>()
+    private val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
     private val weights = hashMapOf<Cell, Double>()
     private val path = ArrayDeque<Cell>()
     private var expanding: Entry? = null
@@ -96,8 +98,11 @@ internal class CitizenPacketRoute(
         if (pending != null && pending.hasNext()) {
             val current = requireNotNull(expanding)
             val next = pending.next()
-            if (abs(next.y - current.cell.y) <= 1.01 && stepAllowed(current.cell.point(), next.point()) &&
-                citizenPacketStepClear(world, current.cell.point(), next.point(), allowDoors = true)) offer(current, next)
+            // A resident can start anywhere inside a path/slab cell after a push or an
+            // earlier arrival. Validating from its centre can admit a blocked first corner.
+            val from = if (current.cell == start) origin else current.cell.point()
+            if (abs(next.y - current.cell.y) <= 1.01 && stepAllowed(from, next.point()) &&
+                citizenPacketStepClear(world, from, next.point(), allowDoors = true, collision = ::collision)) offer(current, next)
             return
         }
         edges = null
@@ -128,7 +133,7 @@ internal class CitizenPacketRoute(
                 if (dx == 0 && dz == 0) continue
                 val x = cell.x + dx
                 val z = cell.z + dz
-                yieldAll(cells.getOrPut(Triple(x, floor(cell.y).toInt(), z)) { standingCells(x, cell.y, z) })
+                yieldAll(cells.getOrPut(Triple(x, cell.y, z)) { standingCells(x, cell.y, z) })
             }
             // A quarry's ladder connects adjacent floors without inventing a solid support block.
             val at = world.getBlockAt(cell.x, floor(cell.y).toInt(), cell.z)
@@ -136,7 +141,7 @@ internal class CitizenPacketRoute(
                 val next = Cell(cell.x, floor(cell.y) + dy, cell.z, true)
                 if (allowed(CivPosition(next.x, floor(next.y).toInt(), next.z)) &&
                     Tag.CLIMBABLE.isTagged(world.getBlockAt(next.x, floor(next.y).toInt(), next.z).type) &&
-                    citizenPacketBodyClear(world, next.point(), true)) yield(next)
+                    citizenPacketBodyClear(world, next.point(), true, collision = ::collision)) yield(next)
             }
         }.iterator()
     }
@@ -166,6 +171,15 @@ internal class CitizenPacketRoute(
         return sqrt(dx * dx + dy * dy + dz * dz)
     }
 
+    private fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
+        val key = CivPosition(x, y, z)
+        return collisions[key] ?: citizenCollisionSnapshot(world, x, y, z).also {
+            // Each search is already bounded by 4096 expanded cells and a 96-block region.
+            // Cap shape retention independently when one region contains many small shapes.
+            if (collisions.size < 16_384) collisions[key] = it
+        }
+    }
+
     private fun standingCells(x: Int, y: Double, z: Int): List<Cell> {
         if (!citizenChunkReady(world, x shr 4, z shr 4)) return emptyList()
         val result = linkedSetOf<Cell>()
@@ -176,16 +190,16 @@ internal class CitizenPacketRoute(
             if (block.isLiquid) continue
             if (Tag.CLIMBABLE.isTagged(block.type)) {
                 val point = CitizenPoint(x + .5, by.toDouble(), z + .5)
-                if (allowed(CivPosition(x, by, z)) && citizenPacketBodyClear(world, point, true))
+                if (allowed(CivPosition(x, by, z)) && citizenPacketBodyClear(world, point, true, collision = ::collision))
                     result += Cell(x, by.toDouble(), z, true)
             }
-            for (box in block.collisionShape.boundingBoxes) {
+            for (box in collision(x, by, z).localBoxes) {
                 if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
                 val height = by + box.maxY
                 if (abs(height - y) > 1.01) continue
                 val point = CitizenPoint(x + .5, height, z + .5)
                 if (allowed(CivPosition(x, floor(height + .001).toInt(), z)) &&
-                    citizenPacketBodyClear(world, point, true)) result += Cell(x, height, z)
+                    citizenPacketBodyClear(world, point, true, collision = ::collision)) result += Cell(x, height, z)
             }
         }
         return result.toList()
@@ -255,6 +269,7 @@ internal class CitizenPacketRoute(
     private fun releaseSearch() {
         open.clear()
         cells.clear()
+        collisions.clear()
         weights.clear()
         parents.clear()
         costs.clear()
@@ -268,9 +283,20 @@ internal fun citizenTurn(from: Float, to: Float, limit: Float): Float {
     return from + change.coerceIn(-limit, limit)
 }
 
+internal data class CitizenCollisionSnapshot(val liquid: Boolean, val door: Boolean,
+    val localBoxes: List<BoundingBox>, val boxes: List<BoundingBox>)
+
+private fun citizenCollisionSnapshot(world: World, x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
+    val block = world.getBlockAt(x, y, z)
+    val local = block.collisionShape.boundingBoxes.map { it.clone() }
+    return CitizenCollisionSnapshot(block.isLiquid, block.blockData is Door, local,
+        local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
+}
+
 /** Collision shapes are local to their block; check both body width and headroom. */
 internal fun citizenPacketBodyClear(world: World, point: CitizenPoint, allowDoors: Boolean,
-                                    allowLiquids: Boolean = false, allowBelowWorld: Boolean = false): Boolean {
+                                    allowLiquids: Boolean = false, allowBelowWorld: Boolean = false,
+                                    collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): Boolean {
     val body = BoundingBox(point.x - .299, point.y + .001, point.z - .299, point.x + .299, point.y + 1.799, point.z + .299)
     for (x in floor(body.minX).toInt()..floor(body.maxX).toInt()) for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt()) {
         if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
@@ -280,10 +306,10 @@ internal fun citizenPacketBodyClear(world: World, point: CitizenPoint, allowDoor
                 return false
             }
             if (y >= world.maxHeight) return false
-            val block = world.getBlockAt(x, y, z)
-            if (block.isLiquid && !allowLiquids) return false
-            if (allowDoors && block.blockData is Door) continue
-            for (shape in block.collisionShape.boundingBoxes) if (body.overlaps(shape.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()))) return false
+            val state = collision?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
+            if (state.liquid && !allowLiquids) return false
+            if (allowDoors && state.door) continue
+            if (state.boxes.any(body::overlaps)) return false
         }
     }
     return true
@@ -322,21 +348,22 @@ internal fun citizenPacketCampfireClear(world: World, point: CitizenPoint, from:
     return true
 }
 
-internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean): Boolean {
+internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
+                                   collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): Boolean {
     if (abs(to.y - from.y) > 1.01) return false
     if (from.y != to.y) {
         val high = max(from.y, to.y)
         val aboveFrom = CitizenPoint(from.x, high, from.z)
         val aboveTo = CitizenPoint(to.x, high, to.z)
-        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors, from) &&
-            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors, from) &&
-            citizenPacketSegmentClear(world, aboveTo, to, allowDoors, from)
+        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors, from, collision) &&
+            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors, from, collision) &&
+            citizenPacketSegmentClear(world, aboveTo, to, allowDoors, from, collision)
     }
-    return citizenPacketSegmentClear(world, from, to, allowDoors, from)
+    return citizenPacketSegmentClear(world, from, to, allowDoors, from, collision)
 }
 
 private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
-                                      occupied: CitizenPoint): Boolean {
+                                      occupied: CitizenPoint, collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)?): Boolean {
     val distance = sqrt(from.distanceSquared(to))
     val samples = kotlin.math.ceil(distance / .15).toInt().coerceIn(1, 16)
     for (index in 1..samples) {
@@ -344,7 +371,7 @@ private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: Citi
         val point = CitizenPoint(from.x + (to.x - from.x) * t,
             from.y + (to.y - from.y) * t,
             from.z + (to.z - from.z) * t)
-        if (!citizenPacketBodyClear(world, point, allowDoors) || !citizenPacketCampfireClear(world, point, occupied)) return false
+        if (!citizenPacketBodyClear(world, point, allowDoors, collision = collision) || !citizenPacketCampfireClear(world, point, occupied)) return false
     }
     return true
 }

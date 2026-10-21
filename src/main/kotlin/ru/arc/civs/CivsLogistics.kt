@@ -12,6 +12,8 @@ data class CivCargo(
     val sourceEntrance: CivPosition,
     val material: String,
     val amount: Long,
+    /** Missing in legacy JSON: those items still need one durable inventory materialization. */
+    val inventoryBacked: Boolean = false,
 )
 
 data class CivCourierPlan(val cargo: CivCargo, val destinationBuildingId: UUID,
@@ -105,7 +107,8 @@ object CivsLogistics {
             } else city.building(request.buildingId)?.takeIf { it.control != null }
             if (target == null) continue
             if (target.id == warehouse.id || !withinRoute(requireNotNull(warehouse.control), requireNotNull(target.control))) continue
-            val amount = minOf(MAX_CARGO, (request.needed - request.inTransit).coerceAtLeast(0), available[request.material] ?: 0)
+            val amount = minOf(MAX_CARGO, (request.needed - request.inTransit).coerceAtLeast(0), available[request.material] ?: 0,
+                CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(request.material)).toLong())
             if (amount > 0) {
                 val candidate = job(city, worker, warehouse, warehouse, target, request.material, amount)
                 if (request.construction) return candidate
@@ -117,7 +120,8 @@ object CivsLogistics {
             if (!withinRoute(source.control, requireNotNull(warehouse.control))) continue
             val material = CivsProduction.material(source) ?: continue
             val reserve = desiredStock(city, source)[material] ?: 0L
-            val amount = minOf(MAX_CARGO, ((stock(source.id)[material] ?: 0L) - reserve).coerceAtLeast(0))
+            val amount = minOf(MAX_CARGO, ((stock(source.id)[material] ?: 0L) - reserve).coerceAtLeast(0),
+                CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(material)).toLong())
             if (amount > 0) candidates += job(city, worker, warehouse, source, warehouse, material, amount)
         }
         // The durable completed-trip counter rotates ordinary supply and collection together.
@@ -170,21 +174,36 @@ object CivsLogistics {
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo): Settlement {
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-        if (worker.cargo == cargo) return city
+        if (worker.cargo == cargo.copy(inventoryBacked = true)) return city
         val source = city.building(cargo.sourceBuildingId) ?: throw CivsRejection("stale-delivery")
         val warehouse = city.building(cargo.warehouseId) ?: throw CivsRejection("stale-delivery")
         reject(city.pendingDeletion != null || worker.cargo != null || worker.assignment != cargo.warehouseId || warehouse.type != BuildingType.WAREHOUSE ||
             warehouse.phase != BuildingPhase.ACTIVE || source.entrance != cargo.sourceEntrance ||
             cargo.id != shipmentId(city.id, workerId, worker.completedCycles, cargo.sourceBuildingId, cargo.targetBuildingId, cargo.material) ||
             !validCargo(city, cargo), "stale-delivery")
-        return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) it.copy(cargo = cargo) else it },
+        val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))
+            .copy(cargo = cargo.copy(inventoryBacked = true))
+        return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) supplied else it },
+            revision = Math.addExact(city.revision, 1)))
+    }
+
+    /** The service durably commits this revision before exposing old shipments to gameplay. */
+    fun materializeCargo(city: Settlement): Settlement {
+        val workers = city.workers.map { worker ->
+            val cargo = worker.cargo?.takeUnless { it.inventoryBacked } ?: return@map worker
+            CivsEquipment.materializeLegacyCargo(worker, cargo)
+        }
+        return if (workers == city.workers) city else CivsRules.validate(city.copy(workers = workers,
             revision = Math.addExact(city.revision, 1)))
     }
 
     fun unload(city: Settlement, workerId: UUID, cargoId: UUID, at: Long): Settlement {
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         reject(worker.cargo?.id != cargoId, "stale-delivery")
-        val updated = CivsResidents.trained(worker.copy(cargo = null, completedCycles = Math.addExact(worker.completedCycles, 1),
+        val cargo = requireNotNull(worker.cargo)
+        reject(!cargo.inventoryBacked, "materials-migration-pending")
+        val emptied = CivsEquipment.consume(worker.copy(cargo = null), cargo.material, cargo.amount.toInt())
+        val updated = CivsResidents.trained(emptied.copy(completedCycles = Math.addExact(worker.completedCycles, 1),
             nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE)
         return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) updated else it },
             revision = Math.addExact(city.revision, 1)))

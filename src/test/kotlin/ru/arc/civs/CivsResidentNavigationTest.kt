@@ -19,6 +19,29 @@ import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
 class CivsResidentNavigationTest : FunSpec({
+    test("the first diagonal on a fractional-height path is checked from the actual off-centre position") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in 0..4) for (z in 0..2) terrain.blocks[CivPosition(x, 63, z)] = Material.DIRT_PATH
+            for (y in 64..65) terrain.blocks[CivPosition(1, y, -1)] = Material.STONE
+            var at = Location(terrain.world, .69, 63.9375, .31)
+            citizenPacketBodyClear(terrain.world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
+            val origin = CitizenPoint(at.x, at.y, at.z)
+            val plannedStarts = mutableListOf<CitizenPoint>()
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 4.5, 64.0, .5),
+                { p -> p.x in 0..4 && p.z in 0..2 && p.y in 63..64 },
+                { from, _ -> plannedStarts += from; true }, { 1.0 })
+            repeat(5_000) { if (route.searching) route.expand() }
+            plannedStarts.first() shouldBe origin
+            route.failure shouldBe null
+            repeat(120) { route.move(at, 1.0) { true }?.let { at = it } }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.x shouldBe 4.5
+            at.y shouldBe 63.9375
+        }
+    }
+
     test("packet movement walks around an occupied body-width corner and rejects an inserted wall") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()

@@ -5,6 +5,7 @@ import org.bukkit.FluidCollisionMode
 import org.bukkit.Material
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
+import org.bukkit.event.EventPriority
 import org.bukkit.event.HandlerList
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerChangedWorldEvent
@@ -62,6 +63,7 @@ class CivsService(
         var feedbackFailed = false
     }
     private data class ConstructionFocus(val orderId: UUID, val position: CivPosition, val tick: Int)
+    private data class ConstructionSupplyNeed(val orderId: UUID, val batch: Int, val materials: Map<String, Long>)
     private data class RecoveredPlacement(val plan: CivPlacementPlan, val snapshot: ArcSchematicSnapshot,
         val access: PlacementAccess, val batch: CivBuildBatch?, val validationPlan: CivPlacementPlan)
     private var cities = linkedMapOf<UUID, Settlement>()
@@ -82,8 +84,10 @@ class CivsService(
     private val placementRuns = mutableMapOf<UUID, UUID>()
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
     private val constructionFocus = mutableMapOf<UUID, ConstructionFocus>()
+    private val constructionSupplyNeeds = mutableMapOf<UUID, ConstructionSupplyNeed>()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
     private val populationPending = mutableSetOf<UUID>()
+    private val lastInjury = mutableMapOf<UUID, CivDeathContext>()
     private val memberNamesPending = mutableSetOf<UUID>()
     private var recoveredMemberNames = emptyMap<UUID, String>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
@@ -140,6 +144,8 @@ class CivsService(
         }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
         surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
+        productionReady = ::productionReady, workInputsReady = ::workInputsReady,
+        residentSupplySource = ::residentSupplySource, prepareSupplies = ::prepareResidentSupplies,
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
 
@@ -161,6 +167,9 @@ class CivsService(
     override fun unavailableReason(): String? = loadFailure ?: if (!initialized && unhealthy.isNotEmpty()) "storage-unavailable" else null
     override fun styles(): List<String> = CivsBlueprints.STYLES
     override fun settlements(): List<Settlement> = cities.values.toList()
+    internal fun corpseSettlements(): List<Settlement> = if (ready()) cities.values.filter {
+        it.id !in unhealthy && it.pendingDeletion == null
+    } else emptyList()
     override fun city(player: Player): Settlement? = cities.values.firstOrNull { it.canManage(player.uniqueId) }
     override fun remoteCity(player: Player): CivsNetworkCity? = remoteCities[player.uniqueId]
     override fun memberName(city: Settlement, memberId: UUID): String =
@@ -969,11 +978,60 @@ class CivsService(
         mutate(city.id) { CivsRules.assign(it, player.uniqueId, workerId, buildingId, now()) }.thenApply { Unit }
     }
 
-    internal fun hurtResident(cityId: UUID, workerId: UUID, damage: Double): CompletableFuture<Settlement> =
-        action("resident_injury", null, "city" to cityId, "worker" to workerId, "damage" to damage) {
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun rememberInjury(event: CivsResidentDamageEvent) {
+        val source = (event.source as? org.bukkit.entity.Projectile)?.shooter as? org.bukkit.entity.Entity ?: event.source
+        val location = event.location
+        val killerName = (source as? Player)?.name ?: source?.customName()?.let {
+            net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(it)
+                .filterNot(Char::isISOControl).take(64).takeIf(String::isNotBlank)
+        }
+        lastInjury[event.workerId] = CivDeathContext(CivPosition(location.blockX, location.blockY, location.blockZ), now(),
+            killerName, source?.type?.name, event.cause.name, location.y)
+    }
+
+    internal fun hurtResident(cityId: UUID, workerId: UUID, damage: Double): CompletableFuture<Settlement> {
+        val death = lastInjury.remove(workerId) ?: CivDeathContext(cities[cityId]?.center ?: CivPosition(0, 0, 0), now())
+        return action("resident_injury", null, "city" to cityId, "worker" to workerId, "damage" to damage,
+            "damage_cause" to death.cause, "source" to death.killerType, "position" to death.position) {
             afterCityAvailable(cityId) {
-                mutate(cityId) { CivsRules.hurtResident(it, it.owner, workerId, damage) }
+                mutate(cityId) { CivsRules.hurtResident(it, it.owner, workerId, damage, death) }.thenApply { saved ->
+                    saved.corpses.orEmpty().firstOrNull { it.worker.id == workerId }?.let { corpse ->
+                        CivsDiagnostics.event("resident_death", "city" to cityId, "worker" to workerId,
+                            "cause" to corpse.cause, "killer" to corpse.killerType, "position" to corpse.position,
+                            "expires_at" to corpse.expiresAt)
+                    }
+                    saved
+                }
             }
+        }
+    }
+
+    private fun corpse(player: Player, city: Settlement, workerId: UUID): CivCorpse {
+        val corpse = city.corpses.orEmpty().firstOrNull { it.worker.id == workerId && it.expiresAt > now() }
+            ?: throw CivsRejection("worker-not-found")
+        rejectIf(player.world.uid != city.worldId, "wrong-world")
+        rejectIf(player.location.distanceSquared(org.bukkit.Location(player.world, corpse.position.x + .5,
+            corpse.feetY ?: corpse.position.y.toDouble(), corpse.position.z + .5)) > 36.0, "worker-too-far")
+        return corpse
+    }
+
+    override fun corpseItems(player: Player, workerId: UUID): List<org.bukkit.inventory.ItemStack?> =
+        CivsEquipment.slots(corpse(player, managed(player), workerId).worker).map { it?.stack() }
+
+    override fun transferCorpseItem(player: Player, workerId: UUID, npcSlot: Int,
+        click: org.bukkit.event.inventory.ClickType): CompletableFuture<Unit> =
+        cityAction("corpse_loot", player, "worker" to workerId, "slot" to npcSlot) { city ->
+            var updated: CivWorker? = null
+            inventoryMutation(city.id, { before ->
+                corpse(player, before, workerId)
+                storage.prepareResidentTransfer(before, workerId, player, npcSlot, null, click)
+                    .also { updated = it.worker }.plan
+            }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
+                before.copy(corpses = before.corpses.orEmpty().map {
+                    if (it.worker.id == workerId) it.copy(worker = requireNotNull(updated)) else it
+                }, inventory = inventory, revision = before.revision + 1)
+            }.thenApply { Unit }
         }
 
     override fun supplyWorker(player: Player, workerId: UUID, material: String): CompletableFuture<Unit> =
@@ -1218,6 +1276,75 @@ class CivsService(
         } }
     }
 
+    /** Local stock permits the trip to storage; work still requires the subsequent physical pickup. */
+    internal fun productionReady(city: Settlement, worker: CivWorker): Boolean {
+        val building = worker.assignment?.let(city::building) ?: return true
+        if (CivsRules.isBuilder(city, building) || building.type in CivsWorksites.TYPES) return true
+        return CivsEquipment.inputsReady(worker, CivsProduction.inputs(building), localStocks(city)(building.id))
+    }
+
+    internal fun workInputsReady(city: Settlement, worker: CivWorker): Boolean {
+        val building = worker.assignment?.let(city::building) ?: return true
+        if (CivsRules.isBuilder(city, building)) {
+            val order = city.construction ?: return true
+            if (order.payment == null || order.payment.reservedBatch != null) return true
+            val required = order.payment.awaiting ?: constructionSupplyNeeds[city.id]?.takeIf {
+                it.orderId == order.id && it.batch == order.workDone
+            }?.materials
+            // The first captured row may only remove blocks; its exact debit is prepared before placement.
+            return required == null || CivsRules.constructionStorageInputs(city, order.buildingId, required).isEmpty()
+        }
+        if (building.type in CivsWorksites.TYPES) return true
+        return CivsEquipment.inputsReady(worker, CivsProduction.inputs(building), emptyMap())
+    }
+
+    internal fun residentSupplySource(city: Settlement, worker: CivWorker): UUID? {
+        if (city.inventory == null || CivsResidents.hunger(worker) > 14 || CivsEquipment.usableCount(worker, "BREAD") > 0 ||
+            CivsEquipment.supplyRoom(worker, Material.BREAD) == 0) return null
+        return city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL && it.control != null &&
+            (localStocks(city)(it.id)["BREAD"] ?: 0L) > 0L }?.id
+    }
+
+    internal fun prepareResidentSupplies(cityId: UUID, workerId: UUID, buildingId: UUID): CompletableFuture<Settlement> =
+        action("resident_supplies", null, "city" to cityId, "worker" to workerId, "building" to buildingId) {
+            afterCityAvailable(cityId) {
+                var supplied: CivWorker? = null
+                inventoryMutation(cityId, { city ->
+                    val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                    val source = city.building(buildingId) ?: throw CivsRejection("building-not-found")
+                    citizens.requireStorageArrival(cityId, workerId, buildingId)
+                    val food = source.type == BuildingType.TOWN_HALL && CivsResidents.hunger(worker) <= 14 &&
+                        CivsEquipment.usableCount(worker, "BREAD") == 0
+                    val prepared = if (food) {
+                        val count = minOf(4L, storage.buildingAvailable(city, buildingId)["BREAD"] ?: 0L,
+                            CivsEquipment.supplyRoom(worker, Material.BREAD).toLong())
+                        rejectIf(count == 0L, "resident-food-missing")
+                        storage.prepareResidentPickup(city, workerId, buildingId, mapOf("BREAD" to count))
+                    } else {
+                        rejectIf(worker.assignment != buildingId || worker.cargo != null || CivsResidents.isChild(worker), "invalid-assignment")
+                        if (CivsRules.isBuilder(city, source)) storage.prepareBuilderPickup(city, workerId,
+                            city.construction?.payment?.awaiting ?: constructionSupplyNeeds[city.id]?.takeIf {
+                                it.orderId == city.construction?.id && it.batch == city.construction?.workDone
+                            }?.materials.orEmpty()) else {
+                            rejectIf(!CivsRules.productionAvailable(city, source) || source.type in CivsWorksites.TYPES, "invalid-assignment")
+                            storage.prepareResidentPickup(city, workerId, buildingId,
+                                CivsEquipment.storageInputs(worker, CivsProduction.inputs(source)))
+                        }
+                    }
+                    supplied = prepared.worker
+                    if (prepared.worker == worker && prepared.plan.changes.isEmpty() && prepared.plan.inventoryAfter == city.inventory) null
+                    else prepared.plan
+                }, keepViewersOpen = true) { before, inventory ->
+                    val worker = requireNotNull(supplied)
+                    before.copy(workers = before.workers.map { if (it.id == workerId) worker else it },
+                        inventory = inventory, revision = Math.addExact(before.revision, 1))
+                }.thenApply { saved ->
+                    nextMaterialCheckAt = 0L
+                    saved
+                }
+            }
+        }
+
     private fun courierPlan(city: Settlement, worker: CivWorker): CivCourierPlan? =
         CivsLogistics.plan(city, worker, localStocks(city))
 
@@ -1366,7 +1493,9 @@ class CivsService(
                 CivsDiagnostics.event("inventory_committed", "city" to tx.cityId, "transaction" to tx.id, "revision" to tx.after.revision)
                 tx.residentTransfer?.let { transfer ->
                     val before = transfer.before.filterNotNull().groupingBy { it.material }.fold(0) { total, item -> total + item.amount }
-                    val after = CivsEquipment.materials(tx.after.workers.first { it.id == transfer.workerId })
+                    val resident = tx.after.workers.firstOrNull { it.id == transfer.workerId }
+                        ?: tx.after.corpses.orEmpty().first { it.worker.id == transfer.workerId }.worker
+                    val after = CivsEquipment.materials(resident)
                     for (material in (before.keys + after.keys).sorted()) {
                         val previous = before[material]?.toLong() ?: 0L
                         val current = after[material] ?: 0L
@@ -1376,7 +1505,24 @@ class CivsService(
                             "after" to current, "delta" to current - previous)
                     }
                 }
-                result?.complete(cities.getValue(tx.cityId))
+                val current = cities.getValue(tx.cityId)
+                if (current.workers.any { it.cargo?.inventoryBacked == false }) {
+                    // Retire the immutable old receipt first; migration owns a new durable revision.
+                    val migration = runCatching { mutate(current.id) { CivsLogistics.materializeCargo(it) } }
+                        .getOrElse { CompletableFuture.failedFuture(it) }
+                    if (!migration.isDone) unhealthy += current.id
+                    migration.whenCompleteSync(tasks) { saved, error ->
+                        if (error != null) {
+                            unhealthy += current.id
+                            log("materialize recovered cargo ${current.id}", error)
+                            result?.completeExceptionally(error)
+                        } else {
+                            unhealthy -= current.id
+                            result?.complete(requireNotNull(saved))
+                        }
+                        updateHealth()
+                    }
+                } else result?.complete(current)
             }
             updateHealth()
         }
@@ -1391,7 +1537,7 @@ class CivsService(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (tx.residentTransfer != null) when (val applied = storage.reconcile(tx)) {
+                if (city.revision == tx.after.revision || tx.residentTransfer != null) when (val applied = storage.reconcile(tx)) {
                     is CivInventoryApplyResult.Retry -> { busy -= city.id; unhealthy += city.id; return@runCatching }
                     is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", applied.values)
                     CivInventoryApplyResult.Applied -> Unit
@@ -1829,7 +1975,20 @@ class CivsService(
         (previews.keys + selections.keys + requests.keys).toList().forEach { cancelPreview(it, "reload") }
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
-        loadInventoryReceipts().thenCompose { store.load() }.thenApplyAsync({ records ->
+        val materialized = tracked<List<Settlement>>()
+        loadInventoryReceipts().thenCompose { store.load() }.whenCompleteSync(tasks) { records, failure ->
+            if (failure != null) materialized.completeExceptionally(failure)
+            else if (closed) materialized.completeExceptionally(CivsRejection("not-ready"))
+            else runCatching {
+                // A pending immutable receipt must finish its own revision before a cargo migration can follow it.
+                val migrated = requireNotNull(records).map { if (it.id in inventoryRecovery) it else CivsLogistics.materializeCargo(it) }
+                val writes = migrated.zip(records).filter { (after, before) -> after != before }.map { (after, _) -> store.save(after) }
+                CompletableFuture.allOf(*writes.toTypedArray()).whenComplete { _, writeFailure ->
+                    if (writeFailure == null) materialized.complete(migrated) else materialized.completeExceptionally(writeFailure)
+                }
+            }.onFailure(materialized::completeExceptionally)
+        }
+        materialized.thenApplyAsync({ records ->
             val members = records.flatMap { it.members + it.owner }
             require(members.distinct().size == members.size) { "A player belongs to more than one settlement" }
             val missingNames = records.flatMap { city ->
@@ -1937,12 +2096,14 @@ class CivsService(
     private fun pulse() {
         if (closed) return
         constructionFocus.entries.removeIf { (cityId, focus) -> cities[cityId]?.construction?.id != focus.orderId }
+        constructionSupplyNeeds.entries.removeIf { (cityId, needs) -> cities[cityId]?.construction?.id != needs.orderId }
         selections.filterValues { it.expires <= now() }.keys.toList().forEach { cancelSelection(it, "expired") }
         previews.filterValues { it.expires <= now() }.keys.toList().forEach { cancelPreview(it, "expired") }
         citizens.pulse(now())
         plugin.server.onlinePlayers.forEach(::refreshBoundary)
         if (ready()) {
             recoverInventories()
+            pulseCorpses()
             pulseDeletions()
             pulseControls()
             pulseImmigration()
@@ -1954,6 +2115,16 @@ class CivsService(
         }
         pulseConstruction()
         updateHealth()
+    }
+
+    private fun pulseCorpses() {
+        lastInjury.keys.retainAll(cities.values.flatMap { it.workers }.mapTo(hashSetOf(), CivWorker::id))
+        val city = cities.values.firstOrNull { it.id !in busy && it.id !in unhealthy &&
+            it.corpses.orEmpty().any { corpse -> corpse.expiresAt <= now() } } ?: return
+        mutate(city.id) { current -> current.copy(corpses = current.corpses.orEmpty().filter { it.expiresAt > now() },
+            revision = current.revision + 1) }.whenComplete { _, error ->
+            if (error != null) log("expire resident corpses ${city.id}", error)
+        }
     }
 
     private val controlFailures = mutableSetOf<UUID>()
@@ -2321,6 +2492,7 @@ class CivsService(
                 runCatching {
                     val required = if (order.payment != null && order.payment.reservedBatch == null)
                         CivsMaterials.required(batchPlan) else null
+                    if (required != null) constructionSupplyNeeds[city.id] = ConstructionSupplyNeed(order.id, order.workDone, required)
                     val begin = afterCityAvailable(city.id) {
                         rejectIf(placementRuns[city.id] != run, "stale-construction")
                         val current = cities[city.id] ?: throw CivsRejection("no-city")
@@ -2364,8 +2536,10 @@ class CivsService(
     }
 
     private fun payBatch(city: Settlement, order: CivConstruction, required: Map<String, Long>): CompletableFuture<Settlement> =
-        inventoryMutation(city.id, { current -> storage.prepareConstructionDebitBackground(current,
-            CivsRules.constructionStorageInputs(current, order.buildingId, required), order.buildingId) }, keepViewersOpen = true) { before, inventory ->
+        inventoryMutation(city.id, { current ->
+            if (CivsRules.constructionStorageInputs(current, order.buildingId, required).isNotEmpty()) null
+            else CivStoragePlan(requireNotNull(current.inventory), emptyList())
+        }, keepViewersOpen = true) { before, inventory ->
             CivsRules.payBatch(before, before.owner, order.id, order.workDone, required).copy(inventory = inventory)
         }.whenComplete { saved, failure ->
             if (failure == null && saved?.construction?.payment?.reservedBatch == order.workDone)
@@ -2634,6 +2808,8 @@ class CivsService(
         HandlerList.unregisterAll(this)
         placementAccess.clear()
         constructionFocus.clear()
+        constructionSupplyNeeds.clear()
+        lastInjury.clear()
         placementRuns.clear()
         placing.clear()
         operations.values.toList().forEach { it.cancel() }

@@ -121,6 +121,36 @@ class CivsUi internal constructor(
         }
     }
 
+    fun openCorpse(player: Player, cityId: UUID, corpseId: UUID) {
+        if (closed || !player.isOnline) return
+        equipment.dismiss(player)
+        host.cancelSelection(player, "menu-reopened")
+        runtime.beginFlow(player)
+        val city = host.settlements().firstOrNull { it.id == cityId && it.canManage(player.uniqueId) }
+        val corpse = city?.corpses.orEmpty().firstOrNull { it.worker.id == corpseId }
+        if (corpse == null) {
+            roots[player.uniqueId] = "civs.corpse"
+            notice(player, "civs.corpse", "corpse.items", text.reason(player, if (city == null) "not-member" else "worker-not-found")) { open(player) }
+            return
+        }
+        val killerKey = "corpse.killer.${corpse.killerType?.lowercase(Locale.ROOT)}"
+        val causeKey = "corpse.cause.${corpse.cause.lowercase(Locale.ROOT)}"
+        val death = if (corpse.killerName != null || corpse.killerType != null) tr(player, "corpse.killed-by", "name" to
+            (corpse.killerName?.let(text::literal) ?: tr(player, killerKey.takeIf { it in text.keys("ru") } ?: "corpse.killer.unknown")))
+        else tr(player, "corpse.died-from", "cause" to tr(player, causeKey.takeIf { it in text.keys("ru") } ?: "corpse.cause.unknown"))
+        visits.remove(player.uniqueId)
+        roots.remove(player.uniqueId)
+        runtime.close(player)
+        equipment.open(player, corpse.worker.name, items = { host.corpseItems(player, corpseId) },
+            transfer = { actor, npcSlot, playerSlot, click ->
+                if (npcSlot != null && playerSlot == null) host.transferCorpseItem(actor, corpseId, npcSlot, click)
+                else CompletableFuture.failedFuture(CivsRejection("not-authorized"))
+            }, back = { open(player) }, canDeposit = false,
+            titleKey = if (corpse.worker.sex == CivSex.FEMALE) "corpse.inventory-title-female" else "corpse.inventory-title",
+            backKey = "corpse.back",
+            details = listOf(death))
+    }
+
     /** The control block and the town catalog open the same building screen. */
     fun openBuilding(player: Player, cityId: UUID, buildingId: UUID) {
         if (closed || !player.isOnline) return
@@ -259,6 +289,7 @@ class CivsUi internal constructor(
             host.workerStatus(it.id).substringAfterLast('.') in setOf("sleeping", "no-viewers")
         }
         val construction = city.construction
+        val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
         present(player, "civs.overview", "city.title", listOfNotNull(
             body(tint(tr(player, "city.intro", "name" to city.name), LAND)),
             table(listOf(
@@ -279,6 +310,9 @@ class CivsUi internal constructor(
             add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             add(button(player, "buildings", "buildings.open", LAND) { showBuildings(player) })
             add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
+            if (hall?.control != null && city.inventory != null && !host.cityBusy(player))
+                add(button(player, "hall_inventory", "city.hall-inventory", STOCK) { openIntake(player, hall.id) }
+                    .copy(tooltip = tr(player, "city.hall-inventory-help")))
             add(button(player, "guide", "guide.open", NAVIGATION) { showGuide(player) })
         }, reopen = { showOverview(player) })
     }
@@ -904,10 +938,10 @@ class CivsUi internal constructor(
                 "name" to recipient?.name)),
             if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
                 val have = available.getOrNull()?.get(material) ?: 0L
-                materialName(player, material) to tint(tr(player, "materials.builder-counts", "have" to have,
-                    "need" to count, "held" to (held[material] ?: 0L)), if (have >= count) COMMIT else STOCK)
-            }, tr(player, "materials.item") to tr(player, "materials.builder-counts-title"),
-                DialogTables.Frame.EPIC, 400, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
+                listOf(materialName(player, material), tint(text.literal(have), if (have >= count) COMMIT else STOCK),
+                    text.literal(count), text.literal(held[material] ?: 0L))
+            }, listOf("item", "stock", "needed", "held").map { tint(tr(player, "materials.$it"), STOCK) },
+                DialogTables.Frame.EPIC, 400, listOf(5, 2, 2, 2)) else body(player, "materials.no-cost"),
             body(player, "materials.builder-stock-help"),
             if (city.constructionQueue.orEmpty().isNotEmpty()) body(tr(player, "queue.waiting", "count" to city.constructionQueue.orEmpty().size)) else null,
             feedback?.let(::body), available.exceptionOrNull()?.let { body(text.failure(player, it)) },

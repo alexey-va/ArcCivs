@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "title": "ArcCivs miner speed, resident supplies and corpse retention",
+  "assumptions": [
+    "Baseline miner work is read from ArcCivs HEAD c67edf6: 4 seconds per native work action, doubled to 8 seconds at hunger <= 6. The 2-second healthy and 4-second hungry durations are implemented in the candidate CivsWorksites.kt; runtime throughput remains unmeasured.",
+    "Low/base/high scenarios use 1/10/16 participating cities, one quarry miner per city and 0.25/1/4 active work hours per city-day. These are sensitivity assumptions, not measured participation or worker-hours.",
+    "The ideal healthy excavation ceiling is 900/1800 one-block actions per active hour before/after; the hungry ceiling is 450/900 actions per active hour. These ceilings exclude travel, support placement, native work budget, night, failures, downtime, tool availability, storage and all other bottlenecks; they are not expected or measured throughput.",
+    "For the item scenario only, each counted excavation is assumed to remove plain STONE and yield exactly 1 COBBLESTONE. Actual native drops depend on the block and held tool; the scenario does not claim every mine cell is plain stone or has this drop.",
+    "A working adult loses 1 hunger per active minute and consumes 1 existing BREAD at hunger <= 14, restoring 6 hunger. The model uses the sustained upper bound of 10 bread per active worker-hour, or 2.5/10/40 bread per city-day at 0.25/1/4 hours; the initial food reserve and interruptions can lower actual use.",
+    "Hall supply is modeled as a transfer of up to 4 existing BREAD per refill, not an item grant. One/three/ten refill events per worker-day are upper-bound activity assumptions for 0.25/1/4 active hours; actual transferred amounts may be lower and unused bread remains inventory.",
+    "The current economy inventory's illustrative death scenarios of 0/0.1/1 resident deaths per city-day are reused only as sensitivity assumptions, not telemetry. The illustrative loadout is 16 BREAD, 4 profession tools and 4 armor pieces, not the native bag capacity limit. After death, the candidate behavior places those exact existing items in a lootable corpse for five minutes; unclaimed corpses expire. Escrow totals show temporary access opportunity, not guaranteed player recovery, new items or sustained net-supply change. No claim rate is assumed.",
+    "Builder paid sessions change from 8 to 64 already-paid rows. The existing serial placer remains capped at 4 placement units per second; accepted row costs and material requirements do not change, and no extra construction items or refunds are modeled. If the current MAX_POPULATION * BUILDER_SESSION_ROWS work-credit formula remains, the stored-credit cap scales from 96 to 768; this is backlog capacity, not placement throughput.",
+    "Vault and premium-token direct flows remain zero. Internal profession points are not player XP. No item-to-money rate is inferred; current EconomyShopGUI SELL and the planned future SELL-to-contract change are outside this assessment."
+  ],
+  "participants": [1, 10, 16],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "item_cobblestone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "plain_stone_excavation_drops",
+          "kind": "item",
+          "source": "ArcCivs src/main/kotlin/ru/arc/civs/CivsWorksites.kt:461-475,577-578",
+          "basis": "One miner per city; 0.25/1/4 active hours per city-day; 4s to 2s per action gives 225/900/3600 to 450/1800/7200 one-block actions per city-day. Assumes 1 COBBLESTONE from each plain STONE cell solely for this scenario; no terrain/drop distribution is measured.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [225, 900, 3600]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [450, 1800, 7200]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "working_resident_bread_consumption",
+          "kind": "burn",
+          "source": "ArcCivs src/main/kotlin/ru/arc/civs/CivsResidents.kt:24-35",
+          "basis": "Existing-item consumption at the sustained upper bound: 1 hunger/minute, 1 bread consumed at <=14 and +6 hunger, yielding 10 bread per active worker-hour. Assumes 0.25/1/4 active hours per city-day; same food rule before and after.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": ["2.5", 10, 40]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": ["2.5", 10, 40]
+          }
+        },
+        {
+          "id": "resident_death_bread_loss",
+          "kind": "burn",
+          "source": "ruscrafting-ops/docs/knowledge/economy-inventory.md:110; ArcCivs resident death baseline",
+          "basis": "Illustrative loadout of 16 existing bread per death using the inventory row's explicit 0/0.1/1 deaths-per-city-day sensitivity; not measured contents or death frequency. The candidate corpse leaves this item available for up to five minutes, but actual recovery is unknown.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "16", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {"value": "16", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        },
+        {
+          "id": "resident_death_bread_corpse_escrow",
+          "kind": "escrow",
+          "source": "ArcCivs candidate five-minute resident corpse inventory",
+          "basis": "Temporary escrow of up to 16 existing bread per death under the same illustrative 0/0.1/1 deaths-per-city-day assumptions. It is lootable for five minutes and expires if unclaimed; no item is issued and the number actually recovered is unknown.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {"value": "16", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "16", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        },
+        {
+          "id": "town_hall_bread_transfer",
+          "kind": "transfer",
+          "source": "ArcCivs src/main/kotlin/ru/arc/civs/CivsService.kt:1282-1302",
+          "basis": "Up to 4 existing bread per refill moved from hall storage into a resident's bag; 1/3/10 refill events per city-day are upper-bound assumptions corresponding to 0.25/1/4 active hours. Gross inventory movement only, not a grant; actual stacks can be smaller.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [1, 3, 10]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [1, 3, 10]
+          }
+        }
+      ]
+    },
+    "item_profession_tool": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "resident_death_tool_loss",
+          "kind": "burn",
+          "source": "ruscrafting-ops/docs/knowledge/economy-inventory.md:110; ArcCivs resident death baseline",
+          "basis": "Illustrative loadout of 4 existing profession tools per death; 0/0.1/1 deaths per city-day are reused illustrative assumptions, not telemetry. The candidate corpse temporarily retains the exact existing tools; actual recovery is unknown.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        },
+        {
+          "id": "resident_death_tool_corpse_escrow",
+          "kind": "escrow",
+          "source": "ArcCivs candidate five-minute resident corpse inventory",
+          "basis": "Temporary escrow of up to 4 existing profession tools per death under the illustrative 0/0.1/1 deaths-per-city-day assumptions. Five-minute lootability and expiry do not create items; actual recovery is unknown.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        }
+      ]
+    },
+    "item_armor_piece": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "resident_death_armor_loss",
+          "kind": "burn",
+          "source": "ruscrafting-ops/docs/knowledge/economy-inventory.md:110; ArcCivs resident death baseline",
+          "basis": "Illustrative loadout of 4 existing armor pieces per death; 0/0.1/1 deaths per city-day are reused illustrative assumptions, not telemetry. The candidate corpse temporarily retains the exact existing armor; actual recovery is unknown.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        },
+        {
+          "id": "resident_death_armor_corpse_escrow",
+          "kind": "escrow",
+          "source": "ArcCivs candidate five-minute resident corpse inventory",
+          "basis": "Temporary escrow of up to 4 existing armor pieces per death under the illustrative 0/0.1/1 deaths-per-city-day assumptions. Five-minute lootability and expiry do not create items; actual recovery is unknown.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, "0.1", 1]
+          }
+        }
+      ]
+    }
+  }
+}

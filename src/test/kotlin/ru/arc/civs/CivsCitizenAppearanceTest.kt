@@ -10,6 +10,15 @@ import java.util.Base64
 import java.util.UUID
 
 class CivsCitizenAppearanceTest : FunSpec({
+    test("persisted sex selects the matching signed pool independently of UUID and profession") {
+        val skins = loadCitizenSkins()
+        for (id in (0L..20L).map { UUID(0, it) }) for (sex in CivSex.entries) {
+            val worker = CivWorker(id, if (sex == CivSex.FEMALE) "Мария" else "Иван", null, sex = sex)
+            citizenSkin(skins, worker).sex shouldBe sex
+            citizenSkin(skins, worker.copy(assignment = UUID.randomUUID())) shouldBe citizenSkin(skins, worker)
+        }
+    }
+
     test("bundled skins have signed texture snapshots and stable varied resident selection") {
         val skins = loadCitizenSkins()
         (skins.size >= 2) shouldBe true

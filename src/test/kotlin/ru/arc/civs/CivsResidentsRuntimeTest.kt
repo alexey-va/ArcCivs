@@ -9,6 +9,7 @@ import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import org.bukkit.FluidCollisionMode
+import org.bukkit.Difficulty
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.Particle
@@ -16,6 +17,9 @@ import org.bukkit.Sound
 import org.bukkit.SoundCategory
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
+import org.bukkit.entity.Entity
+import org.bukkit.entity.EntityType
+import org.bukkit.entity.Monster
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
@@ -27,6 +31,7 @@ import org.mockbukkit.mockbukkit.world.ChunkMock
 import org.mockbukkit.mockbukkit.world.Coordinate
 import org.mockbukkit.mockbukkit.world.WorldMock
 import ru.arc.paper.npc.PacketPlayerNpc
+import ru.arc.paper.npc.PacketNpcProfile
 import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.npc.PaperPacketNpcs
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -36,6 +41,125 @@ import java.util.concurrent.CompletableFuture
 import java.util.function.Predicate
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("monster defence recruits only nearby residents of its victim's city and limits visible melee to once a second") {
+        residentRuntime { h ->
+            val victim = h.owner.collisionActors().single()
+            victim.teleport(Location(h.world, 4.5, 64.0, .5))
+            val monster = h.monsterAt(6.5, .5)
+            // Discovery occurs while only the victim exists. Later helpers must be recruited
+            // by the actual pursuit callback, not become independent targets of the scan.
+            h.owner.pulse(2_000)
+            h.world.threatEntities.clear()
+            val helperId = UUID.randomUUID()
+            val distantId = UUID.randomUUID()
+            val outsiderId = UUID.randomUUID()
+            h.city = h.city.copy(workers = h.city.workers + listOf(
+                CivWorker(helperId, "Helper", null), CivWorker(distantId, "Distant", null)))
+            h.otherCities += h.city.copy(id = UUID.randomUUID(), workers = listOf(CivWorker(outsiderId, "Outsider", null)))
+            h.owner.pulse(3_000)
+            h.owner.pulse(4_000)
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            actors.size shouldBe 4
+            val helper = actors.getValue(helperId)
+            val distant = actors.getValue(distantId)
+            val outsider = actors.getValue(outsiderId)
+            victim.teleport(Location(h.world, 4.5, 64.0, .5))
+            helper.teleport(Location(h.world, 4.5, 64.0, 1.5))
+            distant.teleport(Location(h.world, 18.5, 64.0, .5))
+            outsider.teleport(Location(h.world, 4.5, 64.0, -1.5))
+            val residents = h.city.workers
+            h.owner.activateNavigating()
+            h.owner.pulse(5_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.defending"
+            h.owner.status(helperId) shouldBe "workers.status.defending"
+            h.owner.status(distantId) shouldBe "workers.status.unassigned"
+            h.owner.status(outsiderId) shouldBe "workers.status.unassigned"
+            verify(exactly = 1) { victim.swingMainHand() }
+            verify(exactly = 1) { helper.swingMainHand() }
+            verify(exactly = 0) { distant.swingMainHand() }
+            verify(exactly = 0) { outsider.swingMainHand() }
+            verify(exactly = 2) { monster.damage(1.0) }
+            for (at in 5_100L..5_900L step 100) h.owner.pulse(at)
+            verify(exactly = 2) { monster.damage(any<Double>()) }
+            h.owner.pulse(6_000)
+            verify(exactly = 4) { monster.damage(1.0) }
+
+            // A newly placed native wall blocks both residents' next strikes even though
+            // the pursuit is already active and the monster stays within melee distance.
+            for (y in 64..66) for (z in 0..1) h.world.getBlockAt(5, y, z).type = Material.STONE
+            h.owner.pulse(7_000)
+            verify(exactly = 4) { monster.damage(any<Double>()) }
+            for (y in 64..66) for (z in 0..1) h.world.getBlockAt(5, y, z).type = Material.AIR
+            h.owner.pulse(8_000)
+            verify(exactly = 6) { monster.damage(1.0) }
+            h.city.workers shouldBe residents
+            h.deliveries shouldBe 0
+            h.hits shouldBe 0
+        }
+    }
+
+    test("wounded adults and children walk away from a pursuing monster without attacking or earning work credit") {
+        for (child in listOf(false, true)) residentRuntime { h ->
+            h.city = h.city.copy(workers = h.city.workers.map { if (child)
+                it.copy(childMinutes = 1, parentIds = setOf(UUID.randomUUID(), UUID.randomUUID()))
+                else it.copy(health = 7.0) })
+            val victim = h.owner.collisionActors().single()
+            val start = Location(h.world, 10.5, 64.0, .5)
+            victim.teleport(start)
+            val monster = h.monsterAt(12.5, .5)
+            h.owner.pulse(2_000)
+            h.owner.activateNavigating()
+            h.owner.pulse(3_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.retreating"
+            for (tick in 0 until 2_000) {
+                val before = victim.location
+                h.owner.activateNavigating()
+                (before.distance(victim.location) <= .236501) shouldBe true
+                if (victim.location.distanceSquared(start) >= 4.0 * 4.0) break
+            }
+            (victim.location.x < start.x - 3.0) shouldBe true
+            (victim.location.distanceSquared(monster.location) > start.distanceSquared(monster.location)) shouldBe true
+            verify(exactly = 0) { victim.swingMainHand() }
+            verify(exactly = 0) { monster.damage(any<Double>()) }
+            h.city.workers.single().completedCycles shouldBe 0
+            h.city.workers.single().skills.orEmpty() shouldBe emptyMap()
+            h.deliveries shouldBe 0
+            h.hits shouldBe 0
+            h.steps shouldBe emptyList()
+        }
+    }
+
+    test("a processor collects supplies only at its barrel and cannot start work before the receipt") {
+        residentRuntime { h ->
+            val mill = h.assignFarm().copy(type = BuildingType.SAWMILL, production = null)
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == mill.id) mill else it })
+            h.workReady = false
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 15.5, 64.0, .5))
+            h.owner.pulse(2_000)
+            h.supplyRequests shouldBe 0
+            h.deliveries shouldBe 0
+            actor.teleport(Location(h.world, 19.5, 64.0, .5))
+            h.owner.pulse(3_000)
+            h.supplyRequests shouldBe 1
+            h.owner.requireStorageArrival(h.city.id, h.workerId, mill.id)
+            h.owner.pulse(4_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.loading-cargo"
+            h.supplyRequests shouldBe 1
+            h.deliveries shouldBe 0
+            actor.teleport(Location(h.world, 15.5, 64.0, .5))
+            shouldThrow<CivsRejection> { h.owner.requireStorageArrival(h.city.id, h.workerId, mill.id) }
+            actor.teleport(Location(h.world, 19.5, 64.0, .5))
+            h.workReady = true
+            h.pendingSupplies.complete(h.city)
+            h.owner.pulse(5_000)
+            h.owner.pulse(6_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.working"
+            h.supplyRequests shouldBe 1
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("an accepted packet hit freezes work until durable injury and viewer retirement cannot heal it") {
         residentRuntime { h ->
             h.hit(7.0)
@@ -507,6 +631,9 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var hits = 0
     var deliveries = 0
     var unloads = 0
+    var supplyRequests = 0
+    var workReady = true
+    val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
     val steps = mutableListOf<Pair<Location, Location>>()
     var displayedHand = Material.AIR
@@ -517,6 +644,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     val pending = CompletableFuture<Settlement>()
     private var damage = 0.0
     var city: Settlement
+    val otherCities = mutableListOf<Settlement>()
     val owner: CivsCitizens
     val visualHealth: Double get() = owner.hologramSnapshots().single().health
 
@@ -531,11 +659,12 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
         every { packets.spawnPlayer(any(), any()) } answers {
             spawns++
             var position = firstArg<Location>().clone()
+            val profile = secondArg<PacketNpcProfile>()
             var valid = true
             var npcScale = 1.0
             var npcPose = PacketNpcPose.STANDING
             mockk<PacketPlayerNpc>(relaxed = true) {
-                every { uniqueId } returns workerId
+                every { uniqueId } returns profile.uuid
                 every { isValid } answers { valid }
                 every { location } answers { position.clone() }
                 every { world } returns this@ResidentRuntime.world
@@ -551,7 +680,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             }
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
-        owner = CivsCitizens(plugin, { if (viewing) listOf(city) else emptyList() },
+        owner = CivsCitizens(plugin, { if (viewing) listOf(city) + otherCities else emptyList() },
             { _, _, _, _, _, _, _ ->
                 check(work != null) { "idle resident cannot deliver" }
                 deliveries++
@@ -565,9 +694,29 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 unloads++
                 pendingUnload
             },
-            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets)
+            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets,
+            workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
+                supplyRequests++
+                pendingSupplies
+            })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
+    }
+
+    fun monsterAt(x: Double, z: Double): Monster {
+        world.difficulty = Difficulty.NORMAL
+        val at = Location(world, x, 64.0, z)
+        return mockk<Monster>(relaxed = true) {
+            every { uniqueId } returns UUID.randomUUID()
+            every { isValid } returns true
+            every { isDead } returns false
+            every { hasAI() } returns true
+            every { type } returns EntityType.ZOMBIE
+            every { world } returns this@ResidentRuntime.world
+            every { location } answers { at.clone() }
+            every { eyeLocation } answers { at.clone().add(0.0, 1.62, 0.0) }
+            every { target } returns null
+        }.also(world.threatEntities::add)
     }
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
@@ -620,11 +769,19 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
 
 /** A stone plane with no tile entities. Only pinned MockBukkit's missing terrain queries are supplied. */
 private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
+    val threatEntities = mutableListOf<Entity>()
     val particles = mutableListOf<Triple<Particle, Int, Location>>()
     val sounds = mutableListOf<Triple<Sound, Float, Float>>()
     private val cells = mutableMapOf<Coordinate, BlockMock>()
     private val chunkFixtures = mutableMapOf<Pair<Int, Int>, ChunkMock>()
     init { setName("resident-runtime") }
+
+    override fun getNearbyEntities(location: Location, x: Double, y: Double, z: Double,
+        filter: Predicate<in Entity>?): Collection<Entity> = threatEntities.filter { entity ->
+        val at = entity.location
+        kotlin.math.abs(at.x - location.x) <= x && kotlin.math.abs(at.y - location.y) <= y &&
+            kotlin.math.abs(at.z - location.z) <= z && filter?.test(entity) != false
+    }
 
     override fun spawnParticle(particle: Particle, location: Location, count: Int,
         offsetX: Double, offsetY: Double, offsetZ: Double, extra: Double) {

@@ -120,6 +120,12 @@ open class ArcCivsPlugin : JavaPlugin() {
                 }))
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks, text))
             service.ui = ui
+            val corpses = CivsCorpseRenderer(this, lifecycle.tasks, text, service::corpseSettlements, ui::openCorpse)
+            lifecycle.own(AutoCloseable {
+                val failure = runCatching { corpses.close() }.exceptionOrNull()
+                nativeDrains += corpses.drained()
+                if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
+            })
             val controls = CivsPlacementControls(this, service, ui, lifecycle.tasks, text, nativeWork = queue)
             lifecycle.own(AutoCloseable {
                 val failure = runCatching { controls.close() }.exceptionOrNull()

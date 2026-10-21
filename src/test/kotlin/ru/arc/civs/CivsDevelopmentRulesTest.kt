@@ -59,6 +59,7 @@ class CivsDevelopmentRulesTest : FunSpec({
             val workshop = building(3, type, 20, BuildingPhase.ACTIVE)
             var city = builderCity().let { it.copy(buildings = it.buildings.map { b -> b.copy(phase = BuildingPhase.ACTIVE) } + workshop) }
             city = CivsRules.assign(city, city.owner, id(100), workshop.id, 40_000)
+            city = city.copy(workers = city.workers.map { withCarriedSupplies(it, CivsProduction.inputs(workshop)) })
             val worker = city.workers.single()
             worker.skills shouldBe null
             denied("materials-required") { CivsRules.deliver(city, city.owner, worker.id, workshop.id,
@@ -92,6 +93,8 @@ class CivsDevelopmentRulesTest : FunSpec({
         city.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
         city.construction!!.materials shouldBe mapOf("STONE" to 3L)
         denied("stale-construction") { CivsRules.payBatch(city, city.owner, order.id, 1, mapOf("STONE" to 2L)) }
+        denied("materials-missing") { CivsRules.payBatch(city, city.owner, order.id, 0, mapOf("STONE" to 2L)) }
+        city = city.copy(workers = city.workers.map { withCarriedSupplies(it, mapOf("STONE" to 3L)) })
         city = CivsRules.payBatch(city, city.owner, order.id, 0, mapOf("STONE" to 2L))
         city.construction!!.materials shouldBe mapOf("STONE" to 1L)
         denied("stale-construction") { CivsRules.payBatch(city, city.owner, order.id, 0, mapOf("STONE" to 2L)) }
@@ -118,7 +121,7 @@ class CivsDevelopmentRulesTest : FunSpec({
         val hungry = fed.copy(workers = fed.workers.map { it.copy(hunger = 6) })
         val fedAfter = trip(fed)
         val hungryAfter = trip(hungry)
-        fedAfter.construction!!.workCredit shouldBe CivsRules.BUILDER_SESSION_ROWS
+        fedAfter.construction!!.workCredit shouldBe minOf(order.workRequired, CivsRules.BUILDER_SESSION_ROWS)
         hungryAfter.construction!!.workCredit shouldBe fedAfter.construction!!.workCredit
         val due = fed.workers.single().nextDeliveryAt
         fedAfter.workers.single().nextDeliveryAt shouldBe due + 2_000
@@ -413,3 +416,10 @@ private fun finishBatch(city: Settlement): Settlement {
 }
 private fun roundTrip(city: Settlement): Settlement = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
 private fun denied(reason: String, action: () -> Unit) { shouldThrow<CivsRejection>(action).reason shouldBe reason }
+
+private fun withCarriedSupplies(worker: CivWorker, supplies: Map<String, Long>): CivWorker =
+    CivsEquipment.replace(worker, MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also { items ->
+        supplies.entries.forEachIndexed { index, (material, amount) ->
+            items[CivsEquipment.BAG + index] = CivResidentItem(material, amount.toInt())
+        }
+    })

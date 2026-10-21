@@ -6,6 +6,9 @@ import org.bukkit.entity.Player
 import org.bukkit.event.inventory.ClickType
 import java.util.Base64
 
+/** UI command only; durable receipts always name an ordinary player storage slot. */
+internal const val CIVS_RESIDENT_CURSOR_SLOT = -1
+
 /** Plain stacks keep the small legacy representation; custom components retain native bytes. */
 data class CivResidentItem(val material: String, val amount: Int, val data: String? = null) {
     fun validated(): CivResidentItem = apply {
@@ -35,6 +38,8 @@ data class CivResidentItem(val material: String, val amount: Int, val data: Stri
 
 internal object CivsEquipment {
     const val SLOTS = 33
+    // Only legacy cargo migration can extend a bag; normal pickups keep their original capacity.
+    const val MAX_SLOTS = SLOTS + 64
     const val BAG = 6
 
     fun slots(worker: CivWorker): List<CivResidentItem?> = worker.items ?: MutableList<CivResidentItem?>(SLOTS) { null }.also { slots ->
@@ -59,27 +64,39 @@ internal object CivsEquipment {
 
     fun replace(worker: CivWorker, slots: List<CivResidentItem?>): CivWorker {
         validate(slots)
-        return worker.copy(inventory = null, items = slots.toList())
+        worker.cargo?.takeIf { it.inventoryBacked }?.let { cargo ->
+            if (slots.filterNotNull().filter { it.material == cargo.material && it.data == null }.sumOf(CivResidentItem::amount) < cargo.amount)
+                throw CivsRejection("resident-item-reserved")
+        }
+        return worker.copy(inventory = null, items = slots.take(maxOf(SLOTS, slots.indexOfLast { it != null } + 1)))
     }
 
     fun plainCount(worker: CivWorker, material: String): Int = slots(worker).filterNotNull()
         .filter { it.material == material && it.data == null }.sumOf(CivResidentItem::amount)
 
+    fun usableCount(worker: CivWorker, material: String): Int = plainCount(worker, material) -
+        (worker.cargo?.takeIf { it.inventoryBacked && it.material == material }?.amount?.toInt() ?: 0)
+
+    fun inputsReady(worker: CivWorker, inputs: Map<String, Long>, stock: Map<String, Long>): Boolean =
+        storageInputs(worker, inputs).all { (material, count) -> (stock[material] ?: 0L) >= count }
+
     fun available(worker: CivWorker, stock: Map<String, Long>): Map<String, Long> = stock.toMutableMap().also { total ->
-        slots(worker).filterNotNull().filter { it.data == null }.forEach { total.merge(it.material, it.amount.toLong(), Long::plus) }
+        slots(worker).filterNotNull().filter { it.data == null }.map(CivResidentItem::material).distinct().forEach {
+            total.merge(it, usableCount(worker, it).toLong(), Long::plus)
+        }
     }
 
     /** Carried plain supplies are consumed first; native storage owns only the remainder. */
     fun storageInputs(worker: CivWorker, inputs: Map<String, Long>): Map<String, Long> = inputs.mapValues { (material, count) ->
-        (count - plainCount(worker, material)).coerceAtLeast(0)
+        (count - usableCount(worker, material)).coerceAtLeast(0)
     }.filterValues { it > 0 }
 
     fun consumeInputs(worker: CivWorker, inputs: Map<String, Long>): CivWorker = inputs.entries.fold(worker) { current, (material, count) ->
-        val carried = minOf(count, plainCount(current, material).toLong()).toInt()
+        val carried = minOf(count, usableCount(current, material).toLong()).toInt()
         if (carried == 0) current else consume(current, material, carried)
     }
 
-    fun supplyRoom(worker: CivWorker, material: Material): Int = slots(worker).drop(BAG).sumOf {
+    fun supplyRoom(worker: CivWorker, material: Material): Int = slots(worker).take(SLOTS).drop(BAG).sumOf {
         when { it == null -> material.maxStackSize; it.material == material.name && it.data == null -> material.maxStackSize - it.amount; else -> 0 }
     }
 
@@ -88,11 +105,26 @@ internal object CivsEquipment {
         val items = slots(worker).toMutableList()
         supplies.forEach { (material, amount) ->
             val maximum = Material.valueOf(material).maxStackSize
-            require(amount in 1..maximum.toLong())
+            require(amount in 1..((SLOTS - BAG) * 64).toLong())
             if (insert(items, CivResidentItem(material, amount.toInt()), amount.toInt(), maximum) != amount.toInt())
                 throw CivsRejection("resident-inventory-full")
         }
         return replace(worker, items)
+    }
+
+    /** Preserve every pre-upgrade shipment, even when its former separate cargo exceeded bag space. */
+    fun materializeLegacyCargo(worker: CivWorker, cargo: CivCargo): CivWorker {
+        val items = slots(worker).toMutableList()
+        val maximum = Material.valueOf(cargo.material).maxStackSize
+        var remaining = cargo.amount.toInt()
+        remaining -= insert(items, CivResidentItem(cargo.material, 1), remaining, maximum)
+        while (remaining > 0) {
+            require(items.size < MAX_SLOTS)
+            val amount = minOf(remaining, maximum)
+            items += CivResidentItem(cargo.material, amount)
+            remaining -= amount
+        }
+        return replace(worker, items).copy(cargo = cargo.copy(inventoryBacked = true))
     }
 
     fun giveRequestedSupply(worker: CivWorker, player: Player, material: Material, amount: Long): Pair<CivWorker, List<CivNativePlayerSlot>> {
@@ -179,9 +211,9 @@ internal object CivsEquipment {
         return replace(worker, slots)
     }
 
-    /** Plans only touched player slots; the resident's 33-slot record is already the city-owned state. */
+    /** Plans only touched player slots; the resident's saved slots is already the city-owned state. */
     fun transfer(worker: CivWorker, player: Player, npcSlot: Int?, playerSlot: Int?, click: ClickType): Pair<CivWorker, List<CivNativePlayerSlot>> {
-        require((npcSlot != null) != (playerSlot != null))
+        require(npcSlot != null || playerSlot != null)
         require(click in setOf(ClickType.LEFT, ClickType.RIGHT, ClickType.SHIFT_LEFT, ClickType.SHIFT_RIGHT))
         val slots = slots(worker).toMutableList()
         val changes = mutableListOf<CivNativePlayerSlot>()
@@ -190,14 +222,26 @@ internal object CivsEquipment {
             val native = player.inventory.getItem(playerSlot)
             val item = CivResidentItem.of(native) ?: throw CivsRejection("resident-item-missing")
             val amount = if (click == ClickType.RIGHT) 1 else item.amount
-            val moved = insert(slots, item, amount, requireNotNull(native).maxStackSize)
+            val moved = if (npcSlot == null) insert(slots, item, amount, requireNotNull(native).maxStackSize) else {
+                require(npcSlot in 0 until SLOTS)
+                val previous = slots[npcSlot]
+                if (npcSlot < 4 && armorSlot(item.material) != npcSlot || previous != null &&
+                    (previous.material != item.material || previous.data != item.data)) throw CivsRejection("resident-slot-occupied")
+                val maximum = if (npcSlot < BAG) 1 else requireNotNull(native).maxStackSize
+                minOf(amount, maximum - (previous?.amount ?: 0)).coerceAtLeast(0).also { moved ->
+                    if (moved > 0) slots[npcSlot] = item.copy(amount = (previous?.amount ?: 0) + moved)
+                }
+            }
             if (moved == 0) throw CivsRejection("resident-inventory-full")
             changes += CivNativePlayerSlot(playerSlot, item, item.copy(amount = item.amount - moved).takeIf { it.amount > 0 })
         } else {
             val index = requireNotNull(npcSlot)
-            require(index in 0 until SLOTS)
+            require(index in slots.indices)
             val item = slots[index] ?: throw CivsRejection("resident-item-missing")
-            var remaining = if (click == ClickType.RIGHT) 1 else item.amount
+            val requested = minOf(if (click == ClickType.RIGHT) 1 else item.amount,
+                if (item.data == null) usableCount(worker, item.material) else item.amount)
+            if (requested <= 0) throw CivsRejection("resident-item-reserved")
+            var remaining = requested
             val source = item.stack()
             val maximum = source.maxStackSize
             // Merge exact native payloads first, then fill empty player storage cells.
@@ -213,7 +257,7 @@ internal object CivsEquipment {
                 changes += CivNativePlayerSlot(slot, before, item.copy(amount = (before?.amount ?: 0) + moved))
                 remaining -= moved
             }
-            val moved = (if (click == ClickType.RIGHT) 1 else item.amount) - remaining
+            val moved = requested - remaining
             if (moved == 0) throw CivsRejection("storage-full")
             slots[index] = item.copy(amount = item.amount - moved).takeIf { it.amount > 0 }
         }
@@ -240,7 +284,7 @@ internal object CivsEquipment {
     }
 
     fun validate(slots: List<CivResidentItem?>) {
-        require(slots.size == SLOTS)
+        require(slots.size in SLOTS..MAX_SLOTS)
         slots.forEachIndexed { index, item ->
             item?.validated()
             if (index < 4 && item != null) require(armorSlot(item.material) == index && item.amount == 1)
@@ -250,6 +294,8 @@ internal object CivsEquipment {
 
     fun consume(worker: CivWorker, material: String, amount: Int): CivWorker {
         require(amount > 0)
+        if (amount > usableCount(worker, material)) throw CivsRejection(
+            if (amount <= plainCount(worker, material)) "resident-item-reserved" else "resident-item-missing")
         val slots = slots(worker).toMutableList()
         var remaining = amount
         for (index in slots.indices) {

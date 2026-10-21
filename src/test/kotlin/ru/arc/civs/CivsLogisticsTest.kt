@@ -5,8 +5,12 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
+import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsLogisticsTest : FunSpec({
+    lateinit var paper: MockBukkitTestRuntime
+    beforeEach { paper = MockBukkitTestRuntime.open() }
+    afterEach { paper.close() }
     test("shipment reach uses source and destination barrels while the saved entrance remains its identity") {
         val base = logisticsCity()
         val warehouse = base.buildings[1].copy(entrance = CivPosition(-30, 64, 3))
@@ -19,7 +23,7 @@ class CivsLogisticsTest : FunSpec({
         plan.cargo.targetBuildingId shouldBe smith.id
         plan.cargo.sourceEntrance shouldBe warehouse.entrance
         // The entrances are 90 blocks apart; the actual barrel leg is only ten.
-        CivsLogistics.pickup(city, city.workers.first().id, plan.cargo).workers.first().cargo shouldBe plan.cargo
+        CivsLogistics.pickup(city, city.workers.first().id, plan.cargo).workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
     }
 
     test("accepted cargo removes duplicate demand and a second courier chooses another item") {
@@ -44,7 +48,7 @@ class CivsLogisticsTest : FunSpec({
         val plan = CivsLogistics.plan(city, city.workers.first()) { if (it == city.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap() }!!
         val picked = CivsLogistics.pickup(city, city.workers.first().id, plan.cargo)
         val restored = Gson().fromJson(Gson().toJson(picked), Settlement::class.java).let(CivsRules::validate)
-        restored.workers.first().cargo shouldBe plan.cargo
+        restored.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
         val delivered = CivsLogistics.unload(restored, restored.workers.first().id, plan.cargo.id, 10_000)
         delivered.workers.first().cargo shouldBe null
         delivered.workers.first().completedCycles shouldBe 1L
@@ -79,8 +83,8 @@ class CivsLogisticsTest : FunSpec({
         val returning = CivsLogistics.plan(deleted, deleted.workers.first()) { emptyMap() }!!
         returning.carrying shouldBe true
         returning.destinationBuildingId shouldBe city.buildings.first().id
-        returning.cargo shouldBe plan.cargo
-        deleted.workers.first().cargo shouldBe plan.cargo
+        returning.cargo shouldBe plan.cargo.copy(inventoryBacked = true)
+        deleted.workers.first().cargo shouldBe plan.cargo.copy(inventoryBacked = true)
         val farther = logisticsBuilding(40, BuildingType.WAREHOUSE)
         val nearer = logisticsBuilding(60, BuildingType.WAREHOUSE)
         val alternatives = deleted.copy(buildings = deleted.buildings + listOf(farther, nearer)).let(CivsRules::validate)
@@ -168,7 +172,7 @@ class CivsLogisticsTest : FunSpec({
         CivsLogistics.destination(city, oldCargo)?.id shouldBe hut.id
         val legacyPicked = CivsLogistics.pickup(city, courier.id, oldCargo)
         CivsLogistics.pickup(legacyPicked, courier.id, oldCargo) shouldBe legacyPicked
-        legacyPicked.workers.first().cargo shouldBe oldCargo
+        legacyPicked.workers.first().cargo shouldBe oldCargo.copy(inventoryBacked = true)
         CivsLogistics.requests(legacyPicked, stock).single { it.construction } shouldBe CivSupplyRequest(hut.id, "STONE", 5, 5, true)
         CivsLogistics.plan(legacyPicked, legacyPicked.workers[1], stock) shouldBe null
         val delivered = CivsLogistics.unload(legacyPicked, courier.id, oldCargo.id, 10_000)
@@ -310,6 +314,90 @@ class CivsLogisticsTest : FunSpec({
         plan.cargo.targetBuildingId shouldBe city.buildings[1].id
         plan.cargo.material shouldBe material
         plan.cargo.amount shouldBe 4L
+    }
+
+    test("pickup materializes real carried cargo and unload consumes only that shipment") {
+        val base = logisticsCity()
+        val worker = base.workers.first().copy(items = List(CivsEquipment.SLOTS) {
+            if (it == CivsEquipment.BAG) CivResidentItem("IRON_INGOT", 2) else null
+        })
+        val city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
+        val plan = requireNotNull(CivsLogistics.plan(city, worker) {
+            if (it == city.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap()
+        })
+        val picked = CivsLogistics.pickup(city, worker.id, plan.cargo)
+        val carrying = picked.workers.first()
+        carrying.cargo!!.inventoryBacked shouldBe true
+        CivsEquipment.plainCount(carrying, "IRON_INGOT") shouldBe 5
+        CivsEquipment.usableCount(carrying, "IRON_INGOT") shouldBe 2
+        shouldThrow<CivsRejection> { CivsEquipment.consume(carrying, "IRON_INGOT", 3) }.reason shouldBe "resident-item-reserved"
+        val unloaded = CivsLogistics.unload(picked, worker.id, plan.cargo.id, 10_000)
+        CivsEquipment.plainCount(unloaded.workers.first(), "IRON_INGOT") shouldBe 2
+    }
+
+    test("old cargo JSON is materialized once without replacing an existing personal stack") {
+        val base = logisticsCity()
+        val worker = base.workers.first().copy(items = List(CivsEquipment.SLOTS) {
+            if (it == CivsEquipment.BAG) CivResidentItem("IRON_INGOT", 2) else null
+        })
+        val city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
+        val plan = requireNotNull(CivsLogistics.plan(city, worker) {
+            if (it == city.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap()
+        })
+        val legacy = city.copy(workers = city.workers.map { if (it.id == worker.id) it.copy(cargo = plan.cargo) else it })
+        val json = Gson().toJsonTree(legacy).asJsonObject.also {
+            it["workers"].asJsonArray[0].asJsonObject["cargo"].asJsonObject.remove("inventoryBacked")
+        }
+        val decoded = Gson().fromJson(json, Settlement::class.java).let(CivsRules::validate)
+        decoded.workers.first().cargo!!.inventoryBacked shouldBe false
+        val migrated = CivsLogistics.materializeCargo(decoded)
+        CivsEquipment.plainCount(migrated.workers.first(), "IRON_INGOT") shouldBe 5
+        migrated.workers.first().cargo!!.inventoryBacked shouldBe true
+        CivsLogistics.materializeCargo(migrated) shouldBe migrated
+        val restored = Gson().fromJson(Gson().toJson(migrated), Settlement::class.java).let(CivsRules::validate)
+        CivsLogistics.materializeCargo(restored) shouldBe restored
+        val unloaded = CivsLogistics.unload(restored, worker.id, plan.cargo.id, 10_000)
+        CivsEquipment.plainCount(unloaded.workers.first(), "IRON_INGOT") shouldBe 2
+    }
+
+    test("full carried inventory rejects new shipments but preserves old cargo in visible overflow slots") {
+        val base = logisticsCity()
+        val original = base.workers.first()
+        val plan = requireNotNull(CivsLogistics.plan(base, original) {
+            if (it == base.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap()
+        })
+        val full = original.copy(items = List(CivsEquipment.SLOTS) {
+            if (it >= CivsEquipment.BAG) CivResidentItem("STONE", 64) else null
+        })
+        val city = base.copy(workers = base.workers.map { if (it.id == full.id) full else it })
+        CivsLogistics.plan(city, full) { if (it == base.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap() } shouldBe null
+        shouldThrow<CivsRejection> { CivsLogistics.pickup(city, full.id, plan.cargo) }.reason shouldBe "resident-inventory-full"
+        val legacy = city.copy(workers = city.workers.map { if (it.id == full.id) it.copy(cargo = plan.cargo) else it })
+        val migrated = CivsLogistics.materializeCargo(legacy)
+        val carried = migrated.workers.first()
+        carried.items!!.take(CivsEquipment.SLOTS) shouldBe full.items
+        carried.items!!.drop(CivsEquipment.SLOTS) shouldBe listOf(CivResidentItem("IRON_INGOT", 3))
+        carried.cargo shouldBe plan.cargo.copy(inventoryBacked = true)
+        CivsLogistics.materializeCargo(migrated) shouldBe migrated
+        val restored = Gson().fromJson(Gson().toJson(migrated), Settlement::class.java).let(CivsRules::validate)
+        val unloaded = CivsLogistics.unload(restored, full.id, plan.cargo.id, 10_000)
+        CivsEquipment.plainCount(unloaded.workers.first(), "IRON_INGOT") shouldBe 0
+        CivsEquipment.plainCount(unloaded.workers.first(), "STONE") shouldBe 27 * 64
+    }
+
+    test("legacy unstackable cargo retains all sixty-four native items") {
+        val base = logisticsCity()
+        val plan = requireNotNull(CivsLogistics.plan(base, base.workers.first()) {
+            if (it == base.buildings[1].id) mapOf("IRON_INGOT" to 3L) else emptyMap()
+        })
+        val worker = base.workers.first().copy(cargo = plan.cargo.copy(material = "IRON_PICKAXE", amount = 64))
+        val migrated = CivsLogistics.materializeCargo(base.copy(workers = listOf(worker)))
+        val carried = migrated.workers.single()
+        CivsEquipment.plainCount(carried, "IRON_PICKAXE") shouldBe 64
+        carried.items!!.filterNotNull().all { it.amount == 1 } shouldBe true
+        carried.items!!.size shouldBe 69
+        CivsEquipment.supplyRoom(carried, org.bukkit.Material.STONE) shouldBe 0
+        CivsLogistics.materializeCargo(migrated) shouldBe migrated
     }
 
     test("malformed or unbacked legacy cargo fails snapshot validation") {

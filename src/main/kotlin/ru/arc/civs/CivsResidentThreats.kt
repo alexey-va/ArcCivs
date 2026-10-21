@@ -48,7 +48,8 @@ internal data class CivsThreatTarget(val cityId: UUID, val workerId: UUID, val n
  * Virtual resident targets never enter a world's entity list. Real monsters keep their own native
  * movement, projectiles and explosions; this owner supplies target positions and authoritative hits.
  */
-internal class CivsResidentThreats(private val plugin: Plugin, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
+internal class CivsResidentThreats(private val plugin: Plugin,
+    private val attacked: (UUID, Monster) -> Unit = { _, _ -> }, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
     private data class Pursuit(val monster: Monster, val worker: UUID, var attackAfter: Long = 0, var routeAfter: Long = 0)
     private data class Flight(val projectile: Projectile, var previous: Location)
     private data class Falling(val top: Double, var speed: Double = 0.0)
@@ -105,6 +106,7 @@ internal class CivsResidentThreats(private val plugin: Plugin, private val injur
         }
         val at = target.npc.location
         if (!visible(monster.eyeLocation, eye(target))) return true
+        attacked(target.workerId, monster)
         monster.lookAt(eye(target), 30f, 30f)
         val distance = monster.location.distanceSquared(at)
         if (distance > 1.5 * 1.5 && now >= pursuit.routeAfter) {
@@ -334,6 +336,8 @@ internal class CivsResidentThreats(private val plugin: Plugin, private val injur
         val event = CivsResidentDamageEvent(target.cityId, target.workerId, target.npc.location, source, cause, damage)
         Bukkit.getPluginManager().callEvent(event)
         if (event.isCancelled || !event.damage.isFinite() || event.damage <= 0) return false
+        val monster = source as? Monster ?: ((source as? Projectile)?.shooter as? Monster)
+        if (monster != null) attacked(target.workerId, monster)
         injury(target.workerId, event.damage)
         return true
     }
@@ -350,7 +354,7 @@ internal class CivsResidentThreats(private val plugin: Plugin, private val injur
         BoundingBox(it.x - .3, it.y, it.z - .3, it.x + .3, it.y + target.npc.height, it.z + .3)
     }
 
-    private fun visible(from: Location, to: Location): Boolean {
+    fun visible(from: Location, to: Location): Boolean {
         if (from.world != to.world) return false
         val delta = to.toVector().subtract(from.toVector())
         val distance = delta.length()
@@ -390,6 +394,20 @@ internal class CivsResidentThreats(private val plugin: Plugin, private val injur
         private val ARCHERS = setOf(EntityType.SKELETON, EntityType.STRAY, EntityType.BOGGED)
         private val FIRE = setOf(Material.FIRE, Material.SOUL_FIRE, Material.CAMPFIRE, Material.SOUL_CAMPFIRE, Material.MAGMA_BLOCK)
     }
+}
+
+internal fun citizenRetreats(worker: CivWorker): Boolean = CivsResidents.isChild(worker) ||
+    CivsResidents.health(worker) <= maxOf(6.0, CivsResidents.maxHealth(worker) * .35)
+
+/** Use the actual held item's native base attack attributes; an empty hand remains an empty hand. */
+internal fun citizenAttackDamage(hand: ItemStack?): Double {
+    if (hand == null || hand.type.isAir) return 1.0
+    val modifiers = hand.itemMeta?.takeIf { it.hasAttributeModifiers() }?.getAttributeModifiers(EquipmentSlot.HAND)
+        ?: hand.type.getDefaultAttributeModifiers(EquipmentSlot.HAND)
+    val base = 1.0 + modifiers?.get(Attribute.ATTACK_DAMAGE).orEmpty()
+        .filter { it.operation == AttributeModifier.Operation.ADD_NUMBER }.sumOf { it.amount }
+    val sharpness = hand.getEnchantmentLevel(Enchantment.SHARPNESS)
+    return (base + if (sharpness > 0) .5 * sharpness + .5 else 0.0).coerceAtLeast(1.0)
 }
 
 private class CivsResidentLands(plugin: Plugin) {

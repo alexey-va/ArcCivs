@@ -20,6 +20,59 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsSpatialWorkReviewTest : FunSpec({
+    test("deep mine travel first reaches the authored shaft and then descends at its actual ladder") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("mine-legs").also(paper.server::addWorld)
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+            val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+            val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
+            val floor = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout.getAsJsonArray("floors")[0].asJsonObject["landing"]))
+            for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
+            for (y in floor.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                Bukkit.createBlockData("minecraft:ladder[facing=${layout["ladderFacing"].asString},waterlogged=false]")
+            citizenMineWaypoint(city, world, Location(world, bottom.x + 4.5, 64.0, bottom.z + .5), floor) shouldBe bottom
+            citizenMineWaypoint(city, world, Location(world, bottom.x + .5, bottom.y.toDouble(), bottom.z + .5), floor) shouldBe bottom.copy(y = floor.y)
+            citizenMineWaypoint(city, world, Location(world, bottom.x + .5, floor.y.toDouble(), bottom.z + .5), bottom.copy(x = bottom.x + 5, y = 64)) shouldBe bottom
+        }
+    }
+
+    test("a newly exposed cave opening is sealed with paid stone before deeper shaft excavation") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-cave-seal").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineSeal")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = spatialWorker(mine, "IRON_PICKAXE")
+                val city = spatialCity(world.uid, listOf(mine), worker).copy(mineProgress = mapOf(mine.id.toString() to 2L))
+                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                for (y in bottom.y - 1..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                    Bukkit.createBlockData("minecraft:ladder[facing=${layout["ladderFacing"].asString},waterlogged=false]")
+                // Open the south side, leaving the west-facing ladder's east support intact.
+                // A missing block behind an existing ladder is neither a stable native ladder
+                // arrangement nor a visible placement face from inside its shaft.
+                val opening = bottom.copy(z = bottom.z + 1, y = bottom.y - 1)
+                world.getBlockAt(opening.x, opening.y, opening.z).type = Material.AIR
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    repeat(12) { runtime.pulse(listOf(city)) }
+                    val work = requireNotNull(runtime.plan(city, worker))
+                    work.status shouldBe "securing-mine"
+                    work.changes.single().position shouldBe opening
+                    work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                    work.outputs shouldBe emptyMap()
+                    work.durationMillis shouldBe 2_000L
+                    (requireNotNull(work.miningStep) <= 3L) shouldBe true
+                    world.getBlockAt(bottom.x, bottom.y - 2, bottom.z).type shouldBe Material.STONE
+                }
+                tasks.close()
+            }
+        }
+    }
+
     test("all authored farm levels place irrigation without filled or empty bucket items") {
         for (style in listOf("medievaloak", "nordic", "caledonia")) for (level in 1..3) {
             failOnUnsupportedMockBukkitOperation {
@@ -566,7 +619,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> shaftLocked && point == shaft })
                         fun commit(work: CivWorldWork) {
                             runtime.validate(city, work)
-                            work.durationMillis shouldBe 4_000
+                            work.durationMillis shouldBe 2_000
                             work.storageInputs(city.workers.single()) shouldBe emptyMap()
                             city = CivsRules.finishWorldWork(city, work, 20_000 + work.cycle * 5_000)
                             work.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
@@ -609,7 +662,10 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         wall.changes.single().after shouldBe "minecraft:cobblestone"
                         wall.inputs shouldBe mapOf("COBBLESTONE" to 1L)
                         wall.outputs shouldBe emptyMap()
-                        wall.miningStep shouldBe 1L
+                        wall.status shouldBe "securing-mine"
+                        // The shell repair precedes the authored cursor. The subsequent scan
+                        // skips its now-sound support before committing the ladder at step 2.
+                        wall.miningStep shouldBe 0L
                         commit(wall)
                         CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 63
                         CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 64
@@ -685,7 +741,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     citizenCanReachBlock(world, Location(world, standing.x + .5, standing.y + 1.62, standing.z + .5), target) shouldBe true
                     work.changes.single().position shouldBe target
                     work.changes.single().after shouldBe "minecraft:air"
-                    work.durationMillis shouldBe 4_000
+                    work.durationMillis shouldBe 2_000
                     work.inputs shouldBe emptyMap()
                     work.outputs shouldBe mapOf("COBBLESTONE" to 1L)
                     world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE

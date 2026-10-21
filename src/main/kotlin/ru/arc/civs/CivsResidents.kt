@@ -13,7 +13,7 @@ object CivsResidents {
     fun hunger(worker: CivWorker): Int = worker.hunger ?: 20
     fun isChild(worker: CivWorker): Boolean = worker.childMinutes != null
     fun legacySex(workerId: UUID): CivSex = if (Math.floorMod(workerId.hashCode(), 2) == 0) CivSex.MALE else CivSex.FEMALE
-    fun sex(worker: CivWorker): CivSex = worker.sex ?: legacySex(worker.id)
+    fun sex(worker: CivWorker): CivSex = worker.sex ?: CivsNames.knownSex(worker.name) ?: legacySex(worker.id)
     fun workDuration(worker: CivWorker, baseMillis: Long): Long {
         require(baseMillis >= 0)
         return if (hunger(worker) <= 6) {
@@ -25,7 +25,7 @@ object CivsResidents {
     fun activeMinute(worker: CivWorker, working: Boolean): CivWorker {
         val hunger = (hunger(worker) - if (working && !isChild(worker)) 1 else 0).coerceAtLeast(0)
         val items = CivsEquipment.slots(worker)
-        val bread = if (hunger <= 14) (CivsEquipment.BAG until items.size).firstOrNull {
+        val bread = if (hunger <= 14 && CivsEquipment.usableCount(worker, "BREAD") > 0) (CivsEquipment.BAG until items.size).firstOrNull {
             items[it]?.let { item -> item.material == "BREAD" && item.data == null } == true
         } else null
         if (bread == null) return if (worker.hunger == hunger) worker else worker.copy(hunger = hunger)

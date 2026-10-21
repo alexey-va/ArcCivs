@@ -4,7 +4,7 @@ import org.bukkit.Material
 import org.bukkit.configuration.file.YamlConfiguration
 import java.util.UUID
 
-internal data class CitizenSkin(val name: String, val texture: String, val signature: String)
+internal data class CitizenSkin(val name: String, val texture: String, val signature: String, val sex: CivSex = CivSex.MALE)
 
 /** Bundled signed snapshots are read once when the scene starts, never from the spawn/pulse path. */
 internal fun loadCitizenSkins(): List<CitizenSkin> {
@@ -16,8 +16,9 @@ internal fun loadCitizenSkins(): List<CitizenSkin> {
         fun field(key: String) = checkNotNull((entry[key] as? String)?.takeIf(String::isNotBlank)) {
             "ArcCivs citizen skin has no $key"
         }
-        CitizenSkin(field("name"), field("texture"), field("signature"))
+        CitizenSkin(field("name"), field("texture"), field("signature"), CivSex.valueOf(field("sex")))
     }
+    check(CivSex.entries.all { sex -> skins.any { it.sex == sex } }) { "ArcCivs citizen skins must cover both sexes" }
     check(skins.isNotEmpty() && skins.map { it.name }.distinct().size == skins.size) {
         "ArcCivs citizen skins must have distinct names and at least one signed texture"
     }
@@ -27,6 +28,9 @@ internal fun loadCitizenSkins(): List<CitizenSkin> {
 /** A resident keeps the same appearance across assignment changes, viewer exits and restarts. */
 internal fun citizenSkin(skins: List<CitizenSkin>, workerId: UUID): CitizenSkin =
     skins[Math.floorMod(workerId.hashCode(), skins.size)]
+
+internal fun citizenSkin(skins: List<CitizenSkin>, worker: CivWorker): CitizenSkin =
+    citizenSkin(skins.filter { it.sex == CivsResidents.sex(worker) }.also { check(it.isNotEmpty()) }, worker.id)
 
 internal fun citizenScale(worker: CivWorker): Double = if (CivsResidents.isChild(worker)) .5 else 1.0
 

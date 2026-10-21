@@ -71,6 +71,22 @@ data class CivWorker(
 /** A stable pair occupies one house. Progress records active minutes, never wall-clock catch-up. */
 data class CivFamily(val firstParentId: UUID, val secondParentId: UUID, val homeId: UUID, val activeMinutes: Int)
 
+/** A dead resident's exact belongings remain lootable until this durable expiry. */
+data class CivCorpse(
+    val worker: CivWorker,
+    val position: CivPosition,
+    val diedAt: Long,
+    val expiresAt: Long,
+    val killerName: String?,
+    val killerType: String?,
+    val cause: String,
+    val feetY: Double? = null,
+)
+
+data class CivDeathContext(val position: CivPosition, val at: Long,
+    val killerName: String? = null, val killerType: String? = null, val cause: String = "CUSTOM",
+    val feetY: Double? = null)
+
 /** Captured placement bytes live under this order's UUID, independently of mutable source files. */
 data class CivConstruction(
     val id: UUID,
@@ -128,6 +144,7 @@ data class Settlement(
     val mineProgress: Map<String, Long>? = null,
     val families: List<CivFamily>? = null,
     val memberNames: Map<String, String>? = null,
+    val corpses: List<CivCorpse>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

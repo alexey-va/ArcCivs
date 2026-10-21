@@ -64,19 +64,23 @@ class CivsConstructionQueueTest : FunSpec({
         shouldThrow<CivsRejection> { CivsRules.validate(maxed.copy(constructionQueue = listOf(building.id))) }.reason shouldBe "invalid-state"
     }
 
-    test("one observed builder session preserves eight paid row boundaries across shortage pause and restart") {
+    test("one observed builder session preserves sixty four paid row boundaries across shortage pause and restart") {
         val f = QueueFixture()
-        var city = f.start(f.city, f.first)
+        var city = f.start(f.city, f.first, rows = 70).let { started ->
+            started.copy(workers = started.workers.mapIndexed { index, resident -> if (index == 0)
+                resident.copy(items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("STONE", 64) else null })
+                else resident })
+        }
         val worker = city.workers.first()
         city = CivsRules.deliver(city, city.owner, worker.id, worker.assignment!!, worker.completedCycles, worker.nextDeliveryAt, worker.nextDeliveryAt)
-        city.construction!!.workCredit shouldBe 8
+        city.construction!!.workCredit shouldBe 64
         city.workers.first().nextDeliveryAt shouldBe worker.nextDeliveryAt + 2_000L
-        for (index in 0 until 8) {
+        for (index in 0 until 64) {
             val order = city.construction!!
             order.workDone shouldBe index
             city = CivsRules.awaitMaterials(city, city.owner, order.id, index, mapOf("STONE" to 1L))
             city = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
-            city.construction!!.workCredit shouldBe 8 - index
+            city.construction!!.workCredit shouldBe 64 - index
             city = CivsRules.payBatch(city, city.owner, order.id, index, mapOf("STONE" to 1L))
             shouldThrow<CivsRejection> { CivsRules.payBatch(city, city.owner, order.id, index, mapOf("STONE" to 1L)) }.reason shouldBe "stale-construction"
             city = CivsRules.pauseConstruction(city, city.owner, order.id, "placement-cancelled")
@@ -84,10 +88,10 @@ class CivsConstructionQueueTest : FunSpec({
             city.construction!!.payment!!.reservedBatch shouldBe index
             city = CivsRules.completeBatch(CivsRules.beginPlacement(city, city.owner, order.id), city.owner, order.id)
         }
-        city.construction!!.workDone shouldBe 8
+        city.construction!!.workDone shouldBe 64
         city.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
         city.construction!!.workCredit shouldBe 0
-        city.construction!!.materials shouldBe mapOf("STONE" to 2L)
+        city.construction!!.materials shouldBe mapOf("STONE" to 6L)
         city.workers.first().completedCycles shouldBe 1L
     }
 
@@ -157,10 +161,10 @@ private class QueueFixture {
         listOf(building(0, BuildingType.TOWN_HALL, BuildingPhase.ACTIVE), hut, first),
         List(4) { index -> CivWorker(UUID.randomUUID(), "Resident $index", if (index == 0) hut.id else null, nextDeliveryAt = 1) },
         inventory = CivInventory(CivStorageMode.PHYSICAL)))
-    fun start(city: Settlement, site: CivBuilding, incremental: Boolean = true): Settlement {
+    fun start(city: Settlement, site: CivBuilding, incremental: Boolean = true, rows: Int = 10): Settlement {
         val building = site.copy(phase = BuildingPhase.CONSTRUCTING)
-        val order = CivConstruction(UUID.randomUUID(), site.id, site.level, 10, 0, ConstructionPhase.CONSTRUCTING, Stock(),
-            plannedBuilding = building, batches = CivConstructionBatches(10, 16), materials = mapOf("STONE" to 10L),
+        val order = CivConstruction(UUID.randomUUID(), site.id, site.level, rows, 0, ConstructionPhase.CONSTRUCTING, Stock(),
+            plannedBuilding = building, batches = CivConstructionBatches(rows, 16), materials = mapOf("STONE" to rows.toLong()),
             payment = if (incremental) CivConstructionPayment() else null)
         return CivsRules.startSite(city, city.owner, building, order)
     }

@@ -13,6 +13,7 @@ import org.bukkit.World
 import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.type.Door
 import org.bukkit.entity.Player
+import org.bukkit.entity.Monster
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.HandlerList
@@ -67,6 +68,11 @@ class CivsCitizens(
     private val doorBlocked: (UUID, CivPosition) -> Boolean = { _, _ -> false },
     private val constructionFocus: (UUID, UUID) -> CivPosition? = { _, _ -> null },
     packetOwner: PaperPacketNpcs? = null,
+    private val productionReady: (Settlement, CivWorker) -> Boolean = { _, _ -> true },
+    private val workInputsReady: (Settlement, CivWorker) -> Boolean = { _, _ -> true },
+    private val residentSupplySource: (Settlement, CivWorker) -> UUID? = { _, _ -> null },
+    private val prepareSupplies: (UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val navigation = CivsResidentNavigation()
@@ -86,6 +92,7 @@ class CivsCitizens(
     private val voices = CivsCitizenVoices(plugin.config)
     private val pendingHarm = mutableSetOf<UUID>()
     private val harmCompletions = ConcurrentLinkedQueue<HarmCompletion>()
+    private val supplyCompletions = ConcurrentLinkedQueue<SupplyCompletion>()
     private var harmEpoch = 0L
     internal var residentStepAllowed: (PacketPlayerNpc, Location, Location) -> Boolean = { _, _, _ -> true }
 
@@ -121,7 +128,7 @@ class CivsCitizens(
         checkMainThread()
         skins = loadCitizenSkins()
         packets = packetOwner ?: PaperPacketNpcs(plugin, "civs-residents")
-        threats = CivsResidentThreats(plugin, ::damage)
+        threats = CivsResidentThreats(plugin, attacked = ::defend, injury = ::damage)
         packets.onInteract = { player, npc, action ->
             val actor = actors.values.firstOrNull { it.npc === npc }
             if (!closed.get() && actor != null) {
@@ -146,6 +153,7 @@ class CivsCitizens(
         campBudget = 2 // At most two six-place campfire admission searches for the entire owner.
         recoveryBudget = 2 // At most two bounded safe-position searches after real route failures per pulse.
         drainCompletions(nowMillis)
+        drainSupplies(nowMillis)
         drainHarm()
         val cities = cityProvider().associateBy { it.id }
         paths.retain(cities)
@@ -169,7 +177,8 @@ class CivsCitizens(
             val world = plugin.server.getWorld(city.worldId)
             // Native inventory slots can change before the canonical cargo revision is published.
             // Keep this exact transfer stationary until its receipt resolves instead of choosing a new request.
-            val plan = citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
+            val plan = if (actor.supplyPickup != null) actor.plan
+                else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
             val reason = when {
                 actor.cityId != city.id || actor.worldId != city.worldId -> "unavailable"
                 world == null -> "world-unloaded"
@@ -248,7 +257,7 @@ class CivsCitizens(
                     statuses[workerId] = "route-unreachable"
                     continue
                 }
-                val skin = citizenSkin(skins, workerId)
+                val skin = citizenSkin(skins, worker)
                 npc = packets.spawnPlayer(point, PacketNpcProfile(workerId, "civ_" + workerId.toString().replace("-", "").take(12),
                     skin.texture, skin.signature))
                 npc.viewRange = viewerRange.toDouble()
@@ -286,6 +295,7 @@ class CivsCitizens(
             val worker = city?.workers?.firstOrNull { it.id == workerId }
             if (city != null && worker != null) {
                 val actor = actors[workerId]
+                actor?.combatStatus?.let { return "workers.status.$it" }
                 if (actor?.sheltering == true) return "workers.status.${if (actor.sleeping) "sleeping" else "sheltering"}"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
                 actor?.social?.visit?.let {
@@ -378,7 +388,8 @@ class CivsCitizens(
         val control = building.control ?: throw CivsRejection("control-missing")
         val entity = actor.npc
         if (entity.world.uid != city.worldId || actor.workerId in pendingHarm ||
-            actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
+            actor.supplyPickup?.buildingId != buildingId &&
+                actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
             !citizenAtStorage(entity.world, entity.location.point(), control) ||
             !citizenCanReachBlock(entity, control)) throw CivsRejection("route-unreachable")
     }
@@ -399,12 +410,14 @@ class CivsCitizens(
 
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
         val base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
-        val planned = if (base.courier != null || base.type !in CivsWorksites.TYPES || base.idleReason != null) base else {
+        val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
+        val planned = if (admitted.courier != null || admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
             val work = workPlan(city, worker)
             if (work == null) base.copy(idleReason = workIdleReason(city, worker)) else base.copy(
                 workplace = work.standing, workMillis = work.durationMillis, completeAtWorkplace = true, worldWork = work)
         }
-        return planned.copy(workMillis = CivsResidents.workDuration(worker, planned.workMillis))
+        return planned.copy(workMillis = CivsResidents.workDuration(worker, planned.workMillis),
+            suppliesNeeded = !workInputsReady(city, worker))
     }
 
     fun workplaceSnapshots(): List<CivsWorkplaceSnapshot> {
@@ -470,7 +483,8 @@ class CivsCitizens(
             val motion = route.motion
             // Stop on the first valid arrival tick, including at any usable side of a barrel.
             // Waiting for the coarse work pulse used to keep walking around the barrel after arrival.
-            val travelTarget = if (actor.returningToWarehouse) actor.plan.storage else when (actor.cycle.phase) {
+            val travelTarget = actor.combatDestination ?: actor.foodSource?.let(city::building)?.control ?:
+                if (actor.returningToWarehouse) actor.plan.storage else when (actor.cycle.phase) {
                 CitizenPhase.TO_WORK -> actor.plan.workplace
                 CitizenPhase.TO_STORAGE, CitizenPhase.RETURNING -> actor.plan.storage
                 else -> null
@@ -484,16 +498,29 @@ class CivsCitizens(
                 continue
             }
             if (motion.searching) continue
+            if (!route.planningReported) {
+                route.planningReported = true
+                val elapsed = System.currentTimeMillis() - route.startedAt
+                if (elapsed >= 1_000) CivsDiagnostics.event("citizen_route_ready", "worker" to actor.workerId,
+                    "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to motion.failure,
+                    "intermediate" to route.intermediate)
+            }
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
             if (motion.failure != null) { route.completion = CitizenNavigationCompletion(motion.failure); continue }
             if (motion.finished) {
+                if (route.intermediate) {
+                    cancelRoute(actor)
+                    startRoute(actor, npc.world, route.authored, System.currentTimeMillis(), route.idleAnchor)
+                    continue
+                }
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
                 continue
             }
             val before = npc.location
-            val working = actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering)
-            val speed = if (working) surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
+            val working = actor.attacker == null && (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))
+            val speed = if (actor.attacker != null) 1.1 else if (working)
+                surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             val next = motion.move(before, speed, { from, to -> residentStepAllowed(npc, from, to) }) { destination ->
                 (0..1).all { dy -> citizenOpenRouteDoor(city, route.allowedBuildings, before,
                     CivPosition(destination.blockX, destination.blockY + dy, destination.blockZ), doorBlocked) }
@@ -520,6 +547,11 @@ class CivsCitizens(
             }
             if (motion.failure != null) route.completion = CitizenNavigationCompletion(motion.failure)
             else if (motion.finished) {
+                if (route.intermediate) {
+                    cancelRoute(actor)
+                    startRoute(actor, npc.world, route.authored, System.currentTimeMillis(), route.idleAnchor)
+                    continue
+                }
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
             }
@@ -530,6 +562,9 @@ class CivsCitizens(
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
         val cycle = actor.cycle
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (actor.supplyPickup != null) { statuses[actor.workerId] = "loading-cargo"; return }
+        if (combat(actor, city, worker, world, now)) return
+        if (supplyFood(actor, city, worker, world, now)) return
         if (world.time in 12_000L..23_000L && cycle.phase !in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP)) {
             stopCamp(actor, "night")
             shelter(actor, city, worker, world, now)
@@ -560,6 +595,10 @@ class CivsCitizens(
         } else stopCamp(actor, "work-priority")
         actor.plan.idleReason?.let {
             if (it != "placing") {
+                if (actor.plan.type == BuildingType.BUILDER_HUT && it == "waiting-materials") {
+                    travelForSupplies(actor, city, world, actor.plan.storage, now)
+                    return
+                }
                 if (it !in setOf("waiting-materials", "construction-paused")) wander(actor, city, world, now)
                 statuses[actor.workerId] = it
                 animateWork(actor, city, world, now)
@@ -582,6 +621,15 @@ class CivsCitizens(
         when (cycle.phase) {
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> {
                 val target = if (cycle.phase == CitizenPhase.TO_WORK) requireNotNull(actor.plan.workplace) else actor.plan.storage
+                if (arrivedAt(actor, city, world, target)) {
+                    cancelRoute(actor)
+                    arriveForWork(actor, city, worker, now)
+                    statuses[actor.workerId] = actor.cycle.status()
+                    // Arrival starts the observed work interval on this pulse. Its first
+                    // gesture and crop-care prop belong to that same interval.
+                    if (actor.cycle.phase == CitizenPhase.WORKING) animateWork(actor, city, world, now)
+                    return
+                }
                 if (actor.route == null) startRoute(actor, world, target, now)
                 val route = actor.route
                 if (route != null) {
@@ -598,7 +646,7 @@ class CivsCitizens(
                             CitizenNavigationOutcome.ARRIVED -> {
                                 route.trip?.let { paths.complete(city, it) }
                                 cancelRoute(actor)
-                                cycle.arrive(now)
+                                arriveForWork(actor, city, worker, now)
                             }
                             else -> pauseNavigation(actor, "route-unreachable", outcome.name.lowercase(), route.target, now)
                         }
@@ -607,7 +655,11 @@ class CivsCitizens(
             }
             CitizenPhase.WORKING -> {
                 val target = requireNotNull(actor.plan.workplace)
-                if (!arrivedAt(actor, city, world, target))
+                if (!workInputsReady(city, worker)) {
+                    cancelRoute(actor)
+                    actor.cycle = actor.plan.copy(suppliesNeeded = true).cycle()
+                    actor.cycle.start()
+                } else if (!arrivedAt(actor, city, world, target))
                     pauseNavigation(actor, "route-unreachable", "left-workplace", resolvedTarget(actor, target).location(world), now)
                 else if (actor.plan.idleReason != "placing") {
                     cycle.work(now)
@@ -628,6 +680,160 @@ class CivsCitizens(
                 actor.plan.token.constructionId?.let { constructionBuilder(actor, city, it) } != null) "placing"
                 else citizenWorkStatus(actor.plan, cycle.phase) ?: cycle.status()
             animateWork(actor, city, world, now)
+        }
+    }
+
+    private fun defend(workerId: UUID, monster: Monster) {
+        val victim = actors[workerId] ?: return
+        val now = System.currentTimeMillis()
+        for (actor in actors.values) {
+            if (actor.cityId != victim.cityId || !actor.npc.isValid || actor.npc.world != monster.world ||
+                actor.npc.location.distanceSquared(victim.npc.location) > 10.0 * 10.0) continue
+            if (actor.attacker?.uniqueId != monster.uniqueId) {
+                if (actor.attacker?.let { it.isValid && !it.isDead } == true) continue
+                cancelRoute(actor)
+                stopCamp(actor, "monster")
+                actor.sheltering = false
+                actor.shelter = null
+                actor.cycle = actor.plan.cycle()
+                actor.attacker = monster
+                actor.combatDestination = null
+                actor.combatRouteAfter = 0
+            }
+            actor.combatUntil = now + 10_000
+        }
+    }
+
+    private fun combat(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
+        val monster = actor.attacker ?: return false
+        if (!monster.isValid || monster.isDead || monster.world != world || now > actor.combatUntil ||
+            monster.location.distanceSquared(actor.npc.location) > 24.0 * 24.0) {
+            cancelRoute(actor)
+            actor.attacker = null
+            actor.combatDestination = null
+            actor.combatStatus = null
+            actor.cycle = actor.plan.cycle()
+            return false
+        }
+        val retreat = citizenRetreats(worker)
+        actor.combatStatus = if (retreat) "retreating" else "defending"
+        statuses[actor.workerId] = requireNotNull(actor.combatStatus)
+        val at = actor.npc.location
+        val foe = monster.location
+        if (!retreat && at.distanceSquared(foe) <= 2.5 * 2.5 &&
+            threats.visible(at.clone().add(0.0, actor.npc.eyeHeight, 0.0), monster.eyeLocation)) {
+            cancelRoute(actor)
+            actor.combatDestination = null
+            citizenLookDirection(at.clone().add(0.0, actor.npc.eyeHeight, 0.0), monster.eyeLocation)
+                .let { (yaw, pitch) -> look(actor.npc, yaw, pitch) }
+            if (now >= actor.combatAttackAfter) {
+                actor.combatAttackAfter = now + 1_000
+                actor.npc.swingMainHand()
+                monster.damage(citizenAttackDamage(CivsEquipment.slots(worker)[4]?.stack()))
+            }
+            return true
+        }
+        if (now < actor.combatRouteAfter || wanderBudget == 0) return true
+        if (actor.route?.let { it.motion.navigating && now - it.startedAt < it.timeoutMillis } == true && actor.combatDestination?.let {
+                retreat || it.point().distanceSquared(foe.point()) <= 3.0 * 3.0
+            } == true) return true
+        wanderBudget--
+        actor.combatRouteAfter = now + 1_000
+        cancelRoute(actor)
+        val direction = at.toVector().subtract(foe.toVector()).setY(0.0)
+        if (direction.lengthSquared() < .01) direction.x = 1.0
+        direction.normalize()
+        val points = if (retreat) listOf(6.0, 4.0, 8.0).flatMap { distance ->
+            listOf(0.0, .8, -.8).map { turn -> at.clone().add(direction.clone().rotateAroundY(turn).multiply(distance)) }
+        } else listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).map { (x, z) -> foe.clone().add(x.toDouble(), 0.0, z.toDouble()) }
+        val destination = points.asSequence().flatMap { point -> sequenceOf(0, 1, -1).map { dy ->
+            CivPosition(point.blockX, point.blockY + dy, point.blockZ)
+        } }.firstOrNull { point -> citizenStandable(world, point) && citizenControlClear(city, point) &&
+            citizenPacketBodyClear(world, point.point(), false) && citizenPacketCampfireClear(world, point.point()) &&
+            citizenRouteCellAllowed(city, citizenRouteBuildings(city, actor.plan, point,
+                CivPosition(at.blockX, at.blockY, at.blockZ)), point.x, point.z) }
+        if (destination != null) {
+            actor.combatDestination = destination
+            startRoute(actor, world, destination, now)
+        }
+        return true
+    }
+
+    private fun arriveForWork(actor: Actor, city: Settlement, worker: CivWorker, now: Long) {
+        if (actor.cycle.phase == CitizenPhase.TO_STORAGE && city.inventory != null && actor.plan.courier == null &&
+            actor.plan.type !in CivsWorksites.TYPES &&
+            (actor.plan.type == BuildingType.BUILDER_HUT || !workInputsReady(city, worker))) {
+            val source = storageForTarget(actor, city, actor.plan.storage) ?: return
+            beginSupplies(actor, source.id, now, resumeWork = true)
+        } else if (actor.cycle.phase != CitizenPhase.TO_WORK || workInputsReady(city, worker)) actor.cycle.arrive(now)
+        else {
+            actor.cycle = actor.plan.copy(suppliesNeeded = true).cycle()
+            actor.cycle.start()
+        }
+    }
+
+    /** Food is collected at the hall without replacing a cargo/work identity. */
+    private fun supplyFood(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
+        if (actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) || now < actor.supplyRetryAt) return false
+        val source = residentSupplySource(city, worker)
+        if (source == null) {
+            if (actor.foodSource != null) { cancelRoute(actor); actor.foodSource = null }
+            return false
+        }
+        val control = city.building(source)?.control ?: return false
+        if (actor.foodSource != source) { cancelRoute(actor); stopCamp(actor, "food"); actor.foodSource = source }
+        travelForSupplies(actor, city, world, control, now, resumeWork = false)
+        return true
+    }
+
+    private fun travelForSupplies(actor: Actor, city: Settlement, world: World, target: CivPosition, now: Long,
+                                  resumeWork: Boolean = false) {
+        statuses[actor.workerId] = "moving-to-storage"
+        if (now < actor.supplyRetryAt) { statuses[actor.workerId] = "waiting-materials"; return }
+        if (arrivedAt(actor, city, world, target)) {
+            cancelRoute(actor)
+            citizenControlBuilding(city, target)?.let { beginSupplies(actor, it.id, now, resumeWork) }
+            return
+        }
+        if (actor.route == null) startRoute(actor, world, target, now)
+        actor.route?.let { route ->
+            if (route.completion != null || now - route.startedAt > route.timeoutMillis) {
+                // A supply detour may retry normally, but never teleport into work from a food trip.
+                cancelRoute(actor)
+                actor.supplyRetryAt = now + 1_000
+            }
+        }
+    }
+
+    private fun beginSupplies(actor: Actor, buildingId: UUID, now: Long, resumeWork: Boolean) {
+        if (actor.supplyPickup != null || now < actor.supplyRetryAt) return
+        val pickup = SupplyPickup(UUID.randomUUID(), buildingId, resumeWork)
+        actor.supplyPickup = pickup
+        val future = try { prepareSupplies(actor.cityId, actor.workerId, buildingId) }
+            catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        future.whenComplete { city, error ->
+            if (!closed.get()) supplyCompletions.add(SupplyCompletion(actor.workerId, actor.instanceId, pickup, city, error))
+        }
+    }
+
+    private fun drainSupplies(now: Long) {
+        while (true) {
+            val completion = supplyCompletions.poll() ?: return
+            val actor = actors[completion.workerId]?.takeIf {
+                it.instanceId == completion.actorId && it.supplyPickup == completion.pickup
+            } ?: continue
+            actor.supplyPickup = null
+            val error = (completion.error as? CompletionException)?.cause ?: completion.error
+            if (error != null) {
+                actor.supplyRetryAt = now + 1_000
+                if (error !is CivsRejection) logFailure(actor, "supplies", error)
+            } else {
+                actor.foodSource = null
+                val city = completion.city ?: continue
+                val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
+                if (completion.pickup.resumeWork && workInputsReady(city, worker)) actor.cycle.arrive(now)
+                actor.equipmentItems = null
+            }
         }
     }
 
@@ -653,7 +859,7 @@ class CivsCitizens(
         val player = actor.npc
         val eye = player.location.clone().add(0.0, player.eyeHeight, 0.0)
         val workFocus = actor.plan.worldWork?.let(::citizenWorkFocus)
-        val focus = if (workFocus != null) citizenReachableBlockPoint(world, eye, workFocus) ?: return
+        val focus = if (workFocus != null) citizenReachableBlockPoint(world, eye, workFocus, citizenWorkReach(actor.plan.type)) ?: return
         else if (city.buildings.any { it.control == workplace })
             Location(world, workplace.x + 0.5, workplace.y + 0.7, workplace.z + 0.5)
         else citizenWorkBuilding(city, actor.plan)?.bounds?.let { bounds ->
@@ -947,7 +1153,6 @@ class CivsCitizens(
         // cell. Likewise, any visible side of the real storage barrel is a valid arrival.
         if (idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
             actor.plan.idleReason in listOf(null, "placing") && arrivedAt(actor, city, world, target)) {
-            actor.cycle.arrive(now)
             return true
         }
         val storage = storageForTarget(actor, city, target)
@@ -965,7 +1170,8 @@ class CivsCitizens(
             actor.targets[target] = standing
         }
         val resolved = if (idleAnchor != null && storage == null) target else resolvedTarget(actor, target)
-        val to = resolved.location(world)
+        val waypoint = citizenMineWaypoint(city, world, from, resolved)
+        val to = (waypoint ?: resolved).location(world)
         val distance = from.distance(to)
         if (!citizenRouteWithinReach(from.point(), to.point())) {
             if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing")) pauseNavigation(actor, "route-unreachable", "outside-route-range", to, now)
@@ -993,7 +1199,7 @@ class CivsCitizens(
             { ground -> trip?.cost(ground, surfaceSpeed) ?: 1.0 })
         val timeout = if (actor.sheltering) 10_000L else (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = Route(from.point(), to, chunks, now, timeout,
-            allowed, motion, trip)
+            allowed, motion, trip, target, waypoint != null, idleAnchor)
         look(actor.npc, from.yaw, 0f)
         return true
     }
@@ -1011,6 +1217,7 @@ class CivsCitizens(
             "from" to route?.from?.coordinates(), "target" to target.point().coordinates(), "actual" to actual.coordinates(),
             "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
             "path_nodes" to route?.motion?.nodeCount, "path_failure" to route?.motion?.failure,
+            "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
             "strategy" to "packet-grid"))
         if (!recoverNavigation(actor, target, now)) pause(actor, status, now)
     }
@@ -1018,7 +1225,7 @@ class CivsCitizens(
     private fun resolvedTarget(actor: Actor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
     private fun canWorkFrom(actor: Actor, work: CivWorldWork): Boolean =
-        citizenWorkFocus(work)?.let { citizenCanReachBlock(actor.npc, it) } == true
+        citizenWorkFocus(work)?.let { citizenCanReachBlock(actor.npc, it, citizenWorkReach(actor.plan.type)) } == true
 
     private fun storageForTarget(actor: Actor, city: Settlement, target: CivPosition): CivBuilding? {
         val work = actor.plan.worldWork
@@ -1044,6 +1251,8 @@ class CivsCitizens(
     /** A proven failed route may recover to a freshly validated loaded endpoint, never into a wall. */
     private fun recoverNavigation(actor: Actor, target: Location, now: Long, idleAnchor: CivPosition? = null): Boolean {
         val failed = actor.route ?: return false
+        // Planning latency and a temporary player obstruction are not proof of an impossible route.
+        if (failed.motion.searching || failed.motion.waitingForCollision || now < actor.nextRecoveryAt || actor.attacker != null) return false
         if (failed.motion.failure == null && failed.completion == null && now - failed.startedAt <= failed.timeoutMillis) return false
         if (recoveryBudget == 0 || idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
             actor.plan.idleReason !in listOf(null, "placing") ||
@@ -1084,10 +1293,11 @@ class CivsCitizens(
         if (actor.sheltering) actor.shelter = point
         else if (idleAnchor == null) actor.targets[authored] = point
         entity.teleport(destination)
+        actor.nextRecoveryAt = now + 60_000
         actor.footsteps.reset()
         if (idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse) {
             if (!arrivedAt(actor, city, entity.world, authored)) return false
-            actor.cycle.arrive(now)
+            arriveForWork(actor, city, worker, now)
         }
         CivsDiagnostics.event("citizen_route_recovered", "city" to city.id, "worker" to actor.workerId,
             "mode" to "safe-teleport", "cause" to (failed.motion.failure ?: failed.completion?.cancelReason ?: "timeout"),
@@ -1405,6 +1615,7 @@ class CivsCitizens(
         actors.clear()
         completions.clear()
         harmCompletions.clear()
+        supplyCompletions.clear()
         pendingHarm.clear()
         spawnRetries.clear()
         statuses.clear()
@@ -1446,15 +1657,30 @@ class CivsCitizens(
         var sleeping = false
         var shelter: CivPosition? = null
         var nextPlayAt = 0L
+        var supplyPickup: SupplyPickup? = null
+        var supplyRetryAt = 0L
+        var foodSource: UUID? = null
+        var nextRecoveryAt = 0L
+        var attacker: Monster? = null
+        var combatUntil = 0L
+        var combatDestination: CivPosition? = null
+        var combatStatus: String? = null
+        var combatRouteAfter = 0L
+        var combatAttackAfter = 0L
     }
     private class Route(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long,
-        val timeoutMillis: Long, val allowedBuildings: Set<UUID>, val motion: CitizenPacketRoute, val trip: CivsPaths.Trip?) {
+        val timeoutMillis: Long, val allowedBuildings: Set<UUID>, val motion: CitizenPacketRoute, val trip: CivsPaths.Trip?,
+        val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null) {
         var completion: CitizenNavigationCompletion? = null
+        var planningReported = false
         var path: CitizenPathSnapshot? = null
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?, val pickup: Boolean = false)
     private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?, val epoch: Long)
+    private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean)
+    private data class SupplyCompletion(val workerId: UUID, val actorId: UUID, val pickup: SupplyPickup,
+        val city: Settlement?, val error: Throwable?)
 
     private companion object {
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
@@ -1537,10 +1763,10 @@ internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: L
     val shipmentId: UUID? = null)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
-    val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null) {
+    val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false) {
     val spawnOrigin: CivPosition get() = courier?.cargo?.sourceEntrance ?: storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
-        worldWork != null || type == BuildingType.BUILDER_HUT && idleReason == "placing")
+        worldWork != null || type == BuildingType.BUILDER_HUT && idleReason == "placing" && !suppliesNeeded)
 }
 
 /** Pickup publication changes carried quantity, never the identity of the journey already observed. */
@@ -1668,14 +1894,16 @@ internal fun citizenWorkFocus(work: CivWorldWork): CivPosition? =
             work.changes.all { it.position == focus.copy(y = focus.y - 1) } }
 
 /** A short eye-to-block ray is the authority for work and storage access; no chunk is loaded. */
-internal fun citizenCanReachBlock(npc: PacketPlayerNpc, target: CivPosition): Boolean =
-    npc.isValid && citizenCanReachBlock(npc.world, npc.location.clone().add(0.0, npc.eyeHeight, 0.0), target)
+internal fun citizenCanReachBlock(npc: PacketPlayerNpc, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH): Boolean =
+    npc.isValid && citizenCanReachBlock(npc.world, npc.location.clone().add(0.0, npc.eyeHeight, 0.0), target, reach)
 
 internal const val CITIZEN_BLOCK_REACH = 3.0
+internal const val CITIZEN_MINE_REACH = 4.5
+internal fun citizenWorkReach(type: BuildingType?): Double = if (type == BuildingType.QUARRY) CITIZEN_MINE_REACH else CITIZEN_BLOCK_REACH
 
 /** Planning uses the same ray contract as the observed actor and its durable receipt. */
-internal fun citizenCanReachBlock(world: World, eye: Location, target: CivPosition): Boolean =
-    citizenReachableBlockPoint(world, eye, target) != null
+internal fun citizenCanReachBlock(world: World, eye: Location, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH): Boolean =
+    citizenReachableBlockPoint(world, eye, target, reach) != null
 
 /** A block's centre can be hidden while one of its faces remains visible, notably below a ladder. */
 internal fun citizenBlockAimPoints(eye: Location, target: CivPosition): List<Location> {
@@ -1692,20 +1920,21 @@ internal fun citizenBlockAimPoints(eye: Location, target: CivPosition): List<Loc
         Location(eye.world, x, y, z0), Location(eye.world, x, y, z1)).distinct()
 }
 
-internal fun citizenReachableBlockPoint(world: World, eye: Location, target: CivPosition): Location? {
+internal fun citizenReachableBlockPoint(world: World, eye: Location, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH): Location? {
     if (eye.world != world || !eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite() ||
         target.y !in world.minHeight until world.maxHeight) return null
-    val points = citizenBlockAimPoints(eye, target).filter { eye.distanceSquared(it) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH }
+    val points = citizenBlockAimPoints(eye, target).filter { eye.distanceSquared(it) <= reach * reach }
     if (points.isEmpty() || !citizenBlockTraceReady(world, eye, target)) return null
     return points.firstOrNull { citizenTraceBlockPoint(world, eye, target, it) }
 }
 
 /** A single bounded sample; Worksites keeps its own cursor and shared eight-ray pulse budget. */
-internal fun citizenCanReachBlockPoint(world: World, eye: Location, target: CivPosition, aim: Location): Boolean {
+internal fun citizenCanReachBlockPoint(world: World, eye: Location, target: CivPosition, aim: Location,
+    reach: Double = CITIZEN_BLOCK_REACH): Boolean {
     if (aim.world != world || !aim.x.isFinite() || !aim.y.isFinite() || !aim.z.isFinite() ||
         aim.x < target.x || aim.x >= target.x + 1.0 || aim.y < target.y || aim.y >= target.y + 1.0 ||
         aim.z < target.z || aim.z >= target.z + 1.0 || eye.world != world ||
-        eye.distanceSquared(aim) > CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH) return false
+        eye.distanceSquared(aim) > reach * reach) return false
     return citizenBlockTraceReady(world, eye, target) && citizenTraceBlockPoint(world, eye, target, aim)
 }
 
@@ -2086,6 +2315,31 @@ internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: 
             building.control == target ||
             (target == plan.workplace || target == plan.storage) && building.id == plan.token.assignmentId
     }.mapTo(hashSetOf()) { it.id }
+
+/** Authored shafts split a deep search into the actual entrance, climb and gallery legs. */
+internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location, target: CivPosition): CivPosition? {
+    for (mine in city.buildings.filter { it.type == BuildingType.QUARRY }) {
+        val layout = CivsWorksiteLayouts.site(mine)?.getAsJsonObject("mine") ?: continue
+        val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
+        val floors = layout.getAsJsonArray("floors").flatMap { floor ->
+            floor.asJsonObject.getAsJsonArray("floorCells").map { CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(it)) }
+        }
+        fun inMine(x: Int, y: Double, z: Int): Boolean = y < bottom.y - .5 &&
+            (x == bottom.x && z == bottom.z || floors.any { abs(x - it.x) <= 1 && abs(z - it.z) <= 1 && y in (it.y.toDouble()..it.y + 4.0) })
+        if (abs(from.y - target.y) <= 1.01 ||
+            !inMine(from.blockX, from.y, from.blockZ) && !inMine(target.x, target.y.toDouble(), target.z)) continue
+        val onShaft = from.blockX == bottom.x && from.blockZ == bottom.z
+        val waypoint = when {
+            from.y > bottom.y + .5 -> bottom
+            !onShaft -> bottom.copy(y = from.blockY)
+            target.y >= bottom.y -> bottom
+            else -> bottom.copy(y = target.y)
+        }
+        if (waypoint == target || citizenNearEndpoint(from.point(), waypoint)) continue
+        if (citizenStandable(world, waypoint) && citizenPacketBodyClear(world, waypoint.point(), false)) return waypoint
+    }
+    return null
+}
 
 internal fun citizenShelterTarget(city: Settlement, worker: CivWorker, safe: (CivPosition) -> Boolean): CivPosition? {
     val home = citizenHomeBuilding(city, worker) ?: return null

@@ -283,10 +283,13 @@ QUARRY advances an authored real shaft across multiple floors. Before excavation
 the miner needs a pickaxe and carried ladders, torches and cobblestone. If any
 supply runs out, one storage receipt tops the bag up to 16 ladders, 8 torches and
 32 cobblestone before work resumes; it does not alter blocks or mining progress.
-Mining spends carried supplies and harvests native drops one block per 4-second
-action. The three worksites therefore do not mint resources on a timer.
-Item-storage processors consume carried ingredients first, then their current
-control barrel or virtual building map; output remains in the building store; couriers move their goods to the current building endpoint.
+Mining secures exposed floor, walls, ceiling and lighting with paid carried supplies
+before advancing, and harvests native drops one block per 2-second action. The three
+worksites therefore do not mint resources on a timer. The miner can reach visible
+blocks up to 4.5 blocks away; collision and line of sight still control each action.
+Item-storage processors physically collect ingredients from their own control barrel
+before working. Both work admission and the final receipt require carried ingredients;
+output remains in the building store and couriers move it to its current endpoint.
 FARM and FORESTER perform work directly at field/tree cells, without a per-cell
 return trip. Legacy abstract-stock producers retain their old return trip. The chosen processor output is persisted
 per building; a full destination pauses delivery. Farming takes 1.5 seconds per
@@ -297,8 +300,10 @@ No offline production/catch-up.
 
 Orders are derived from local ingredient shortages: one recipe cycle per assigned
 worker, less local stock and incoming cargo. Construction orders cover only the
-current `payment.awaiting` row, delivered to a builder hut. Construction consumes
-builders' real bags first and then only builder-hut-local stores. A SITE hut can
+unpaid material remainder, delivered to a builder hut. Builders collect useful batches
+from their own huts into real inventory slots; placement consumes only carried items.
+A full builder bag can return spare ordinary blocks to its hut to fit the next row.
+A SITE hut can
 bootstrap its own construction; neither the target building nor the hall is a
 construction buffer. Explicit virtual mode uses the same hut-local scope.
 Active warehouses and builder huts can use their indexed internal containers. Couriers prefer
@@ -310,9 +315,15 @@ Worksite orders include one spare IRON_HOE, IRON_AXE or IRON_PICKAXE per assigne
 worker, according to job; FARM requests only its selected seed type.
 
 `CivWorker.cargo` records one material, at most64 items, original source entrance
-and stable shipment identity. Pickup journals source debit and cargo together;
+and stable shipment identity. New cargo is marked `inventoryBacked`; its exact items
+occupy the resident's real bag and are reserved against personal consumption/removal.
+Legacy cargo materializes in a durable revision before gameplay exposure. Existing full bags
+or old unstackable shipments retain overflow in extra persisted native-item slots, visible
+on withdrawal-only inventory pages; ordinary pickup/deposit capacity remains 27 bag slots. A pending
+old receipt retires first, followed by that migration. Pickup journals source debit,
+bag items and cargo together;
 the actor waits for that receipt before travelling. Unload journals destination
-credit, cargo removal, one completed cycle and one WAREHOUSE profession point.
+credit, exact bag debit, cargo removal, one completed cycle and one WAREHOUSE profession point.
 An empty courier without another shipment returns beside its assigned warehouse
 barrel and waits there; this return is real movement with no cargo or work reward.
 Night sheltering still takes priority. Actual dirt paths and provider-recognized
@@ -326,8 +337,18 @@ A pending receipt retains the actor's shipment plan. Shipment recovery preserves
 its recorded source and accepted cargo; safe empty-return or night-shelter
 recovery changes no shipment state. Missing destinations return to a reachable surviving warehouse
 or hall, within the same route bound. Reassignment
-does not discard carried goods; death intentionally destroys cargo without drops.
+does not discard carried goods. Death transfers exact equipment and bag contents to
+a saved corpse for five minutes and releases its shipment reservation. The corpse
+shows its resident and killer/cause; city members can loot nearby through the same
+native item journal. Expiry removes unclaimed contents. Rendering creates no loot
+copies, and the body preserves fractional feet height on paths, slabs and stairs.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
+
+Hungry residents with no personal bread fetch up to four existing bread from their
+town hall, limited by its stock and real bag capacity, before returning to their job.
+Monster attacks interrupt work: nearby adult residents assist, while children and
+badly injured adults retreat. Combat uses actual carried weapons and native monster
+damage events; neither NPC combat nor corpse rendering grants currency or player XP.
 
 All item movement uses exact native slot before/after receipts stored by Core
 AtomicFileStore on the I/O executor before native writes. Synchronous planning
@@ -352,8 +373,8 @@ change saved row boundaries: water blocks, waterlogging and cauldron filling no
 longer require water buckets, while the underlying block/cauldron still does.
 Old unpaid water requests are recalculated; paid reservations are not refunded.
 One observed builder
-session adds at most eight existing rows after two seconds of work. Concurrent
-builders add once-only durable credit, bounded by remaining rows and 96 total rows;
+session adds at most 64 existing rows after two seconds of work. Concurrent
+builders add once-only durable credit, bounded by remaining rows and 768 total rows;
 one placer still charges and installs each row serially. Durable work credit
 preserves the remaining authorization across pause/restart; it does
 not change row indices or charge already paid rows again. Only that row's exact obtainable items are debited, in the existing

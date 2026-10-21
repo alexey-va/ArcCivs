@@ -48,6 +48,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private var spotSearchPending = false
     private var cursor = 0
     private val mineCursors = hashMapOf<UUID, Triple<Int, Long, Int>>()
+    private data class MineSafetyScan(val building: CivBuilding, val target: CivPosition, val progress: Long, var next: Int = 0)
+    private val mineSafety = hashMapOf<UUID, MineSafetyScan>()
 
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {
         val building = worker.assignment?.let(city::building) ?: return null
@@ -55,7 +57,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             it.worker.items == worker.items && it.worker.inventory == worker.inventory }?.work
     }
 
-    fun invalidate(workerId: UUID) { cached.remove(workerId); needs.remove(workerId); workSpots.remove(workerId) }
+    fun invalidate(workerId: UUID) { cached.remove(workerId); needs.remove(workerId); workSpots.remove(workerId); mineSafety.remove(workerId) }
 
     /** One worker, 16 job candidates, 32 standing probes and eight short rays per shared pulse. */
     fun pulse(cities: Collection<Settlement>) {
@@ -72,6 +74,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         reportedNeeds.keys.retainAll(workerIds)
         cursors.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
+        mineSafety.keys.retainAll(workerIds)
         if (jobs.isEmpty()) return
         val (city, worker, building) = jobs[Math.floorMod(cursor++, jobs.size)]
         if (plan(city, worker) != null) return
@@ -442,6 +445,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 // Record skipped already-dug cells with the next actual work, without a save per empty cell.
                 continue
             }
+            val protection = secureMine(city, worker, building, world, layout, local, next - 1)
+            if (protection != null || spotSearchPending || currentNeed(city, worker)?.status != "searching-work") return protection
             if (block.isLiquid) return blocked(worker, "worksite-liquid", point = point,
                 reason = "liquid", blockMaterial = block.type.name)
             if (block.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = point,
@@ -459,7 +464,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (!shaft.type.isAir && shaft.type != Material.LADDER) {
                     val standing = beside(city, worker, building, world, shaftPoint, ladder = true) ?: return null
                     return work(worker, building, standing, listOf(change(shaft, "minecraft:air")),
-                        outputs = drops(shaft, tool(worker)), status = "digging-mine", duration = 4_000, miningStep = next - 1)
+                        outputs = drops(shaft, tool(worker)), status = "digging-mine", duration = 2_000, miningStep = next - 1)
                 }
             }
             val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
@@ -472,9 +477,68 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val standing = beside(city, worker, building, world, point, ladder = true) ?: return null
             val outputs = if (block.type.isAir || block.type == Material.LADDER || block.type == Material.TORCH) emptyMap() else drops(block, tool(worker))
             return work(worker, building, standing, listOf(change(block, if (excavating) "minecraft:air" else target?.asString ?: "minecraft:air")), costs, outputs,
-                "digging-mine", duration = 4_000, miningStep = if (excavating) next - 1 else next)
+                "digging-mine", duration = 2_000, miningStep = if (excavating) next - 1 else next)
         }
         if (mineCursors[building.id]?.third == steps.size || scanStart == steps.size) blocked(worker, "mine-complete")
+        return null
+    }
+
+    /** Repair the exposed shaft/gallery shell before admitting its next excavation step.
+     * These extra paid actions deliberately retain the old durable cursor: existing mines keep their geometry. */
+    private fun secureMine(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        layout: com.google.gson.JsonObject, around: CivPosition, progress: Long): CivWorldWork? {
+        data class Protection(val exposed: CivPosition, val block: CivPosition, val material: Material)
+        val bottom = CivsWorksiteLayouts.vector(layout["ladderBottom"])
+        val floors = layout.getAsJsonArray("floors").map { level ->
+            level.asJsonObject.getAsJsonArray("floorCells").map(CivsWorksiteLayouts::vector)
+                .sortedBy { kotlin.math.abs(it.x - bottom.x) + kotlin.math.abs(it.z - bottom.z) }
+        }
+        val lowest = layout.getAsJsonArray("floors").last().asJsonObject["feetY"].asInt
+        val tasks = buildList {
+            for (y in maxOf(lowest, around.y - 2)..minOf(bottom.y - 1, around.y + 2)) {
+                val exposed = bottom.copy(y = y)
+                for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+                    val wall = exposed.copy(x = exposed.x + dx, z = exposed.z + dz)
+                    // Gallery portals remain open; the remaining shaft sides close caves and liquids.
+                    if (floors.none { cells -> cells.any { it.x == wall.x && it.z == wall.z && wall.y in it.y + 1..it.y + 3 } })
+                        add(Protection(exposed, wall, Material.COBBLESTONE))
+                }
+            }
+            for (cells in floors) for ((index, support) in cells.withIndex()) {
+                if (kotlin.math.abs(support.x - around.x) > 2 || kotlin.math.abs(support.z - around.z) > 2 ||
+                    around.y !in support.y..support.y + 4) continue
+                val exposed = support.copy(y = support.y + 1)
+                add(Protection(exposed, support, Material.COBBLESTONE))
+                add(Protection(exposed, support.copy(y = support.y + 4), Material.COBBLESTONE))
+                for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+                    val x = support.x + dx; val z = support.z + dz
+                    if (x == bottom.x && z == bottom.z || cells.any { it.x == x && it.z == z }) continue
+                    for (dy in 1..3) add(Protection(exposed, CivPosition(x, support.y + dy, z), Material.COBBLESTONE))
+                }
+                if (index % 8 == 0) add(Protection(exposed, exposed, Material.TORCH))
+            }
+        }.distinct()
+        val scan = mineSafety[worker.id]?.takeIf { it.building == building && it.target == around && it.progress == progress }
+            ?: MineSafetyScan(building, around, progress).also { mineSafety[worker.id] = it }
+        repeat(24) {
+            val task = tasks.getOrNull(scan.next) ?: return null
+            val exposed = CivsWorksiteLayouts.point(building, task.exposed)
+            val opening = read(city, building, world, exposed) ?: run { scan.next++; return@repeat }
+            val head = read(city, building, world, exposed.copy(y = exposed.y + 1)) ?: run { scan.next++; return@repeat }
+            val open = setOf(Material.AIR, Material.CAVE_AIR, Material.VOID_AIR, Material.LADDER, Material.TORCH)
+            if (opening.type !in open || head.type !in open) { scan.next++; return@repeat }
+            val point = CivsWorksiteLayouts.point(building, task.block)
+            val block = read(city, building, world, point, worker = worker) ?: return null
+            val safe = if (task.material == Material.TORCH) block.type == Material.TORCH
+                else block.type.isOccluding && !block.type.hasGravity()
+            if (safe || !block.type.isAir && !block.isLiquid && block.type !in WEEDS) { scan.next++; return@repeat }
+            if (CivsEquipment.plainCount(worker, task.material.name) == 0)
+                return blocked(worker, "waiting-${task.material.name.lowercase()}", task.material.name)
+            val standing = beside(city, worker, building, world, point, ladder = true) ?: return null
+            return work(worker, building, standing, listOf(change(block, task.material.createBlockData().asString)),
+                inputs = mapOf(task.material.name to 1L), status = "securing-mine", duration = 2_000, miningStep = progress)
+        }
+        if (scan.next < tasks.size) { spotSearchPending = true; blocked(worker, "searching-work") }
         return null
     }
 
@@ -506,6 +570,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             it.buildingId == building.id && it.target == target && it.allowOwn == allowOwn && it.ladder == ladder
         } ?: WorkSpotSearch(building.id, target, allowOwn, ladder).also { workSpots[worker.id] = it }
         val offsets = if (ladder) LADDER_WORK_OFFSETS else WORK_OFFSETS
+        val reach = citizenWorkReach(building.type)
         fun pending(): CivPosition? {
             spotSearchPending = true
             blocked(worker, "searching-work")
@@ -532,7 +597,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             while (search.nextAim < aims.size) {
                 if (spotRaysRemaining == 0) return pending()
                 spotRaysRemaining--
-                if (citizenCanReachBlockPoint(world, eye, target, aims[search.nextAim++])) {
+                if (citizenCanReachBlockPoint(world, eye, target, aims[search.nextAim++], reach)) {
                     workSpots.remove(worker.id)
                     return p
                 }
@@ -598,6 +663,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (dx * dx + dz * dz + (dy + 1.12) * (dy + 1.12) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH)
                     add(CivPosition(dx, dy, dz))
         }
-        private val LADDER_WORK_OFFSETS = listOf(1, 0, -1, -2).map { CivPosition(0, it, 0) } + WORK_OFFSETS
+        private val LADDER_WORK_OFFSETS = listOf(1, 0, 2, -1, 3, -2, -3).map { CivPosition(0, it, 0) } + WORK_OFFSETS +
+            buildList {
+                for (dy in listOf(0, 1, -1, 2, -2, -3)) for (dx in -4..4) for (dz in -4..4)
+                    if ((dx != 0 || dz != 0) && dx * dx + dz * dz + (dy + 1.12) * (dy + 1.12) <= CITIZEN_MINE_REACH * CITIZEN_MINE_REACH)
+                        add(CivPosition(dx, dy, dz))
+            }.filter { it !in WORK_OFFSETS }
     }
 }
