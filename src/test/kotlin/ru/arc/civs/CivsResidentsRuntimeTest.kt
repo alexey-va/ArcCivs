@@ -160,6 +160,52 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (carried in listOf(false, true)) test("a builder renews exhausted work credit at the site when supplied carried=$carried") {
+        residentRuntime { h ->
+            val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
+            val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.PLACING,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 1L),
+                payment = CivConstructionPayment(reservedBatch = 0), workCredit = 1)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), hut, target), construction = order,
+                workers = h.city.workers.map { if (carried) CivsEquipment.collectSupplies(it, mapOf("STONE" to 1L)) else it }))
+            h.world.getBlockAt(30, 64, 0).type = Material.BARREL
+            val actor = h.owner.collisionActors().single()
+            val site = Location(h.world, 29.5, 64.0, .5)
+            actor.teleport(site)
+            h.owner.pulse(2_000)
+            h.supplyRequests shouldBe 0
+            h.city = CivsRules.completeBatch(h.city, h.city.owner, order.id)
+            h.city.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
+            h.workReady = CivsEquipment.usableCount(h.city.workers.single(), "STONE") > 0
+            h.owner.pulse(3_000)
+            if (carried) repeat(20) { h.owner.activateNavigating() }
+            else for (tick in 1..512) {
+                h.owner.activateNavigating()
+                val at = actor.location
+                if (citizenAtStorage(h.world, CitizenPoint(at.x, at.y, at.z), hut.control!!)) break
+            }
+            h.supplyRequests shouldBe 0
+            if (carried) {
+                actor.location shouldBe site
+                h.owner.workingResidentIds(h.city.id) shouldBe setOf(h.workerId)
+            } else {
+                citizenAtStorage(h.world, CitizenPoint(actor.location.x, actor.location.y, actor.location.z), hut.control!!) shouldBe true
+                h.owner.pulse(4_000)
+                h.supplyRequests shouldBe 1
+                h.owner.requireStorageArrival(h.city.id, h.workerId, hut.id)
+                h.owner.pulse(5_000)
+                h.supplyRequests shouldBe 1
+                h.owner.status(h.workerId) shouldBe "workers.status.loading-cargo"
+                h.owner.constructionReady(h.city.id, order.id) shouldBe false
+            }
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+        }
+    }
+
     test("an accepted packet hit freezes work until durable injury and viewer retirement cannot heal it") {
         residentRuntime { h ->
             h.hit(7.0)

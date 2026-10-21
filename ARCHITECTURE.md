@@ -314,6 +314,10 @@ worker, less local stock and incoming cargo. Construction orders cover only the
 unpaid material remainder, delivered to a builder hut. Builders collect useful batches
 from their own huts into real inventory slots; placement consumes only carried items.
 A full builder bag can return spare ordinary blocks to its hut to fit the next row.
+Starting another builder session with sufficient carried supplies goes directly
+to work, including CONSTRUCTING between placement credits. A real deficit still
+requires the physical hut pickup. Storage-trip diagnostics distinguish departure
+reason and route planning from the committed pickup, including no-op pickups.
 A SITE hut can
 bootstrap its own construction; neither the target building nor the hall is a
 construction buffer. Explicit virtual mode uses the same hut-local scope.

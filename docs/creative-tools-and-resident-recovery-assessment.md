@@ -9,3 +9,19 @@ The farmer now completes a bounded field scan before choosing care. Mature crops
 Interrupted construction retains its exact reserved row and consumed materials. Chunk availability controls retry; native protection and filled-container safety remain. Smoother movement changes waypoint distance accounting without changing work rewards. Source and automated evidence do not replace runtime or native-client observations.
 
 Inputs: [assessment](creative-tools-and-resident-recovery-assessment.json); calculator: [result](creative-tools-and-resident-recovery-assessment-result.json).
+
+## 0.1.40: avoid empty builder trips
+
+Before, a new CONSTRUCTING session entered TO_STORAGE even when the existing
+carried material check passed. Live automatic pickups at 22:13:24, 22:14:55 and
+22:15:44 on 2026-10-21 completed without inventory mutation; their route searches
+took about 5–8.5 seconds. After, a supplied builder goes directly to work; a real
+shortage still requires the same physical pickup. The two-second session, at
+most 64 existing rows of credit, carried-item debit and once-only receipt rules
+are unchanged. Faster construction may make buildings available earlier; the
+throughput change is not measured or assigned a guessed multiplier.
+
+Direct builder-session Vault, tokens and player XP remain 0→0 in separate units.
+The same rows consume the same native item quantities; this adds no item grant,
+sale value, reward or offline catch-up. Current SELL and the planned contract
+transition are unchanged. The new diagnostic events observe state only.

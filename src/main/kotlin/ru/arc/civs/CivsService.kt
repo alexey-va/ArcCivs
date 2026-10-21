@@ -85,6 +85,7 @@ class CivsService(
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
     private val constructionFocus = mutableMapOf<UUID, ConstructionFocus>()
     private val constructionSupplyNeeds = mutableMapOf<UUID, ConstructionSupplyNeed>()
+    private val supplyNoopDiagnostics = linkedMapOf<UUID, String>()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
     private val populationPending = mutableSetOf<UUID>()
     private val lastInjury = mutableMapOf<UUID, CivDeathContext>()
@@ -1317,37 +1318,72 @@ class CivsService(
         action("resident_supplies", null, "city" to cityId, "worker" to workerId, "building" to buildingId) {
             afterCityAvailable(cityId) {
                 var supplied: CivWorker? = null
+                var supplyContext = emptyArray<Pair<String, Any?>>()
+                var carriedBefore = emptyMap<String, Long>()
+                var required: Map<String, Long>? = null
+                var reportSupply = false
+                var supplyChanged = false
                 inventoryMutation(cityId, { city ->
                     val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
                     val source = city.building(buildingId) ?: throw CivsRejection("building-not-found")
                     citizens.requireStorageArrival(cityId, workerId, buildingId)
+                    carriedBefore = CivsEquipment.available(worker, emptyMap())
                     val food = source.type == BuildingType.TOWN_HALL && CivsResidents.hunger(worker) <= 14 &&
                         CivsEquipment.usableCount(worker, "BREAD") == 0
+                    val builder = !food && CivsRules.isBuilder(city, source)
+                    reportSupply = worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true
+                    val order = city.construction.takeIf { reportSupply }
+                    supplyContext = arrayOf("city" to cityId, "worker" to workerId, "source" to buildingId,
+                        "target" to source.control, "order" to order?.id, "batch" to order?.workDone,
+                        "construction_phase" to order?.phase, "reserved_batch" to order?.payment?.reservedBatch,
+                        "reason" to if (food) "food" else if (order?.payment?.awaiting != null) "next-required-type" else "work-materials")
                     val prepared = if (food) {
                         val count = minOf(4L, storage.buildingAvailable(city, buildingId)["BREAD"] ?: 0L,
                             CivsEquipment.supplyRoom(worker, Material.BREAD).toLong())
                         rejectIf(count == 0L, "resident-food-missing")
+                        required = mapOf("BREAD" to count)
                         storage.prepareResidentPickup(city, workerId, buildingId, mapOf("BREAD" to count))
                     } else {
                         rejectIf(worker.assignment != buildingId || worker.cargo != null || CivsResidents.isChild(worker), "invalid-assignment")
-                        if (CivsRules.isBuilder(city, source)) storage.prepareBuilderPickup(city, workerId,
-                            city.construction?.payment?.awaiting ?: constructionSupplyNeeds[city.id]?.takeIf {
+                        if (builder) {
+                            required = city.construction?.payment?.awaiting ?: constructionSupplyNeeds[city.id]?.takeIf {
                                 it.orderId == city.construction?.id && it.batch == city.construction?.workDone
-                            }?.materials.orEmpty()) else {
+                            }?.materials
+                            storage.prepareBuilderPickup(city, workerId, required.orEmpty())
+                        } else {
                             rejectIf(!CivsRules.productionAvailable(city, source) || source.type in CivsWorksites.TYPES, "invalid-assignment")
+                            required = CivsProduction.inputs(source)
                             storage.prepareResidentPickup(city, workerId, buildingId,
                                 CivsEquipment.storageInputs(worker, CivsProduction.inputs(source)))
                         }
                     }
                     supplied = prepared.worker
-                    if (prepared.worker == worker && prepared.plan.changes.isEmpty() && prepared.plan.inventoryAfter == city.inventory) null
-                    else prepared.plan
+                    supplyChanged = prepared.worker != worker || prepared.plan.changes.isNotEmpty() || prepared.plan.inventoryAfter != city.inventory
+                    if (supplyChanged) prepared.plan else null
                 }, keepViewersOpen = true) { before, inventory ->
                     val worker = requireNotNull(supplied)
                     before.copy(workers = before.workers.map { if (it.id == workerId) worker else it },
                         inventory = inventory, revision = Math.addExact(before.revision, 1))
                 }.thenApply { saved ->
                     nextMaterialCheckAt = 0L
+                    if (!reportSupply) return@thenApply saved
+                    val worker = requireNotNull(supplied)
+                    val carriedAfter = CivsEquipment.available(worker, emptyMap())
+                    val picked = carriedAfter.mapValues { (material, count) -> count - carriedBefore.getOrDefault(material, 0) }.filterValues { it > 0 }
+                    val returned = carriedBefore.mapValues { (material, count) -> count - carriedAfter.getOrDefault(material, 0) }.filterValues { it > 0 }
+                    val fields = supplyContext + arrayOf("outcome" to if (supplyChanged) "committed" else "no-op",
+                        "required_known" to (required != null), "required" to required,
+                        "missing_before" to required?.mapValues { (material, count) -> (count - carriedBefore.getOrDefault(material, 0)).coerceAtLeast(0) }?.filterValues { it > 0 },
+                        "missing_after" to required?.let { CivsEquipment.storageInputs(worker, it) },
+                        "carried_before" to carriedBefore, "carried_after" to carriedAfter,
+                        "picked" to picked, "returned" to returned, "amount" to picked.values.sum())
+                    val noOp = !supplyChanged
+                    val signature = if (noOp) CivsDiagnostics.line("resident_supplies_result", *fields) else null
+                    if (!noOp || supplyNoopDiagnostics.put(workerId, requireNotNull(signature)) != signature)
+                        CivsDiagnostics.event("resident_supplies_result", *fields, "revision" to saved.revision)
+                    if (!noOp) supplyNoopDiagnostics.remove(workerId)
+                    // Only coalesce unchanged no-ops; real committed transfers are always reported.
+                    if (supplyNoopDiagnostics.size > 128) supplyNoopDiagnostics.remove(supplyNoopDiagnostics.keys.first())
                     saved
                 }
             }

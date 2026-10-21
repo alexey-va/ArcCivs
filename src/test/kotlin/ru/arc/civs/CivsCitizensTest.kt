@@ -539,6 +539,16 @@ class CivsCitizensTest : FunSpec({
         }
     }
 
+    test("a builder renewing work credit visits its hut only when carried supplies are missing") {
+        val plan = CitizenPlan(token(), CivPosition(0, 64, 0), CivPosition(10, 64, 0),
+            BuildingType.BUILDER_HUT, CivsRules.BUILDER_SESSION_INTERVAL, null, completeAtWorkplace = true)
+        for (missing in listOf(false, true)) {
+            val cycle = plan.copy(suppliesNeeded = missing).cycle()
+            cycle.start()
+            cycle.phase shouldBe if (missing) CitizenPhase.TO_STORAGE else CitizenPhase.TO_WORK
+        }
+    }
+
     test("arrival after a recovery teleport never credits time known to have been away from work") {
         val cycle = CitizenCycle(token(), 2_000, completeAtWorkplace = true)
         reachWork(cycle)

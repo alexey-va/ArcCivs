@@ -508,7 +508,10 @@ class CivsCitizens(
             if (!route.planningReported) {
                 route.planningReported = true
                 val elapsed = System.currentTimeMillis() - route.startedAt
-                if (elapsed >= 1_000) CivsDiagnostics.event("citizen_route_ready", "worker" to actor.workerId,
+                if (elapsed >= 1_000 || route.storageReason != null) CivsDiagnostics.event("citizen_route_ready", "city" to actor.cityId,
+                    "worker" to actor.workerId, "route_started_at" to route.startedAt,
+                    "reason" to route.storageReason, "source" to route.storageBuilding,
+                    "phase" to actor.cycle.phase, "state" to "path-ready",
                     "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to motion.failure,
                     "intermediate" to route.intermediate)
             }
@@ -833,6 +836,9 @@ class CivsCitizens(
         actor.supplyPickup = pickup
         val future = try { prepareSupplies(actor.cityId, actor.workerId, buildingId) }
             catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        if (!future.isDone && actor.plan.type == BuildingType.BUILDER_HUT) CivsDiagnostics.event("citizen_supplies_pending", "city" to actor.cityId,
+            "worker" to actor.workerId, "source" to buildingId, "phase" to actor.cycle.phase,
+            "order" to actor.plan.token.constructionId, "state" to "operation-pending")
         future.whenComplete { city, error ->
             if (!closed.get()) supplyCompletions.add(SupplyCompletion(actor.workerId, actor.instanceId, pickup, city, error))
         }
@@ -848,8 +854,15 @@ class CivsCitizens(
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
             if (error != null) {
                 actor.supplyRetryAt = now + 1_000
+                val reason = CivsDiagnostics.rejection(error)?.reason ?: "unexpected-failure"
+                val failure = completion.pickup.buildingId to reason
+                if (actor.plan.type == BuildingType.BUILDER_HUT && actor.supplyFailure != failure) CivsDiagnostics.event("citizen_supplies_blocked",
+                    "city" to actor.cityId, "worker" to actor.workerId, "source" to completion.pickup.buildingId,
+                    "order" to actor.plan.token.constructionId, "phase" to actor.cycle.phase, "reason" to reason)
+                actor.supplyFailure = failure
                 if (error !is CivsRejection) logFailure(actor, "supplies", error)
             } else {
+                actor.supplyFailure = null
                 actor.foodSource = null
                 val city = completion.city ?: continue
                 val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
@@ -1235,6 +1248,26 @@ class CivsCitizens(
         val timeout = if (actor.sheltering) 10_000L else (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = Route(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
+        val storageReason = when {
+            actor.plan.type != BuildingType.BUILDER_HUT || idleAnchor != null || actor.sheltering || actor.attacker != null -> null
+            actor.foodSource != null -> "food"
+            actor.cycle.phase == CitizenPhase.RETURNING -> "unload"
+            actor.plan.idleReason == "waiting-materials" -> "next-required-type"
+            actor.cycle.phase == CitizenPhase.TO_STORAGE -> "work-materials"
+            else -> null
+        }
+        if (storage != null && storageReason != null) {
+            actor.route?.storageReason = storageReason
+            actor.route?.storageBuilding = storage.id
+            val worker = city.workers.firstOrNull { it.id == actor.workerId }
+            CivsDiagnostics.event("citizen_storage_trip", "city" to actor.cityId, "worker" to actor.workerId,
+                "order" to actor.plan.token.constructionId, "batch" to city.construction?.workDone,
+                "construction_phase" to city.construction?.phase, "credit" to city.construction?.workCredit,
+                "source" to storage.id, "target" to target, "from" to from.point(),
+                "phase" to actor.cycle.phase, "reason" to storageReason, "supplies_needed" to actor.plan.suppliesNeeded,
+                "carried" to worker?.let { CivsEquipment.available(it, emptyMap()) },
+                "route_started_at" to now, "state" to "planning", "path_nodes" to motion.nodeCount)
+        }
         look(actor.npc, from.yaw, 0f)
         return true
     }
@@ -1731,6 +1764,7 @@ class CivsCitizens(
         var shelter: CivPosition? = null
         var nextPlayAt = 0L
         var supplyPickup: SupplyPickup? = null
+        var supplyFailure: Pair<UUID, String>? = null
         var supplyRetryAt = 0L
         var foodSource: UUID? = null
         var nextRecoveryAt = 0L
@@ -1746,6 +1780,8 @@ class CivsCitizens(
         val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null) {
         var completion: CitizenNavigationCompletion? = null
         var planningReported = false
+        var storageReason: String? = null
+        var storageBuilding: UUID? = null
         var path: CitizenPathSnapshot? = null
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
@@ -1839,7 +1875,7 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false) {
     val spawnOrigin: CivPosition get() = courier?.cargo?.sourceEntrance ?: storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
-        worldWork != null || type == BuildingType.BUILDER_HUT && idleReason == "placing" && !suppliesNeeded)
+        worldWork != null || type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
 }
 
 /** Pickup publication changes carried quantity, never the identity of the journey already observed. */

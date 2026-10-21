@@ -5,6 +5,8 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import io.mockk.verify
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Bukkit
@@ -1004,6 +1006,51 @@ class CivsServiceTest : FunSpec({
             inventory.getItem(0)!!.amount shouldBe 4
             h.world.getBlockAt(0, 64, 10).type shouldBe Material.OAK_PLANKS
         }
+    }
+
+    test("automatic builder supply diagnostics distinguish unchanged requests from committed quantities") {
+        val results = mutableListOf<Map<String, Any?>>()
+        mockkObject(CivsDiagnostics)
+        try {
+            every { CivsDiagnostics.event(any(), *anyVararg()) } answers {
+                if (firstArg<String>() == "resident_supplies_result")
+                    results += secondArg<Array<Pair<String, Any?>>>().toMap()
+                Unit
+            }
+            serviceScenario { h ->
+                val placement = h.incrementalPlacement()
+                every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+                h.start(); h.commit()
+                val worker = h.service.city(h.player)!!.workers.first()
+                repeat(2) {
+                    val pickup = h.service.prepareResidentSupplies(placement.city.id, worker.id, worker.assignment!!)
+                    h.tick(); pickup.join()
+                }
+                results.size shouldBe 1 // An unchanged empty hut is one outcome, not a per-pulse message.
+                results.single()["outcome"] shouldBe "no-op"
+                results.single()["source"] shouldBe worker.assignment
+                results.single()["order"] shouldBe placement.city.construction!!.id
+                results.single()["batch"] shouldBe 0
+                results.single()["required"] shouldBe mapOf("STONE" to 1L)
+                results.single()["missing_after"] shouldBe mapOf("STONE" to 1L)
+                results.single()["amount"] shouldBe 0L
+                val barrel = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
+                barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
+                val pickup = h.service.prepareResidentSupplies(placement.city.id, worker.id, worker.assignment!!)
+                h.tick()
+                results.size shouldBe 1 // A prepared transfer is not a committed pickup.
+                h.commit(); pickup.join()
+                results.size shouldBe 2
+                results.last()["outcome"] shouldBe "committed"
+                results.last()["picked"] shouldBe mapOf("STONE" to 1L)
+                results.last()["returned"] shouldBe emptyMap<String, Long>()
+                results.last()["carried_before"] shouldBe emptyMap<String, Long>()
+                results.last()["carried_after"] shouldBe mapOf("STONE" to 1L)
+                results.last()["missing_after"] shouldBe emptyMap<String, Long>()
+                results.last()["amount"] shouldBe 1L
+            }
+        } finally { unmockkObject(CivsDiagnostics) }
     }
 
     test("missing row waits without debit and replenishment resumes only after the paid receipt commits") {
