@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "title": "ArcCivs creative profession-tool issuance correction",
+  "assumptions": [
+    "Source before d8364fd: creative request button required an existing tool in player storage; an empty creative inventory could issue zero. After: one plain requested iron tool is created and equipped per accepted request; its existing replacement is retained in the bag.",
+    "This is creative administration, not ordinary player income. Survival continues exact native-item transfers and cannot mint. The request disappears once the correct tool is equipped; repeated clicks and crash recovery reuse durable state. Creative players already have unrestricted native item creation.",
+    "Sensitivity only: 1/2/4 creative operators, 1/4/12 accepted requests per operator-day (0.25/1/2 active hours, 4/4/6 actions per hour). Not telemetry and not an implemented daily cap. One request equals one profession tool, including the requested iron pickaxe; no money conversion.",
+    "Farm correction prioritizes mature crops through complete bounded scans and removes zero-change watering. Exposed rain suppresses every watering action, including the former free age3-to4 boost; covered or dry-weather care retains that boost and age5 fertilizing retains its real bone-meal debit. Harvest starvation repair may raise realized collections; removing exposed-rain bonuses may lower growth relative to baseline in rain. Neither effect is assigned invented throughput. Existing drop quantities, four-second care duration and profession rewards are unchanged. Motion and transient chunk retry do not change construction cost or paid receipt identity.",
+    "Direct Vault, tokens and player XP deltas are zero. Current SELL and planned future SELL-to-contract transition remain outside scope; no duplicate item redemption is modeled."
+  ],
+  "participants": [
+    1,
+    2,
+    4
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "item_native_profession_tool": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "creative_requested_tool",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsService.kt:giveRequestedTool",
+          "basis": "Explicit creative-only request, one exact requested tool in resident main hand; ordinary survival transfer unchanged.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              12
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              12
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

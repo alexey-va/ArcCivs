@@ -347,6 +347,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, base.id, worker.id)
             plainText(h.screen.buttons.first().label) shouldBe "Выдать мотыгу"
             h.screen.buttons.first().label.color() shouldBe TextColor.color(0x9BD48D)
+            plainText(h.screen.buttons.first().tooltip) shouldContain "Передать один подходящий инструмент из своего инвентаря"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-tool-ready-ru", h.screen, listOf(588, 380)) }
             val ready = h.screen
             h.click("give_request"); h.click("give_request", screen = ready)
@@ -356,6 +357,63 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.worker"
             h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
             h.body().contains("Для работы нужна мотыга") shouldBe false
+        }
+    }
+
+    test("creative empty-inventory pickaxe request uses the host grant through resident and building dialog actions") {
+        for (buildingScreen in listOf(false, true)) withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.player.gameMode = GameMode.SURVIVAL
+            h.player.inventory.clear()
+            val base = settlement(h.player)
+            val worker = base.workers.first().copy(name = "Фёдор")
+            val building = base.building(requireNotNull(worker.assignment))!!.copy(
+                type = BuildingType.QUARRY, schematicId = "medieval-oak/quarry")
+            h.city = base.copy(buildings = base.buildings.map { if (it.id == building.id) building else it },
+                workers = base.workers.map { if (it.id == worker.id) worker else it })
+            var request: CivsBuildingRequest? = CivsBuildingRequest(Material.IRON_PICKAXE, 1, false)
+            every { h.host.workerRequest(h.player, worker.id) } answers { request }
+            every { h.host.buildingRequest(h.player, building.id) } answers { request }
+            every { h.host.workerStatus(worker.id) } returns "workers.status.waiting-tool"
+            val receipt = CompletableFuture<Unit>()
+            every { h.host.giveWorkerRequest(h.player, worker.id, "IRON_PICKAXE") } returns receipt
+            every { h.host.giveBuildingRequest(h.player, building.id, "IRON_PICKAXE") } returns receipt
+            fun open() {
+                if (buildingScreen) h.ui.openBuilding(h.player, base.id, building.id)
+                else h.ui.openWorker(h.player, base.id, worker.id)
+            }
+            open()
+            var button = h.screen.buttons.single { it.id.value == "give_request" }
+            button.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(button.tooltip) shouldContain "проверьте инструмент в своём инвентаре"
+            h.click("give_request")
+            h.player.gameMode = GameMode.CREATIVE
+            open()
+            button = h.screen.buttons.single { it.id.value == "give_request" }
+            button.label.color() shouldBe TextColor.color(0xFF6B61)
+            plainText(button.tooltip) shouldBe "Освободите место у жителя, чтобы выдать инструмент."
+            h.click("give_request")
+            verify(exactly = 0) { h.host.giveWorkerRequest(any(), any(), any()); h.host.giveBuildingRequest(any(), any(), any()) }
+            request = request!!.copy(canGive = true)
+            open()
+            button = h.screen.buttons.single { it.id.value == "give_request" }
+            plainText(button.label) shouldBe "Выдать кирку"
+            button.label.color() shouldBe TextColor.color(0x9BD48D)
+            plainText(button.tooltip) shouldBe "Создать нужный инструмент и выдать жителю в руку. Ваши предметы не расходуются."
+            h.player.inventory.contents.all { it == null || it.type.isAir } shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it,
+                "${if (buildingScreen) "quarry" else "resident"}-pickaxe-creative-ru", h.screen, listOf(588, 380)) }
+            val ready = h.screen
+            h.click("give_request", screen = ready)
+            h.click("give_request", screen = ready)
+            verify(exactly = if (buildingScreen) 1 else 0) { h.host.giveBuildingRequest(h.player, building.id, "IRON_PICKAXE") }
+            verify(exactly = if (buildingScreen) 0 else 1) { h.host.giveWorkerRequest(h.player, worker.id, "IRON_PICKAXE") }
+            verify(exactly = 0) { h.host.transferResidentItem(any(), any(), any(), any(), any()) }
+            request = null
+            receipt.complete(Unit)
+            h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
+            h.player.inventory.contents.all { it == null || it.type.isAir } shouldBe true
         }
     }
 

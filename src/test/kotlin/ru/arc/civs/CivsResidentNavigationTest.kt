@@ -7,6 +7,7 @@ import io.mockk.every
 import io.mockk.excludeRecords
 import io.mockk.mockk
 import org.bukkit.Chunk
+import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
@@ -19,6 +20,130 @@ import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
 class CivsResidentNavigationTest : FunSpec({
+    test("a fractional ladder start descends onto its current rung and turns out through a low landing") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("fractional-ladder").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            for (x in -1..3) for (z in -1..1) for (y in 64..68) world.getBlockAt(x, y, z).type = Material.STONE
+            for (y in 64..67) world.getBlockAt(0, y, 0).type = Material.AIR
+            for (y in 64..65) world.getBlockAt(0, y, 0).blockData =
+                Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+            for (x in 1..2) for (y in 64..65) world.getBlockAt(x, y, 0).type = Material.AIR
+            var at = Location(world, .57, 65.2, .55)
+            citizenPacketBodyClear(world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
+            val route = CitizenPacketRoute(world, at, Location(world, 2.5, 64.0, .5),
+                { p -> p.x in 0..2 && p.z == 0 && p.y in 64..66 }, { _, _ -> true }, { 1.0 })
+            repeat(3_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            route.searching shouldBe false
+            repeat(80) {
+                route.move(at, 1.0) { true }?.let { next ->
+                    for (sample in 0..10) {
+                        val p = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
+                        citizenPacketBodyClear(world, CitizenPoint(p.x, p.y, p.z), false) shouldBe true
+                    }
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(Location(world, 2.5, 64.0, .5)) shouldBe 0.0
+        }
+    }
+
+    test("an interrupted step can settle in its own column before walking under a low ceiling") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in 1..3) terrain.blocks[CivPosition(x, 66, 0)] = Material.STONE
+            var at = Location(terrain.world, .5, 65.0, .5)
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 3.5, 64.0, .5),
+                { p -> p.x in 0..3 && p.z == 0 && p.y in 64..65 }, { _, _ -> true }, { 1.0 })
+            repeat(3_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
+            route.finished shouldBe true
+            at.distanceSquared(Location(terrain.world, 3.5, 64.0, .5)) shouldBe 0.0
+        }
+    }
+
+    test("sleep clearance rotates the full native body and rejects walls and fire beyond standing feet") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val feet = Location(terrain.world, .5, 64.0, .5)
+            val open = requireNotNull(citizenSleepPose(terrain.world, feet, 1.0))
+            open.position.yaw shouldBe 0f
+            (open.bounds.minY > feet.y) shouldBe true
+            // The native armour head inflates its 8px cube by 1px on every face.
+            val helmetRadius = 5.0 / 16.0 * .9375
+            (open.bounds.minY < open.position.y - helmetRadius) shouldBe true
+            (open.bounds.maxY > open.position.y + helmetRadius) shouldBe true
+            val bobbingArmWidth = (5 + 4 * kotlin.math.cos(.1) + 11 * kotlin.math.sin(.1)) / 16 * .9375
+            (open.bounds.minZ < open.position.z - bobbingArmWidth) shouldBe true
+            (open.bounds.maxZ > open.position.z + bobbingArmWidth) shouldBe true
+            (open.bounds.minX < -1.4) shouldBe true
+            terrain.blocks[CivPosition(-1, 64, 0)] = Material.STONE
+            citizenPacketBodyClear(terrain.world, CitizenPoint(.5, 64.0, .5), false) shouldBe true
+            val turned = requireNotNull(citizenSleepPose(terrain.world, feet, 1.0))
+            (turned.position.yaw != 0f) shouldBe true
+            citizenSleepClear(terrain.world, open.bounds) shouldBe false
+            terrain.blocks[CivPosition(-1, 64, 0)] = Material.CAMPFIRE
+            citizenSleepClear(terrain.world, open.bounds) shouldBe false
+            for ((x, z) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1))
+                terrain.blocks[CivPosition(x, 64, z)] = Material.STONE
+            citizenSleepPose(terrain.world, feet, 1.0) shouldBe null
+            citizenPacketBodyClear(terrain.world, CitizenPoint(.5, 64.0, .5), false) shouldBe true
+        }
+    }
+
+    test("walking keeps the full per-tick distance across straight and diagonal cell centres") {
+        MockBukkitTestRuntime.open().use {
+            for (diagonal in listOf(false, true)) for (speed in listOf(.55, 1.0, 1.3)) {
+                val terrain = ResidentRouteTerrain()
+                var at = Location(terrain.world, .5, 64.0, .5)
+                val route = CitizenPacketRoute(terrain.world, at,
+                    Location(terrain.world, 20.5, 64.0, if (diagonal) 20.5 else .5),
+                    { p -> p.x in 0..20 && p.z in 0..20 && p.y == 64 }, { _, _ -> true }, { 1.0 })
+                repeat(20_000) { if (route.searching) route.expand() }
+                route.searching shouldBe false
+                route.failure shouldBe null
+                repeat(60) { tick ->
+                    val next = requireNotNull(route.move(at, speed) { true })
+                    withClue("diagonal=$diagonal speed=$speed tick=$tick from=$at to=$next") {
+                        (kotlin.math.abs(at.distance(next) - .215 * speed) < .000001) shouldBe true
+                    }
+                    at = next
+                }
+            }
+        }
+    }
+
+    test("speed changes collision waits and cancellation never bank movement for a later tick") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            var at = Location(terrain.world, .5, 64.0, .5)
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 20.5, 64.0, .5),
+                { p -> p.x in 0..20 && p.z == 0 && p.y == 64 }, { _, _ -> true }, { 1.0 })
+            repeat(20_000) { if (route.searching) route.expand() }
+            repeat(4) { at = requireNotNull(route.move(at, 1.0) { true }) }
+            // The next step crosses a waypoint. A player blocking that tick must leave its
+            // full budget unspent rather than allow a jump when the player moves away.
+            val blockedAt = at.clone()
+            repeat(7) {
+                route.move(at, 1.0, { _, _ -> false }) { true } shouldBe null
+                route.waitingForCollision shouldBe true
+                at shouldBe blockedAt
+            }
+            for (speed in listOf(.55, 1.3, 1.0, .55, 1.3, 1.0)) {
+                val next = requireNotNull(route.move(at, speed) { true })
+                (kotlin.math.abs(at.distance(next) - .215 * speed) < .000001) shouldBe true
+                at = next
+            }
+            route.cancel()
+            route.move(at, 1.3) { true } shouldBe null
+            route.navigating shouldBe false
+        }
+    }
+
     test("the first diagonal on a fractional-height path is checked from the actual off-centre position") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
@@ -54,7 +179,10 @@ class CivsResidentNavigationTest : FunSpec({
             var detoured = false
             repeat(200) {
                 route.move(at, 1.0) { true }?.let { next ->
-                    citizenPacketBodyClear(terrain.world, CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                    for (sample in 0..10) {
+                        val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
+                        citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                    }
                     if (kotlin.math.abs(next.z - .5) >= 2.5) detoured = true
                     at = next
                 }

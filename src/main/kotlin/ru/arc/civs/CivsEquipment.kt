@@ -193,14 +193,19 @@ internal object CivsEquipment {
     fun giveRequestedTool(worker: CivWorker, player: Player, requested: Material): Pair<CivWorker, List<CivNativePlayerSlot>> {
         val index = cheapestTool(player, requested) ?: throw CivsRejection("resident-item-missing")
         val before = requireNotNull(CivResidentItem.of(player.inventory.getItem(index)))
+        return equipRequestedTool(worker, before.copy(amount = 1)) to listOf(CivNativePlayerSlot(index, before,
+            before.copy(amount = before.amount - 1).takeIf { it.amount > 0 }))
+    }
+
+    fun equipRequestedTool(worker: CivWorker, item: CivResidentItem): CivWorker {
+        require(item.amount == 1)
         val items = slots(worker).toMutableList()
         items[4]?.let { previous ->
             val free = (BAG until SLOTS).firstOrNull { items[it] == null } ?: throw CivsRejection("resident-inventory-full")
             items[free] = previous
         }
-        items[4] = before.copy(amount = 1)
-        return replace(worker, items) to listOf(CivNativePlayerSlot(index, before,
-            before.copy(amount = before.amount - 1).takeIf { it.amount > 0 }))
+        items[4] = item
+        return replace(worker, items)
     }
 
     fun supply(worker: CivWorker, material: String, returning: Boolean): CivWorker {
@@ -211,7 +216,7 @@ internal object CivsEquipment {
         return replace(worker, slots)
     }
 
-    /** Plans only touched player slots; the resident's saved slots is already the city-owned state. */
+    /** Plans only touched player slots; the resident's saved slots are already the city-owned state. */
     fun transfer(worker: CivWorker, player: Player, npcSlot: Int?, playerSlot: Int?, click: ClickType): Pair<CivWorker, List<CivNativePlayerSlot>> {
         require(npcSlot != null || playerSlot != null)
         require(click in setOf(ClickType.LEFT, ClickType.RIGHT, ClickType.SHIFT_LEFT, ClickType.SHIFT_RIGHT))

@@ -101,6 +101,13 @@ class CivsCitizens(
         return actors.values.map { it.npc }
     }
 
+    /** Logical grounded feet stay stable while the sleeping mesh has a pose-only lift. */
+    internal fun residentFeet(workerId: UUID): Location? {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.npc.isValid } ?: return null
+        return actor.sleepOrigin?.clone() ?: actor.npc.location.clone()
+    }
+
     /** A small physical push changes only the observed position, never a work or cargo receipt. */
     internal fun nudgeResident(npc: PacketPlayerNpc, impulse: Vector): Boolean {
         checkMainThread()
@@ -362,7 +369,7 @@ class CivsCitizens(
         val destination = point?.location(world) ?: return false
         val previous = npc.location
         stopCamp(actor, "summoned")
-        cancelRoute(actor)
+        cancelRoute(actor, destination)
         actor.cycle.close()
         actor.plan = nextPlan
         actor.cycle = nextPlan.cycle()
@@ -556,12 +563,19 @@ class CivsCitizens(
                 route.completion = CitizenNavigationCompletion(null)
             }
         }
-        threats.gravity(actors.values.filter { it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
+        threats.gravity(actors.values.filter { it.sleeping || it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
     }
 
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
         val cycle = actor.cycle
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (actor.sleeping && !sleepStillSafe(actor)) {
+            // Changed support/headroom must be handled before work, hunger or another route.
+            // A clear but unsupported origin wakes in place and falls on the normal gravity tick.
+            if (wake(actor)) actor.shelter = null
+            statuses[actor.workerId] = "sheltering"
+            return
+        }
         if (actor.supplyPickup != null) { statuses[actor.workerId] = "loading-cargo"; return }
         if (combat(actor, city, worker, world, now)) return
         if (supplyFood(actor, city, worker, world, now)) return
@@ -595,6 +609,14 @@ class CivsCitizens(
         } else stopCamp(actor, "work-priority")
         actor.plan.idleReason?.let {
             if (it != "placing") {
+                if (it == "searching-work") {
+                    // A committed block invalidates the worksite cache before its bounded
+                    // next-job search finishes. Returning to the surface in this gap made
+                    // miners climb up after every block, then reverse for the next job.
+                    cancelRoute(actor)
+                    statuses[actor.workerId] = it
+                    return
+                }
                 if (actor.plan.type == BuildingType.BUILDER_HUT && it == "waiting-materials") {
                     travelForSupplies(actor, city, world, actor.plan.storage, now)
                     return
@@ -1121,14 +1143,27 @@ class CivsCitizens(
         }
         if (actor.shelter == null && wanderBudget > 0) {
             wanderBudget--
-            actor.shelter = citizenShelterTarget(city, worker) { citizenStandable(world, it) }
+            actor.shelter = citizenShelterTarget(city, worker) {
+                citizenStandable(world, it) && citizenSleepPose(world, it.location(world), citizenScale(worker)) != null
+            } ?: citizenShelterTarget(city, worker) { citizenStandable(world, it) }
         }
         statuses[actor.workerId] = if (actor.sleeping) "sleeping" else "sheltering"
         val target = actor.shelter ?: return
-        if (actor.sleeping) return
+        if (actor.sleeping) {
+            if (sleepStillSafe(actor)) return
+            if (!wake(actor)) return
+            statuses[actor.workerId] = "sheltering"
+        }
         if (arrived(actor.npc.location, target.location(world))) {
             cancelRoute(actor)
-            actor.npc.sleepingBed = actor.npc.location
+            // Arrival has a tolerance; validate the observed feet, not the target's centre.
+            val origin = actor.npc.location
+            val pose = citizenSleepPose(world, origin, citizenScale(worker)) ?: return
+            actor.sleepOrigin = origin
+            actor.sleepPose = pose
+            actor.npc.sleepingBed = null
+            actor.npc.teleport(pose.position)
+            look(actor.npc, pose.position.yaw, 0f)
             actor.npc.pose = PacketNpcPose.SLEEPING
             actor.sleeping = true
             statuses[actor.workerId] = "sleeping"
@@ -1146,7 +1181,7 @@ class CivsCitizens(
     }
 
     private fun startRoute(actor: Actor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null): Boolean {
-        wake(actor)
+        if (!wake(actor)) return false
         val from = actor.npc.location
         val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
         // A valid hand reach does not depend on the availability of the preferred standing
@@ -1218,6 +1253,8 @@ class CivsCitizens(
             "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
             "path_nodes" to route?.motion?.nodeCount, "path_failure" to route?.motion?.failure,
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
+            "work_focus" to actor.plan.worldWork?.focus, "work_standing" to actor.plan.worldWork?.standing,
+            "mining_step" to actor.plan.worldWork?.miningStep,
             "strategy" to "packet-grid"))
         if (!recoverNavigation(actor, target, now)) pause(actor, status, now)
     }
@@ -1289,7 +1326,7 @@ class CivsCitizens(
         val destination = point.location(entity.world)
         if (!residentStepAllowed(entity, destination, destination)) return false
         val previous = entity.location
-        cancelRoute(actor)
+        cancelRoute(actor, destination)
         if (actor.sheltering) actor.shelter = point
         else if (idleAnchor == null) actor.targets[authored] = point
         entity.teleport(destination)
@@ -1384,21 +1421,55 @@ class CivsCitizens(
         actor.cycle.pause(reason, now, false)
     }
 
-    private fun cancelRoute(actor: Actor) {
+    private fun cancelRoute(actor: Actor, wakeDestination: Location? = null) {
         fieldCareHand(actor, null)
         actor.route?.motion?.cancel()
         actor.route = null
         actor.footsteps.reset()
-        wake(actor)
+        wake(actor, wakeDestination)
     }
 
-    private fun wake(actor: Actor) {
+    private fun sleepStillSafe(actor: Actor): Boolean {
+        val origin = actor.sleepOrigin ?: return false
+        return citizenPacketSupported(actor.npc.world, origin.point()) &&
+            citizenPacketBodyClear(actor.npc.world, origin.point(), false) &&
+            actor.sleepPose?.let { citizenSleepClear(actor.npc.world, it.bounds) } == true
+    }
+
+    private fun wake(actor: Actor, checkedDestination: Location? = null): Boolean {
         val wasSleeping = actor.sleeping
+        val npc = actor.npc
+        val origin = actor.sleepOrigin
+        val destination = if (wasSleeping && npc.isValid) {
+            fun clear(at: Location) = at.world == npc.world && citizenPacketBodyClear(npc.world, at.point(), false) &&
+                citizenPacketCampfireClear(npc.world, at.point())
+            checkedDestination?.takeIf(::clear) ?: origin?.takeIf(::clear) ?: run {
+                if (recoveryBudget == 0 || origin == null) return false
+                recoveryBudget--
+                val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+                val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+                val home = citizenHomeBuilding(city, worker) ?: return false
+                val lying = actor.sleepPose?.bounds ?: return false
+                citizenShelterTarget(city, worker) { point ->
+                    val at = point.location(npc.world)
+                    citizenStandable(npc.world, point) && clear(at) && citizenControlClear(city, point) &&
+                        citizenRouteCellAllowed(city, setOf(home.id), point.x, point.z) &&
+                        // Slide the low pose only through its clear swept envelope before standing.
+                        // This cannot jump through a wall into another room or across a control.
+                        citizenSleepClear(npc.world, lying.clone().union(lying.clone().shift(at.toVector().subtract(origin.toVector())))) &&
+                        residentStepAllowed(npc, at, at)
+                }?.location(npc.world) ?: return false
+            }
+        } else null
         actor.sleeping = false
-        if (!actor.npc.isValid) return
-        actor.npc.sleepingBed = null
-        actor.npc.pose = PacketNpcPose.STANDING
+        actor.sleepOrigin = null
+        actor.sleepPose = null
+        if (!npc.isValid) return true
+        npc.sleepingBed = null
+        if (destination != null) npc.teleport(destination)
+        npc.pose = PacketNpcPose.STANDING
         if (wasSleeping) CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId, "action" to "wake")
+        return true
     }
 
     private fun look(npc: PacketPlayerNpc, yaw: Float, pitch: Float) {
@@ -1655,6 +1726,8 @@ class CivsCitizens(
         var returningToWarehouse = false
         val social = CitizenCampRoutine(workerId)
         var sleeping = false
+        var sleepOrigin: Location? = null
+        var sleepPose: CitizenSleepPose? = null
         var shelter: CivPosition? = null
         var nextPlayAt = 0L
         var supplyPickup: SupplyPickup? = null
@@ -2339,6 +2412,43 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
         if (citizenStandable(world, waypoint) && citizenPacketBodyClear(world, waypoint.point(), false)) return waypoint
     }
     return null
+}
+
+internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)
+
+/** Native 1.21.11 sleeping mesh: head toward -X at yaw zero, .9375 model scale.
+ * Include outer skin/armour layers and lift the pose above the actual floor. No fake bed metadata. */
+internal fun citizenSleepPose(world: World, feet: Location, scale: Double): CitizenSleepPose? {
+    if (!citizenPacketSupported(world, feet.point()) || !citizenPacketBodyClear(world, feet.point(), false)) return null
+    val origin = feet.clone().add(0.0, .32 * scale + .01, 0.0)
+    for (yaw in listOf(0f, 90f, 180f, 270f)) {
+        val radians = Math.toRadians(yaw.toDouble())
+        val cos = kotlin.math.cos(radians)
+        val sin = kotlin.math.sin(radians)
+        // HumanoidModel keeps its idle arm bob in SLEEPING: the armoured hand reaches
+        // .591 blocks sideways at the .1-radian maximum, beyond its static .527 width.
+        val corners = listOf(-1.96, .07).flatMap { x -> listOf(-.62, .62).map { z ->
+            (origin.x + (x * cos + z * sin) * scale) to (origin.z + (-x * sin + z * cos) * scale)
+        } }
+        val box = org.bukkit.util.BoundingBox(corners.minOf { it.first }, origin.y - .31 * scale,
+            corners.minOf { it.second }, corners.maxOf { it.first }, origin.y + .31 * scale, corners.maxOf { it.second })
+        if (citizenSleepClear(world, box)) return CitizenSleepPose(origin.clone().also { it.yaw = yaw; it.pitch = 0f }, box)
+    }
+    return null
+}
+
+internal fun citizenSleepClear(world: World, body: org.bukkit.util.BoundingBox): Boolean {
+    for (x in kotlin.math.floor(body.minX).toInt()..kotlin.math.floor(body.maxX).toInt())
+        for (z in kotlin.math.floor(body.minZ).toInt()..kotlin.math.floor(body.maxZ).toInt()) {
+            if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+            for (y in kotlin.math.floor(body.minY).toInt()..kotlin.math.floor(body.maxY).toInt()) {
+                if (y !in world.minHeight until world.maxHeight) return false
+                val block = world.getBlockAt(x, y, z)
+                if (block.isLiquid || block.type in CITIZEN_LEISURE_HAZARDS ||
+                    block.collisionShape.boundingBoxes.any { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()).overlaps(body) }) return false
+            }
+        }
+    return true
 }
 
 internal fun citizenShelterTarget(city: Settlement, worker: CivWorker, safe: (CivPosition) -> Boolean): CivPosition? {

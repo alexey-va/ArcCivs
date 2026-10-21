@@ -65,10 +65,17 @@ class CivsPhysicalWorkTest : FunSpec({
                 world.getBlockAt(p.x, p.y, p.z).setBlockData(org.bukkit.Bukkit.createBlockData(plant.changes.single().after), false)
                 runtime.invalidate(worker.id)
                 repeat(8) { runtime.pulse(listOf(city)) }
+                // A wet immature crop needs no action. Only meaningful soil care may run.
+                runtime.plan(city, worker) shouldBe null
+                world.getBlockAt(soil.x, soil.y, soil.z).setBlockData(
+                    org.bukkit.Bukkit.createBlockData("minecraft:farmland[moisture=3]"), false)
+                runtime.invalidate(worker.id)
+                repeat(8) { runtime.pulse(listOf(city)) }
                 val care = requireNotNull(runtime.plan(city, worker))
                 care.status shouldBe "watering"
                 care.outputs shouldBe emptyMap()
-                care.changes shouldBe emptyList()
+                care.changes.single().position shouldBe soil
+                care.changes.single().after shouldBe "minecraft:farmland[moisture=7]"
                 val crop = world.getBlockAt(p.x, p.y, p.z)
                 crop.blockData = (crop.blockData as Ageable).also { it.age = it.maximumAge }
                 shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"

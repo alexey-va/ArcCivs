@@ -62,8 +62,11 @@ member-name changes use the existing city write queue, without starving behind w
 bounded routes in loaded chunks, sharing at most 96 search steps or one millisecond
 per tick across residents. Each route visits at most 4096 nodes; an edge checks a
 0.6-by-1.8-block body and at most one block of ascent or descent.
-Movement revalidates live collision and support before accepting a step; work
-checks the actual position independently of planner completion. A failed or stuck
+Movement revalidates live collision and support before accepting a step and
+spends a tick's remaining distance across clear waypoints, without
+banking time behind an obstruction or cutting through a step or corner.
+An interrupted ladder route can settle onto real support in its current column.
+Work checks the actual position independently of planner completion. A failed or stuck
 route may recover to a validated loaded safe endpoint, resetting footsteps.
 The same arrival, work and cycle-token checks still apply. Actual work-route
 crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
@@ -160,11 +163,19 @@ available and otherwise use the town hall, then enter the native sleeping pose.
 After a failed night route or ten seconds, the existing shared safe-recovery
 budget can move them into a freshly validated, loaded home position. A blocked
 or occupied destination retains the failed attempt for a later pulse. Sleep
-arrival grants no work credit, delivery or synthetic footsteps.
+arrival grants no work credit, delivery or synthetic footsteps. The pose chooses
+a clear direction using the full sleeping body, skin, armour and idle arm motion;
+it lifts only the rendered pose above the floor and restores clear original feet
+on waking. Support and standing headroom are rechecked during sleep. If the head
+is blocked, the shared recovery budget can select a clear spot in the same home
+through a clear swept sleeping envelope; without room the low pose is retained
+without work or travel. A cramped shelter does not start a sleeping pose.
 Idle residents choose safe loaded wandering targets within eight blocks of their
 workplace, otherwise home or town hall, at 0.55 of work speed. Base work speed is
 0.215 blocks per tick before the current surface multiplier. Routes avoid horizontal footprints
 of foreign buildings and farm fields; idle wandering does not generate Trails wear.
+The bounded search between world-work cycles holds the current position instead
+of starting an idle trip; food, threats and night shelter still take priority.
 Idle/evening campfire visits use existing lit campfires within 24 blocks of the
 resident's anchor. Discovery examines at most one loaded chunk per pulse, caches
 at most 256 chunks for 120 seconds and invalidates affected chunks on block events.
@@ -269,7 +280,7 @@ are created; a legacy BREAD selection resolves to wheat harvesting.
 When no actionable field job is found in the bounded plot slice, FARM tends an
 unripe crop for four seconds. Watering maintains soil moisture and advances only
 age 3 to 4; optional fertilizer consumes one real bone meal at age 5 to reach 6.
-Other care visits animate without inventing world changes. Native age checkpoints
+Care requires an actual soil or growth change, and an entire bounded field pass prioritizes harvesting over care. Exposed rain suppresses manual watering, including its free age checkpoint; covered plots may still need care. Native age checkpoints
 bound each growth-cycle bonus without a separate timer or restart catch-up.
 Care retains field reach, protection and receipt validation; it grants no drops,
 profession training or hoe wear. Existing hunger still applies while working.
@@ -537,3 +548,7 @@ A migrated city already containing sixteen buildings and no builder hut retains
 one builder assignment in its active hall. This narrowly avoids an irreversible
 bootstrap deadlock in old full cities. New city placement reserves a hut slot,
 so the compatibility condition is unreachable through the new normal flow.
+
+Creative profession-tool requests can issue one plain requested iron tool directly into the resident's main hand without a player stack. Existing held equipment moves into a real free bag slot. Survival still transfers the cheapest matching native player item; repeated requests recheck the equipped tool after the durable inventory receipt.
+
+Transient schematic WORLD_UNAVAILABLE/chunk-unloaded failures preserve the current paid row and retry no sooner than five seconds later, only when its destination entrance is loaded. They do not become permanent generic placement failures. Pre-upgrade generic paused rows receive one guarded recovery attempt per load; a repeated permanent error stays paused. Native world protection and nonempty-container checks remain mandatory.

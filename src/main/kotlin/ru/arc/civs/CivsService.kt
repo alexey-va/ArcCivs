@@ -276,7 +276,7 @@ class CivsService(
         "work-route-too-long", "lands-denied", "world-changed", "protected-terrain", "building-overlap",
         "outside-city", "protected-area", "placement-failed", "placement-cancelled" -> reason
         "control-position-missing", "control-missing", "control-obstructed" -> "control-missing"
-        "world-unavailable", "chunk-unloaded" -> "sleeping"
+        "world-unavailable", "chunk-unloaded", "chunks-unloaded" -> "sleeping"
         else -> "paused"
     }
     override fun activeNpcCount(): Int = citizens.activeCount()
@@ -981,7 +981,7 @@ class CivsService(
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun rememberInjury(event: CivsResidentDamageEvent) {
         val source = (event.source as? org.bukkit.entity.Projectile)?.shooter as? org.bukkit.entity.Entity ?: event.source
-        val location = event.location
+        val location = citizens.residentFeet(event.workerId) ?: event.location
         val killerName = (source as? Player)?.name ?: source?.customName()?.let {
             net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(it)
                 .filterNot(Char::isISOControl).take(64).takeIf(String::isNotBlank)
@@ -1068,7 +1068,8 @@ class CivsService(
         val city = managed(player)
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         val tool = CivsEquipment.requestedTool(city, worker) ?: return null
-        return CivsToolRequest(tool, CivsEquipment.canEquipRequestedTool(worker) && CivsEquipment.cheapestTool(player, tool) != null)
+        return CivsToolRequest(tool, CivsEquipment.canEquipRequestedTool(worker) &&
+            (player.gameMode == org.bukkit.GameMode.CREATIVE || CivsEquipment.cheapestTool(player, tool) != null))
     }
 
     override fun giveRequestedTool(player: Player, workerId: UUID): CompletableFuture<Unit> =
@@ -1178,11 +1179,18 @@ class CivsService(
     private fun transferResidentItems(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requested: Boolean): CompletableFuture<Unit> =
         cityAction("resident_transfer", player, "worker" to workerId, "resident_slot" to npcSlot, "player_slot" to playerSlot) { city ->
             var updated: CivWorker? = null
+            val creativeGrant = requested && player.gameMode == org.bukkit.GameMode.CREATIVE
             inventoryMutation(city.id, { before ->
-                val tool = if (requested) CivsEquipment.requestedTool(before, before.workers.firstOrNull { it.id == workerId }
-                    ?: throw CivsRejection("worker-not-found")) ?: throw CivsRejection("resident-item-missing") else null
-                storage.prepareResidentTransfer(before, workerId, player, npcSlot, playerSlot, click, tool).also { updated = it.worker }.plan
-            }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
+                val worker = before.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                val tool = if (requested) CivsEquipment.requestedTool(before, worker)
+                    ?: throw CivsRejection("resident-item-missing") else null
+                if (creativeGrant) {
+                    rejectIf(player.gameMode != org.bukkit.GameMode.CREATIVE || !player.isOnline, "not-authorized")
+                    updated = CivsEquipment.equipRequestedTool(worker, CivResidentItem(requireNotNull(tool).name, 1))
+                    CivStoragePlan(before.inventory ?: throw CivsRejection("materials-required"), emptyList())
+                } else storage.prepareResidentTransfer(before, workerId, player, npcSlot, playerSlot, click, tool)
+                    .also { updated = it.worker }.plan
+            }, sourcePlayer = if (creativeGrant) null else player, keepViewersOpen = true) { before, inventory ->
                 before.copy(workers = before.workers.map { if (it.id == workerId) requireNotNull(updated) else it },
                     inventory = inventory, revision = before.revision + 1)
             }.thenApply { Unit }
@@ -2012,6 +2020,10 @@ class CivsService(
                 val (records, prepared, recovered) = requireNotNull(loaded)
                 storage.replaceCities(records.values)
                 cities = records
+                legacyPlacementRetries.clear()
+                legacyPlacementRetries.addAll(records.values.mapNotNull { city -> city.construction?.takeIf {
+                    it.phase == ConstructionPhase.PAUSED && it.failure in setOf("placement-failed", "chunk-unloaded", "chunks-unloaded", "world-unavailable")
+                }?.id })
                 recoveredMemberNames = recovered
                 populationMinuteAt.clear()
                 citizens.reconcileResidents()
@@ -2384,6 +2396,8 @@ class CivsService(
         }
     }
 
+    private val constructionRetryAfter = mutableMapOf<UUID, Long>()
+    private val legacyPlacementRetries = mutableSetOf<UUID>()
     private var nextMaterialCheckAt = 0L
     private var materialCursor = 0
     private val queueFailures = mutableMapOf<UUID, Pair<UUID, String>>()
@@ -2424,7 +2438,7 @@ class CivsService(
         if (placing.size < 2 && now() >= nextMaterialCheckAt) {
             nextMaterialCheckAt = now() + 5_000L
             val waiting = cities.values.filter { city ->
-                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
+                city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && now() >= (constructionRetryAfter[city.id] ?: 0L) && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
                     city.id !in placing && city.pendingControls.orEmpty().none { it.buildingId == city.construction.buildingId } &&
                     plugin.server.getWorld(city.worldId)?.let { target ->
                         city.construction.plannedBuilding?.entrance?.let { target.isChunkLoaded(it.x shr 4, it.z shr 4) }
@@ -2442,11 +2456,19 @@ class CivsService(
             val order = city.construction ?: continue
             if (city.id in busy || city.id in unhealthy || city.id in placing || city.pendingDeletion != null) continue
             if (city.pendingControls.orEmpty().any { it.buildingId == order.buildingId }) continue
-            if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
+            if (now() < (constructionRetryAfter[city.id] ?: 0L)) continue
             // A reloaded city sleeps until its destination chunks are already available.
             val b = order.plannedBuilding ?: continue
             val w = plugin.server.getWorld(city.worldId) ?: continue
             if (!w.isChunkLoaded(b.entrance.x shr 4, b.entrance.z shr 4)) continue
+            if (order.phase == ConstructionPhase.PAUSED && order.id in legacyPlacementRetries) {
+                // Older releases flattened temporary chunk unload into this generic failure. Try its current row once.
+                legacyPlacementRetries -= order.id
+                mutate(city.id) { CivsRules.retryConstruction(it, it.owner, order.id) }
+                    .whenComplete { _, failure -> if (failure != null) log("resume legacy construction ${order.id}", failure) }
+                continue
+            }
+            if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
             startPlacement(city, order)
         }
     }
@@ -2674,9 +2696,16 @@ class CivsService(
 
     private fun placementFailed(cityId: UUID, orderId: UUID, failure: Throwable) {
         releasePlacement(cityId)
-        log("place construction $orderId", failure)
         if (closed || cityId in unhealthy || cities[cityId]?.pendingDeletion != null || cities[cityId]?.construction?.id != orderId) return
-        val causes = generateSequence(failure) { it.cause }.toList()
+        val causes = generateSequence(failure) { it.cause }.take(16).toList()
+        if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.WORLD_UNAVAILABLE } ||
+            causes.filterIsInstance<CivsRejection>().any { it.reason in setOf("chunk-unloaded", "chunks-unloaded", "world-unavailable") }) {
+            constructionRetryAfter[cityId] = now() + 5_000
+            CivsDiagnostics.event("construction_waiting_world", "city" to cityId, "order" to orderId,
+                "batch" to cities[cityId]?.construction?.workDone, "reason" to "chunk-unloaded")
+            return
+        }
+        log("place construction $orderId", failure)
         val reason = causes.filterIsInstance<CivsRejection>().firstOrNull()?.reason
             ?: if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.PROTECTED_AREA }) "protected-area" else "placement-failed"
         runCatching {

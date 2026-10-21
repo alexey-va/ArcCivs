@@ -50,3 +50,7 @@ and existing food costs. Verify priorities, the two native age checkpoints,
 water-only work, physical input debit/replay, actual reach, stale growth,
 protection, cancellation and absence of care training/tool damage. Source,
 delivery, activation and native-client animation acceptance remain separate.
+
+## Correction in 0.1.39
+
+The historical no-change care visits above have been removed. A full field scan, still bounded to sixteen candidate plots per pulse, prioritizes mature crops before care. Open-sky rain suppresses all manual watering, including the free age3 increment; roofed or dry-weather meaningful care retains the previous checkpoints and fertilizer costs. No realized throughput estimate is claimed. See [the correction assessment](creative-tools-and-resident-recovery-assessment.md).

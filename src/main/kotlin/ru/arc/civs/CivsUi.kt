@@ -1481,12 +1481,18 @@ class CivsUi internal constructor(
     private fun requestButton(player: Player, request: CivsBuildingRequest, unavailableKey: String, helpKey: String,
         give: () -> Unit, refresh: () -> Unit): PaperDialogButton {
         val tool = requestTool(request)
+        val creativeTool = tool != null && player.gameMode == GameMode.CREATIVE
         val busy = host.cityBusy(player)
         val canGive = request.canGive && !busy
         val color = if (canGive) COMMIT else DANGER
         val tooltip = tr(player, when {
             busy -> "reason.city-busy"
-            !request.canGive -> if (tool == null) unavailableKey else "workers.tool-request-unavailable"
+            !request.canGive -> when {
+                creativeTool -> "workers.tool-request-creative-unavailable"
+                tool != null -> "workers.tool-request-unavailable"
+                else -> unavailableKey
+            }
+            creativeTool -> "workers.give-tool-creative-help"
             tool != null -> "workers.give-tool-help"
             else -> helpKey
         })

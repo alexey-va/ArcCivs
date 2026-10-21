@@ -32,7 +32,7 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
-    test("empty crop care requires arrival at the plot and commits its cycle only through the journal") {
+    test("useful crop care requires arrival at the plot and commits its cycle only through the journal") {
         serviceScenario { h ->
             val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)
             val anchor = CivPosition(30, 63, 0)
@@ -46,7 +46,7 @@ class CivsServiceTest : FunSpec({
                 workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
             for (x in 0..4) for (z in -3..1) world.loadChunk(x, z)
             CivsWorksiteLayouts.field(farm).forEach { soil ->
-                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=3]")
                 world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
                     (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
             }
@@ -59,9 +59,10 @@ class CivsServiceTest : FunSpec({
             every { h.citizens.requireStorageArrival(any(), any(), any()) } throws CivsRejection("stale-delivery")
             h.start()
             val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }.get(h.service) as CivsWorksites
+            repeat(32) { if (runtime.plan(h.service.city(h.player)!!, worker) == null) h.paper.performTicks(5) }
             val work = requireNotNull(runtime.plan(h.service.city(h.player)!!, worker))
             work.status shouldBe "watering"
-            work.changes shouldBe emptyList()
+            work.changes.size shouldBe 1
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
@@ -70,7 +71,7 @@ class CivsServiceTest : FunSpec({
             val completion = complete()
             val accepted = requireNotNull(receipt)
             accepted.changes shouldBe emptyList()
-            accepted.worldChanges shouldBe emptyList()
+            accepted.worldChanges shouldBe work.changes
             accepted.after.workers.single().completedCycles shouldBe 1L
             accepted.after.workers.single().skills shouldBe worker.skills
             accepted.after.workers.single().items shouldBe worker.items
@@ -85,6 +86,60 @@ class CivsServiceTest : FunSpec({
             h.service.city(h.player)!!.workers.single().completedCycles shouldBe 1L
             complete().isCompletedExceptionally shouldBe true
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    for (viaBuilding in listOf(false, true)) test("creative empty inventory issues the requested pickaxe durably viaBuilding=$viaBuilding") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("CreativeToolOwner").also {
+                it.isOp = true; it.gameMode = org.bukkit.GameMode.CREATIVE
+                it.teleport(Location(h.world, 0.0, 65.0, 0.0)); it.inventory.clear()
+            }
+            val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY)
+            val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1,
+                items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem("IRON_AXE", 1) else null })
+            val ready = h.city.copy(owner = player.uniqueId, buildings = listOf(h.city.buildings.first(), quarry),
+                memberNames = mapOf(player.uniqueId.toString() to player.name),
+                workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.IRON_PICKAXE, 1, true)
+            h.service.buildingRequest(player, quarry.id) shouldBe CivsBuildingRequest(Material.IRON_PICKAXE, 1, true)
+            val issue = if (viaBuilding) h.service.giveBuildingRequest(player, quarry.id, "IRON_PICKAXE")
+                else h.service.giveWorkerRequest(player, worker.id, "IRON_PICKAXE")
+            val tx = requireNotNull(receipt)
+            tx.residentTransfer shouldBe null
+            tx.changes shouldBe emptyList()
+            CivsEquipment.slots(tx.after.workers.single())[4] shouldBe CivResidentItem("IRON_PICKAXE", 1)
+            CivsEquipment.plainCount(tx.after.workers.single(), "IRON_AXE") shouldBe 1
+            CivsEquipment.slots(h.service.city(player)!!.workers.single())[4] shouldBe CivResidentItem("IRON_AXE", 1)
+            player.inventory.storageContents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+            issue.isDone shouldBe false
+            journal.complete(tx); h.tick(); h.commit(); issue.join()
+            CivsEquipment.slots(h.service.city(player)!!.workers.single())[4] shouldBe CivResidentItem("IRON_PICKAXE", 1)
+            h.service.giveRequestedTool(player, worker.id).isCompletedExceptionally shouldBe true
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            player.inventory.storageContents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+        }
+    }
+
+    test("survival operator cannot issue a requested pickaxe without a real player item") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("SurvivalToolOwner").also { it.isOp = true; it.inventory.clear() }
+            val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY)
+            val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(owner = player.uniqueId,
+                buildings = listOf(h.city.buildings.first(), quarry), workers = listOf(worker), stock = Stock(),
+                inventory = CivInventory(CivStorageMode.VIRTUAL))))
+            h.start()
+            h.service.toolRequest(player, worker.id) shouldBe CivsToolRequest(Material.IRON_PICKAXE, false)
+            h.service.giveRequestedTool(player, worker.id).isCompletedExceptionally shouldBe true
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), "IRON_PICKAXE") shouldBe 0
         }
     }
 
@@ -987,6 +1042,51 @@ class CivsServiceTest : FunSpec({
             placement.pasted.complete(ArcSchematicMutationResult(1, 0, false)); h.tick(); h.commit()
             h.service.city(h.player)!!.construction!!.workDone shouldBe 1
             h.service.city(h.player)!!.construction!!.payment shouldBe CivConstructionPayment()
+        }
+    }
+
+    for (chunkFailure in listOf(
+        ArcSchematicException(ArcSchematicFailure.WORLD_UNAVAILABLE, "Schematic target chunk unloaded during mutation"),
+        CivsRejection("chunks-unloaded"),
+    )) test("unloaded construction chunks wait and resume the paid row without another debit ${chunkFailure.javaClass.simpleName}") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true, stock = 7)
+            h.start(); h.commit()
+            placement.pasted.completeExceptionally(chunkFailure); h.tick()
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.PLACING
+            h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
+            h.saves.size shouldBe 1
+            val retryResult = CompletableFuture<ArcSchematicMutationResult>()
+            val retry = mockk<ArcSchematicOperation>(relaxed = true)
+            every { retry.completion } returns retryResult
+            every { h.blueprints.paste(any(), any(), any(), any(), any()) } returns retry
+            h.time += 4_999; h.paper.performTicks(20)
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            h.time++; h.paper.performTicks(20)
+            verify(exactly = 2) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            retryResult.complete(ArcSchematicMutationResult(1, 0, false)); h.tick(); h.commit()
+            h.service.city(h.player)!!.construction!!.workDone shouldBe 1
+            (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("a legacy generic placement failure gets one guarded retry after its chunk loads") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(phase = ConstructionPhase.PAUSED, paid = true, stock = 7)
+            val recovering = placement.city.copy(construction = placement.city.construction!!.copy(failure = "placement-failed"))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(recovering))
+            h.start(); h.paper.performTicks(20)
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+            h.commit(); h.paper.performTicks(20); h.commit()
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
+            (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
+            placement.pasted.completeExceptionally(IllegalStateException("permanent native error")); h.tick(); h.commit()
+            h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.PAUSED
+            h.time += 10_000; h.paper.performTicks(40)
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
 

@@ -202,6 +202,43 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a miner waits on its ladder while the next job is searched instead of climbing toward an idle surface walk") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry()
+            val actor = h.owner.collisionActors().single()
+            for (y in 57..64) h.world.getBlockAt(18, y, 0).type = Material.LADDER
+            val start = Location(h.world, 18.5, 61.4, .5)
+            actor.teleport(start)
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(18, 61, 0),
+                listOf(CivPlanBlock(CivPosition(19, 62, 0), "minecraft:stone", "minecraft:air")), emptyMap(), emptyMap(),
+                durationMillis = 2_000, focus = CivPosition(19, 62, 0), status = "digging-mine")
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.digging-mine"
+            // This is the real cache gap after a commit / invalidation. Its surface anchor
+            // is valid and reachable, so a misplaced idle walk would visibly climb the shaft.
+            h.work = null
+            h.idleReason = "searching-work"
+            h.owner.pulse(3_000)
+            repeat(160) { h.owner.activateNavigating() }
+            actor.location.distanceSquared(start) shouldBe 0.0
+            h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+            h.work = CivWorldWork(h.workerId, 0, quarry.id, CivPosition(18, 57, 0),
+                listOf(CivPlanBlock(CivPosition(18, 56, 0), "minecraft:stone", "minecraft:air")), emptyMap(), emptyMap(),
+                durationMillis = 2_000, focus = CivPosition(18, 56, 0), status = "digging-mine")
+            h.owner.pulse(4_000)
+            repeat(1_000) {
+                h.owner.activateNavigating()
+                (actor.location.y <= start.y) shouldBe true
+            }
+            (actor.location.y < start.y - .1) shouldBe true
+            h.owner.pulse(4_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.digging-mine"
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("a miner waiting for a tool walks from the hall to its quarry through an upward ingress step") {
         residentRuntime { h ->
             val quarry = h.assignQuarry()
@@ -263,6 +300,64 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("removing a sleeping resident's floor wakes it at logical feet and normal gravity settles it") {
+        residentRuntime { h ->
+            val actor = h.owner.collisionActors().single()
+            val origin = Location(h.world, 1.5, 64.0, .5)
+            actor.teleport(origin)
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            actor.pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.residentFeet(h.workerId) shouldBe origin
+            h.world.getBlockAt(1, 63, 0).type = Material.AIR
+            h.owner.pulse(3_000)
+            actor.pose shouldBe PacketNpcPose.STANDING
+            actor.location shouldBe origin
+            repeat(30) { h.owner.activateNavigating() }
+            actor.location.y shouldBe 63.0
+            citizenPacketSupported(h.world, CitizenPoint(actor.location.x, actor.location.y, actor.location.z)) shouldBe true
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+        }
+    }
+
+    test("a new ceiling cannot force a sleeper to stand inside stone or work before a safe wake space opens") {
+        residentRuntime { h ->
+            val actor = h.owner.collisionActors().single()
+            val origin = Location(h.world, 1.5, 64.0, .5)
+            val lying = requireNotNull(citizenSleepPose(h.world, origin, 1.0)).bounds
+            actor.teleport(origin)
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            actor.pose shouldBe PacketNpcPose.SLEEPING
+            val sleepingPosition = actor.location
+            for (x in -2..2) for (z in -2..2) h.world.getBlockAt(x, 65, z).type = Material.STONE
+            citizenSleepClear(h.world, lying) shouldBe true
+            citizenPacketBodyClear(h.world, CitizenPoint(origin.x, origin.y, origin.z), false) shouldBe false
+            h.world.time = 0
+            for (now in listOf(3_000L, 4_000L)) {
+                h.owner.pulse(now)
+                repeat(40) { h.owner.activateNavigating() }
+                actor.pose shouldBe PacketNpcPose.SLEEPING
+                actor.location shouldBe sleepingPosition
+                h.owner.workingResidentIds(h.city.id) shouldBe emptySet()
+                h.hits shouldBe 0
+                (h.owner.status(h.workerId) == "workers.status.injury-pending") shouldBe false
+            }
+            // There is now a supported spot in the same home with a clear low-body sweep.
+            h.world.getBlockAt(2, 65, 0).type = Material.AIR
+            h.owner.pulse(5_000)
+            actor.pose shouldBe PacketNpcPose.STANDING
+            h.hits shouldBe 0
+            actor.location.x shouldBe 2.5
+            actor.location.y shouldBe origin.y
+            citizenPacketBodyClear(h.world, CitizenPoint(actor.location.x, actor.location.y, actor.location.z), false) shouldBe true
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+            h.steps shouldBe emptyList()
+        }
+    }
+
     test("an enclosed builder waiting for materials recovers into its home at night without work credit") {
         residentRuntime { h ->
             val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
@@ -295,6 +390,22 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(15_001)
             actor.pose shouldBe PacketNpcPose.SLEEPING
             h.owner.status(h.workerId) shouldBe "workers.status.sleeping"
+            verify { actor.sleepingBed = null }
+            val lying = actor.location
+            (lying.y > recovered.y) shouldBe true
+            h.owner.residentFeet(h.workerId) shouldBe recovered
+            h.owner.residentFeet(h.workerId)?.add(0.0, 10.0, 0.0) // Caller mutation cannot alter the saved feet.
+            h.owner.residentFeet(h.workerId) shouldBe recovered
+            repeat(20) { h.owner.activateNavigating() }
+            actor.location.y shouldBe lying.y // Gravity must not undo the pose-only floor clearance.
+            // The pose is rechecked against the current world, not trusted until morning.
+            for ((dx, dz) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1))
+                h.world.getBlockAt(recovered.blockX + dx, recovered.blockY, recovered.blockZ + dz).type = Material.STONE
+            h.owner.pulse(16_001)
+            actor.pose shouldBe PacketNpcPose.STANDING
+            actor.location.y shouldBe recovered.y
+            h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+            h.owner.residentFeet(h.workerId) shouldBe recovered
             h.city.construction shouldBe order
             h.city.workers.single().completedCycles shouldBe 0
             h.deliveries shouldBe 0
@@ -668,8 +779,16 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 every { isValid } answers { valid }
                 every { location } answers { position.clone() }
                 every { world } returns this@ResidentRuntime.world
-                every { height } answers { 1.8 * npcScale }
-                every { eyeHeight } answers { 1.62 * npcScale }
+                every { height } answers { when (npcPose) {
+                    PacketNpcPose.STANDING -> 1.8 * npcScale
+                    PacketNpcPose.CROUCHING -> 1.5 * npcScale
+                    PacketNpcPose.SLEEPING -> .2
+                } }
+                every { eyeHeight } answers { when (npcPose) {
+                    PacketNpcPose.STANDING -> 1.62 * npcScale
+                    PacketNpcPose.CROUCHING -> 1.27 * npcScale
+                    PacketNpcPose.SLEEPING -> .2
+                } }
                 every { scale } answers { npcScale }
                 every { scale = any() } answers { npcScale = firstArg() }
                 every { pose } answers { npcPose }
@@ -797,13 +916,18 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         object : BlockMock(if (point.y <= 63) Material.STONE else Material.AIR,
             Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
             override fun isPassable(): Boolean = type.isAir
-            override fun getBoundingBox(): BoundingBox = BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(),
-                x + 1.0, y + if (type.isAir) 0.0 else 1.0, z + 1.0)
-            override fun getCollisionShape(): VoxelShape = if (type.isAir) EMPTY_SHAPE else FULL_SHAPE
+            override fun getBoundingBox(): BoundingBox = if (type == Material.LADDER)
+                BoundingBox(x.toDouble(), y.toDouble(), z + 13.0 / 16.0, x + 1.0, y + 1.0, z + 1.0)
+            else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + if (type.isAir) 0.0 else 1.0, z + 1.0)
+            override fun getCollisionShape(): VoxelShape = when {
+                type.isAir -> EMPTY_SHAPE
+                type == Material.LADDER -> LADDER_SHAPE
+                else -> FULL_SHAPE
+            }
         }
     }
 
-    /** Pinned WorldMock omits this native API. This fixture contains only full cubes and air. */
+    /** Pinned WorldMock omits this native API. The fixture adds the default north-facing ladder shape. */
     override fun rayTraceBlocks(start: Location, direction: Vector, maxDistance: Double,
         fluidCollisionMode: FluidCollisionMode, ignorePassableBlocks: Boolean): RayTraceResult? {
         val end = start.clone().add(direction.clone().normalize().multiply(maxDistance))
@@ -836,5 +960,6 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         }
         private val EMPTY_SHAPE = shape(emptyList())
         private val FULL_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
+        private val LADDER_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0)))
     }
 }

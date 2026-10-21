@@ -34,6 +34,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private data class Cached(val building: CivBuilding, val worker: CivWorker, val work: CivWorldWork)
     private val cached = hashMapOf<UUID, Cached>()
     private val cursors = hashMapOf<UUID, Int>()
+    private data class FarmScan(val building: CivBuilding, val cycle: Long, val plots: List<CivPosition>,
+        var examined: Int = 0, var care: Pair<CivPosition, Int>? = null)
+    private val farmScans = hashMapOf<UUID, FarmScan>()
     private data class Need(val building: CivBuilding, val cycle: Long, val status: String,
         val material: String? = null, val amount: Long = 1, val point: CivPosition? = null,
         val reason: String? = null, val blockMaterial: String? = null)
@@ -57,7 +60,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             it.worker.items == worker.items && it.worker.inventory == worker.inventory }?.work
     }
 
-    fun invalidate(workerId: UUID) { cached.remove(workerId); needs.remove(workerId); workSpots.remove(workerId); mineSafety.remove(workerId) }
+    fun invalidate(workerId: UUID) {
+        cached.remove(workerId); needs.remove(workerId); workSpots.remove(workerId); mineSafety.remove(workerId); farmScans.remove(workerId)
+    }
 
     /** One worker, 16 job candidates, 32 standing probes and eight short rays per shared pulse. */
     fun pulse(cities: Collection<Settlement>) {
@@ -73,6 +78,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         workSpots.keys.retainAll(workerIds)
         reportedNeeds.keys.retainAll(workerIds)
         cursors.keys.retainAll(workerIds)
+        farmScans.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
         mineSafety.keys.retainAll(workerIds)
         if (jobs.isEmpty()) return
@@ -93,6 +99,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (work != null) {
             needs.remove(worker.id)
             workSpots.remove(worker.id)
+            farmScans.remove(worker.id)
             cached[worker.id] = Cached(building, worker, work)
         }
         reportWorksite(city, worker, building, work)
@@ -113,6 +120,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val age = crop.blockData as? Ageable
             requireCivs(soil.type == Material.FARMLAND && crop.type == cropAndSeed(building).first &&
                 age != null && age.age < age.maximumAge, "stale-worksite")
+            requireCivs(work.status != "watering" || !world.hasStorm() || world.getHighestBlockYAt(focus.x, focus.z) > focus.y,
+                "stale-worksite")
             CivsWorksiteLayouts.irrigation(building).forEach { point ->
                 val water = read(city, building, world, point) ?: throw CivsRejection("protected-area")
                 requireCivs(water.type == Material.WATER, "stale-worksite")
@@ -228,23 +237,32 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val index = workers.indexOfFirst { it.id == worker.id }
         val plots = CivsWorksiteLayouts.field(building).filterIndexed { i, _ -> i % workers.size == index }
         if (plots.isEmpty()) return null
-        var care: Pair<CivPosition, Int>? = null
-        repeat(minOf(16, plots.size)) {
+        val scan = farmScans[worker.id]?.takeIf { it.building == building && it.cycle == worker.completedCycles && it.plots == plots }
+            ?: FarmScan(building, worker.completedCycles, plots).also { farmScans[worker.id] = it }
+        // Keep the existing per-pulse budget, but inspect the complete field before choosing care.
+        repeat(minOf(16, plots.size - scan.examined)) {
             val soilPoint = plots[Math.floorMod(cursors.getOrDefault(worker.id, 0), plots.size)]
             cursors[worker.id] = cursors.getOrDefault(worker.id, 0) + 1
+            scan.examined++
             val soil = read(city, building, world, soilPoint) ?: return@repeat
             val top = read(city, building, world, soilPoint.copy(y = soilPoint.y + 1)) ?: return@repeat
             if (soil.type !in SOILS || top.type != crop && !top.type.isAir && top.type !in WEEDS) return@repeat
             if (soil.type == Material.FARMLAND && top.type == crop) {
                 val age = top.blockData as? Ageable ?: return@repeat
                 if (age.age < age.maximumAge) {
-                    if (care == null) care = position(top) to cursors.getValue(worker.id)
+                    if (scan.care == null && cropCareChanges(world, top, soil, age,
+                            age.age == 5 && (available["BONE_MEAL"] ?: 0) > 0).isNotEmpty())
+                        scan.care = position(top) to cursors.getValue(worker.id)
                     return@repeat
                 }
             }
             val focus = if (soil.type == Material.FARMLAND) position(top) else soilPoint
             val standing = beside(city, worker, building, world, focus) ?: run {
-                if (spotSearchPending) { cursors[worker.id] = cursors.getValue(worker.id) - 1; return null }
+                if (spotSearchPending) {
+                    cursors[worker.id] = cursors.getValue(worker.id) - 1
+                    scan.examined--
+                    return null
+                }
                 return@repeat
             }
             if (soil.type != Material.FARMLAND) {
@@ -268,12 +286,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1), status = "working-field")
             blocked(worker, "waiting-seeds", seed)
         }
-        return care?.let { (focus, resume) ->
-            careCrop(city, worker, building, world, focus, available).also {
-                if (it != null) cursors[worker.id] = resume
-                else if (spotSearchPending) cursors[worker.id] = resume - 1
-            }
+        if (scan.examined < plots.size) return null
+        val work = scan.care?.let { (focus, resume) ->
+            careCrop(city, worker, building, world, focus, available).also { if (it != null) cursors[worker.id] = resume }
         }
+        if (!spotSearchPending) farmScans.remove(worker.id)
+        return work
     }
 
     private fun cropAndSeed(building: CivBuilding): Pair<Material, String> = when (CivsProduction.material(building)) {
@@ -289,14 +307,20 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val age = crop.blockData as? Ageable ?: return null
         if (soil.type != Material.FARMLAND || crop.type != cropAndSeed(building).first || age.age == age.maximumAge) return null
         val fertilizing = age.age == 5 && (available["BONE_MEAL"] ?: 0) > 0
-        val changes = buildList {
-            if (soil.blockData.asString != "minecraft:farmland[moisture=7]") add(change(soil, "minecraft:farmland[moisture=7]"))
-            // Native age gates allow only one free and one paid extra stage per growth cycle.
-            if (age.age == 3 || fertilizing) add(change(crop, (age.clone() as Ageable).also { it.age++ }.asString))
-        }
+        val changes = cropCareChanges(world, crop, soil, age, fertilizing)
+        if (changes.isEmpty()) return null
         val standing = beside(city, worker, building, world, focus) ?: return null
         return work(worker, building, standing, changes, if (fertilizing) mapOf("BONE_MEAL" to 1L) else emptyMap(),
             status = if (fertilizing) "fertilizing" else "watering", duration = 4_000, focus = focus)
+    }
+
+    private fun cropCareChanges(world: World, crop: Block, soil: Block, age: Ageable, fertilizing: Boolean): List<CivPlanBlock> = buildList {
+        val rainExposed = world.hasStorm() && world.getHighestBlockYAt(crop.x, crop.z) <= crop.y
+        if (!rainExposed && soil.blockData.asString != "minecraft:farmland[moisture=7]")
+            add(change(soil, "minecraft:farmland[moisture=7]"))
+        // Rain needs no manual watering; otherwise keep the existing one free and one paid extra stage.
+        if (!rainExposed && age.age == 3 || fertilizing)
+            add(change(crop, (age.clone() as Ageable).also { it.age++ }.asString))
     }
 
     private fun forest(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {

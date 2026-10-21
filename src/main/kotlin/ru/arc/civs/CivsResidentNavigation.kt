@@ -54,11 +54,11 @@ internal class CitizenPacketRoute(
     private val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
     private val travelCost: (org.bukkit.block.Block) -> Double,
 ) {
-    private data class Cell(val x: Int, val y: Double, val z: Int, val climbing: Boolean = false) {
+    private data class Cell(val x: Int, val y: Double, val z: Int, val climbing: Boolean = false, val initial: Boolean = false) {
         fun point() = CitizenPoint(x + .5, y, z + .5)
     }
     private data class Entry(val cell: Cell, val cost: Double, val score: Double, val order: Int)
-    private val start = Cell(from.blockX, from.y, from.blockZ)
+    private val start = Cell(from.blockX, from.y, from.blockZ, initial = true)
     private val origin = CitizenPoint(from.x, from.y, from.z)
     private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
     private val costs = hashMapOf(start to 0.0)
@@ -129,6 +129,9 @@ internal class CitizenPacketRoute(
         }
         expanding = current
         edges = sequence {
+            // A cancelled ascent/ladder exit can leave feet between supports or off centre.
+            // First reach a real support in this column before looking for a neighbour.
+            if (cell == start) yieldAll(standingCells(cell.x, cell.y, cell.z))
             for (dx in -1..1) for (dz in -1..1) {
                 if (dx == 0 && dz == 0) continue
                 val x = cell.x + dx
@@ -137,7 +140,7 @@ internal class CitizenPacketRoute(
             }
             // A quarry's ladder connects adjacent floors without inventing a solid support block.
             val at = world.getBlockAt(cell.x, floor(cell.y).toInt(), cell.z)
-            if (Tag.CLIMBABLE.isTagged(at.type)) for (dy in listOf(-1, 1)) {
+            if (Tag.CLIMBABLE.isTagged(at.type)) for (dy in listOf(-1, 0, 1)) {
                 val next = Cell(cell.x, floor(cell.y) + dy, cell.z, true)
                 if (allowed(CivPosition(next.x, floor(next.y).toInt(), next.z)) &&
                     Tag.CLIMBABLE.isTagged(world.getBlockAt(next.x, floor(next.y).toInt(), next.z).type) &&
@@ -150,7 +153,7 @@ internal class CitizenPacketRoute(
         val p = next.point()
         if (abs(p.x - start.point().x) > 96 || abs(p.z - start.point().z) > 96 ||
             abs(p.y - start.y) > 96) return
-        val distance = sqrt(previous.cell.point().distanceSquared(p))
+        val distance = sqrt((if (previous.cell == start) origin else previous.cell.point()).distanceSquared(p))
         val weight = weights.getOrPut(next) {
             travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z))
         }
@@ -214,48 +217,74 @@ internal class CitizenPacketRoute(
              openDoor: (Location) -> Boolean): Location? {
         waitingForCollision = false
         if (searching || failure != null || finished) return null
-        val next = path.firstOrNull() ?: run { finished = true; return null }
-        val to = Location(world, next.x + .5, next.y, next.z + .5)
-        if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
-            !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
-            !citizenPacketSupported(world, next.point()) ||
-            !travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z)).isFinite() || !openDoor(to)) {
-            fail("path-changed"); return null
+        var point = from.clone()
+        var remaining = .215 * speed.coerceIn(.1, 5.0)
+        var moved = false
+        var previousDirection: org.bukkit.util.Vector? = null
+        // A normal step can cross a cell centre. Spend its remainder in this same tick,
+        // never save it for a later tick or accelerate after an obstruction clears.
+        for (segment in 0 until 8) {
+            val next = path.firstOrNull()
+            if (next == null) { finished = true; break }
+            val to = Location(world, next.x + .5, next.y, next.z + .5)
+            if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
+                !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
+                !citizenPacketSupported(world, next.point()) ||
+                !travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z)).isFinite() || !openDoor(to)) {
+                fail("path-changed"); break
+            }
+            // Keep vertical and horizontal legs in separate packets: interpolating diagonally
+            // from below a step to its top would cut through the solid support's side.
+            val waypoint = to.clone()
+            if (to.y > point.y + .0001) {
+                waypoint.x = point.x
+                waypoint.z = point.z
+            } else if (to.y < point.y - .0001 &&
+                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
+                waypoint.y = point.y
+            }
+            val delta = waypoint.toVector().subtract(point.toVector())
+            val distance = delta.length()
+            if (distance < .0001) {
+                if (point.distanceSquared(to) < .000001) { path.removeFirst(); continue }
+                break
+            }
+            val direction = delta.clone().multiply(1.0 / distance)
+            if (previousDirection?.let { previous ->
+                    (abs(previous.y) > .0001 || abs(direction.y) > .0001) &&
+                        previous.clone().crossProduct(direction).lengthSquared() > .000001
+                } == true) break
+            val advance = min(distance, remaining)
+            val candidate = if (advance == distance) waypoint else point.clone().add(direction.clone().multiply(advance))
+            val a = CitizenPoint(point.x, point.y, point.z)
+            val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
+            if (!stepAllowed(a, b) || !citizenPacketStepClear(world, a, b, false)) {
+                fail("movement-blocked"); break
+            }
+            // A client interpolates one straight segment between packets. Adjacent path legs
+            // may each be clear while their shortcut clips a corner; stop at that corner then.
+            val origin = CitizenPoint(from.x, from.y, from.z)
+            if (moved && (!stepAllowed(origin, b) || !citizenPacketStepClear(world, origin, b, false))) break
+            if (!movementAllowed(from, candidate)) {
+                waitingForCollision = true
+                break
+            }
+            point = candidate
+            moved = true
+            remaining -= advance
+            previousDirection = direction
+            if (point.distanceSquared(to) < .000001) path.removeFirst()
+            if (path.isEmpty()) { finished = true; break }
+            if (remaining < .000001) break
         }
-        // Rise before entering an upper block's side. Walk beyond a lower step's edge before
-        // descending, so the body never interpolates diagonally through its previous support.
-        val waypoint = to.clone()
-        if (to.y > from.y + .0001) {
-            waypoint.x = from.x
-            waypoint.z = from.z
-        } else if (to.y < from.y - .0001 &&
-            (to.x - from.x) * (to.x - from.x) + (to.z - from.z) * (to.z - from.z) > .000001) {
-            waypoint.y = from.y
-        }
-        val delta = waypoint.toVector().subtract(from.toVector())
-        val distance = delta.length()
-        val advance = min(distance, .215 * speed.coerceIn(.1, 5.0))
-        val point = if (distance < .0001) waypoint else from.clone().add(delta.multiply(advance / distance))
-        val a = CitizenPoint(from.x, from.y, from.z)
-        val b = CitizenPoint(point.x, point.y, point.z)
-        if (!stepAllowed(a, b) || !citizenPacketStepClear(world, a, b, false)) {
-            fail("movement-blocked"); return null
-        }
-        // A player can temporarily occupy the next step. Preserve the waypoint; the
-        // domain's existing timeout and safe recovery policy handle prolonged blocking.
-        if (!movementAllowed(from, point)) {
-            waitingForCollision = true
-            return null
-        }
-        if (delta.x * delta.x + delta.z * delta.z > .00001) {
-            val wanted = Math.toDegrees(atan2(-delta.x, delta.z)).toFloat()
+        if (!moved) return null
+        val dx = point.x - from.x
+        val dz = point.z - from.z
+        if (dx * dx + dz * dz > .00001) {
+            val wanted = Math.toDegrees(atan2(-dx, dz)).toFloat()
             point.yaw = citizenTurn(from.yaw, wanted, 24f)
         }
         point.pitch = 0f
-        if (point.distanceSquared(to) < .000001) {
-            path.removeFirst()
-            if (path.isEmpty()) finished = true
-        }
         return point
     }
 
