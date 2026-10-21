@@ -97,6 +97,22 @@ object CivsRules {
         else -> false
     }
 
+    /** A site hut bootstraps itself; town halls never provide construction storage. */
+    fun constructionStores(city: Settlement, buildingId: UUID): List<CivBuilding> = city.buildings.filter {
+        it.type == BuildingType.BUILDER_HUT && it.control != null &&
+            (it.phase == BuildingPhase.ACTIVE || it.id == buildingId)
+    }
+
+    fun constructionWorkers(city: Settlement, buildingId: UUID): List<CivWorker> = city.workers.filter { worker ->
+        !CivsResidents.isChild(worker) && worker.cargo == null && worker.assignment?.let(city::building)?.let { assigned ->
+            assigned.type == BuildingType.BUILDER_HUT && (assigned.phase == BuildingPhase.ACTIVE || assigned.id == buildingId) ||
+                assigned.type == BuildingType.TOWN_HALL && legacyHallBuilder(city)
+        } == true
+    }
+
+    fun constructionStorageInputs(city: Settlement, buildingId: UUID, materials: Map<String, Long>): Map<String, Long> =
+        constructionWorkers(city, buildingId).fold(materials) { remaining, worker -> CivsEquipment.storageInputs(worker, remaining) }
+
     fun productionAvailable(city: Settlement, building: CivBuilding): Boolean =
         building.phase == BuildingPhase.ACTIVE && !isBuilder(city, building) &&
             CivsProduction.options(building.type).isNotEmpty() && city.construction?.buildingId != building.id
@@ -434,18 +450,27 @@ object CivsRules {
         check(batch == order.workDone && payment.reservedBatch == null &&
             order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS), "stale-construction")
         check(validMaterials(materials) && materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
-        check(payment.awaiting == null || payment.awaiting == materials, "invalid-construction")
-        val remaining = order.materials.orEmpty().mapValues { (key, value) -> value - materials.getOrDefault(key, 0) }.filterValues { it > 0 }
+        check(payment.awaiting == null || CivsMaterials.unpaid(payment.awaiting) == materials, "invalid-construction")
+        val remaining = CivsMaterials.unpaid(order.materials.orEmpty()).mapValues { (key, value) -> value - materials.getOrDefault(key, 0) }.filterValues { it > 0 }
+        var storageInputs = materials
+        val builders = constructionWorkers(city, order.buildingId).map(CivWorker::id).toSet()
+        val workers = city.workers.map { worker ->
+            if (worker.id !in builders) worker else CivsEquipment.consumeInputs(worker, storageInputs).also {
+                storageInputs = CivsEquipment.storageInputs(worker, storageInputs)
+            }
+        }
         return changed(city, city.copy(construction = order.copy(phase = ConstructionPhase.PLACING,
-            materials = remaining, payment = CivConstructionPayment(batch))))
+            materials = remaining, payment = CivConstructionPayment(batch)), workers = workers))
     }
 
     fun awaitMaterials(city: Settlement, actor: UUID, orderId: UUID, batch: Int, materials: Map<String, Long>): Settlement {
         authorized(city, actor)
         val order = order(city, orderId)
         check(order.payment?.reservedBatch == null && order.payment != null && order.workDone == batch &&
-            order.phase == ConstructionPhase.READY_TO_PLACE && materials.isNotEmpty() && validMaterials(materials) &&
+            order.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.WAITING_MATERIALS) &&
+            materials.isNotEmpty() && validMaterials(materials) &&
             materials.all { (key, value) -> order.materials.orEmpty().getOrDefault(key, 0) >= value }, "invalid-construction")
+        if (order.phase == ConstructionPhase.WAITING_MATERIALS && order.payment?.awaiting == materials) return city
         return changed(city, city.copy(construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS,
             payment = CivConstructionPayment(awaiting = materials))))
     }

@@ -126,6 +126,29 @@ class CivsCitizensTest : FunSpec({
         cycle.phase shouldBe CitizenPhase.READY
     }
 
+    test("item builders start at their own hut even when the hall is nearer the construction") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+        val hut = building(BuildingType.BUILDER_HUT, CivPosition(24, 64, 0))
+        val target = building(BuildingType.HOUSE, CivPosition(4, 64, 0)).copy(phase = BuildingPhase.SITE)
+        val worker = CivWorker(UUID.randomUUID(), "Строитель", hut.id)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = target, payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1)))
+        val city = city(listOf(hall, hut, target), worker, order).copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+        for (buildings in listOf(city.buildings, listOf(hut, target))) {
+            val plan = requireNotNull(citizenPlan(city.copy(buildings = buildings), worker))
+            plan.storage shouldBe hut.control
+            plan.spawnOrigin shouldBe hut.control
+            plan.workplace shouldBe target.control
+            plan.idleReason shouldBe "waiting-materials"
+        }
+        val site = hut.copy(phase = BuildingPhase.SITE, control = null)
+        val bootstrap = city.copy(buildings = listOf(hall, site), construction = order.copy(buildingId = site.id, plannedBuilding = site))
+        val plan = requireNotNull(citizenPlan(bootstrap, worker))
+        plan.storage shouldBe site.entrance
+        plan.spawnOrigin shouldBe site.entrance
+        plan.idleReason shouldBe "waiting-materials"
+    }
+
     test("physical work picks up its missing tool once then starts each field action directly at the worksite") {
         val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
         val barrelSide = CivPosition(21, 64, -2)

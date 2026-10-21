@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
@@ -305,13 +306,57 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("existing roads beat a modest learned grass shortcut but not an excessive detour") {
+        MockBukkitTestRuntime.open().use {
+            for (material in listOf(Material.DIRT_PATH, Material.COBBLESTONE)) {
+                fun routeOnRoad(detour: Int): Set<CivPosition> {
+                    val terrain = ResidentRouteTerrain()
+                    val city = pathsCity().copy(worldId = terrain.world.uid)
+                    val paths = CivsPaths()
+                    val shortcut = paths.begin(city)
+                    for (x in 0..16) shortcut.observe(CitizenPoint(x + .5, 64.0, .5))
+                    paths.complete(city, shortcut)
+                    repeat(2) { paths.pulse() }
+                    for (x in 0..16) terrain.blocks[CivPosition(x, 63, detour)] = material
+                    for (z in 0..detour) for (x in listOf(0, 16)) terrain.blocks[CivPosition(x, 63, z)] = material
+                    val trip = paths.begin(city)
+                    var at = Location(terrain.world, .5, if (material == Material.DIRT_PATH) 63.9375 else 64.0, .5)
+                    val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 16.5, at.y, .5),
+                        { p -> p.x in 0..16 && p.z in 0..detour && p.y in 63..64 }, { _, _ -> true },
+                        { ground -> trip.cost(ground) { if (it.type == Material.COBBLESTONE) 1.3 else 1.0 } })
+                    repeat(20_000) { if (route.searching) route.expand() }
+                    route.failure shouldBe null
+                    route.searching shouldBe false
+                    val walked = linkedSetOf<CivPosition>()
+                    repeat(600) {
+                        route.move(at, 1.0) { true }?.let { next ->
+                            walked += CivPosition(next.blockX, citizenSupportY(next.y), next.blockZ)
+                            at = next
+                        }
+                    }
+                    route.finished shouldBe true
+                    return walked
+                }
+                val modest = routeOnRoad(3)
+                withClue("$material should reuse the existing road despite the learned direct shortcut") {
+                    modest.count { it.x in 2..14 && it.z == 3 } shouldBe 13
+                }
+                val excessive = routeOnRoad(10)
+                withClue("$material should not turn a short walk into a large road detour") {
+                    excessive.none { it.z == 10 } shouldBe true
+                    excessive.count { it.x in 2..14 && it.z == 0 } shouldBe 13
+                }
+            }
+        }
+    }
+
     test("a path at fifteen sixteenths height reaches its endpoint and emits every actual cell crossing") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
             for (x in 0..5) terrain.blocks[CivPosition(x, 63, 0)] = Material.DIRT_PATH
             val trip = CivsPaths().begin(pathsCity().copy(worldId = terrain.world.uid))
             val first = terrain.world.getBlockAt(0, 63, 0)
-            trip.cost(first) { 5.0 } shouldBe 1.15 // Explicit path wins over a provider's recognized surface.
+            trip.cost(first) { 5.0 } shouldBe 1.0 // Explicit path wins over a provider's recognized surface.
             val route = CitizenPacketRoute(terrain.world, Location(terrain.world, .95, 63.9375, .5),
                 Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.z == 0 && p.y in 63..64 },
                 { _, _ -> true }, { block -> trip.cost(block) { 1.0 } })

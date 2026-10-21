@@ -217,10 +217,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (block.type == Material.WATER) continue
             if (block.type !in SOILS) return blocked(worker, "worksite-soil", point = point,
                 reason = "irrigation-ground", blockMaterial = block.type.name)
-            if ((available["WATER_BUCKET"] ?: 0) == 0L) return blocked(worker, "waiting-water", "WATER_BUCKET")
             val standing = beside(city, worker, building, world, point) ?: return null
             return work(worker, building, standing, listOf(change(block, Material.WATER.createBlockData().asString)),
-                mapOf("WATER_BUCKET" to 1), mapOf("BUCKET" to 1), "working-field")
+                status = "working-field")
         }
         val workers = city.workers.filter { it.assignment == building.id }
         val index = workers.indexOfFirst { it.id == worker.id }

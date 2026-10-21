@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.37: builder material custody, free water and explicit Creative testing grants",
+  "assumptions": [
+    "Low/base/high are illustrative 1/10/16 participating city owners, not measured ordinary player income. Construction water/waterlogged/filled-cauldron placements per owner-day:1/16/64; farm irrigation repairs:1/4/16. These are sensitivity inputs, not an enforced daily limit.",
+    "All building levels share CivsMaterials requirements. Water blocks, waterlogging and cauldron filling cost zero WATER_BUCKET after; base cauldron/block item, lava and powder-snow costs stay. Existing prepaid receipts are not refunded. Original row grouping remains stable for persisted batch cursors.",
+    "Before construction consumes one water bucket per charged water/waterlogged cell without an empty-bucket refund. Before farmer repair exchanges one real WATER_BUCKET for one BUCKET. After both place water without consuming or creating bucket items. Water blocks can be collected with a player's own bucket; native renewable water already exists. No inventory bucket faucet is added.",
+    "Nine authored farm variants cover all three styles/levels: medievaloak has four existing irrigation cells, nordic/caledonia one initially dry cell each. Automatic repair remains confined to authored irrigation cells with normal permissions, world validation and durable block receipts.",
+    "Construction storage routing moves existing items to builder huts and real builder bags; exact schematic non-water costs, native inventories, player debit, paid reservations and replay protection remain. This is custody/transfer correction with zero additional normal-player item issuance.",
+    "Existing admin material grants remain. New explicit Creative grants admit creative city managers without requiring admin permission or real source inventory. Illustrative incremental issued mixed-item counts per owner-day are64/2048/27648 (1/4/16 grants at64/512/1728 fitting-item average); not guaranteed fit, not economic valuation and not a lifetime cap. Actual grant is only deficit fitting selected physical destination. Taking items out then granting again can issue more, as existing Creative/admin capabilities can.",
+    "Direct Vault, tokens and player XP delta is0. Administrative/Creative item resale may feed current SELL/player trade/contracts, but no material-specific redemption prices or normal-player savings are inferred. Planned SELL-to-contract transition is not assumed active.",
+    "Current read-only168h ledger succeeded at1792587379667:3706records,37518operations,30players. Typed currencies separate tokens(62mint/21burn) and Vault(67712749.7876233mint/2862234.6599999983burn), unknownNet0. Mixed legacy totals are not used. One boundary-crossing record/two operations excluded; audit is network background, not attribution to ArcCivs grants.",
+    "Removing missing-supply stalls and travel can improve realized throughput without changing production output, growth checkpoints, work durations or native-drop caps. Care limits and hunger remain existing mechanics. No price/progression change, so days-to-save is unknown/not recomputed.",
+    "Worker night recovery and courier return do not grant goods or work credit. Stronger existing-path preference can change travel time, not intrinsic job output. Path widening is reused from Trails rather than a new block/item grant."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "water_bucket": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "water_inputs",
+          "kind": "burn",
+          "source": "CivsMaterials.requirements / CivsWorksites.farm",
+          "basis": "Construction water inputs plus farmer water repair inputs; filled bucket units, not coins.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "2",
+              "20",
+              "80"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        }
+      ]
+    },
+    "empty_bucket": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "irrigation_bucket_return",
+          "kind": "item",
+          "source": "CivsWorksites.farm",
+          "basis": "Before each farmer repair returned one empty bucket in exchange for the filled one; after no bucket enters or leaves inventory.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "1",
+              "4",
+              "16"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        }
+      ]
+    },
+    "water_block": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "placed_water",
+          "kind": "item",
+          "source": "CivsMaterials / CivsWorksites.farm",
+          "basis": "World water placements only, no transferable item grant. Same scenario placements; input cost changes.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "2",
+              "20",
+              "80"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "2",
+              "20",
+              "80"
+            ]
+          }
+        }
+      ]
+    },
+    "creative_item": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "creative_testing_grant",
+          "kind": "item",
+          "source": "CivsService explicit Creative grant / CivsStorage receipt",
+          "basis": "Incremental Creative-without-admin testing issue; existing admin issue excluded. Mixed item counts, not a cash conversion.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "64",
+              "2048",
+              "27648"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

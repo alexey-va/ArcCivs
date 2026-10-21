@@ -157,6 +157,10 @@ The first pioneer arrives after 30s,
 then one per 60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants extra residents or catches up multiple arrivals. At night, residents shelter in their active house when
 available and otherwise use the town hall, then enter the native sleeping pose.
+After a failed night route or ten seconds, the existing shared safe-recovery
+budget can move them into a freshly validated, loaded home position. A blocked
+or occupied destination retains the failed attempt for a later pulse. Sleep
+arrival grants no work credit, delivery or synthetic footsteps.
 Idle residents choose safe loaded wandering targets within eight blocks of their
 workplace, otherwise home or town hall, at 0.55 of work speed. Base work speed is
 0.215 blocks per tick before the current surface multiplier. Routes avoid horizontal footprints
@@ -203,8 +207,8 @@ limit16 and native NPC limit48 remain. Completed hall upgrades expand the actual
 persisted radius by32, including96→128→160 for new default cities. New founding
 reserves future maximum spacing; existing cities keep their actual radius.
 
-Materials pages show16 rows and provide one explicit player supply action plus
-an admin-only deficit grant. Both subtract existing town stock and fit physical
+Materials pages show8 rows and provide one explicit player supply action plus
+an admin/Creative deficit grant. Both subtract existing builder stock and fit physical
 slot capacity. Player supply journals exact plain-slot before/after debit together
 with container credits, locks the source inventory, and uses Core native player
 data persistence before applying container credits. Recovery waits for an offline
@@ -293,8 +297,11 @@ No offline production/catch-up.
 
 Orders are derived from local ingredient shortages: one recipe cycle per assigned
 worker, less local stock and incoming cargo. Construction orders cover only the
-current `payment.awaiting` row; a site spends its own control-barrel stock. Active
-warehouse upgrades may use all their own internal containers. Couriers prefer
+current `payment.awaiting` row, delivered to a builder hut. Construction consumes
+builders' real bags first and then only builder-hut-local stores. A SITE hut can
+bootstrap its own construction; neither the target building nor the hall is a
+construction buffer. Explicit virtual mode uses the same hut-local scope.
+Active warehouses and builder huts can use their indexed internal containers. Couriers prefer
 construction requests, then rotate ingredient deliveries and collection of the currently
 selected output from other buildings by completed shipment count. Source-to-destination entrances must be within the existing
 88-block work-route bound. Warehouses use their own indexed native containers;
@@ -306,10 +313,18 @@ worker, according to job; FARM requests only its selected seed type.
 and stable shipment identity. Pickup journals source debit and cargo together;
 the actor waits for that receipt before travelling. Unload journals destination
 credit, cargo removal, one completed cycle and one WAREHOUSE profession point.
+An empty courier without another shipment returns beside its assigned warehouse
+barrel and waits there; this return is real movement with no cargo or work reward.
+Night sheltering still takes priority. Actual dirt paths and provider-recognized
+roads have routing cost1, remembered unworn corridors1.5, ordinary ground2.25.
+This changes route preference, not speed; Trails owns widening and block wear.
 Planning revalidates demand and actual stock at pickup; incoming cargo prevents
-duplicate orders. A pending receipt retains the actor's shipment plan. Couriers
-never use teleport recovery and restart at the recorded source before travelling
-to the destination. Missing destinations return to a reachable surviving warehouse
+duplicate orders, including legacy cargo whose actual destination is now a hut.
+Construction destinations are chosen within the current courier's route bound,
+so an unreachable staffed hut does not hide another reachable hut.
+A pending receipt retains the actor's shipment plan. Shipment recovery preserves
+its recorded source and accepted cargo; safe empty-return or night-shelter
+recovery changes no shipment state. Missing destinations return to a reachable surviving warehouse
 or hall, within the same route bound. Reassignment
 does not discard carried goods; death intentionally destroys cargo without drops.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
@@ -332,7 +347,11 @@ a platform persistence boundary. No blind repeat after an unknown result.
 
 Construction starts without requiring the complete material list. New orders split the
 immutable captured before/after plan into deterministic horizontal rows of at most16
-adjacent cells with identical per-cell material requirements. One observed builder
+adjacent cells with identical historical material keys. Free water does not
+change saved row boundaries: water blocks, waterlogging and cauldron filling no
+longer require water buckets, while the underlying block/cauldron still does.
+Old unpaid water requests are recalculated; paid reservations are not refunded.
+One observed builder
 session adds at most eight existing rows after two seconds of work. Concurrent
 builders add once-only durable credit, bounded by remaining rows and 96 total rows;
 one placer still charges and installs each row serially. Durable work credit

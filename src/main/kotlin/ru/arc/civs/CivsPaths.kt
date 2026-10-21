@@ -49,10 +49,10 @@ internal class CivsPaths {
             // A remembered line never licenses climbing an outdoor tree.
             if (Tag.LOGS.isTagged(ground.type) || Tag.LEAVES.isTagged(ground.type)) return Double.POSITIVE_INFINITY
             return when {
-                point in preferred -> 1.0
-                ground.type == Material.DIRT_PATH -> 1.15
+                ground.type == Material.DIRT_PATH -> 1.0
                 // The provider may recognize untracked materials when its configuration permits it.
-                recognizedSurface(ground) > 1.0 -> 1.25
+                recognizedSurface(ground) > 1.0 -> 1.0
+                point in preferred -> 1.5
                 else -> ORDINARY_COST
             }
         }
@@ -137,7 +137,7 @@ internal class CivsPaths {
     }
 
     companion object {
-        const val ORDINARY_COST = 1.6
+        const val ORDINARY_COST = 2.25
         const val MAX_CITIES = 32
         const val MAX_CELLS_PER_CITY = 512
         const val MAX_TRIP_CELLS = 256

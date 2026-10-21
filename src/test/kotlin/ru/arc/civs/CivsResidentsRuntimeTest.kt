@@ -139,6 +139,95 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("an enclosed builder waiting for materials recovers into its home at night without work credit") {
+        residentRuntime { h ->
+            val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
+            val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val home = h.city.buildings.first()
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 1L),
+                payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1L)), workCredit = 0)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(home, hut, target), construction = order,
+                workers = h.city.workers.map { it.copy(homeId = home.id) }))
+            h.world.time = 13_000
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 20.5, 68.0, .5))
+            h.world.getBlockAt(20, 67, 0).type = Material.STONE
+            for (x in 19..21) for (z in -1..1) if (x != 20 || z != 0)
+                for (y in 68..70) h.world.getBlockAt(x, y, z).type = Material.STONE
+            // A player occupying every recovery destination must keep the same failed route pending.
+            h.owner.residentStepAllowed = { _, from, to -> from.distanceSquared(to) > .000001 }
+            h.owner.pulse(2_000)
+            repeat(200) { h.owner.activateNavigating() }
+            h.owner.pulse(13_001)
+            actor.location.x shouldBe 20.5
+            h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+            h.owner.residentStepAllowed = { _, _, _ -> true }
+            h.owner.pulse(14_001)
+            val recovered = actor.location
+            home.bounds.contains(recovered.blockX, recovered.blockY, recovered.blockZ) shouldBe true
+            h.owner.pulse(15_001)
+            actor.pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.status(h.workerId) shouldBe "workers.status.sleeping"
+            h.city.construction shouldBe order
+            h.city.workers.single().completedCycles shouldBe 0
+            h.deliveries shouldBe 0
+            h.pendingDelivery.isDone shouldBe false
+            h.steps shouldBe emptyList()
+            h.spawns shouldBe 1
+        }
+    }
+
+    test("a courier unloads once then walks back to its warehouse and waits beside the real barrel") {
+        residentRuntime { h ->
+            val warehouse = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
+            val receiver = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.SAWMILL, schematicId = "sawmill1",
+                anchor = CivPosition(8, 64, 0), entrance = CivPosition(8, 64, 0), control = CivPosition(8, 64, 0),
+                bounds = CivBox(CivPosition(6, 64, -2), CivPosition(10, 68, 2)))
+            h.world.getBlockAt(8, 64, 0).type = Material.BARREL
+            val cargo = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, receiver.id, warehouse.entrance, "OAK_LOG", 8)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), warehouse, receiver),
+                workers = h.city.workers.map { it.copy(cargo = cargo) }))
+            h.courier = CivCourierPlan(cargo, receiver.id, receiver.entrance, true)
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 9.5, 64.0, .5))
+            h.owner.pulse(2_000)
+            h.owner.pulse(3_000)
+            h.unloads shouldBe 1
+            h.city.workers.single().cargo shouldBe cargo
+            h.city = h.city.copy(revision = h.city.revision + 1,
+                workers = h.city.workers.map { it.copy(cargo = null, completedCycles = 1) })
+            h.courier = null
+            h.pendingUnload.complete(h.city)
+            h.owner.pulse(4_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
+            for (tick in 1..2_000) {
+                val before = actor.location
+                h.owner.activateNavigating()
+                if (tick % 20 == 0) h.owner.pulse(4_000)
+                (before.distance(actor.location) <= .215001) shouldBe true
+                if (h.owner.status(h.workerId) == "workers.status.waiting-orders") break
+            }
+            val atWarehouse = actor.location
+            citizenAtStorage(h.world, CitizenPoint(atWarehouse.x, atWarehouse.y, atWarehouse.z), requireNotNull(warehouse.control)) shouldBe true
+            citizenCanReachBlock(actor, requireNotNull(warehouse.control)) shouldBe true
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-orders"
+            h.steps.isNotEmpty() shouldBe true
+            repeat(80) { tick ->
+                h.owner.activateNavigating()
+                if (tick % 20 == 0) h.owner.pulse(5_000L + tick * 50)
+                actor.location shouldBe atWarehouse
+            }
+            h.unloads shouldBe 1
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 1
+            h.city.workers.single().cargo shouldBe null
+            h.spawns shouldBe 1
+        }
+    }
+
     test("summoned farmer starts a supplied work plan at the barrel and keeps its delivery receipt fenced") {
         residentRuntime { h ->
             val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
@@ -417,10 +506,14 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var spawns = 0
     var hits = 0
     var deliveries = 0
+    var unloads = 0
+    var courier: CivCourierPlan? = null
+    val steps = mutableListOf<Pair<Location, Location>>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
     var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
+    val pendingUnload = CompletableFuture<Settlement>()
     val pending = CompletableFuture<Settlement>()
     private var damage = 0.0
     var city: Settlement
@@ -465,6 +558,13 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 pendingDelivery
             },
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
+            footstep = { _, _, _, from, to -> steps += from.clone() to to.clone() },
+            courierPlan = { _, _ -> courier }, dropoffCargo = { _, _, cargo, target ->
+                cargo shouldBe requireNotNull(courier).cargo
+                target shouldBe requireNotNull(courier).destinationBuildingId
+                unloads++
+                pendingUnload
+            },
             workPlan = { _, _ -> work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets)
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1

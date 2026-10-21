@@ -595,7 +595,7 @@ class CivsService(
     override fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>> = action("building_materials", player, "building" to buildingId) {
         val city = managed(player)
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
-        if (city.construction?.buildingId == buildingId) CompletableFuture.completedFuture(city.construction.materials.orEmpty())
+        if (city.construction?.buildingId == buildingId) CompletableFuture.completedFuture(CivsMaterials.unpaid(city.construction.materials.orEmpty()))
         else if (building.phase != BuildingPhase.SITE && buildingId !in city.constructionQueue.orEmpty()) CompletableFuture.completedFuture(emptyMap())
         else store.loadPlan(queuedDesignId(building)).thenApplyAsync({ plan ->
             requireQueuedDesign(requireNotNull(plan), city, building)
@@ -606,21 +606,40 @@ class CivsService(
     override fun supplyConstruction(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult> =
         cityAction("construction_supply", player, "building" to buildingId) { supplyConstruction(player, buildingId, false) }
 
+    override fun supplyConstruction(player: Player, buildingId: UUID, hutId: UUID): CompletableFuture<CivsSupplyResult> =
+        cityAction("construction_supply", player, "building" to buildingId, "hut" to hutId) { supplyConstruction(player, buildingId, false, hutId) }
+
     override fun grantConstructionMaterials(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult> =
         cityAction("construction_grant", player, "building" to buildingId) { supplyConstruction(player, buildingId, true) }
 
-    private fun supplyConstruction(player: Player, buildingId: UUID, grant: Boolean): CompletableFuture<CivsSupplyResult> {
-        rejectIf(grant && !player.hasPermission("arccivs.admin"), "not-authorized")
+    override fun grantConstructionMaterials(player: Player, buildingId: UUID, hutId: UUID): CompletableFuture<CivsSupplyResult> =
+        cityAction("construction_grant", player, "building" to buildingId, "hut" to hutId) { supplyConstruction(player, buildingId, true, hutId) }
+
+    private fun mayGrantMaterials(player: Player): Boolean = player.hasPermission("arccivs.admin") || player.gameMode == org.bukkit.GameMode.CREATIVE
+
+    private fun constructionDeficit(required: Map<String, Long>, available: Map<String, Long>): Map<String, Long> =
+        required.mapValues { (material, count) -> (count - (available[material] ?: 0L)).coerceAtLeast(0) }.filterValues { it > 0 }
+
+    private fun constructionStore(city: Settlement, buildingId: UUID, hutId: UUID?): CivBuilding =
+        CivsRules.constructionStores(city, buildingId).let { stores ->
+            if (hutId != null) stores.firstOrNull { it.id == hutId }
+            else stores.firstOrNull { store -> city.workers.any { it.assignment == store.id } } ?: stores.firstOrNull()
+        } ?: throw CivsRejection("builder-required")
+
+    private fun supplyConstruction(player: Player, buildingId: UUID, grant: Boolean, hutId: UUID? = null): CompletableFuture<CivsSupplyResult> {
+        rejectIf(grant && !mayGrantMaterials(player), "not-authorized")
         val city = managed(player)
         rejectIf(city.id in busy, "city-busy")
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
-        near(player, city.worldId, building.entrance)
         rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
         val order = city.construction?.takeIf { it.buildingId == buildingId }
         rejectIf(order == null && building.phase != BuildingPhase.SITE && buildingId !in city.constructionQueue.orEmpty(), "invalid-building")
         // Legacy orders paid their complete bill when reserved; their estimate must never mint another payment.
         if (order != null && order.payment == null) return CompletableFuture.completedFuture(CivsSupplyResult(0, 0, false))
-        val required = if (order != null) CompletableFuture.completedFuture(order.materials.orEmpty())
+        val destination = constructionStore(city, buildingId, hutId)
+        val grantMode = player.gameMode
+        near(player, city.worldId, if (hutId == null) building.entrance else destination.entrance)
+        val required = if (order != null) CompletableFuture.completedFuture(CivsMaterials.unpaid(order.materials.orEmpty()))
         else store.loadPlan(queuedDesignId(building)).thenApplyAsync({ stored ->
             val plan = requireNotNull(stored) { "Missing site design $buildingId" }
             requireQueuedDesign(plan, city, building)
@@ -632,13 +651,17 @@ class CivsService(
             busy -= city.id
             if (failure != null) { result.completeExceptionally(failure); return@whenCompleteSync }
             runCatching {
-                rejectIf(!player.isOnline || grant && !player.hasPermission("arccivs.admin"), "not-authorized")
+                rejectIf(!player.isOnline || grant && !mayGrantMaterials(player), "not-authorized")
                 val current = managed(player)
-                rejectIf(current.id != city.id || current.building(buildingId) != building || current.construction != city.construction, "invalid-building")
-                near(player, current.worldId, building.entrance)
+                rejectIf(current.id != city.id || current.building(buildingId) != building || current.construction != city.construction ||
+                    constructionStore(current, buildingId, destination.id) != destination, "invalid-building")
+                near(player, current.worldId, if (hutId == null) building.entrance else destination.entrance)
                 var supplied: CivStorageSupplyPlan? = null
                 inventoryMutation(current.id, { lockedCity ->
-                    storage.prepareConstructionSupply(lockedCity, buildingId, requireNotNull(materials), if (grant) null else player)
+                    val missing = constructionDeficit(requireNotNull(materials), storage.constructionAvailable(lockedCity, buildingId))
+                    val local = storage.buildingAvailable(lockedCity, destination.id)
+                    val desired = missing.mapValues { (material, count) -> count + (local[material] ?: 0L) }
+                    storage.prepareConstructionSupply(lockedCity, destination.id, desired, if (grant) null else player)
                         .also { supplied = it }.plan
                 }, sourcePlayer = if (grant) null else player) { before, inventory ->
                     if (requireNotNull(supplied).plan.changes.isEmpty()) before
@@ -647,8 +670,11 @@ class CivsService(
                     if (applyFailure != null) result.completeExceptionally(applyFailure)
                     else {
                         val outcome = requireNotNull(supplied).result
-                        CivsDiagnostics.event("construction_supplied", "city" to city.id, "building" to buildingId,
-                            "player" to player.uniqueId, "grant" to grant, "moved" to outcome.moved,
+                        val moved = requireNotNull(supplied).plan.changes.groupBy { it.after?.material ?: it.before?.material }.mapValues { (_, changes) ->
+                            changes.sumOf { (it.after?.amount ?: 0).toLong() - (it.before?.amount ?: 0) }
+                        }.filterValues { it > 0 }
+                        CivsDiagnostics.event("construction_supplied", "city" to city.id, "building" to buildingId, "hut" to destination.id,
+                            "player" to player.uniqueId, "grant" to grant, "game_mode" to grantMode, "materials" to moved, "moved" to outcome.moved,
                             "remaining" to outcome.remaining, "storage_full" to outcome.storageFull)
                         result.complete(outcome)
                     }
@@ -657,6 +683,65 @@ class CivsService(
         }
         return result
     }
+
+    override fun supplyBuilderMaterials(player: Player, workerId: UUID): CompletableFuture<CivsSupplyResult> =
+        supplyBuilderMaterials(player, workerId, false)
+
+    override fun grantBuilderMaterials(player: Player, workerId: UUID): CompletableFuture<CivsSupplyResult> =
+        supplyBuilderMaterials(player, workerId, true)
+
+    private fun supplyBuilderMaterials(player: Player, workerId: UUID, grant: Boolean): CompletableFuture<CivsSupplyResult> =
+        cityAction("builder_materials_supply", player, "worker" to workerId, "grant" to grant) { city ->
+            rejectIf(grant && !mayGrantMaterials(player), "not-authorized")
+            rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "invalid-storage-mode")
+            val order = city.construction ?: throw CivsRejection("no-construction")
+            if (order.payment == null) return@cityAction CompletableFuture.completedFuture(CivsSupplyResult(0, 0, false))
+            val worker = CivsRules.constructionWorkers(city, order.buildingId).firstOrNull { it.id == workerId }
+                ?: throw CivsRejection("builder-required")
+            val points = listOfNotNull(worker.assignment?.let(city::building)?.entrance, order.plannedBuilding?.entrance)
+            rejectIf(player.world.uid != city.worldId || points.none { point ->
+                player.location.toVector().distanceSquared(org.bukkit.util.Vector(point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) <= 96.0 * 96.0
+            }, "too-far")
+            var updated: CivWorker? = null
+            val grantMode = player.gameMode
+            var moved: Map<String, Long> = emptyMap()
+            var outcome = CivsSupplyResult(0, 0, false)
+            inventoryMutation(city.id, { before ->
+                rejectIf(grant && !mayGrantMaterials(player), "not-authorized")
+                rejectIf(before.construction?.id != order.id || before.construction.workDone != order.workDone, "stale-construction")
+                val current = CivsRules.constructionWorkers(before, order.buildingId).firstOrNull { it.id == workerId }
+                    ?: throw CivsRejection("builder-required")
+                val missing = constructionDeficit(CivsMaterials.unpaid(requireNotNull(before.construction).materials.orEmpty()),
+                    storage.constructionAvailable(before, order.buildingId))
+                val offered = if (grant) missing else missing.mapValues { (material, count) -> minOf(count,
+                    player.inventory.storageContents.filterNotNull().filter { it.type.name == material && it.isSimilar(org.bukkit.inventory.ItemStack(it.type)) }
+                        .sumOf { it.amount.toLong() }) }.filterValues { it > 0 }
+                rejectIf(missing.isNotEmpty() && offered.isEmpty(), "construction-supplies-empty")
+                val prepared = if (grant) {
+                    val (issued, amounts) = CivsEquipment.grantSupplies(current, missing)
+                    updated = issued
+                    moved = amounts
+                    CivStoragePlan(requireNotNull(before.inventory), emptyList())
+                } else storage.prepareResidentTransfer(before, workerId, player, null, null,
+                    org.bukkit.event.inventory.ClickType.LEFT, requestedSupplies = missing).also { transfer ->
+                    updated = transfer.worker
+                    moved = missing.mapValues { (material, _) ->
+                        (CivsEquipment.plainCount(transfer.worker, material) - CivsEquipment.plainCount(current, material)).toLong()
+                    }.filterValues { it > 0 }
+                }.plan
+                val count = moved.values.sum()
+                outcome = CivsSupplyResult(count, missing.values.sum() - count, offered.values.sum() > count)
+                prepared
+            }, sourcePlayer = if (grant) null else player, keepViewersOpen = true) { before, inventory ->
+                if (outcome.moved == 0L) before else before.copy(inventory = inventory,
+                    workers = before.workers.map { if (it.id == workerId) requireNotNull(updated) else it }, revision = before.revision + 1)
+            }.thenApply { saved ->
+                CivsDiagnostics.event("builder_materials_supplied", "city" to saved.id, "building" to order.buildingId,
+                    "worker" to workerId, "player" to player.uniqueId, "grant" to grant, "game_mode" to grantMode,
+                    "materials" to moved, "moved" to outcome.moved, "remaining" to outcome.remaining, "storage_full" to outcome.storageFull)
+                outcome
+            }
+        }
 
     override fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit> = action("construction_order", player, "building" to buildingId) {
         val offered = managed(player)
@@ -1321,6 +1406,8 @@ class CivsService(
     }
 
     override fun availableMaterials(player: Player): Map<String, Long> = storage.available(managed(player))
+    override fun constructionAvailable(player: Player, buildingId: UUID): Map<String, Long> =
+        storage.constructionAvailable(managed(player).also { rejectIf(it.building(buildingId) == null, "building-not-found") }, buildingId)
     override fun localMaterials(player: Player, buildingId: UUID): Map<String, Long> =
         managed(player).let { localStocks(it)(buildingId) }
     override fun supplyRequests(player: Player): List<CivSupplyRequest> =
@@ -2163,7 +2250,7 @@ class CivsService(
 
     private fun pulseConstruction() {
         if (!ready()) return
-        if (now() >= nextMaterialCheckAt) {
+        if (placing.size < 2 && now() >= nextMaterialCheckAt) {
             nextMaterialCheckAt = now() + 5_000L
             val waiting = cities.values.filter { city ->
                 city.construction?.phase == ConstructionPhase.WAITING_MATERIALS && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
@@ -2175,13 +2262,8 @@ class CivsService(
             if (waiting.isNotEmpty()) {
                 val city = waiting[Math.floorMod(materialCursor++, waiting.size)]
                 val order = requireNotNull(city.construction)
-                runCatching { payBatch(city, order, requireNotNull(order.payment?.awaiting)) }
-                    .onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
-                        if (failure != null && CivsDiagnostics.rejection(failure)?.reason != "materials-missing")
-                            placementFailed(city.id, order.id, failure)
-                    } }.onFailure {
-                        if (CivsDiagnostics.rejection(it)?.reason != "materials-missing") placementFailed(city.id, order.id, it)
-                    }
+                // Reprice the unpaid row from its immutable plan, including old free-water requests.
+                startPlacement(city, order)
             }
         }
         for (city in cities.values.toList()) {
@@ -2282,7 +2364,8 @@ class CivsService(
     }
 
     private fun payBatch(city: Settlement, order: CivConstruction, required: Map<String, Long>): CompletableFuture<Settlement> =
-        inventoryMutation(city.id, { storage.prepareDebitBackground(it, required, order.buildingId) }, keepViewersOpen = true) { before, inventory ->
+        inventoryMutation(city.id, { current -> storage.prepareConstructionDebitBackground(current,
+            CivsRules.constructionStorageInputs(current, order.buildingId, required), order.buildingId) }, keepViewersOpen = true) { before, inventory ->
             CivsRules.payBatch(before, before.owner, order.id, order.workDone, required).copy(inventory = inventory)
         }.whenComplete { saved, failure ->
             if (failure == null && saved?.construction?.payment?.reservedBatch == order.workDone)

@@ -55,6 +55,7 @@ class CivsEquipmentMenuTest : FunSpec({
             h.open()
             val view = h.player.openInventory.topInventory
             view.size shouldBe 54
+            view.getItem(53)!!.type shouldBe Material.GRAY_STAINED_GLASS_PANE
             view.getItem(6) shouldBe hoe
             view.getItem(18) shouldBe ItemStack(Material.WHEAT_SEEDS, 32)
             h.export("equipment-equipped")
@@ -93,7 +94,7 @@ class CivsEquipmentMenuTest : FunSpec({
             h.click(1); h.click(13); h.click(49)
             h.calls.size shouldBe 0
             h.failSnapshot = true
-            h.click(53)
+            h.paper.performTicks(20)
             h.player.inventory.setItem(9, ItemStack(Material.DIAMOND))
             h.click(54)
             h.calls.size shouldBe 0

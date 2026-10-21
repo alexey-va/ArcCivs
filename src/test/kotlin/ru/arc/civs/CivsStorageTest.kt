@@ -403,6 +403,132 @@ class CivsStorageTest : FunSpec({
         chest.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 64)
     }
 
+    test("construction uses builder bags and physical hut storage without spending site hall or warehouse stock") {
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE, 10)
+        val target = addLocalBuilding(BuildingType.HOUSE, 14).copy(phase = BuildingPhase.CONSTRUCTING)
+        val inner = world.getBlockAt(7, 64, 1).also { it.type = Material.CHEST; indexedBlocks += it }
+        cargo(inner).setItem(0, ItemStack(Material.STONE, 3))
+        cargo(world.getBlockAt(6, 64, 0)).setItem(0, ItemStack(Material.STONE, 1))
+        cargo(world.getBlockAt(10, 64, 0)).setItem(0, ItemStack(Material.STONE, 64))
+        cargo(world.getBlockAt(14, 64, 0)).setItem(0, ItemStack(Material.STONE, 64))
+        barrel.setItem(0, ItemStack(Material.STONE, 64))
+        chest.setItem(0, ItemStack(Material.STONE, 64))
+        val builder = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1, items = List(CivsEquipment.SLOTS) {
+            when (it) { 6 -> CivResidentItem("STONE", 2); 7 -> CivResidentItem.of(named(Material.STONE, 3)); else -> null }
+        })
+        val required = mapOf("STONE" to 5L)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 1, 0, ConstructionPhase.READY_TO_PLACE,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(1, 16), materials = required,
+            payment = CivConstructionPayment())
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(builder), construction = order))
+        storage.constructionAvailable(city, target.id) shouldBe mapOf("STONE" to 6L)
+        val remaining = CivsRules.constructionStorageInputs(city, target.id, required)
+        remaining shouldBe mapOf("STONE" to 3L)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = requireNotNull(storage.prepareConstructionDebitBackground(city, remaining, target.id))
+        val paid = CivsRules.payBatch(city, city.owner, order.id, 0, required).copy(inventory = plan.inventoryAfter)
+        val receipt = CivInventoryTransaction(id, city.id, city.revision, paid, plan.changes).validated()
+        plan.changes.map { it.container }.toSet() shouldBe setOf(requireNotNull(hut.control), CivPosition(7, 64, 1))
+        CivsEquipment.plainCount(paid.workers.single(), "STONE") shouldBe 0
+        paid.workers.single().items!![7] shouldBe builder.items!![7]
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.amount shouldBe 64
+        chest.getItem(0)!!.amount shouldBe 64
+        storage.buildingAvailable(city, warehouse.id)["STONE"] shouldBe 64L
+        storage.buildingAvailable(city, target.id)["STONE"] shouldBe 64L
+        shouldThrow<CivsRejection> { CivsRules.payBatch(paid, paid.owner, order.id, 0, required) }.reason shouldBe "stale-construction"
+    }
+
+    test("builder bulk deposits conserve multiple materials metadata and partial bag capacity across replay") {
+        val player = paper.addPlayer("BuilderSupplier")
+        player.openInventory(paper.server.createInventory(player, 9))
+        val hut = addLocalBuilding(BuildingType.BUILDER_HUT)
+        val items = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { if (it >= CivsEquipment.BAG) CivResidentItem("DIRT", 64) else null }
+        items[6] = CivResidentItem("STONE", 63); items[7] = null
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1, items = items)
+        city = city.copy(owner = player.uniqueId, workers = listOf(worker))
+        player.inventory.setItem(0, ItemStack(Material.STONE, 4))
+        player.inventory.setItem(1, ItemStack(Material.OAK_LOG, 64))
+        val custom = named(Material.OAK_LOG, 64)
+        player.inventory.setItem(2, custom)
+        player.inventory.setItemInOffHand(ItemStack(Material.STONE, 10))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val prepared = storage.prepareResidentTransfer(city, worker.id, player, null, null, ClickType.LEFT,
+            requestedSupplies = mapOf("STONE" to 1L, "OAK_LOG" to 70L))
+        val receipt = residentTransaction(id, city, prepared).validated()
+        CivsEquipment.plainCount(prepared.worker, "STONE") shouldBe 64
+        CivsEquipment.plainCount(prepared.worker, "OAK_LOG") shouldBe 64
+        receipt.residentTransfer!!.changes.map { it.slot } shouldBe listOf(0, 1)
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0)!!.amount shouldBe 3
+        player.inventory.getItem(1) shouldBe null
+        player.inventory.getItem(2) shouldBe custom
+        player.inventory.itemInOffHand.amount shouldBe 10
+        val (issued, moved) = CivsEquipment.grantSupplies(prepared.worker, mapOf("OAK_LOG" to 10L, "STONE" to 10L))
+        issued shouldBe prepared.worker
+        moved shouldBe emptyMap()
+    }
+
+    test("explicit virtual construction spends only hut stocks and real builder bags across multiple huts") {
+        val first = addLocalBuilding(BuildingType.BUILDER_HUT, 6)
+        val second = addLocalBuilding(BuildingType.BUILDER_HUT, 10)
+        val target = addLocalBuilding(BuildingType.HOUSE, 14)
+        val worker = CivWorker(UUID.randomUUID(), "Builder", first.id, nextDeliveryAt = 1, items = List(CivsEquipment.SLOTS) {
+            if (it == 6) CivResidentItem("STONE", 2) else null
+        })
+        city = city.copy(workers = listOf(worker), inventory = CivInventory(CivStorageMode.VIRTUAL,
+            mapOf("STONE" to 64L), buildingMaterials = mapOf(city.buildings.first().id.toString() to mapOf("STONE" to 64L),
+                target.id.toString() to mapOf("STONE" to 64L), first.id.toString() to mapOf("STONE" to 1L),
+                second.id.toString() to mapOf("STONE" to 2L))))
+        storage.constructionAvailable(city, target.id) shouldBe mapOf("STONE" to 5L)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = requireNotNull(storage.prepareConstructionDebitBackground(city,
+            CivsRules.constructionStorageInputs(city, target.id, mapOf("STONE" to 5L)), target.id))
+        plan.changes shouldBe emptyList()
+        plan.inventoryAfter.buildingStock(first.id) shouldBe emptyMap()
+        plan.inventoryAfter.buildingStock(second.id) shouldBe emptyMap()
+        plan.inventoryAfter.buildingStock(target.id) shouldBe mapOf("STONE" to 64L)
+        plan.inventoryAfter.buildingStock(city.buildings.first().id) shouldBe mapOf("STONE" to 64L)
+        plan.inventoryAfter.materials shouldBe mapOf("STONE" to 64L)
+        storage.prepareConstructionDebitBackground(city, mapOf("STONE" to 4L), target.id) shouldBe null
+    }
+
+    test("an old unpaid water only row completes without consuming or refunding existing water buckets") {
+        val target = addLocalBuilding(BuildingType.BUILDER_HUT).copy(phase = BuildingPhase.CONSTRUCTING)
+        val worker = CivWorker(UUID.randomUUID(), "Builder", target.id, nextDeliveryAt = 1, items = List(CivsEquipment.SLOTS) {
+            if (it == 6) CivResidentItem("WATER_BUCKET", 1) else null
+        })
+        val old = mapOf("WATER_BUCKET" to 1L)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 1, 1, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = target, batches = CivConstructionBatches(1, 16), materials = old,
+            payment = CivConstructionPayment(awaiting = old))
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == target.id) target else it },
+            workers = listOf(worker), construction = order))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = requireNotNull(storage.prepareConstructionDebitBackground(city, emptyMap(), target.id))
+        val paid = CivsRules.payBatch(city, city.owner, order.id, 0, emptyMap()).copy(inventory = plan.inventoryAfter)
+        val receipt = CivInventoryTransaction(id, city.id, city.revision, paid, plan.changes).validated()
+        receipt.changes shouldBe emptyList()
+        paid.construction!!.materials shouldBe emptyMap()
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        val completed = CivsRules.completeBatch(paid, paid.owner, order.id)
+        completed.construction shouldBe null
+        completed.workers.single().items shouldBe worker.items
+        CivsRules.completeBatch(completed, completed.owner, order.id) shouldBe completed
+    }
+
     test("physical cargo pickup and dropoff conserve exact local stock across receipt replays") {
         val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
         val warehouseControl = cargo(world.getBlockAt(6, 64, 0))

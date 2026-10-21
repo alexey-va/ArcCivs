@@ -39,7 +39,8 @@ object CivsLogistics {
     fun requests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> {
         if (city.inventory == null || city.pendingDeletion != null) return emptyList()
         val carried = city.workers.mapNotNull(CivWorker::cargo)
-        fun incoming(id: UUID, material: String) = carried.filter { it.targetBuildingId == id && it.material == material }.sumOf(CivCargo::amount)
+        val destinations = carried.associate { it.id to destination(city, it)?.id }
+        fun incoming(id: UUID, material: String) = carried.filter { destinations[it.id] == id && it.material == material }.sumOf(CivCargo::amount)
         val requests = mutableListOf<CivSupplyRequest>()
         fun request(buildingId: UUID, required: Map<String, Long>, construction: Boolean) {
             val local = stock(buildingId)
@@ -49,9 +50,23 @@ object CivsLogistics {
                 if (needed > 0 || inTransit > 0) requests += CivSupplyRequest(buildingId, material, needed, inTransit, construction)
             }
         }
-        city.construction?.let { order ->
-            order.payment?.awaiting?.takeIf { city.building(order.buildingId)?.control != null }
-                ?.let { request(order.buildingId, it, true) }
+        city.construction?.takeIf { it.payment != null }?.let { order ->
+            val stores = CivsRules.constructionStores(city, order.buildingId)
+            val target = stores.firstOrNull { building -> city.workers.any { it.assignment == building.id } } ?: stores.firstOrNull()
+            if (target != null) {
+                val available = mutableMapOf<String, Long>()
+                stores.forEach { building -> stock(building.id).forEach { (material, count) -> available.merge(material, count, Math::addExact) } }
+                CivsRules.constructionWorkers(city, order.buildingId).forEach { worker ->
+                    CivsEquipment.slots(worker).filterNotNull().filter { it.data == null }.forEach {
+                        available.merge(it.material, it.amount.toLong(), Math::addExact)
+                    }
+                }
+                for ((material, desired) in CivsMaterials.unpaid(order.materials.orEmpty()).toSortedMap()) {
+                    val needed = (desired - (available[material] ?: 0L)).coerceAtLeast(0)
+                    val inTransit = stores.sumOf { incoming(it.id, material) }
+                    if (needed > 0 || inTransit > 0) requests += CivSupplyRequest(target.id, material, needed, inTransit, true)
+                }
+            }
         }
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.control != null && !CivsRules.isBuilder(city, it) }.forEach { building ->
             val required = desiredStock(city, building)
@@ -64,8 +79,7 @@ object CivsLogistics {
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(building) + when (building.type) {
-            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L,
-                "WATER_BUCKET" to if (CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")?.get("irrigationExisting")?.asBoolean == false) 1L else 0L)
+            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
             BuildingType.QUARRY -> QUARRY_SUPPLIES + ("IRON_PICKAXE" to 1L)
             else -> emptyMap()
@@ -86,7 +100,10 @@ object CivsLogistics {
         val available = stock(warehouse.id)
         val candidates = mutableListOf<CivCourierPlan>()
         for (request in requests(city, stock)) {
-            val target = city.building(request.buildingId)?.takeIf { it.control != null } ?: continue
+            val target = if (request.construction) city.construction?.let {
+                constructionDestination(city, it.buildingId, requireNotNull(warehouse.control))
+            } else city.building(request.buildingId)?.takeIf { it.control != null }
+            if (target == null) continue
             if (target.id == warehouse.id || !withinRoute(requireNotNull(warehouse.control), requireNotNull(target.control))) continue
             val amount = minOf(MAX_CARGO, (request.needed - request.inTransit).coerceAtLeast(0), available[request.material] ?: 0)
             if (amount > 0) {
@@ -118,9 +135,24 @@ object CivsLogistics {
     private fun shipmentId(city: UUID, worker: UUID, cycle: Long, source: UUID, target: UUID, material: String): UUID =
         UUID.nameUUIDFromBytes("$city/$worker/$cycle/$source/$target/$material".toByteArray(StandardCharsets.UTF_8))
 
+    private fun constructionDestination(city: Settlement, buildingId: UUID, source: CivPosition): CivBuilding? {
+        val stores = CivsRules.constructionStores(city, buildingId).filter { withinRoute(source, requireNotNull(it.control)) }
+        return stores.firstOrNull { building -> city.workers.any { it.assignment == building.id } } ?: stores.firstOrNull()
+    }
+
     /** A retained source uses its real barrel; a removed source retains its durable departure point. */
     fun destination(city: Settlement, cargo: CivCargo): CivBuilding? {
         val source = city.building(cargo.sourceBuildingId)?.control ?: cargo.sourceEntrance
+        val target = city.building(cargo.targetBuildingId)
+        if (target != null && city.construction?.buildingId == target.id && target.type != BuildingType.BUILDER_HUT &&
+            target.phase in setOf(BuildingPhase.SITE, BuildingPhase.CONSTRUCTING)) {
+            // Old construction shipments retain their receipt identity, but never refill the site barrel.
+            return constructionDestination(city, target.id, source)
+                ?: city.building(cargo.sourceBuildingId)?.takeIf { it.type == BuildingType.WAREHOUSE && it.control != null &&
+                    withinRoute(source, requireNotNull(it.control)) }
+                ?: city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE && it.control != null &&
+                    withinRoute(source, requireNotNull(it.control)) }.minByOrNull { distanceSquared(source, requireNotNull(it.control)) }
+        }
         return city.building(cargo.targetBuildingId)?.takeIf { it.control != null }
             ?: city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE && it.control != null &&
                 withinRoute(source, requireNotNull(it.control)) }

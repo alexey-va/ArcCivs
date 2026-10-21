@@ -174,7 +174,7 @@ class CivsStorage(private val plugin: Plugin,
         val worldPositions: Set<CivPosition> = emptySet())
     private data class Source(val position: CivPosition, val type: String, val inventory: Inventory)
     private data class Snapshot(val source: Source, val before: List<ItemStack?>, val after: MutableList<ItemStack?>)
-    private class DebitSearch(val worldId: UUID, val owner: UUID, val required: Map<String, Long>) {
+    private class DebitSearch(val worldId: UUID, val owner: UUID, val required: Map<String, Long>, val buildings: Set<UUID>?) {
         var positions: Map<CivPosition, String?> = emptyMap()
         var ordered: List<CivPosition> = emptyList()
         var cursor = 0
@@ -331,15 +331,18 @@ class CivsStorage(private val plugin: Plugin,
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
     fun isWorldLocked(worldId: UUID, position: CivPosition): Boolean = Key(worldId, position) in lockedWorld
 
-    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null, requestedSupply: Pair<Material, Long>? = null): CivResidentTransferPlan {
+    fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null, requestedSupply: Pair<Material, Long>? = null, requestedSupplies: Map<String, Long>? = null): CivResidentTransferPlan {
         checkClaim(city)
         reject(!city.canManage(player.uniqueId) || !player.isOnline, "not-authorized")
         reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-        val (updated, changes) = if (requestedSupply != null) CivsEquipment.giveRequestedSupply(worker, player, requestedSupply.first, requestedSupply.second)
+        val (updated, changes) = if (requestedSupplies != null) {
+            validateAmounts(requestedSupplies)
+            CivsEquipment.giveRequestedSupplies(worker, player, requestedSupplies)
+        } else if (requestedSupply != null) CivsEquipment.giveRequestedSupply(worker, player, requestedSupply.first, requestedSupply.second)
             else if (requestedTool != null) CivsEquipment.giveRequestedTool(worker, player, requestedTool)
             else CivsEquipment.transfer(worker, player, npcSlot, playerSlot, click)
-        val transfer = CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), changes)
+        val transfer = changes.takeIf { it.isNotEmpty() }?.let { CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), it) }
         return CivResidentTransferPlan(CivStoragePlan(requireNotNull(city.inventory), emptyList(), residentTransfer = transfer), updated)
     }
 
@@ -372,6 +375,21 @@ class CivsStorage(private val plugin: Plugin,
         return totals.toSortedMap()
     }
 
+    fun constructionAvailable(city: Settlement, buildingId: UUID): Map<String, Long> {
+        checkMain(); requireOpen()
+        if (city.inventory == null) throw CivsRejection("materials-required")
+        val totals = mutableMapOf<String, Long>()
+        CivsRules.constructionStores(city, buildingId).forEach { building ->
+            buildingAvailable(city, building.id).forEach { (material, count) -> totals.merge(material, count, Math::addExact) }
+        }
+        CivsRules.constructionWorkers(city, buildingId).forEach { worker ->
+            CivsEquipment.slots(worker).filterNotNull().filter { it.data == null }.forEach {
+                totals.merge(it.material, it.amount.toLong(), Math::addExact)
+            }
+        }
+        return totals.toSortedMap()
+    }
+
     fun prepareDebit(city: Settlement, required: Map<String, Long>): CivStoragePlan =
         prepareDebit(city, required, null, null)
 
@@ -396,13 +414,31 @@ class CivsStorage(private val plugin: Plugin,
                 if (failure.reason == "materials-missing") null else throw failure
             }
         }
+        return prepareScopedDebitBackground(city, required, null)
+    }
+
+    fun prepareConstructionDebitBackground(city: Settlement, required: Map<String, Long>, buildingId: UUID): CivStoragePlan? {
+        checkClaim(city)
+        validateAmounts(required)
+        val stores = CivsRules.constructionStores(city, buildingId).map(CivBuilding::id).toSet()
+        if (city.inventory?.mode == CivStorageMode.VIRTUAL) return try {
+            prepareDebit(city, required, null, null, buildingIds = stores)
+        } catch (failure: CivsRejection) {
+            if (failure.reason == "materials-missing") null else throw failure
+        }
+        if (city.inventory == null) throw CivsRejection("materials-required")
+        return prepareScopedDebitBackground(city, required, stores)
+    }
+
+    private fun prepareScopedDebitBackground(city: Settlement, required: Map<String, Long>, buildings: Set<UUID>?): CivStoragePlan? {
         // A homogeneous row has at most 16 blocks; eight snow layers are the largest item count.
         require(required.values.sum() <= BACKGROUND_DEBIT_CONTAINERS) { "Background debit exceeds one construction row" }
         val search = debitSearches[city.id]?.takeIf {
-            it.worldId == city.worldId && it.owner == city.owner && it.required == required
-        } ?: DebitSearch(city.worldId, city.owner, required.toMap()).also { debitSearches[city.id] = it }
-        val positions = claims.getValue(cityClaims.getValue(city.id)).positions
-        if (search.positions !== positions) {
+            it.worldId == city.worldId && it.owner == city.owner && it.required == required && it.buildings == buildings
+        } ?: DebitSearch(city.worldId, city.owner, required.toMap(), buildings).also { debitSearches[city.id] = it }
+        val positions = if (buildings == null) claims.getValue(cityClaims.getValue(city.id)).positions else
+            buildings.flatMap { buildingPositions(city, it).entries }.associate { it.key to it.value }
+        if (search.positions != positions) {
             search.positions = positions
             search.ordered = positions.keys.toList()
             search.cursor = if (positions.isEmpty()) 0 else Math.floorMod(search.cursor, positions.size)
@@ -434,6 +470,7 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun prepareDebit(city: Settlement, required: Map<String, Long>,
         physicalSources: Sequence<Source>?, candidate: ((CivPosition) -> Boolean)?, buildingId: UUID? = null,
+        buildingIds: Set<UUID>? = buildingId?.let(::setOf),
     ): CivStoragePlan {
         checkClaim(city)
         validateAmounts(required)
@@ -447,11 +484,11 @@ class CivsStorage(private val plugin: Plugin,
         } else {
             required.toSortedMap().forEach { (material, requested) ->
                 var remaining = requested
-                val taken = if (buildingId == null) minOf(remaining, virtual[material] ?: 0) else 0L
+                val taken = if (buildingIds == null) minOf(remaining, virtual[material] ?: 0) else 0L
                 putAmount(virtual, material, (virtual[material] ?: 0) - taken)
                 remaining -= taken
-                val selected = if (buildingId == null) warehouses.toSortedMap().values
-                    else listOf(warehouses.getOrPut(buildingId.toString(), ::linkedMapOf))
+                val selected = if (buildingIds == null) warehouses.toSortedMap().values
+                    else buildingIds.map { warehouses.getOrPut(it.toString(), ::linkedMapOf) }
                 selected.forEach { warehouse ->
                     val amount = minOf(remaining, warehouse[material] ?: 0)
                     putAmount(warehouse, material, (warehouse[material] ?: 0) - amount)
@@ -919,7 +956,7 @@ class CivsStorage(private val plugin: Plugin,
         val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
         return linkedMapOf<CivPosition, String?>().also { selected ->
             building.control?.takeIf { it in positions }?.let { selected[it] = positions[it] }
-            if (!controlOnly && building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE) {
+            if (!controlOnly && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && building.phase == BuildingPhase.ACTIVE) {
                 val foreignControls = city.buildings.filter { it.id != buildingId }.mapNotNull(CivBuilding::control).toSet()
                 positions.forEach { (position, type) ->
                     if (position !in foreignControls && building.bounds.contains(position.x, position.y, position.z))

@@ -99,7 +99,7 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicP
             cost = null
             continue
         }
-        val required = CivsMaterials.requirements(cell.after)
+        val required = CivsMaterials.batchKey(cell.after)
         val previous = result.lastOrNull()
         if (previous != null && required == cost && cell.position.y == previous.maximum.y &&
             cell.position.z == previous.maximum.z && cell.position.x == previous.maximum.x + 1 &&
@@ -152,15 +152,24 @@ internal object CivsMaterials {
         return result
     }
 
-    fun requirements(blockData: String): Map<String, Long> {
+    /** Already persisted row indices keep their original grouping when water becomes free. */
+    fun batchKey(blockData: String): Map<String, Long> = requirements(blockData, freeWater = false)
+
+    fun unpaid(materials: Map<String, Long>): Map<String, Long> = materials.filterKeys { it != "WATER_BUCKET" }
+
+    fun requirements(blockData: String): Map<String, Long> = requirements(blockData, freeWater = true)
+
+    private fun requirements(blockData: String, freeWater: Boolean): Map<String, Long> {
         val id = blockData.substringBefore('[').removePrefix("minecraft:").uppercase(java.util.Locale.ROOT)
         val states = blockData.substringAfter('[', "").removeSuffix("]").split(',').mapNotNull {
             val pair = it.split('=', limit = 2)
             if (pair.size == 2) pair[0] to pair[1] else null
         }.toMap()
         if (id in setOf("AIR", "CAVE_AIR", "VOID_AIR", "BARRIER", "STRUCTURE_VOID")) return emptyMap()
+        if (freeWater && id == "WATER") return emptyMap()
         if ((id.endsWith("_DOOR") || id in TALL_PLANTS) && states["half"] == "upper") return emptyMap()
         if (id.endsWith("_BED") && states["part"] == "head") return emptyMap()
+        if (freeWater && id == "WATER_CAULDRON") return mapOf("CAULDRON" to 1L)
         if (id in setOf("WATER_CAULDRON", "LAVA_CAULDRON", "POWDER_SNOW_CAULDRON"))
             return mapOf("CAULDRON" to 1L, id.removeSuffix("_CAULDRON") + "_BUCKET" to 1L)
         val mapped = when {
@@ -182,7 +191,7 @@ internal object CivsMaterials {
             else -> 1L
         }
         val costs = linkedMapOf(item(mapped) to count)
-        if (states["waterlogged"] == "true") costs.merge("WATER_BUCKET", 1L, Math::addExact)
+        if (!freeWater && states["waterlogged"] == "true") costs.merge("WATER_BUCKET", 1L, Math::addExact)
         return costs
     }
 

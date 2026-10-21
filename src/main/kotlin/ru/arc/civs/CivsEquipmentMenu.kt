@@ -78,7 +78,6 @@ class CivsEquipmentMenu(
         }
         session.view.setItem(13, icon(Material.BUNDLE, player, "equipment.bag", "equipment.bag-help"))
         session.view.setItem(45, icon(Material.ARROW, player, "equipment.back"))
-        session.view.setItem(53, icon(Material.SUNFLOWER, player, "equipment.refresh"))
         // Opening replaces the previous view and can synchronously fire InventoryCloseEvent.
         sessions.remove(player.uniqueId)
         render(session)
@@ -106,11 +105,6 @@ class CivsEquipmentMenu(
                     session.back()
                 }
             }
-            return
-        }
-        if (event.rawSlot == 53) {
-            session.feedback = null
-            render(session)
             return
         }
         if (session.snapshot.size != CIVS_EQUIPMENT_LOGICAL_SIZE) return

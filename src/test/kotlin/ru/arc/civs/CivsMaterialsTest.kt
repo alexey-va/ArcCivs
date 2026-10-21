@@ -38,11 +38,29 @@ class CivsMaterialsTest : FunSpec({
         CivsMaterials.requirements("minecraft:wall_torch[facing=north]") shouldBe mapOf("TORCH" to 1L)
         CivsMaterials.requirements("minecraft:potted_poppy") shouldBe mapOf("FLOWER_POT" to 1L, "POPPY" to 1L)
         CivsMaterials.requirements("minecraft:wheat[age=7]") shouldBe mapOf("WHEAT_SEEDS" to 1L)
-        CivsMaterials.requirements("minecraft:oak_stairs[waterlogged=true]") shouldBe mapOf("OAK_STAIRS" to 1L, "WATER_BUCKET" to 1L)
+        CivsMaterials.requirements("minecraft:oak_stairs[waterlogged=true]") shouldBe mapOf("OAK_STAIRS" to 1L)
         CivsMaterials.requirements("minecraft:structure_void") shouldBe emptyMap()
         CivsMaterials.requirements("minecraft:fire[age=15,east=false,north=false,south=false,up=false,west=false]") shouldBe
             mapOf("FIRE_CHARGE" to 1L)
         shouldThrow<CivsRejection> { CivsMaterials.requirements("minecraft:nether_portal") }.reason shouldBe "unsupported-material"
+    }
+
+    test("water is free without changing saved construction row boundaries or other liquids") {
+        CivsMaterials.requirements("minecraft:water[level=0]") shouldBe emptyMap()
+        CivsMaterials.requirements("minecraft:water_cauldron[level=3]") shouldBe mapOf("CAULDRON" to 1L)
+        CivsMaterials.requirements("minecraft:lava[level=0]") shouldBe mapOf("LAVA_BUCKET" to 1L)
+        CivsMaterials.requirements("minecraft:lava_cauldron") shouldBe mapOf("CAULDRON" to 1L, "LAVA_BUCKET" to 1L)
+        CivsMaterials.requirements("minecraft:powder_snow_cauldron") shouldBe mapOf("CAULDRON" to 1L, "POWDER_SNOW_BUCKET" to 1L)
+        CivsMaterials.unpaid(mapOf("WATER_BUCKET" to 8L, "OAK_STAIRS" to 2L)) shouldBe mapOf("OAK_STAIRS" to 2L)
+        val building = CivBuilding(java.util.UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(0, 64, 0), 0, "test",
+            CivBox(CivPosition(0, 64, 0), CivPosition(3, 64, 0)), CivPosition(0, 64, 1), BuildingPhase.CONSTRUCTING)
+        val plan = CivPlacementPlan(java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), building,
+            listOf("minecraft:water[level=0]", "minecraft:air", "minecraft:oak_stairs[waterlogged=true]", "minecraft:oak_stairs[waterlogged=false]")
+                .mapIndexed { index, after -> CivPlanBlock(CivPosition(index, 64, 0), "minecraft:stone", after) })
+        civsMaterialBatches(plan) shouldBe (0..3).map { index ->
+            CivBuildBatch(CivPosition(index, 64, 0), CivPosition(index, 64, 0))
+        }
+        CivsMaterials.required(plan) shouldBe mapOf("OAK_STAIRS" to 2L)
     }
 
     test("curated vanilla palettes have obtainable deterministic material requirements") {
@@ -85,7 +103,7 @@ class CivsMaterialsTest : FunSpec({
             batch.minimum.z shouldBe batch.maximum.z
             (batch.maximum.x - batch.minimum.x + 1 <= 16) shouldBe true
             val row = cells.filter { it.position.y == batch.minimum.y && it.position.z == batch.minimum.z && it.position.x in batch.minimum.x..batch.maximum.x }
-            row.map { CivsMaterials.requirements(it.after) }.distinct().size shouldBe 1
+            row.map { CivsMaterials.batchKey(it.after) }.distinct().size shouldBe 1
             row.map { it.position }
         }
         included.distinct().size shouldBe included.size

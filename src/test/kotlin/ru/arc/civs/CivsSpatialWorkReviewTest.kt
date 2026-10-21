@@ -20,6 +20,56 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsSpatialWorkReviewTest : FunSpec({
+    test("all authored farm levels place irrigation without filled or empty bucket items") {
+        for (style in listOf("medievaloak", "nordic", "caledonia")) for (level in 1..3) {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open().use { paper ->
+                    val world = CivsWorksiteWorldFixture("free-water-$style-$level").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("FreeIrrigation")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    val farm = spatialBuilding(style, "farmer", level, CivPosition(0, 63, 0))
+                    val worker = spatialWorker(farm, "IRON_HOE")
+                    val city = spatialCity(world.uid, listOf(farm), worker)
+                    val irrigation = CivsWorksiteLayouts.irrigation(farm)
+                    (irrigation.isNotEmpty()) shouldBe true
+                    irrigation.forEach { point ->
+                        for (x in point.x - 3..point.x + 3) for (z in point.z - 3..point.z + 3) {
+                            world.loadChunk(x shr 4, z shr 4)
+                            world.getBlockAt(x, point.y, z).type = Material.DIRT
+                        }
+                    }
+                    CivsStorage(plugin) { emptyArray() }.use { storage ->
+                        CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            repeat(8) { runtime.pulse(listOf(city)) }
+                            val work = requireNotNull(runtime.plan(city, worker))
+                            work.inputs shouldBe emptyMap()
+                            work.outputs shouldBe emptyMap()
+                            work.changes.single().position shouldBe irrigation.first()
+                            work.changes.single().after shouldBe "minecraft:water[level=0]"
+                            runtime.validate(city, work)
+                            val id = UUID.randomUUID()
+                            storage.reserve(city, id)
+                            val plan = storage.prepareWork(city, farm.id, work.storageInputs(worker), work.outputs, work.changes)
+                            val after = CivsRules.finishWorldWork(city, work, 10_000).copy(inventory = plan.inventoryAfter)
+                            val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
+                                worldChanges = plan.worldChanges).validated()
+                            storage.seal(receipt, keepViewersOpen = true)
+                            storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                            storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                            val placed = irrigation.first()
+                            world.getBlockAt(placed.x, placed.y, placed.z).type shouldBe Material.WATER
+                            CivsEquipment.plainCount(after.workers.single(), "WATER_BUCKET") shouldBe 0L
+                            CivsEquipment.plainCount(after.workers.single(), "BUCKET") shouldBe 0L
+                            storage.unlock(id)
+                        }
+                    }
+                    tasks.close()
+                }
+            }
+        }
+    }
+
     test("a neighbouring forester never plants in the authored field outside the farm hut bounds") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open().use { paper ->

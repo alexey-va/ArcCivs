@@ -2,11 +2,13 @@ package ru.arc.civs
 
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextColor
+import org.bukkit.GameMode
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.HandlerList
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerQuitEvent
+import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.whenCompleteSync
@@ -109,7 +111,14 @@ class CivsUi internal constructor(
         val city = host.settlements().firstOrNull { it.id == cityId }
         if (city == null || !city.canManage(player.uniqueId)) {
             notice(player, "civs.worker", "workers.title", text.reason(player, "not-member")) { showEntry(player) }
-        } else showWorker(player, workerId)
+        } else {
+            val worker = city.workers.firstOrNull { it.id == workerId }
+            val building = worker?.assignment?.let(city::building)
+            if (building != null && CivsRules.isBuilder(city, building) && city.construction != null) {
+                roots[player.uniqueId] = "civs.builder-materials"
+                loadBuilderMaterials(player, building.id, workerId)
+            } else showWorker(player, workerId)
+        }
     }
 
     /** The control block and the town catalog open the same building screen. */
@@ -122,7 +131,13 @@ class CivsUi internal constructor(
         val city = host.settlements().firstOrNull { it.id == cityId }
         if (city == null || !city.canManage(player.uniqueId)) {
             notice(player, "civs.building", "buildings.detail-title", text.reason(player, "not-member")) { showEntry(player) }
-        } else showBuilding(player, buildingId)
+        } else {
+            val building = city.building(buildingId)
+            if (building != null && CivsRules.isBuilder(city, building) && city.construction != null) {
+                roots[player.uniqueId] = "civs.builder-materials"
+                loadBuilderMaterials(player, buildingId)
+            } else showBuilding(player, buildingId)
+        }
     }
 
     private fun showEntry(player: Player) {
@@ -652,10 +667,13 @@ class CivsUi internal constructor(
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
             }
-            if (building.phase == BuildingPhase.SITE || city.construction?.buildingId == buildingId || queued) {
+            if (CivsRules.isBuilder(city, building) && city.construction != null) {
+                add(button(player, "materials", "materials.open", COMMIT) { loadBuilderMaterials(player, buildingId) })
+            } else if (building.phase == BuildingPhase.SITE || city.construction?.buildingId == buildingId || queued) {
                 add(button(player, "materials", "materials.open", COMMIT) { loadBuildingMaterials(player, buildingId) })
             }
-            if (queued) add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
+            if (queued || CivsRules.isBuilder(city, building) && city.constructionQueue.orEmpty().isNotEmpty())
+                add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (building.type == BuildingType.WAREHOUSE && city.inventory != null)
                 add(button(player, "logistics", "logistics.open", STOCK) { showSupplyRequests(player, buildingId) })
@@ -755,11 +773,12 @@ class CivsUi internal constructor(
         val order = city.construction?.takeIf { it.buildingId == buildingId }
         val queued = queuePosition(city, buildingId)
         if (building.phase != BuildingPhase.SITE && order == null && queued == null) return showBuilding(player, buildingId)
-        val available = runCatching { host.localMaterials(player, buildingId) }
+        val available = runCatching { host.constructionAvailable(player, buildingId) }
         val entries = (order?.materials ?: estimate).toSortedMap().entries.toList()
         val incremental = order?.payment != null
         val current = page.coerceIn(0, lastPage(entries.size, MATERIALS_PAGE_SIZE))
-        val canSupply = !host.cityBusy(player) && available.isSuccess && (order == null || incremental) &&
+        val canChange = !host.cityBusy(player) && available.isSuccess && (order == null || incremental)
+        val canSupply = canChange &&
             entries.any { (material, count) -> count > (available.getOrNull()?.get(material) ?: 0) }
         fun supplied(result: CivsSupplyResult) {
             var message = if (result.moved == 0L && result.remaining == 0L) tr(player, "materials.supplies-ready")
@@ -787,18 +806,19 @@ class CivsUi internal constructor(
                 DialogTables.Frame.EPIC, 320, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
             available.exceptionOrNull()?.let { body(text.failure(player, it)) },
         ), buildList {
-            if (canSupply) {
+            if (canSupply && player.gameMode != GameMode.CREATIVE) {
                 add(button(player, "supply", "materials.supply", STOCK) {
                     perform(player, "civs.building-materials", "materials.title", { host.supplyConstruction(player, buildingId) },
                         success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
                         workingKey = "materials.supplying")
                 }.copy(tooltip = tr(player, "materials.supply-help")))
-                if (isAdmin(player)) add(button(player, "grant", "materials.grant", PERSONAL) {
+            }
+            if (canChange && (isAdmin(player) || player.gameMode == GameMode.CREATIVE))
+                add(button(player, "grant", "materials.grant", COMMIT) {
                     perform(player, "civs.building-materials", "materials.title", { host.grantConstructionMaterials(player, buildingId) },
                         success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
                         workingKey = "materials.supplying")
                 }.copy(tooltip = tr(player, "materials.grant-help")))
-            }
             if (order == null && queued == null) add(button(player, "start",
                 if (city.construction == null && city.constructionQueue.orEmpty().isEmpty()) "materials.start" else "queue.add", COMMIT) {
                 perform(player, "civs.building-materials", "materials.title", { host.startBuilding(player, buildingId) },
@@ -807,6 +827,105 @@ class CivsUi internal constructor(
             }.copy(tooltip = tr(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help")))
             pages(player, current, entries.size, MATERIALS_PAGE_SIZE) { showBuildingMaterials(player, buildingId, estimate, it) }
         }, reopen = { showBuildingMaterials(player, buildingId, estimate, current) })
+    }
+
+    private fun loadBuilderMaterials(player: Player, hutId: UUID, workerId: UUID? = null, page: Int = 0, feedback: Component? = null) {
+        val city = city(player) ?: return
+        val order = city.construction ?: return if (workerId == null) showBuilding(player, hutId, feedback)
+            else showWorker(player, workerId, feedback)
+        val visit = present(player, "civs.builder-materials", "materials.title",
+            listOf(body(player, "materials.loading")), emptyList()) ?: return
+        val future = try { host.buildingMaterials(player, order.buildingId) }
+            catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        future.whenCompleteSync(tasks, visit.epoch) { materials, error ->
+            if (!current(player, visit)) return@whenCompleteSync
+            if (host.city(player)?.id != city.id) showEntry(player)
+            else if (error != null) {
+                val failure = text.failure(player, error)
+                if (workerId == null) showBuilding(player, hutId, failure) else showWorker(player, workerId, failure)
+            } else showBuilderMaterials(player, hutId, workerId, order.id, requireNotNull(materials), page, feedback)
+        }
+    }
+
+    private fun showBuilderMaterials(player: Player, hutId: UUID, workerId: UUID?, orderId: UUID,
+        materials: Map<String, Long>, page: Int, feedback: Component?) {
+        val city = city(player) ?: return
+        val hut = city.building(hutId) ?: return showBuildings(player)
+        val worker = workerId?.let { id -> city.workers.firstOrNull { it.id == id && it.assignment == hutId } }
+        if (!CivsRules.isBuilder(city, hut) || workerId != null && worker == null)
+            return if (workerId == null) showBuilding(player, hutId) else showWorker(player, workerId)
+        val order = city.construction
+        if (order?.id != orderId) return loadBuilderMaterials(player, hutId, workerId, page, feedback)
+        val target = city.building(order.buildingId) ?: return showBuilding(player, hutId)
+        // A legacy hall may still employ a builder, but never becomes construction storage.
+        val recipient = worker ?: if (hut.type != BuildingType.BUILDER_HUT)
+            city.workers.firstOrNull { it.assignment == hutId && !CivsResidents.isChild(it) } else null
+        val available = runCatching { host.constructionAvailable(player, target.id) }
+        val entries = materials.toSortedMap().entries.toList()
+        val held = player.inventory.storageContents.filterNotNull().filter { item ->
+            item.amount > 0 && item.isSimilar(ItemStack(item.type))
+        }.groupBy { it.type.name }.mapValues { (_, items) -> items.sumOf { it.amount.toLong() } }
+        val current = page.coerceIn(0, lastPage(entries.size, PAGE_SIZE))
+        val needs = entries.any { (material, count) -> count > (available.getOrNull()?.get(material) ?: 0L) }
+        val canChange = !host.cityBusy(player) && available.isSuccess && order.payment != null &&
+            (recipient != null || hut.type == BuildingType.BUILDER_HUT)
+        val canSupply = canChange && entries.any { (material, count) ->
+                count > (available.getOrNull()?.get(material) ?: 0L) && (held[material] ?: 0L) > 0
+            }
+        val creative = player.gameMode == GameMode.CREATIVE
+        val help = when {
+            host.cityBusy(player) -> tr(player, "reason.city-busy")
+            available.isFailure -> text.failure(player, requireNotNull(available.exceptionOrNull()))
+            order.payment == null || !needs -> tr(player, "materials.supplies-ready")
+            recipient == null && hut.type != BuildingType.BUILDER_HUT -> tr(player, "building-status.no-workers")
+            !canSupply -> tr(player, "materials.inventory-empty")
+            recipient != null -> tr(player, "materials.give-worker-help", "name" to recipient.name)
+            else -> tr(player, "materials.give-hut-help")
+        }
+        fun reload(message: Component? = null) = loadBuilderMaterials(player, hutId, workerId, current, message)
+        fun transfer(grant: Boolean) {
+            perform(player, "civs.builder-materials", "materials.title", {
+                if (recipient != null) {
+                    if (grant) host.grantBuilderMaterials(player, recipient.id) else host.supplyBuilderMaterials(player, recipient.id)
+                } else {
+                    if (grant) host.grantConstructionMaterials(player, target.id, hutId) else host.supplyConstruction(player, target.id, hutId)
+                }
+            }, success = { result ->
+                var message = tr(player, "materials.supplied", "moved" to result.moved, "remaining" to result.remaining)
+                if (result.storageFull) message = message.append(Component.space()).append(tr(player, "materials.storage-full"))
+                reload(message.color(if (result.remaining > 0) STOCK else COMMIT))
+            }, failure = { reload(it) }, workingKey = "materials.supplying")
+        }
+        present(player, "civs.builder-materials", "materials.title", listOfNotNull(
+            body(worker?.let { tint(text.literal(it.name), PEOPLE) } ?: buildingName(player, hut.type, hut.level)),
+            PaperDialogBody(tr(player, "materials.current-build", "building" to buildingName(player, target.type, order.targetLevel),
+                "done" to order.workDone, "total" to order.workRequired), 400),
+            body(tr(player, if (recipient == null) "materials.hut-destination" else "materials.worker-destination",
+                "name" to recipient?.name)),
+            if (entries.isNotEmpty()) DialogTables.body(entries.drop(current * PAGE_SIZE).take(PAGE_SIZE).map { (material, count) ->
+                val have = available.getOrNull()?.get(material) ?: 0L
+                materialName(player, material) to tint(tr(player, "materials.builder-counts", "have" to have,
+                    "need" to count, "held" to (held[material] ?: 0L)), if (have >= count) COMMIT else STOCK)
+            }, tr(player, "materials.item") to tr(player, "materials.builder-counts-title"),
+                DialogTables.Frame.EPIC, 400, DialogTables.Columns.LABEL_WIDE) else body(player, "materials.no-cost"),
+            body(player, "materials.builder-stock-help"),
+            if (city.constructionQueue.orEmpty().isNotEmpty()) body(tr(player, "queue.waiting", "count" to city.constructionQueue.orEmpty().size)) else null,
+            feedback?.let(::body), available.exceptionOrNull()?.let { body(text.failure(player, it)) },
+        ), buildList {
+            add(button(player, if (creative) "grant" else "supply", if (creative) "materials.grant" else "materials.supply",
+                if (if (creative) canChange else canSupply) COMMIT else DANGER) {
+                if (if (creative) canChange else canSupply) transfer(creative) else reload()
+            }.copy(tooltip = if (creative && canChange) tr(player, "materials.grant-help") else help))
+            if (!creative && isAdmin(player)) add(button(player, "grant", "materials.grant", if (canChange) COMMIT else DANGER) {
+                if (canChange) transfer(true) else reload()
+            }.copy(tooltip = if (canChange) tr(player, "materials.grant-help") else help))
+            if (workerId == null) add(button(player, "details", "materials.building-details", PERSONAL) { showBuilding(player, hutId) })
+            else add(button(player, "details", "materials.worker-details", PEOPLE) { showWorker(player, workerId) })
+            if (recipient != null) add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, recipient.id) })
+            else if (!host.cityBusy(player)) add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, hutId) })
+            if (city.constructionQueue.orEmpty().isNotEmpty()) add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
+            pages(player, current, entries.size, PAGE_SIZE) { loadBuilderMaterials(player, hutId, workerId, it) }
+        }, reopen = { loadBuilderMaterials(player, hutId, workerId, current) })
     }
 
     private fun showBuildingWorkers(player: Player, buildingId: UUID, page: Int = 0, error: Component? = null) {
@@ -1008,6 +1127,8 @@ class CivsUi internal constructor(
             if (worker.cargo != null) body(player, "logistics.cargo-help") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
+            if (building != null && CivsRules.isBuilder(city, building) && city.construction != null)
+                add(button(player, "materials", "materials.open", COMMIT) { loadBuilderMaterials(player, building.id, workerId) })
             if (request != null) add(requestButton(player, request, "workers.supply-unavailable", "workers.supply-help", give = {
                 perform(player, "civs.worker", "workers.detail-title", { host.giveWorkerRequest(player, workerId, request.material.name) },
                     success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
@@ -1368,7 +1489,7 @@ class CivsUi internal constructor(
 
     private fun screenColor(id: String): TextColor = when (id) {
         "civs.workers", "civs.worker", "civs.members", "civs.member", "civs.member-add", "civs.building-workers" -> PEOPLE
-        "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.logistics",
+        "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
         "civs.containers", "civs.container" -> STOCK
         "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.storage-mode" -> PERSONAL
         "civs.guide", "civs.remote" -> NAVIGATION

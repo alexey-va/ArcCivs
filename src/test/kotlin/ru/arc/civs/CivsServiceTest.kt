@@ -541,6 +541,92 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("explicit builder hut deposits subtract all builder stores and bags without using site or hall contents") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("HutSupplier")
+            player.addAttachment(h.plugin, "arccivs.use", true)
+            player.teleport(Location(h.world, 20.0, 65.0, 0.0))
+            val plan = h.supplySite(player.uniqueId, 6)
+            val base = h.store.load().join().single()
+            val first = base.buildings.last().copy(phase = BuildingPhase.ACTIVE)
+            val second = first.copy(id = UUID.randomUUID(), anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, 3),
+                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)), control = CivPosition(20, 63, 0))
+            val target = second.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                anchor = CivPosition(30, 64, 0), entrance = CivPosition(30, 64, 3), control = CivPosition(30, 63, 0),
+                bounds = CivBox(CivPosition(28, 63, -2), CivPosition(32, 68, 2)))
+            val worker = base.workers.first().copy(assignment = first.id, nextDeliveryAt = 1, items = List(CivsEquipment.SLOTS) {
+                if (it == 6) CivResidentItem("OAK_LOG", 2) else null
+            })
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 1, 0, ConstructionPhase.PAUSED, Stock(),
+                failure = "placement-cancelled", plannedBuilding = target, batches = CivConstructionBatches(1, 16),
+                materials = mapOf("OAK_LOG" to 6L), payment = CivConstructionPayment())
+            val hall = base.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val city = CivsRules.validate(base.copy(buildings = listOf(hall, first, second, target), workers = listOf(worker), construction = order))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.world.loadChunk(1, 0)
+            for (x in listOf(0, 20, 30)) h.world.getBlockAt(x, 63, 0).type = Material.BARREL
+            fun barrel(x: Int) = (h.world.getBlockAt(x, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel(0).setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 64))
+            barrel(10).setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 1))
+            barrel(30).setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 64))
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.OAK_LOG, 10))
+            h.start()
+            h.service.constructionAvailable(player, target.id)["OAK_LOG"] shouldBe 3L
+            val supplied = h.service.supplyConstruction(player, target.id, second.id); h.tick()
+            barrel(20).getItem(0)!!.amount shouldBe 3
+            barrel(10).getItem(0)!!.amount shouldBe 1
+            barrel(0).getItem(0)!!.amount shouldBe 64
+            barrel(30).getItem(0)!!.amount shouldBe 64
+            player.inventory.getItem(0)!!.amount shouldBe 7
+            h.commit(); h.await(supplied) shouldBe CivsSupplyResult(3, 0, false)
+            h.await(h.service.supplyConstruction(player, target.id, second.id)) shouldBe CivsSupplyResult(0, 0, false)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.loadPlan(plan.id) }
+        }
+    }
+
+    test("creative builder bag grant is durable capacity bounded repeat safe and rejects survival issuance") {
+        serviceScenario { h ->
+            val player = h.paper.addPlayer("CreativeBuilderSupplier")
+            player.addAttachment(h.plugin, "arccivs.use", true)
+            player.teleport(Location(h.world, 10.0, 65.0, 0.0))
+            val placement = h.incrementalPlacement(phase = ConstructionPhase.PAUSED)
+            val base = placement.city
+            val worker = base.workers.first().copy(items = List(CivsEquipment.SLOTS) {
+                when { it == 6 -> CivResidentItem("STONE", 63); it == 7 || it < 6 -> null; else -> CivResidentItem("DIRT", 64) }
+            })
+            val city = CivsRules.validate(base.copy(owner = player.uniqueId, memberNames = mapOf(player.uniqueId.toString() to player.name),
+                workers = listOf(worker), construction = base.construction!!.copy(materials = mapOf("STONE" to 65L, "OAK_LOG" to 70L))))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            player.inventory.setItem(0, org.bukkit.inventory.ItemStack(Material.DIAMOND, 3))
+            h.start()
+            player.gameMode = org.bukkit.GameMode.SURVIVAL
+            val denied = h.service.grantBuilderMaterials(player, worker.id)
+            (shouldThrow<CompletionException> { h.await(denied) }.cause as CivsRejection).reason shouldBe "not-authorized"
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            player.gameMode = org.bukkit.GameMode.CREATIVE
+            val granted = h.service.grantBuilderMaterials(player, worker.id); h.tick()
+            requireNotNull(receipt).playerDebit shouldBe null
+            requireNotNull(receipt).residentTransfer shouldBe null
+            h.service.city(player)!!.workers.single() shouldBe worker
+            h.saves shouldBe emptyList()
+            journal.complete(receipt); h.tick()
+            granted.isDone shouldBe false
+            h.commit(); h.await(granted) shouldBe CivsSupplyResult(65, 7, true)
+            CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), "STONE") shouldBe 64
+            CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), "OAK_LOG") shouldBe 64
+            h.await(h.service.grantBuilderMaterials(player, worker.id)) shouldBe CivsSupplyResult(0, 7, true)
+            player.inventory.getItem(0) shouldBe org.bukkit.inventory.ItemStack(Material.DIAMOND, 3)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     for (prepaid in listOf(false, true)) test("construction supplies use the unpaid remainder and never refill a prepaid order prepaid=$prepaid") {
         serviceScenario { h ->
             val player = h.paper.addPlayer("RemainderOwner").also { it.setOp(true) }
@@ -624,12 +710,12 @@ class CivsServiceTest : FunSpec({
 
     test("the first ready row uses bounded debit and remains waiting without a partial journal or paste") {
         val storage = mockk<CivsStorage>(relaxed = true)
-        every { storage.prepareDebitBackground(any(), any(), any()) } returns null
+        every { storage.prepareConstructionDebitBackground(any(), any(), any()) } returns null
         every { storage.prepareDebit(any(), any()) } throws AssertionError("Construction must use bounded debit")
         serviceScenario(storageFactory = { storage }) { h ->
             h.incrementalPlacement()
             h.start()
-            verify(exactly = 1) { storage.prepareDebitBackground(any(), mapOf("STONE" to 1L), any()) }
+            verify(exactly = 1) { storage.prepareConstructionDebitBackground(any(), mapOf("STONE" to 1L), any()) }
             verify(exactly = 1) { storage.unlock(any()) }
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
             h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
@@ -637,7 +723,7 @@ class CivsServiceTest : FunSpec({
             h.time += 5_000; h.paper.performTicks(20)
             h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
             h.saves.size shouldBe 1
-            verify(exactly = 2) { storage.prepareDebitBackground(any(), mapOf("STONE" to 1L), any()) }
+            verify(exactly = 2) { storage.prepareConstructionDebitBackground(any(), mapOf("STONE" to 1L), any()) }
             verify(exactly = 0) { storage.prepareDebit(any(), any()); h.store.saveInventoryTransaction(any()) }
         }
     }
@@ -875,7 +961,7 @@ class CivsServiceTest : FunSpec({
             h.start(); h.commit()
             h.service.city(h.player)!!.construction!!.phase shouldBe ConstructionPhase.WAITING_MATERIALS
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
-            val barrel = (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory
+            val barrel = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
             h.time += 5_000; h.paper.performTicks(20)
             barrel.getItem(0)!!.amount shouldBe 1
@@ -905,7 +991,7 @@ class CivsServiceTest : FunSpec({
             h.saves.filter { !it.second.isDone }.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
             h.commit()
             h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
-            (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
+            (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 7
             verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
@@ -953,13 +1039,18 @@ class CivsServiceTest : FunSpec({
             val second = CivsRules.validate(first.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), center = shiftedPoint(first.center),
                 buildings = first.buildings.map(::shiftedBuilding), construction = secondOrder))
             h.world.loadChunk(16, 0); h.world.loadChunk(17, 0)
-            h.world.getBlockAt(271, 63, 1).type = Material.BARREL
-            val barrel = (h.world.getBlockAt(271, 63, 1).state as org.bukkit.block.Barrel).inventory
+            h.world.getBlockAt(276, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(276, 63, 0).state as org.bukkit.block.Barrel).inventory
             barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, 1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
-            every { h.store.loadPlan(secondOrder.id) } returns CompletableFuture()
+            val secondPlan = requireNotNull(h.store.loadPlan(order.id).join()).let { plan -> plan.copy(id = secondOrder.id,
+                cityId = second.id, building = requireNotNull(secondOrder.plannedBuilding),
+                blocks = plan.blocks.map { it.copy(position = shiftedPoint(it.position)) }) }
+            every { h.store.loadPlan(secondOrder.id) } returns CompletableFuture.completedFuture(secondPlan)
+            every { h.blueprints.recover(secondPlan) } returns CompletableFuture.completedFuture(mockk(relaxed = true))
+            every { h.worldAdapter.revalidate(any(), second.owner) } returns CompletableFuture.completedFuture(Unit)
             h.start()
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             h.time += 5_000; h.paper.performTicks(20)
@@ -980,7 +1071,7 @@ class CivsServiceTest : FunSpec({
             receipt!!.after.construction!!.payment!!.reservedBatch shouldBe 0
             h.service.close()
             durable.complete(receipt!!); h.tick()
-            (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 1
+            (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0)!!.amount shouldBe 1
             verify(exactly = 0) { h.store.save(any()); h.blueprints.paste(any(), any(), any(), any(), any()) }
         }
     }
@@ -992,11 +1083,11 @@ class CivsServiceTest : FunSpec({
             val order = before.construction!!
             val after = CivsRules.payBatch(before, before.owner, order.id, 0, mapOf("STONE" to 1L))
             val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
-                listOf(CivInventorySlotChange(CivPosition(15, 63, 1), "BARREL", 0, CivPlainItem("STONE", 1), null)))
+                listOf(CivInventorySlotChange(CivPosition(20, 63, 0), "BARREL", 0, CivPlainItem("STONE", 1), null)))
             every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
             every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
             h.start(); h.paper.performTicks(20)
-            (h.world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory.getItem(0) shouldBe null
+            (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory.getItem(0) shouldBe null
             h.commit(); h.paper.performTicks(20)
             h.service.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe 0
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
@@ -2748,8 +2839,16 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun <T> await(future: CompletableFuture<T>): T {
+        repeat(80) {
+            if (future.isDone) return future.join()
+            paper.performTicks(1)
+        }
+        check(future.isDone) { "Service future did not finish within 80 ticks; pending saves=${saves.count { !it.second.isDone }}" }
+        return future.join()
+    }
     fun supplySite(owner: UUID, logs: Int): CivPlacementPlan {
-        val site = city.buildings.last().copy(phase = BuildingPhase.SITE, control = CivPosition(10, 63, 0))
+        val site = city.buildings.last().copy(type = BuildingType.BUILDER_HUT, phase = BuildingPhase.SITE, control = CivPosition(10, 63, 0))
         world.getBlockAt(10, 63, 0).type = Material.BARREL
         val ready = city.copy(owner = owner, memberNames = paper.server.getPlayer(owner)?.name?.let { mapOf(owner.toString() to it) },
             stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
@@ -2821,7 +2920,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     fun incrementalPlacement(phase: ConstructionPhase = ConstructionPhase.READY_TO_PLACE, paid: Boolean = false, stock: Int = 0): ServicePlacement {
         world.getBlockAt(0, 63, 0).type = Material.BARREL
         world.getBlockAt(15, 63, 1).type = Material.BARREL
-        if (stock > 0) (world.getBlockAt(15, 63, 1).state as org.bukkit.block.Barrel).inventory
+        world.getBlockAt(20, 63, 0).type = Material.BARREL
+        if (stock > 0) (world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
             .setItem(0, org.bukkit.inventory.ItemStack(Material.STONE, stock))
         val building = city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, level = 1,
             anchor = CivPosition(15, 64, 0), bounds = CivBox(CivPosition(14, 63, -2), CivPosition(17, 68, 2)),
@@ -2830,8 +2930,12 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
             failure = if (phase == ConstructionPhase.PAUSED) "placement-cancelled" else null, plannedBuilding = building,
             batches = CivConstructionBatches(2, 16), materials = if (paid) mapOf("OAK_PLANKS" to 1L) else mapOf("STONE" to 1L, "OAK_PLANKS" to 1L),
             payment = CivConstructionPayment(reservedBatch = if (paid) 0 else null))
+        val hut = city.buildings.last().copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT,
+            anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, 3), control = CivPosition(20, 63, 0),
+            bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)))
         val ready = CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-            buildings = city.buildings.mapIndexed { index, b -> if (index == 0) b.copy(control = CivPosition(0, 63, 0)) else b } + building,
+            buildings = city.buildings.mapIndexed { index, b -> if (index == 0) b.copy(control = CivPosition(0, 63, 0)) else b } + hut + building,
+            workers = city.workers.mapIndexed { index, worker -> if (index == 0) worker.copy(assignment = hut.id, nextDeliveryAt = 1) else worker },
             construction = order))
         val plan = CivPlacementPlan(order.id, city.id, world.uid, building, listOf(
             CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:stone"),

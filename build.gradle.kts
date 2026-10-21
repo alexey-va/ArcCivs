@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.36"
+version = "0.1.37"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.19"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -47,6 +47,8 @@ tasks.withType<Test>().configureEach {
     maxHeapSize = "2g"
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
     maxParallelForks = 1
+    // MockBukkit/MockK retain JVM state; isolate suites without increasing the heap.
+    forkEvery = 1
 }
 tasks.register<Test>("integrationTest") {
     description = "Runs disposable MySQL network-authority tests."

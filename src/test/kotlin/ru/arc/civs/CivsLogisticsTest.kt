@@ -120,11 +120,12 @@ class CivsLogisticsTest : FunSpec({
     test("eligible construction supply keeps priority over the ordinary rotation") {
         val base = logisticsCity()
         val site = logisticsBuilding(40, BuildingType.HOUSE).copy(phase = BuildingPhase.CONSTRUCTING)
+        val hut = logisticsBuilding(50, BuildingType.BUILDER_HUT)
         val required = mapOf("COBBLESTONE" to 1L)
         val order = CivConstruction(UUID.randomUUID(), site.id, 1, 1, 0, ConstructionPhase.WAITING_MATERIALS,
             Stock(), plannedBuilding = site, batches = CivConstructionBatches(1, 16), materials = required,
             payment = CivConstructionPayment(awaiting = required))
-        val city = base.copy(buildings = base.buildings + site, construction = order,
+        val city = base.copy(buildings = base.buildings + site + hut, construction = order, inventory = CivInventory(CivStorageMode.PHYSICAL),
             workers = base.workers.mapIndexed { index, worker -> if (index == 0) worker.copy(completedCycles = 3) else worker })
             .let(CivsRules::validate)
         val warehouse = city.buildings[1]
@@ -134,9 +135,84 @@ class CivsLogisticsTest : FunSpec({
             else -> emptyMap()
         } }
         val plan = CivsLogistics.plan(city, city.workers.first(), stock)!!
-        plan.cargo.targetBuildingId shouldBe site.id
+        plan.cargo.targetBuildingId shouldBe hut.id
         plan.cargo.material shouldBe "COBBLESTONE"
         plan.cargo.amount shouldBe 1L
+    }
+
+    test("construction demand counts only hut stores and builder bags and suppresses duplicate shipments") {
+        val base = logisticsCity()
+        val site = logisticsBuilding(40, BuildingType.HOUSE).copy(phase = BuildingPhase.CONSTRUCTING)
+        val hut = logisticsBuilding(50, BuildingType.BUILDER_HUT)
+        val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1, items = List(CivsEquipment.SLOTS) {
+            if (it == CivsEquipment.BAG) CivResidentItem("STONE", 2) else null
+        })
+        val required = mapOf("STONE" to 10L, "WATER_BUCKET" to 1L)
+        val order = CivConstruction(UUID.randomUUID(), site.id, 1, 1, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = site, batches = CivConstructionBatches(1, 16), materials = required,
+            payment = CivConstructionPayment(awaiting = required))
+        val city = base.copy(buildings = base.buildings + site + hut, workers = base.workers + worker,
+            inventory = CivInventory(CivStorageMode.PHYSICAL), construction = order).let(CivsRules::validate)
+        val stock: (UUID) -> Map<String, Long> = { if (it == hut.id) mapOf("STONE" to 3L) else mapOf("STONE" to 64L) }
+        val request = CivsLogistics.requests(city, stock).single { it.construction }
+        request shouldBe CivSupplyRequest(hut.id, "STONE", 5, 0, true)
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), stock))
+        plan.cargo.amount shouldBe 5L
+        val picked = CivsLogistics.pickup(city, city.workers.first().id, plan.cargo)
+        CivsLogistics.requests(picked, stock).single { it.construction }.inTransit shouldBe 5L
+        CivsLogistics.plan(picked, picked.workers[1], stock)?.cargo?.targetBuildingId.let { it == hut.id } shouldBe false
+        val courier = city.workers.first()
+        val oldCargo = plan.cargo.copy(targetBuildingId = site.id, id = UUID.nameUUIDFromBytes(
+            "${city.id}/${courier.id}/${courier.completedCycles}/${plan.cargo.sourceBuildingId}/${site.id}/STONE"
+                .toByteArray(java.nio.charset.StandardCharsets.UTF_8)))
+        CivsLogistics.destination(city, oldCargo)?.id shouldBe hut.id
+        val legacyPicked = CivsLogistics.pickup(city, courier.id, oldCargo)
+        CivsLogistics.pickup(legacyPicked, courier.id, oldCargo) shouldBe legacyPicked
+        legacyPicked.workers.first().cargo shouldBe oldCargo
+        CivsLogistics.requests(legacyPicked, stock).single { it.construction } shouldBe CivSupplyRequest(hut.id, "STONE", 5, 5, true)
+        CivsLogistics.plan(legacyPicked, legacyPicked.workers[1], stock) shouldBe null
+        val delivered = CivsLogistics.unload(legacyPicked, courier.id, oldCargo.id, 10_000)
+        shouldThrow<CivsRejection> { CivsLogistics.unload(delivered, courier.id, oldCargo.id, 11_000) }.reason shouldBe "stale-delivery"
+        CivsLogistics.destination(city.copy(buildings = city.buildings.filterNot { it.id == hut.id }), oldCargo)?.id shouldBe city.buildings[1].id
+        val upgrading = city.copy(buildings = city.buildings.map { if (it.id == site.id) it.copy(phase = BuildingPhase.ACTIVE) else it })
+        CivsLogistics.destination(upgrading, oldCargo)?.id shouldBe site.id
+    }
+
+    test("a courier chooses a reachable hut when the first staffed construction hut is outside its route") {
+        val base = logisticsCity()
+        val warehouse = logisticsBuilding(-30, BuildingType.WAREHOUSE, 2)
+        val first = logisticsBuilding(80, BuildingType.BUILDER_HUT)
+        val reachable = logisticsBuilding(20, BuildingType.BUILDER_HUT)
+        val site = logisticsBuilding(40, BuildingType.HOUSE).copy(phase = BuildingPhase.CONSTRUCTING)
+        val required = mapOf("STONE" to 5L)
+        val order = CivConstruction(UUID.randomUUID(), site.id, 1, 1, 0, ConstructionPhase.WAITING_MATERIALS,
+            Stock(), plannedBuilding = site, batches = CivConstructionBatches(1, 16), materials = required,
+            payment = CivConstructionPayment(awaiting = required))
+        val city = base.copy(buildings = listOf(base.buildings.first(), warehouse, first, reachable, site),
+            workers = base.workers.take(2).map { it.copy(assignment = warehouse.id) } +
+                CivWorker(UUID.randomUUID(), "Builder", first.id, nextDeliveryAt = 1),
+            inventory = CivInventory(CivStorageMode.PHYSICAL), construction = order).let(CivsRules::validate)
+        val stock: (UUID) -> Map<String, Long> = { if (it == warehouse.id) mapOf("STONE" to 10L) else emptyMap() }
+        CivsLogistics.requests(city, stock).single { it.construction }.buildingId shouldBe first.id
+        val courier = city.workers.first()
+        val plan = requireNotNull(CivsLogistics.plan(city, courier, stock))
+        plan.cargo.sourceBuildingId shouldBe warehouse.id
+        plan.cargo.targetBuildingId shouldBe reachable.id
+        plan.cargo.amount shouldBe 5L
+        shouldThrow<CivsRejection> { CivsLogistics.pickup(city, courier.id, plan.cargo.copy(targetBuildingId = first.id)) }.reason shouldBe "stale-delivery"
+        val picked = CivsLogistics.pickup(city, courier.id, plan.cargo)
+        CivsLogistics.pickup(picked, courier.id, plan.cargo) shouldBe picked
+        CivsLogistics.requests(picked, stock).single { it.construction }.inTransit shouldBe 5L
+        CivsLogistics.plan(picked, picked.workers[1], stock) shouldBe null
+    }
+
+    test("farms request seeds tools and fertilizer without water buckets") {
+        val base = logisticsProducerCity(BuildingType.FARM, "WHEAT")
+        val farm = base.buildings.last().copy(schematicId = "civs/minecolonies/caledonia/agriculture/horticulture/farmer1")
+        val city = base.copy(buildings = base.buildings.dropLast(1) + farm)
+        CivsWorksiteLayouts.site(farm)!!.getAsJsonObject("farm").get("irrigationExisting").asBoolean shouldBe false
+        CivsLogistics.requests(city) { emptyMap() }.filter { it.buildingId == farm.id }.associate { it.material to it.needed } shouldBe
+            mapOf("BONE_MEAL" to 16L, "IRON_HOE" to 1L, "WHEAT_SEEDS" to 16L)
     }
 
     test("death destroys carried goods and frees the original request without awarding a delivery") {

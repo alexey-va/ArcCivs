@@ -124,7 +124,16 @@ interface CivsUiHost {
     fun startBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun buildingMaterials(player: Player, buildingId: UUID): CompletableFuture<Map<String, Long>>
     fun supplyConstruction(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
+    fun supplyConstruction(player: Player, buildingId: UUID, hutId: UUID): CompletableFuture<CivsSupplyResult> =
+        supplyConstruction(player, buildingId)
+    fun supplyBuilderMaterials(player: Player, workerId: UUID): CompletableFuture<CivsSupplyResult> =
+        CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
     fun grantConstructionMaterials(player: Player, buildingId: UUID): CompletableFuture<CivsSupplyResult>
+    fun grantConstructionMaterials(player: Player, buildingId: UUID, hutId: UUID): CompletableFuture<CivsSupplyResult> =
+        grantConstructionMaterials(player, buildingId)
+    fun grantBuilderMaterials(player: Player, workerId: UUID): CompletableFuture<CivsSupplyResult> =
+        CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
+    fun constructionAvailable(player: Player, buildingId: UUID): Map<String, Long> = emptyMap()
     fun availableMaterials(player: Player): Map<String, Long>
     fun localMaterials(player: Player, buildingId: UUID): Map<String, Long>
     fun supplyRequests(player: Player): List<CivSupplyRequest>

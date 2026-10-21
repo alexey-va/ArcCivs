@@ -97,20 +97,39 @@ internal object CivsEquipment {
 
     fun giveRequestedSupply(worker: CivWorker, player: Player, material: Material, amount: Long): Pair<CivWorker, List<CivNativePlayerSlot>> {
         require(amount in 1..material.maxStackSize.toLong())
+        return giveRequestedSupplies(worker, player, mapOf(material.name to amount)).also { (_, changes) ->
+            if (changes.isEmpty()) throw CivsRejection(if (supplyRoom(worker, material) == 0) "resident-inventory-full" else "resident-item-missing")
+        }
+    }
+
+    fun giveRequestedSupplies(worker: CivWorker, player: Player, required: Map<String, Long>): Pair<CivWorker, List<CivNativePlayerSlot>> {
+        require(required.values.all { it > 0 })
         val items = slots(worker).toMutableList()
         val changes = mutableListOf<CivNativePlayerSlot>()
-        var remaining = amount.toInt()
+        val remaining = required.toMutableMap()
         for (slot in 0..35) {
-            if (remaining == 0) break
-            val native = player.inventory.getItem(slot)?.takeIf { it.type == material && it.amount > 0 && it.isSimilar(ItemStack(material)) } ?: continue
+            val native = player.inventory.getItem(slot)?.takeIf {
+                (remaining[it.type.name] ?: 0L) > 0 && it.amount > 0 && it.isSimilar(ItemStack(it.type))
+            } ?: continue
             val before = requireNotNull(CivResidentItem.of(native))
-            val moved = insert(items, before, minOf(remaining, before.amount), material.maxStackSize)
-            if (moved == 0) break
+            val needed = remaining.getValue(before.material)
+            val moved = insert(items, before, minOf(needed, before.amount.toLong()).toInt(), native.maxStackSize)
+            if (moved == 0) continue
             changes += CivNativePlayerSlot(slot, before, before.copy(amount = before.amount - moved).takeIf { it.amount > 0 })
-            remaining -= moved
+            remaining[before.material] = needed - moved
         }
-        if (changes.isEmpty()) throw CivsRejection(if (supplyRoom(worker, material) == 0) "resident-inventory-full" else "resident-item-missing")
-        return replace(worker, items) to changes
+        return (if (changes.isEmpty()) worker else replace(worker, items)) to changes
+    }
+
+    /** Explicit creative/admin issuance still fits actual resident slots. */
+    fun grantSupplies(worker: CivWorker, required: Map<String, Long>): Pair<CivWorker, Map<String, Long>> {
+        val items = slots(worker).toMutableList()
+        val moved = required.toSortedMap().mapValues { (material, count) ->
+            require(count > 0)
+            val maximum = Material.valueOf(material).maxStackSize
+            insert(items, CivResidentItem(material, 1), count.coerceAtMost((SLOTS * 64).toLong()).toInt(), maximum).toLong()
+        }.filterValues { it > 0 }
+        return (if (moved.isEmpty()) worker else replace(worker, items)) to moved
     }
 
     fun requestedTool(city: Settlement, worker: CivWorker): Material? {
