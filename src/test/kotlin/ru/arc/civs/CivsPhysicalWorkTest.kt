@@ -65,9 +65,14 @@ class CivsPhysicalWorkTest : FunSpec({
                 world.getBlockAt(p.x, p.y, p.z).setBlockData(org.bukkit.Bukkit.createBlockData(plant.changes.single().after), false)
                 runtime.invalidate(worker.id)
                 repeat(8) { runtime.pulse(listOf(city)) }
-                runtime.plan(city, worker) shouldBe null
+                val care = requireNotNull(runtime.plan(city, worker))
+                care.status shouldBe "watering"
+                care.outputs shouldBe emptyMap()
+                care.changes shouldBe emptyList()
                 val crop = world.getBlockAt(p.x, p.y, p.z)
                 crop.blockData = (crop.blockData as Ageable).also { it.age = it.maximumAge }
+                shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+                runtime.invalidate(worker.id)
                 repeat(8) { runtime.pulse(listOf(city)) }
                 val harvest = requireNotNull(runtime.plan(city, worker))
                 ((harvest.outputs["WHEAT"] ?: 0L) > 0L) shouldBe true

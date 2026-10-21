@@ -7,8 +7,10 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import org.bukkit.FluidCollisionMode
+import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.data.Ageable
 import org.bukkit.block.BlockFace
 import org.bukkit.entity.Player
 import org.bukkit.configuration.file.YamlConfiguration
@@ -30,6 +32,62 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("empty crop care requires arrival at the plot and commits its cycle only through the journal") {
+        serviceScenario { h ->
+            val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)
+            val anchor = CivPosition(30, 63, 0)
+            val farm = h.city.buildings.last().copy(type = BuildingType.FARM, anchor = anchor, level = 1,
+                schematicId = "civs/minecolonies/medievaloak/agriculture/horticulture/farmer1",
+                bounds = CivBox(CivPosition(26, 63, -22), CivPosition(48, 80, -1)),
+                entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, -3), production = "WHEAT")
+            val worker = h.city.workers.first().copy(assignment = farm.id, nextDeliveryAt = 1,
+                inventory = null, items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem("IRON_HOE", 1) else null })
+            val ready = h.city.copy(worldId = world.uid, buildings = listOf(h.city.buildings.first(), farm),
+                workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            for (x in 0..4) for (z in -3..1) world.loadChunk(x, z)
+            CivsWorksiteLayouts.field(farm).forEach { soil ->
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                    (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+            }
+            CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.citizens.requireStorageArrival(any(), any(), any()) } throws CivsRejection("stale-delivery")
+            h.start()
+            val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }.get(h.service) as CivsWorksites
+            val work = requireNotNull(runtime.plan(h.service.city(h.player)!!, worker))
+            work.status shouldBe "watering"
+            work.changes shouldBe emptyList()
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            fun complete() = deliver.invoke(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            val completion = complete()
+            val accepted = requireNotNull(receipt)
+            accepted.changes shouldBe emptyList()
+            accepted.worldChanges shouldBe emptyList()
+            accepted.after.workers.single().completedCycles shouldBe 1L
+            accepted.after.workers.single().skills shouldBe worker.skills
+            accepted.after.workers.single().items shouldBe worker.items
+            h.service.city(h.player)!!.workers.single().completedCycles shouldBe 0L
+            h.saves shouldBe emptyList()
+            completion.isDone shouldBe false
+            verify(exactly = 2) { h.citizens.requireWorldWorkArrival(ready.id, worker.id, work) }
+            verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
+            journal.complete(accepted); h.tick()
+            h.service.city(h.player)!!.workers.single().completedCycles shouldBe 0L
+            h.commit(); completion.join()
+            h.service.city(h.player)!!.workers.single().completedCycles shouldBe 1L
+            complete().isCompletedExceptionally shouldBe true
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     test("worker and building requests prioritize a missing recipe ingredient before topping up another") {
         serviceScenario { h ->
             val player = h.paper.addPlayer("ScribeSupplier").also { it.isOp = true; it.teleport(Location(h.world, 0.0, 65.0, 0.0)) }

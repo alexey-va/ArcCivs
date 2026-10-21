@@ -20,6 +20,8 @@ data class CivWorldWork(
     val equipmentAfter: List<CivResidentItem?>? = null,
     val focus: CivPosition? = null,
 ) {
+    val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
+
     // Equipment-only actions explicitly pick up goods from storage; ordinary work uses carried supplies first.
     fun storageInputs(worker: CivWorker): Map<String, Long> = if (equipmentAfter != null && changes.isEmpty()) inputs
         else CivsEquipment.storageInputs(worker, inputs)
@@ -100,6 +102,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
         requireCivs(building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id, "invalid-assignment")
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        if (work.cropCare) {
+            requireCivs(building.type == BuildingType.FARM, "invalid-assignment")
+            val focus = work.focus ?: throw CivsRejection("stale-worksite")
+            val crop = read(city, building, world, focus) ?: throw CivsRejection("protected-area")
+            val soil = read(city, building, world, focus.copy(y = focus.y - 1)) ?: throw CivsRejection("protected-area")
+            val age = crop.blockData as? Ageable
+            requireCivs(soil.type == Material.FARMLAND && crop.type == cropAndSeed(building).first &&
+                age != null && age.age < age.maximumAge, "stale-worksite")
+            CivsWorksiteLayouts.irrigation(building).forEach { point ->
+                val water = read(city, building, world, point) ?: throw CivsRejection("protected-area")
+                requireCivs(water.type == Material.WATER, "stale-worksite")
+            }
+        }
         work.changes.forEach { cell ->
             val block = read(city, building, world, cell.position) ?: throw CivsRejection("protected-area")
             requireCivs(block.blockData.asString == cell.before, "stale-worksite")
@@ -195,13 +210,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun farm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
         if (!tool(worker).type.name.endsWith("_HOE")) return null
-        val selected = CivsProduction.material(building)
         val available by lazy { CivsEquipment.available(worker, stock(city, building.id)) }
-        val (crop, seed) = when (selected) {
-            "CARROT" -> Material.CARROTS to "CARROT"
-            "POTATO" -> Material.POTATOES to "POTATO"
-            else -> Material.WHEAT to "WHEAT_SEEDS"
-        }
+        val (crop, seed) = cropAndSeed(building)
         for (point in CivsWorksiteLayouts.irrigation(building)) {
             val block = read(city, building, world, point, worker = worker) ?: return null
             if (block.type == Material.WATER) continue
@@ -216,12 +226,20 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val index = workers.indexOfFirst { it.id == worker.id }
         val plots = CivsWorksiteLayouts.field(building).filterIndexed { i, _ -> i % workers.size == index }
         if (plots.isEmpty()) return null
+        var care: Pair<CivPosition, Int>? = null
         repeat(minOf(16, plots.size)) {
             val soilPoint = plots[Math.floorMod(cursors.getOrDefault(worker.id, 0), plots.size)]
             cursors[worker.id] = cursors.getOrDefault(worker.id, 0) + 1
             val soil = read(city, building, world, soilPoint) ?: return@repeat
             val top = read(city, building, world, soilPoint.copy(y = soilPoint.y + 1)) ?: return@repeat
             if (soil.type !in SOILS || top.type != crop && !top.type.isAir && top.type !in WEEDS) return@repeat
+            if (soil.type == Material.FARMLAND && top.type == crop) {
+                val age = top.blockData as? Ageable ?: return@repeat
+                if (age.age < age.maximumAge) {
+                    if (care == null) care = position(top) to cursors.getValue(worker.id)
+                    return@repeat
+                }
+            }
             val focus = if (soil.type == Material.FARMLAND) position(top) else soilPoint
             val standing = beside(city, worker, building, world, focus) ?: run {
                 if (spotSearchPending) { cursors[worker.id] = cursors.getValue(worker.id) - 1; return null }
@@ -248,7 +266,35 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1), status = "working-field")
             blocked(worker, "waiting-seeds", seed)
         }
-        return null
+        return care?.let { (focus, resume) ->
+            careCrop(city, worker, building, world, focus, available).also {
+                if (it != null) cursors[worker.id] = resume
+                else if (spotSearchPending) cursors[worker.id] = resume - 1
+            }
+        }
+    }
+
+    private fun cropAndSeed(building: CivBuilding): Pair<Material, String> = when (CivsProduction.material(building)) {
+        "CARROT" -> Material.CARROTS to "CARROT"
+        "POTATO" -> Material.POTATOES to "POTATO"
+        else -> Material.WHEAT to "WHEAT_SEEDS"
+    }
+
+    private fun careCrop(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        focus: CivPosition, available: Map<String, Long>): CivWorldWork? {
+        val crop = read(city, building, world, focus) ?: return null
+        val soil = read(city, building, world, focus.copy(y = focus.y - 1)) ?: return null
+        val age = crop.blockData as? Ageable ?: return null
+        if (soil.type != Material.FARMLAND || crop.type != cropAndSeed(building).first || age.age == age.maximumAge) return null
+        val fertilizing = age.age == 5 && (available["BONE_MEAL"] ?: 0) > 0
+        val changes = buildList {
+            if (soil.blockData.asString != "minecraft:farmland[moisture=7]") add(change(soil, "minecraft:farmland[moisture=7]"))
+            // Native age gates allow only one free and one paid extra stage per growth cycle.
+            if (age.age == 3 || fertilizing) add(change(crop, (age.clone() as Ageable).also { it.age++ }.asString))
+        }
+        val standing = beside(city, worker, building, world, focus) ?: return null
+        return work(worker, building, standing, changes, if (fertilizing) mapOf("BONE_MEAL" to 1L) else emptyMap(),
+            status = if (fertilizing) "fertilizing" else "watering", duration = 4_000, focus = focus)
     }
 
     private fun forest(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -503,11 +549,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun work(worker: CivWorker, building: CivBuilding, standing: CivPosition, changes: List<CivPlanBlock>,
         inputs: Map<String, Long> = emptyMap(), outputs: Map<String, Long> = emptyMap(), status: String,
-        duration: Long = 3_000, miningStep: Long? = null): CivWorldWork {
+        duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null): CivWorldWork {
         val slots = CivsEquipment.slots(worker)
         val hand = slots[4]?.stack()
         val meta = hand?.itemMeta as? org.bukkit.inventory.meta.Damageable
-        val after = if (meta != null && changes.isNotEmpty() && !meta.isUnbreakable) {
+        val after = if (meta != null && changes.isNotEmpty() && status != "watering" && status != "fertilizing" && !meta.isUnbreakable) {
             val unbreaking = hand.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.UNBREAKING).coerceAtLeast(0)
             val uses = changes.count { !Bukkit.createBlockData(it.before).material.isAir }
             val wear = (0 until uses).count { java.util.concurrent.ThreadLocalRandom.current().nextLong(unbreaking.toLong() + 1) == 0L }
@@ -521,7 +567,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         } else null
         return CivWorldWork(worker.id, worker.completedCycles, building.id, standing, changes, inputs, outputs,
             if (status == "working-field") 1_500 else duration, status, miningStep, after,
-            changes.minByOrNull { cell ->
+            focus ?: changes.minByOrNull { cell ->
                 val dx = cell.position.x.toDouble() - standing.x
                 val dy = cell.position.y.toDouble() - standing.y
                 val dz = cell.position.z.toDouble() - standing.z

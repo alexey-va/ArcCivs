@@ -14,6 +14,7 @@ import org.bukkit.block.BlockFace
 import org.bukkit.block.Container
 import org.bukkit.block.DoubleChest
 import org.bukkit.block.data.Ageable
+import org.bukkit.block.data.type.Farmland
 import org.bukkit.entity.Player
 import org.bukkit.event.Event
 import org.bukkit.event.block.Action
@@ -28,6 +29,7 @@ import org.bukkit.event.block.BlockPistonRetractEvent
 import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.block.BlockPhysicsEvent
 import org.bukkit.event.block.LeavesDecayEvent
+import org.bukkit.event.block.MoistureChangeEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
@@ -276,7 +278,7 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
-    test("only authored farm crops grow and exact journal locks stop growth and physics until release") {
+    test("only authored farm crops grow and exact journal locks stop growth moisture and physics until release") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("farm-growth")
             val farm = protectionBuilding(-3, 17).copy(type = BuildingType.FARM, anchor = CivPosition(0, 63, 0),
@@ -287,6 +289,9 @@ class CivsProtectionTest : FunSpec({
             val fields = CivsWorksiteLayouts.field(farm)
             val crop = fields.first().let { it.copy(y = it.y + 1) }
             val otherCrop = fields[1].let { it.copy(y = it.y + 1) }
+            val soil = fields.first()
+            val otherSoil = fields[1]
+            listOf(soil, otherSoil).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.FARMLAND }
             val points = listOf(crop, otherCrop, CivPosition(0, 65, -2), CivPosition(30, 65, 1), CivPosition(40, 65, 1))
             points.forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WHEAT }
             var locked = emptySet<Pair<UUID, CivPosition>>()
@@ -298,6 +303,12 @@ class CivsProtectionTest : FunSpec({
                 after.blockData = (after.blockData as Ageable).also { it.age = it.maximumAge }
                 return paper.callEvent(BlockGrowEvent(block, after))
             }
+            fun moisture(point: CivPosition): MoistureChangeEvent {
+                val block = world.getBlockAt(point.x, point.y, point.z)
+                val after = block.state
+                after.blockData = (after.blockData as Farmland).also { it.moisture = it.maximumMoisture }
+                return paper.callEvent(MoistureChangeEvent(block, after))
+            }
             grow(crop).isCancelled shouldBe false
             grow(otherCrop).isCancelled shouldBe false
             grow(CivPosition(0, 65, -2)).isCancelled shouldBe true
@@ -308,11 +319,16 @@ class CivsProtectionTest : FunSpec({
             locked = setOf(world.uid to crop)
             grow(crop).isCancelled shouldBe true
             grow(otherCrop).isCancelled shouldBe false
+            moisture(soil).isCancelled shouldBe false
+            locked = setOf(world.uid to crop, world.uid to soil)
+            moisture(soil).isCancelled shouldBe true
+            moisture(otherSoil).isCancelled shouldBe false
             paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe true
             val adjacent = world.getBlockAt(otherCrop.x, otherCrop.y, otherCrop.z)
             paper.callEvent(BlockPhysicsEvent(adjacent, adjacent.blockData)).isCancelled shouldBe false
             locked = emptySet()
             grow(crop).isCancelled shouldBe false
+            moisture(soil).isCancelled shouldBe false
             paper.callEvent(BlockPhysicsEvent(block, block.blockData)).isCancelled shouldBe false
 
             // An upgrading farm retains ACTIVE as its current record until the replacement is committed.

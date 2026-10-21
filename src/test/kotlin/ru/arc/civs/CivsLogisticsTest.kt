@@ -209,6 +209,19 @@ class CivsLogisticsTest : FunSpec({
         CivsLogistics.plan(delivered, delivered.workers.first(), stock) shouldBe null
     }
 
+    test("farm fertilizer uses the existing courier supply route in a sixteen item batch") {
+        val city = logisticsProducerCity(BuildingType.FARM, "WHEAT")
+        val warehouse = city.buildings[1]
+        val farm = city.buildings.last()
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first()) {
+            if (it == warehouse.id) mapOf("BONE_MEAL" to 64L) else emptyMap()
+        })
+        plan.cargo.sourceBuildingId shouldBe warehouse.id
+        plan.cargo.targetBuildingId shouldBe farm.id
+        plan.cargo.material shouldBe "BONE_MEAL"
+        plan.cargo.amount shouldBe 16L
+    }
+
     for (material in listOf("CARROT", "POTATO")) test("$material collection retains the farm's requested planting stock") {
         val city = logisticsProducerCity(BuildingType.FARM, material)
         val farm = city.buildings.last()

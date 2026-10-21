@@ -9,6 +9,7 @@ import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Barrel
+import org.bukkit.block.data.Ageable
 import org.bukkit.inventory.ItemStack
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
@@ -68,6 +69,207 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     runtime.requirement(changed, worker) shouldBe ("OAK_SAPLING" to 64L)
                 }
                 tasks.close()
+            }
+        }
+    }
+
+    for ((production, material) in listOf("WHEAT" to Material.WHEAT, "CARROT" to Material.CARROTS,
+        "POTATO" to Material.POTATOES, "BREAD" to Material.WHEAT)) {
+        test("$production farmer waters and optionally fertilizes an unripe field through replayable receipts without repeated boosts or tool wear") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open().use { paper ->
+                    val world = CivsWorksiteWorldFixture("care-${production.lowercase()}").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("CropCare")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = production)
+                    val initial = spatialWorker(farm, "IRON_HOE")
+                    var city = spatialCity(world.uid, listOf(farm), initial)
+                    val plots = CivsWorksiteLayouts.field(farm)
+                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    plots.forEach { soil ->
+                        world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=0]")
+                        world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                            (material.createBlockData() as Ageable).also { it.age = 3 }
+                    }
+                    CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                    var locked: CivPosition? = null
+                    CivsStorage(plugin) { emptyArray() }.use { storage ->
+                        CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                            val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) },
+                                { _, point -> point == locked })
+                            fun next(): CivWorldWork {
+                                repeat(8) { runtime.pulse(listOf(city)) }
+                                return requireNotNull(runtime.plan(city, city.workers.single()))
+                            }
+                            fun commit(work: CivWorldWork) {
+                                runtime.validate(city, work)
+                                val id = UUID.randomUUID()
+                                storage.reserve(city, id)
+                                val plan = storage.prepareWork(city, farm.id, work.storageInputs(city.workers.single()), work.outputs, work.changes)
+                                val after = CivsRules.finishWorldWork(city, work, 20_000 + work.cycle * 5_000).copy(inventory = plan.inventoryAfter)
+                                val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
+                                    worldChanges = plan.worldChanges).validated()
+                                work.changes.forEach { cell ->
+                                    world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+                                }
+                                storage.seal(receipt, keepViewersOpen = true)
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                city = receipt.after
+                                city.workers.single().skills shouldBe initial.skills
+                                CivsEquipment.slots(city.workers.single())[4] shouldBe CivsEquipment.slots(initial)[4]
+                                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, work, 99_000) }.reason shouldBe "stale-delivery"
+                                storage.unlock(id)
+                                runtime.invalidate(work.workerId)
+                            }
+                            val watering = next()
+                            watering.cropCare shouldBe true
+                            watering.status shouldBe "watering"
+                            watering.durationMillis shouldBe 4_000L
+                            watering.inputs shouldBe emptyMap()
+                            watering.outputs shouldBe emptyMap()
+                            watering.equipmentAfter shouldBe null
+                            val focus = requireNotNull(watering.focus)
+                            val soil = focus.copy(y = focus.y - 1)
+                            watering.changes.map(CivPlanBlock::position).toSet() shouldBe setOf(soil, focus)
+                            commit(watering)
+                            val crop = world.getBlockAt(focus.x, focus.y, focus.z)
+                            (crop.blockData as Ageable).age shouldBe 4
+                            world.getBlockAt(soil.x, soil.y, soil.z).blockData.asString shouldBe "minecraft:farmland[moisture=7]"
+                            // Keep one target to observe repeated care at the same native stage.
+                            plots.filter { it != soil }.forEach { world.getBlockAt(it.x, it.y + 1, it.z).type = Material.STONE }
+                            val repeatedWatering = next()
+                            repeatedWatering.focus shouldBe focus
+                            repeatedWatering.changes shouldBe emptyList()
+                            repeatedWatering.inputs shouldBe emptyMap()
+                            repeatedWatering.outputs shouldBe emptyMap()
+                            commit(repeatedWatering)
+                            (crop.blockData as Ageable).age shouldBe 4
+
+                            crop.blockData = (crop.blockData as Ageable).also { it.age = 5 }
+                            val noFertilizer = next()
+                            noFertilizer.status shouldBe "watering"
+                            noFertilizer.inputs shouldBe emptyMap()
+                            noFertilizer.changes shouldBe emptyList()
+                            runtime.invalidate(initial.id)
+                            val fromStorage = production == "WHEAT"
+                            city = if (fromStorage) city.copy(inventory = requireNotNull(city.inventory).copy(
+                                buildingMaterials = mapOf(farm.id.toString() to mapOf("BONE_MEAL" to 2L))))
+                            else city.copy(workers = listOf(CivsEquipment.collectSupplies(city.workers.single(), mapOf("BONE_MEAL" to 2L))))
+                            val fertilizing = next()
+                            fertilizing.status shouldBe "fertilizing"
+                            fertilizing.durationMillis shouldBe 4_000L
+                            fertilizing.focus shouldBe focus
+                            fertilizing.inputs shouldBe mapOf("BONE_MEAL" to 1L)
+                            fertilizing.outputs shouldBe emptyMap()
+                            fertilizing.equipmentAfter shouldBe null
+                            fertilizing.storageInputs(city.workers.single()) shouldBe if (fromStorage) mapOf("BONE_MEAL" to 1L) else emptyMap()
+                            commit(fertilizing)
+                            (crop.blockData as Ageable).age shouldBe 6
+                            if (fromStorage) storage.buildingAvailable(city, farm.id)["BONE_MEAL"] shouldBe 1L
+                            else CivsEquipment.plainCount(city.workers.single(), "BONE_MEAL") shouldBe 1
+                            val repeatedFertilizing = next()
+                            repeatedFertilizing.status shouldBe "watering"
+                            repeatedFertilizing.changes shouldBe emptyList()
+                            repeatedFertilizing.inputs shouldBe emptyMap()
+                            runtime.validate(city, repeatedFertilizing)
+                            locked = focus
+                            shouldThrow<CivsRejection> { runtime.validate(city, repeatedFertilizing) }.reason shouldBe "protected-area"
+                            locked = null
+                            val source = CivsWorksiteLayouts.irrigation(farm).first()
+                            world.getBlockAt(source.x, source.y, source.z).type = Material.AIR
+                            shouldThrow<CivsRejection> { runtime.validate(city, repeatedFertilizing) }.reason shouldBe "stale-worksite"
+                            world.getBlockAt(source.x, source.y, source.z).type = Material.WATER
+                            world.getBlockAt(soil.x, soil.y, soil.z).type = Material.DIRT
+                            shouldThrow<CivsRejection> { runtime.validate(city, repeatedFertilizing) }.reason shouldBe "stale-worksite"
+                            world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                            crop.blockData = (crop.blockData as Ageable).also { it.age = it.maximumAge }
+                            shouldThrow<CivsRejection> { runtime.validate(city, repeatedFertilizing) }.reason shouldBe "stale-worksite"
+                            crop.type = Material.AIR
+                            shouldThrow<CivsRejection> { runtime.validate(city, repeatedFertilizing) }.reason shouldBe "stale-worksite"
+                        }
+                    }
+                    tasks.close()
+                }
+            }
+        }
+    }
+
+    for (action in listOf("till", "plant", "harvest")) {
+        test("farmer prioritizes $action over caring for an earlier unripe crop within its bounded scan") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open().use { paper ->
+                    val world = CivsWorksiteWorldFixture("care-priority-$action").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("CarePriority")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                    val worker = CivsEquipment.collectSupplies(spatialWorker(farm, "IRON_HOE"), mapOf("WHEAT_SEEDS" to 16L))
+                    val city = spatialCity(world.uid, listOf(farm), worker)
+                    val plots = CivsWorksiteLayouts.field(farm)
+                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    plots.forEach { soil ->
+                        world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                        world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                            (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+                    }
+                    CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                    val soil = plots[1]
+                    val crop = soil.copy(y = soil.y + 1)
+                    if (action == "till") world.getBlockAt(soil.x, soil.y, soil.z).type = Material.DIRT
+                    world.getBlockAt(crop.x, crop.y, crop.z).blockData = if (action == "harvest")
+                        (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+                    else Material.AIR.createBlockData()
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        repeat(8) { runtime.pulse(listOf(city)) }
+                        val work = requireNotNull(runtime.plan(city, worker))
+                        work.status shouldBe "working-field"
+                        work.cropCare shouldBe false
+                        work.changes.single().position shouldBe if (action == "till") soil else crop
+                        if (action == "plant") work.inputs shouldBe mapOf("WHEAT_SEEDS" to 1L)
+                        if (action == "harvest") work.outputs["WHEAT"] shouldBe 1L
+                    }
+                    tasks.close()
+                }
+            }
+        }
+    }
+
+    for (style in listOf("medievaloak", "nordic")) {
+        test("$style farmer care rotates through every assigned plot despite scanning sixteen plots at a time") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open().use { paper ->
+                    val world = CivsWorksiteWorldFixture("care-rotation-$style").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("CareRotation")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    val farm = spatialBuilding(style, "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                    val worker = spatialWorker(farm, "IRON_HOE")
+                    var city = spatialCity(world.uid, listOf(farm), worker)
+                    val plots = CivsWorksiteLayouts.field(farm)
+                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    plots.forEach { soil ->
+                        world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                        world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                            (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+                    }
+                    CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                    val visited = mutableSetOf<CivPosition>()
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        repeat(plots.size) {
+                            repeat(8) { runtime.pulse(listOf(city)) }
+                            val work = requireNotNull(runtime.plan(city, city.workers.single()))
+                            work.status shouldBe "watering"
+                            work.changes shouldBe emptyList()
+                            visited += requireNotNull(work.focus)
+                            runtime.validate(city, work)
+                            city = CivsRules.finishWorldWork(city, work, 20_000 + work.cycle * 5_000)
+                            runtime.invalidate(worker.id)
+                        }
+                        visited shouldBe plots.map { it.copy(y = it.y + 1) }.toSet()
+                    }
+                    tasks.close()
+                }
             }
         }
     }

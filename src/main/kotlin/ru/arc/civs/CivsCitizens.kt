@@ -5,6 +5,9 @@ import org.bukkit.Chunk
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.Particle
+import org.bukkit.Sound
+import org.bukkit.SoundCategory
 import org.bukkit.Tag
 import org.bukkit.World
 import org.bukkit.block.data.Bisected
@@ -640,10 +643,9 @@ class CivsCitizens(
             return
         }
         val working = citizenWorking(actor.plan, actor.cycle.phase)
-        if (!working || (actor.route?.motion?.navigating == true)) return
+        if (!working || (actor.route?.motion?.navigating == true)) { fieldCareHand(actor, null); return }
         val workplace = actor.plan.workplace ?: return
-        if (!arrivedAt(actor, city, world, workplace)) return
-        if (!actor.animation.swing(now)) return
+        if (!arrivedAt(actor, city, world, workplace)) { fieldCareHand(actor, null); return }
         val player = actor.npc
         val eye = player.location.clone().add(0.0, player.eyeHeight, 0.0)
         val workFocus = actor.plan.worldWork?.let(::citizenWorkFocus)
@@ -656,9 +658,36 @@ class CivsCitizens(
                 player.location.clone().add(0.0, player.eyeHeight, 0.0).y,
                 (bounds.min.z.toDouble() + bounds.max.z) / 2.0 + 0.5)
         }
+        fieldCareHand(actor, citizenFieldCareItem(actor.plan))
+        if (!actor.animation.swing(now)) return
         focus?.let { citizenLookDirection(eye, it).let { (yaw, pitch) -> look(player, yaw, pitch) } }
         player.swingMainHand()
         speak(actor, CitizenVoiceEvent.WORK)
+    }
+
+    private fun fieldCareHand(actor: Actor, material: Material?) {
+        if (actor.careItem == material) return
+        actor.careItem = material
+        if (!actor.npc.isValid) return
+        val hand = material?.let(::ItemStack) ?: actor.equipmentItems?.getOrNull(4)?.stack()
+            ?: ItemStack(citizenTool(actor.plan) ?: Material.AIR)
+        actor.npc.setEquipment(EquipmentSlot.HAND, hand)
+    }
+
+    /** One small contact cue after the durable receipt; no looping particles or world mutation. */
+    private fun fieldCareCompleted(actor: Actor) {
+        val material = citizenFieldCareItem(actor.plan) ?: return
+        val work = actor.plan.worldWork ?: return
+        val focus = citizenWorkFocus(work) ?: return
+        val npc = actor.npc
+        if (!npc.isValid || npc.world.uid != actor.worldId || actor.sheltering || actor.sleeping || actor.workerId in pendingHarm ||
+            (actor.route?.motion?.navigating == true) || !canWorkFrom(actor, work)) return
+        val watering = material == Material.WATER_BUCKET
+        val at = Location(npc.world, focus.x + .5, focus.y + if (watering) .18 else .35, focus.z + .5)
+        npc.world.spawnParticle(if (watering) Particle.SPLASH else Particle.HAPPY_VILLAGER,
+            at, if (watering) 8 else 6, .22, if (watering) .08 else .18, .22, if (watering) .015 else 0.0)
+        npc.world.playSound(at, if (watering) Sound.ITEM_BUCKET_EMPTY else Sound.ITEM_BONE_MEAL_USE,
+            SoundCategory.BLOCKS, .35f, 1.1f)
     }
 
     /** The native paste waits here while its observed builder is absent, travelling, hurt or sheltering. */
@@ -957,14 +986,14 @@ class CivsCitizens(
 
     private fun storageForTarget(actor: Actor, city: Settlement, target: CivPosition): CivBuilding? {
         val work = actor.plan.worldWork
-        return if (target == actor.plan.workplace && work != null && work.changes.isEmpty())
+        return if (target == actor.plan.workplace && work != null && citizenWorkFocus(work) == null)
             city.building(work.buildingId)?.takeIf { it.control != null }
         else citizenControlBuilding(city, target)
     }
 
     private fun arrivedAt(actor: Actor, city: Settlement, world: World, target: CivPosition): Boolean {
         val work = actor.plan.worldWork
-        if (!actor.sheltering && target == actor.plan.workplace && work != null && work.changes.isNotEmpty())
+        if (!actor.sheltering && target == actor.plan.workplace && work != null && citizenWorkFocus(work) != null)
             return canWorkFrom(actor, work)
         val storage = storageForTarget(actor, city, target)
         val control = storage?.control ?: target
@@ -1082,8 +1111,10 @@ class CivsCitizens(
                     // The provider publishes durable state. Reconciliation starts a new fenced cycle, never this callback.
                     actor.cycle.close()
                     actor.reportedFailure = false
+                    runCatching { fieldCareCompleted(actor) }.onFailure { logFailure(actor, "field-care-feedback", it) }
                 }
             }
+            if (!completion.pickup) fieldCareHand(actor, null)
         }
     }
 
@@ -1094,6 +1125,7 @@ class CivsCitizens(
     }
 
     private fun cancelRoute(actor: Actor) {
+        fieldCareHand(actor, null)
         actor.route?.motion?.cancel()
         actor.route = null
         actor.footsteps.reset()
@@ -1136,7 +1168,8 @@ class CivsCitizens(
             val slots = listOf(EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS,
                 EquipmentSlot.FEET, EquipmentSlot.HAND, EquipmentSlot.OFF_HAND)
             slots.forEachIndexed { index, slot ->
-                npc.setEquipment(slot, items[index]?.stack() ?: ItemStack(if (index == 4) citizenTool(plan) ?: Material.AIR else Material.AIR))
+                npc.setEquipment(slot, if (index == 4 && actor?.careItem != null) ItemStack(requireNotNull(actor.careItem))
+                    else items[index]?.stack() ?: ItemStack(if (index == 4) citizenTool(plan) ?: Material.AIR else Material.AIR))
             }
             actor?.equipmentItems = items
             actor?.equipmentType = plan.type
@@ -1356,6 +1389,7 @@ class CivsCitizens(
         var reportHarmCompletion = false
         var equipmentItems: List<CivResidentItem?>? = null
         var equipmentType: BuildingType? = null
+        var careItem: Material? = null
         var sheltering = false
         val social = CitizenCampRoutine(workerId)
         var sleeping = false
@@ -1574,7 +1608,8 @@ internal fun citizenAtStorage(world: World, from: CitizenPoint, control: CivPosi
 /** Batched actions keep one actual reachable focus (for example the trunk's lowest cut). */
 internal fun citizenWorkFocus(work: CivWorldWork): CivPosition? =
     (work.focus ?: work.changes.minByOrNull { it.position.point().distanceSquared(work.standing.point()) }?.position)
-        ?.takeIf { focus -> work.changes.any { it.position == focus } }
+        ?.takeIf { focus -> work.changes.any { it.position == focus } || work.cropCare && work.focus == focus &&
+            work.changes.all { it.position == focus.copy(y = focus.y - 1) } }
 
 /** A short eye-to-block ray is the authority for work and storage access; no chunk is loaded. */
 internal fun citizenCanReachBlock(npc: PacketPlayerNpc, target: CivPosition): Boolean =

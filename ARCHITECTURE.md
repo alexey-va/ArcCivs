@@ -260,8 +260,16 @@ then the common initial/legacy reserve. No direct player-inventory automation.
 Scribes and the four processors remain observed 60-second work sessions with
 real ingredients and outputs. FARM, FORESTER and QUARRY are physical worksites,
 not timed item grants: FARM tills real soil, plants and waits for mature crops
-before harvesting native drops (1.5 seconds per action); its bread recipe consumes
-3 actual WHEAT for 1 BREAD. FORESTER fells a real tree of at most 128 logs per
+before harvesting native drops (1.5 seconds per action). No new bread-baking jobs
+are created; a legacy BREAD selection resolves to wheat harvesting.
+When no actionable field job is found in the bounded plot slice, FARM tends an
+unripe crop for four seconds. Watering maintains soil moisture and advances only
+age 3 to 4; optional fertilizer consumes one real bone meal at age 5 to reach 6.
+Other care visits animate without inventing world changes. Native age checkpoints
+bound each growth-cycle bonus without a separate timer or restart catch-up.
+Care retains field reach, protection and receipt validation; it grants no drops,
+profession training or hoe wear. Existing hunger still applies while working.
+FORESTER fells a real tree of at most 128 logs per
 action, taking max(6 seconds, 1 second per log), yields native tool drops and
 replants only after spending locally stocked saplings: one for ordinary trees,
 four in a 2×2 plot for dark oak. Each tree receipt records at most 128 exact

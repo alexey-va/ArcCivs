@@ -240,6 +240,9 @@ class CivsProtection(
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    fun moisture(event: MoistureChangeEvent) { if (physicsProtected(event.block)) event.isCancelled = true }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun spread(event: BlockSpreadEvent) {
         if (protected(event.block) || protected(event.source)) event.isCancelled = true
     }

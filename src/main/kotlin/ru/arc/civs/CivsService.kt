@@ -1084,12 +1084,12 @@ class CivsService(
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
                 val work = worksites.plan(city, worker) ?: throw CivsRejection("stale-worksite")
                 rejectIf(work.cycle != cycle || work.buildingId != assignment, "stale-delivery")
-                if (work.changes.isEmpty()) citizens.requireStorageArrival(cityId, workerId, assignment)
+                if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                 else citizens.requireWorldWorkArrival(cityId, workerId, work)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
-                    if (work.changes.isEmpty()) citizens.requireStorageArrival(cityId, workerId, assignment)
+                    if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                     else citizens.requireWorldWorkArrival(cityId, workerId, work)
                     val currentWorker = current.workers.first { it.id == workerId }
                     storage.prepareWork(current, assignment, work.storageInputs(currentWorker), work.outputs, work.changes)
@@ -1100,6 +1100,7 @@ class CivsService(
                         val completed = saved.workers.first { it.id == workerId }
                         CivsDiagnostics.event("world_work_committed", "city" to cityId, "worker" to workerId,
                             "building" to assignment, "cycle" to cycle, "revision" to saved.revision,
+                            "status" to work.status, "duration_ms" to work.durationMillis,
                             "point" to work.focus, "blocks" to work.changes.size, "inputs" to work.inputs,
                             "carried_before" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(worker, material) },
                             "carried_after" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(completed, material) },

@@ -64,7 +64,7 @@ object CivsLogistics {
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(building) + when (building.type) {
-            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "IRON_HOE" to 1L,
+            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L,
                 "WATER_BUCKET" to if (CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")?.get("irrigationExisting")?.asBoolean == false) 1L else 0L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
             BuildingType.QUARRY -> QUARRY_SUPPLIES + ("IRON_PICKAXE" to 1L)

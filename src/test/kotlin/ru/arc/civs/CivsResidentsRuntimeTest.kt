@@ -11,8 +11,13 @@ import io.mockk.verify
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.Particle
+import org.bukkit.Sound
+import org.bukkit.SoundCategory
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
+import org.bukkit.inventory.EquipmentSlot
+import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.RayTraceResult
 import org.bukkit.util.Vector
@@ -223,6 +228,72 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("field care stays at its crop and emits one contact cue only after its durable receipt") {
+        for ((status, prop) in listOf("watering" to Material.WATER_BUCKET, "fertilizing" to Material.BONE_MEAL)) {
+            residentRuntime { h ->
+                val work = h.beginCare(status)
+                val actor = h.owner.collisionActors().single()
+                val observed = actor.location
+                val items = h.city.workers.single().items
+                h.displayedHand shouldBe prop
+                h.owner.status(h.workerId) shouldBe "workers.status.$status"
+                verify(atLeast = 1) { actor.swingMainHand() }
+                verify(atLeast = 1) { actor.pitch = match { it > 0f } }
+                h.world.particles shouldBe emptyList()
+                h.world.sounds shouldBe emptyList()
+                // The cycle counts observed work, never a single four-second gap between pulses.
+                for (at in 3_000L..5_000L step 1_000L) {
+                    h.owner.pulse(at)
+                    h.deliveries shouldBe 0
+                }
+                h.owner.pulse(6_000)
+                h.deliveries shouldBe 1
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+                actor.location shouldBe observed
+                h.owner.pulse(7_000) // A delayed receipt must not masquerade as a completed watering.
+                h.city.workers.single().items shouldBe items
+                h.displayedHand shouldBe prop
+                h.world.particles shouldBe emptyList()
+                h.world.sounds shouldBe emptyList()
+                h.commitWork()
+                h.owner.pulse(8_000)
+                h.displayedHand shouldBe Material.IRON_HOE
+                h.world.particles.single().let { (particle, count, at) ->
+                    particle shouldBe if (status == "watering") Particle.SPLASH else Particle.HAPPY_VILLAGER
+                    count shouldBe if (status == "watering") 8 else 6
+                    at.x shouldBe requireNotNull(work.focus).x + .5
+                    at.z shouldBe requireNotNull(work.focus).z + .5
+                    (at.y > requireNotNull(work.focus).y && at.y < requireNotNull(work.focus).y + .5) shouldBe true
+                }
+                h.world.sounds.single() shouldBe Triple(
+                    if (status == "watering") Sound.ITEM_BUCKET_EMPTY else Sound.ITEM_BONE_MEAL_USE, .35f, 1.1f)
+                repeat(3) { h.owner.pulse(9_000L + it * 1_000) }
+                h.world.particles.size shouldBe 1
+                h.world.sounds.size shouldBe 1
+            }
+        }
+    }
+
+    test("failed injured and retired care restores the true hand without a success cue") {
+        for (outcome in listOf("rejected", "injured", "retired")) {
+            residentRuntime { h ->
+                h.beginCare("watering")
+                for (at in 3_000L..6_000L step 1_000L) h.owner.pulse(at)
+                h.deliveries shouldBe 1
+                h.displayedHand shouldBe Material.WATER_BUCKET
+                when (outcome) {
+                    "rejected" -> h.pendingDelivery.completeExceptionally(CivsRejection("stale-worksite"))
+                    "injured" -> { h.hit(2.0); h.commitWork() }
+                    else -> { h.viewing = false; h.owner.pulse(6_500); h.commitWork() }
+                }
+                h.owner.pulse(7_000)
+                h.displayedHand shouldBe Material.IRON_HOE
+                h.world.particles shouldBe emptyList()
+                h.world.sounds shouldBe emptyList()
+            }
+        }
+    }
+
     test("an out-of-reach worker approaches only until the actual block becomes reachable") {
         residentRuntime { h ->
             val farm = h.assignFarm()
@@ -346,6 +417,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var spawns = 0
     var hits = 0
     var deliveries = 0
+    var displayedHand = Material.AIR
     var work: CivWorldWork? = null
     var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
@@ -381,6 +453,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 every { pose } answers { npcPose }
                 every { pose = any() } answers { npcPose = firstArg() }
                 every { teleport(any()) } answers { position = firstArg<Location>().clone(); Unit }
+                every { setEquipment(EquipmentSlot.HAND, any()) } answers { displayedHand = secondArg<ItemStack>().type; Unit }
                 every { remove() } answers { valid = false; Unit }
             }
         }
@@ -398,6 +471,33 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     }
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
+    fun beginCare(status: String): CivWorldWork {
+        val farm = assignFarm()
+        city = city.copy(workers = city.workers.map { worker -> worker.copy(items =
+            MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also { slots ->
+                slots[4] = CivResidentItem("IRON_HOE", 1)
+                if (status == "fertilizing") slots[6] = CivResidentItem("BONE_MEAL", 1)
+            }) })
+        owner.collisionActors().single().teleport(Location(world, 22.5, 64.0, .5))
+        val focus = CivPosition(23, 64, 0)
+        world.getBlockAt(focus.x, focus.y, focus.z).type = Material.WHEAT
+        work = CivWorldWork(workerId, 0, farm.id, CivPosition(24, 64, 0),
+            if (status == "fertilizing") listOf(CivPlanBlock(focus, "minecraft:wheat[age=5]", "minecraft:wheat[age=6]"))
+                else emptyList(),
+            inputs = if (status == "fertilizing") mapOf("BONE_MEAL" to 1L) else emptyMap(),
+            durationMillis = 4_000, status = status, focus = focus)
+        owner.pulse(2_000)
+        return requireNotNull(work)
+    }
+    fun commitWork() {
+        val completed = requireNotNull(work)
+        city = city.copy(revision = city.revision + 1, workers = city.workers.map { worker ->
+            CivsEquipment.consumeInputs(worker, completed.inputs).copy(completedCycles = worker.completedCycles + 1)
+        })
+        work = null
+        idleReason = "waiting-growth"
+        pendingDelivery.complete(city)
+    }
     fun assignFarm(): CivBuilding {
         val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
             "farm1", CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)), CivPosition(20, 64, 0),
@@ -420,9 +520,20 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
 
 /** A stone plane with no tile entities. Only pinned MockBukkit's missing terrain queries are supplied. */
 private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
+    val particles = mutableListOf<Triple<Particle, Int, Location>>()
+    val sounds = mutableListOf<Triple<Sound, Float, Float>>()
     private val cells = mutableMapOf<Coordinate, BlockMock>()
     private val chunkFixtures = mutableMapOf<Pair<Int, Int>, ChunkMock>()
     init { setName("resident-runtime") }
+
+    override fun spawnParticle(particle: Particle, location: Location, count: Int,
+        offsetX: Double, offsetY: Double, offsetZ: Double, extra: Double) {
+        particles += Triple(particle, count, location.clone())
+    }
+
+    override fun playSound(location: Location, sound: Sound, category: SoundCategory, volume: Float, pitch: Float) {
+        sounds += Triple(sound, volume, pitch)
+    }
 
     override fun getBlockAt(x: Int, y: Int, z: Int): BlockMock = getBlockAt(Coordinate(x, y, z))
     override fun getBlockAt(point: Coordinate): BlockMock = cells.getOrPut(point) {

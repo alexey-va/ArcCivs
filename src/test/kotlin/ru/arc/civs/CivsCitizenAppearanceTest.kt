@@ -105,6 +105,28 @@ class CivsCitizenAppearanceTest : FunSpec({
         animation.swing(60_001) shouldBe false
         animation.swing(61_000) shouldBe true
     }
+
+    test("field care props require matching farm inputs and an explicit crop focus") {
+        val plan = appearancePlan(BuildingType.FARM)
+        val focus = CivPosition(12, 64, 0)
+        val watering = CivWorldWork(UUID(0, 3), 0, requireNotNull(plan.token.assignmentId),
+            requireNotNull(plan.workplace), emptyList(), durationMillis = 4_000, status = "watering", focus = focus)
+        citizenWorkFocus(watering) shouldBe focus
+        citizenFieldCareItem(plan.copy(worldWork = watering)) shouldBe Material.WATER_BUCKET
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(status = "fertilizing"))) shouldBe null
+        val fertilizing = watering.copy(status = "fertilizing", inputs = mapOf("BONE_MEAL" to 1L))
+        citizenFieldCareItem(plan.copy(worldWork = fertilizing)) shouldBe Material.BONE_MEAL
+        citizenFieldCareItem(plan.copy(worldWork = fertilizing.copy(inputs = mapOf("BONE_MEAL" to 0L)))) shouldBe null
+        citizenFieldCareItem(plan.copy(type = BuildingType.QUARRY, worldWork = watering)) shouldBe null
+        citizenFieldCareItem(plan.copy(idleReason = "waiting-growth", worldWork = watering)) shouldBe null
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(focus = null))) shouldBe null
+        citizenWorkFocus(watering.copy(status = "working-field")) shouldBe null
+        citizenWorkFocus(watering.copy(changes = listOf(CivPlanBlock(focus.copy(y = focus.y - 1),
+            "minecraft:farmland[moisture=3]", "minecraft:farmland[moisture=7]")))) shouldBe focus
+        // Ordinary physical work may not substitute an unrelated block for the changed block.
+        citizenWorkFocus(watering.copy(changes = listOf(CivPlanBlock(focus.copy(x = 13),
+            "minecraft:stone", "minecraft:air")))) shouldBe null
+    }
 })
 
 private fun appearancePlan(type: BuildingType?, idleReason: String? = null) = CitizenPlan(

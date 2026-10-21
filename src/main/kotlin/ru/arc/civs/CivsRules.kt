@@ -564,7 +564,7 @@ object CivsRules {
         val equipped = work.equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
         val supplied = if (work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
         val progressed = supplied.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
-        val updated = if (work.changes.isEmpty()) progressed else CivsResidents.trained(progressed, building.type)
+        val updated = if (work.changes.isEmpty() || work.cropCare) progressed else CivsResidents.trained(progressed, building.type)
         val progress = work.miningStep?.let { next ->
             city.mineProgress.orEmpty() + (building.id.toString() to next)
         } ?: city.mineProgress
