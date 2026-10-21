@@ -136,7 +136,8 @@ internal fun citizenResidentNudgeClear(npc: PacketPlayerNpc, from: Location, to:
                 }) return false
             }
         }
-    return citizenPacketSupported(world, CitizenPoint(to.x, to.y, to.z))
+    return citizenPacketSupported(world, CitizenPoint(to.x, to.y, to.z)) &&
+        citizenPacketCampfireClear(world, CitizenPoint(to.x, to.y, to.z), CitizenPoint(from.x, from.y, from.z), half, npc.height)
 }
 
 internal data class CitizenCollisionMove(val position: Vector, val contact: Vector)

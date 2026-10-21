@@ -10,9 +10,11 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
+import org.bukkit.block.data.Lightable
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.VoxelShape
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
 class CivsResidentNavigationTest : FunSpec({
@@ -86,6 +88,99 @@ class CivsResidentNavigationTest : FunSpec({
             route.finished shouldBe true
             route.failure shouldBe null
             at.distanceSquared(Location(terrain.world, 2.5, 64.0, .5)) shouldBe 0.0
+        }
+    }
+
+    for (material in listOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE)) {
+        test("work and social ingress routes walk around a lit $material without touching its footprint") {
+            MockBukkitTestRuntime.open().use {
+                val terrain = ResidentRouteTerrain()
+                val fire = CivPosition(2, 64, 0)
+                terrain.blocks[fire] = material
+                val seat = citizenCampSeats(fire, UUID(0, 1)).first { it.x == 4 && it.y == 64 && it.z == 0 }
+                for (target in listOf(CivPosition(5, 64, 0), seat)) {
+                    // Long idle ingress shares the ordinary route gate with work travel.
+                    var at = Location(terrain.world, -9.5, 64.0, .5)
+                    val route = CitizenPacketRoute(terrain.world, at,
+                        Location(terrain.world, target.x + .5, target.y.toDouble(), target.z + .5),
+                        { p -> p.x in -10..8 && p.z in -5..5 && p.y in 64..65 }, { _, _ -> true }, { 1.0 })
+                    repeat(20_000) { if (route.searching) route.expand() }
+                    route.failure shouldBe null
+                    route.searching shouldBe false
+                    repeat(200) {
+                        route.move(at, 1.0) { true }?.let { next ->
+                            (next.x + .299 > fire.x && next.x - .299 < fire.x + 1 &&
+                                next.z + .299 > fire.z && next.z - .299 < fire.z + 1) shouldBe false
+                            (at.distance(next) <= .215001) shouldBe true
+                            at = next
+                        }
+                    }
+                    route.finished shouldBe true
+                    at.distanceSquared(Location(terrain.world, target.x + .5, target.y.toDouble(), target.z + .5)) shouldBe 0.0
+                }
+            }
+        }
+
+        test("lighting a planned $material foothold stops movement before the resident enters it") {
+            MockBukkitTestRuntime.open().use {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(2, 64, 0)] = material
+                val fire = terrain.world.getBlockAt(2, 64, 0).blockData as Lightable
+                fire.isLit = false
+                val route = terrain.route()
+                repeat(2_000) { if (route.searching) route.expand() }
+                route.failure shouldBe null
+                fire.isLit = true // Shapes remain identical; execution must recheck the heat.
+                var at = Location(terrain.world, .5, 64.0, .5)
+                repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
+                route.failure shouldBe "movement-blocked"
+                (at.x + .299 <= 2.0) shouldBe true
+                citizenPacketBodyClear(terrain.world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
+            }
+        }
+
+        test("a resident already above a lit $material can walk off it but cannot walk back") {
+            MockBukkitTestRuntime.open().use {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(2, 64, 0)] = material
+                val exposed = CitizenPoint(2.5, 64.4375, .5)
+                citizenPacketSupported(terrain.world, exposed) shouldBe true
+                citizenPacketBodyClear(terrain.world, exposed, false) shouldBe true
+                citizenPacketCampfireClear(terrain.world, exposed) shouldBe false
+                val route = CitizenPacketRoute(terrain.world, Location(terrain.world, exposed.x, exposed.y, exposed.z),
+                    Location(terrain.world, 5.5, 64.0, .5), terrain::allowed, { _, _ -> true }, { 1.0 })
+                repeat(2_000) { if (route.searching) route.expand() }
+                route.failure shouldBe null
+                var at = Location(terrain.world, exposed.x, exposed.y, exposed.z)
+                repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
+                route.finished shouldBe true
+                at.distanceSquared(Location(terrain.world, 5.5, 64.0, .5)) shouldBe 0.0
+                citizenPacketStepClear(terrain.world, CitizenPoint(3.5, exposed.y, .5), exposed, false) shouldBe false
+            }
+        }
+    }
+
+    test("campfire heat covers body-side and support rows and prevents a scaled nudge into new heat") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            terrain.blocks[CivPosition(2, 65, 0)] = Material.CAMPFIRE
+            citizenPacketCampfireClear(terrain.world, CitizenPoint(1.75, 64.0, .5)) shouldBe false
+            citizenPacketCampfireClear(terrain.world, CitizenPoint(1.7, 64.0, .5)) shouldBe true
+            terrain.blocks.remove(CivPosition(2, 65, 0))
+            terrain.blocks[CivPosition(2, 63, 0)] = Material.SOUL_CAMPFIRE
+            val from = Location(terrain.world, 1.69, 64.0, .5)
+            val to = from.clone().add(.05, 0.0, 0.0)
+            citizenPacketBodyClear(terrain.world, CitizenPoint(to.x, to.y, to.z), false) shouldBe true
+            val npc = mockk<PacketPlayerNpc> {
+                every { isValid } returns true
+                every { world } returns terrain.world
+                every { scale } returns 1.0
+                every { height } returns 1.8
+            }
+            citizenResidentNudgeClear(npc, from, to) shouldBe false
+            every { npc.scale } returns .5
+            every { npc.height } returns .9
+            citizenResidentNudgeClear(npc, from, to) shouldBe true
         }
     }
 
@@ -278,8 +373,11 @@ private class ResidentRouteTerrain {
             native.getOrPut(point) {
                 val shape = mockk<VoxelShape> {
                     every { boundingBoxes } answers {
-                        if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0,
-                            if (material(point) == Material.DIRT_PATH) .9375 else 1.0, 1.0)) else emptyList()
+                        if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, when (material(point)) {
+                            Material.DIRT_PATH -> .9375
+                            Material.CAMPFIRE, Material.SOUL_CAMPFIRE -> .4375
+                            else -> 1.0
+                        }, 1.0)) else emptyList()
                     }
                 }
                 val block = mockk<Block> {

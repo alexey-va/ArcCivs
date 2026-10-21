@@ -303,20 +303,40 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint): Boolean 
     }
 }
 
+/** Low campfire collision shapes are solid footholds but unsafe for the whole resident body. */
+internal fun citizenPacketCampfireClear(world: World, point: CitizenPoint, from: CitizenPoint? = null,
+                                       halfWidth: Double = .299, height: Double = 1.8): Boolean {
+    fun bodyAt(at: CitizenPoint) = BoundingBox(at.x - halfWidth, at.y - .001, at.z - halfWidth,
+        at.x + halfWidth, at.y + height - .001, at.z + halfWidth)
+    val body = bodyAt(point)
+    val occupied = from?.let(::bodyAt)
+    for (x in floor(body.minX).toInt()..floor(body.maxX).toInt()) for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt()) {
+        if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+        for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {
+            if (y !in world.minHeight until world.maxHeight) return false
+            if (citizenCampfireLit(world.getBlockAt(x, y, z)) &&
+                // An already exposed resident may leave its occupied fire cell, never enter a new one.
+                occupied?.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)) != true) return false
+        }
+    }
+    return true
+}
+
 internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean): Boolean {
     if (abs(to.y - from.y) > 1.01) return false
     if (from.y != to.y) {
         val high = max(from.y, to.y)
         val aboveFrom = CitizenPoint(from.x, high, from.z)
         val aboveTo = CitizenPoint(to.x, high, to.z)
-        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors) &&
-            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors) &&
-            citizenPacketSegmentClear(world, aboveTo, to, allowDoors)
+        return citizenPacketSegmentClear(world, from, aboveFrom, allowDoors, from) &&
+            citizenPacketSegmentClear(world, aboveFrom, aboveTo, allowDoors, from) &&
+            citizenPacketSegmentClear(world, aboveTo, to, allowDoors, from)
     }
-    return citizenPacketSegmentClear(world, from, to, allowDoors)
+    return citizenPacketSegmentClear(world, from, to, allowDoors, from)
 }
 
-private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean): Boolean {
+private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
+                                      occupied: CitizenPoint): Boolean {
     val distance = sqrt(from.distanceSquared(to))
     val samples = kotlin.math.ceil(distance / .15).toInt().coerceIn(1, 16)
     for (index in 1..samples) {
@@ -324,7 +344,7 @@ private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: Citi
         val point = CitizenPoint(from.x + (to.x - from.x) * t,
             from.y + (to.y - from.y) * t,
             from.z + (to.z - from.z) * t)
-        if (!citizenPacketBodyClear(world, point, allowDoors)) return false
+        if (!citizenPacketBodyClear(world, point, allowDoors) || !citizenPacketCampfireClear(world, point, occupied)) return false
     }
     return true
 }

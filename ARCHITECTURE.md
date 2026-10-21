@@ -167,6 +167,9 @@ at most 256 chunks for 120 seconds and invalidates affected chunks on block even
 Six distinct safe standing positions avoid controls, fire and occupied seats;
 travel expires after 45 seconds and rest lasts 25–45 seconds. Work, cargo and
 night sheltering supersede leisure. No chunks are loaded for discovery.
+All route segments, safe endpoints and collision nudges reject lit campfire
+cells touching the resident's body or support. Execution rechecks live heat;
+a resident already touching fire may leave it. Fire damage remains active.
 Optional resource-pack speech uses a stable voice profile per worker UUID.
 Only human viewers within 12 blocks hear ambient speech; sleeping or moving
 residents do not speak ambient lines. Per-resident intervals are 15–25 seconds,
@@ -264,9 +267,12 @@ replants only after spending locally stocked saplings: one for ordinary trees,
 four in a 2×2 plot for dark oak. Each tree receipt records at most 128 exact
 physical block changes. Native Unbreaking durability applies only to changed
 non-air source blocks.
-QUARRY advances an authored real shaft across multiple floors, spending local
-ladders, cobblestone and torches and harvesting native drops one block per
-4-second action. The three worksites therefore do not mint resources on a timer.
+QUARRY advances an authored real shaft across multiple floors. Before excavation,
+the miner needs a pickaxe and carried ladders, torches and cobblestone. If any
+supply runs out, one storage receipt tops the bag up to 16 ladders, 8 torches and
+32 cobblestone before work resumes; it does not alter blocks or mining progress.
+Mining spends carried supplies and harvests native drops one block per 4-second
+action. The three worksites therefore do not mint resources on a timer.
 Item-storage processors consume carried ingredients first, then their current
 control barrel or virtual building map; output remains in the building store; couriers move their goods to the current building endpoint.
 FARM and FORESTER perform work directly at field/tree cells, without a per-cell

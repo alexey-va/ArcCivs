@@ -24,6 +24,7 @@ data class CivSupplyRequest(val buildingId: UUID, val material: String, val need
 /** Demand is derived from local stores; only accepted, physically picked-up cargo needs persistence. */
 object CivsLogistics {
     const val MAX_CARGO = 64L
+    internal val QUARRY_SUPPLIES = mapOf("LADDER" to 16L, "TORCH" to 8L, "COBBLESTONE" to 32L)
     private val MATERIAL = Regex("[A-Z][A-Z0-9_]{0,63}")
 
     fun validCargo(city: Settlement, cargo: CivCargo?): Boolean = cargo == null || runCatching {
@@ -66,7 +67,7 @@ object CivsLogistics {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "IRON_HOE" to 1L,
                 "WATER_BUCKET" to if (CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")?.get("irrigationExisting")?.asBoolean == false) 1L else 0L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
-            BuildingType.QUARRY -> mapOf("COBBLESTONE" to 32L, "LADDER" to 16L, "TORCH" to 8L, "IRON_PICKAXE" to 1L)
+            BuildingType.QUARRY -> QUARRY_SUPPLIES + ("IRON_PICKAXE" to 1L)
             else -> emptyMap()
         }).filterValues { it > 0 }.mapValues { (_, amount) ->
             Math.multiplyExact(amount, workers.toLong())

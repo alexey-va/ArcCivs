@@ -1,12 +1,15 @@
 package ru.arc.civs
 
 import io.kotest.assertions.withClue
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.mockk
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.block.Barrel
+import org.bukkit.inventory.ItemStack
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -69,14 +72,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
-    test("miner excavates native stone before requesting its next ladder and never waits for crop growth") {
+    test("miner requests its complete preparation batch before the first excavation and uses it without per-block refills") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
                 val world = CivsWorksiteWorldFixture("mine-bootstrap").also(paper.server::addWorld)
                 val plugin = paper.createSimplePlugin("MineBootstrap")
                 val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
-                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE", supplies = false))
                 val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
                 val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
                 val facing = layout["ladderFacing"].asString
@@ -87,37 +90,158 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false })
                     runtime.pulse(listOf(city))
-                    val first = requireNotNull(runtime.plan(city, city.workers.single()))
-                    first.inputs shouldBe emptyMap()
-                    first.changes.single().after shouldBe "minecraft:air"
-                    first.status shouldBe "digging-mine"
-                    first.outputs["COBBLESTONE"] shouldBe 1L
-                    first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
-                        .setBlockData(Bukkit.createBlockData(cell.after), false) }
-                    val worker = city.workers.single()
-                    city = city.copy(workers = listOf(worker.copy(completedCycles = 1, items = first.equipmentAfter)),
-                        mineProgress = mapOf(mine.id.toString() to requireNotNull(first.miningStep)))
-                    runtime.invalidate(worker.id)
-                    runtime.pulse(listOf(city))
                     runtime.plan(city, city.workers.single()) shouldBe null
                     runtime.idleReason(city, city.workers.single()) shouldBe "waiting-ladder"
-                    runtime.requirement(city, city.workers.single()) shouldBe ("LADDER" to 64L)
+                    runtime.requirement(city, city.workers.single()) shouldBe ("LADDER" to 16L)
+                    world.getBlockAt(bottom.x, bottom.y - 1, bottom.z).type shouldBe Material.STONE
+                    city.mineProgress shouldBe null
+                    city.workers.single().completedCycles shouldBe 0L
                     val moved = city.workers.single().copy(assignment = city.buildings.last().id)
                     runtime.requirement(city, moved) shouldBe null
                     val changed = city.copy(buildings = city.buildings.map { if (it.id == mine.id) it.copy(production = "STONE") else it })
                     runtime.requirement(changed, city.workers.single()) shouldBe null
-                    runtime.requirement(city, city.workers.single().copy(completedCycles = 2)) shouldBe null
-                    val supplied = city.workers.single().let { miner ->
-                        CivsEquipment.replace(miner, CivsEquipment.slots(miner).toMutableList().also { it[6] = CivResidentItem("LADDER", 64) })
+                    runtime.requirement(city, city.workers.single().copy(completedCycles = 1)) shouldBe null
+                    for ((material, amount) in CivsLogistics.QUARRY_SUPPLIES) {
+                        city = city.copy(workers = listOf(CivsEquipment.collectSupplies(city.workers.single(), mapOf(material to amount))))
+                        runtime.pulse(listOf(city))
+                        if (material == "LADDER") {
+                            runtime.plan(city, city.workers.single()) shouldBe null
+                            runtime.requirement(city, city.workers.single()) shouldBe ("TORCH" to 8L)
+                        }
+                        if (material == "TORCH") {
+                            runtime.plan(city, city.workers.single()) shouldBe null
+                            runtime.requirement(city, city.workers.single()) shouldBe ("COBBLESTONE" to 32L)
+                        }
                     }
-                    city = city.copy(workers = listOf(supplied))
+                    val first = requireNotNull(runtime.plan(city, city.workers.single()))
+                    first.inputs shouldBe emptyMap()
+                    first.changes.single().after shouldBe "minecraft:air"
+                    first.status shouldBe "digging-mine"
+                    first.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                    city = CivsRules.finishWorldWork(city, first, 20_000)
+                    first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                        .setBlockData(Bukkit.createBlockData(cell.after), false) }
+                    runtime.invalidate(first.workerId)
                     runtime.pulse(listOf(city))
+                    val supplied = city.workers.single()
                     val ladderWork = requireNotNull(runtime.plan(city, city.workers.single()))
                     ladderWork.inputs shouldBe mapOf("LADDER" to 1L)
                     ladderWork.storageInputs(supplied) shouldBe emptyMap()
-                    CivsEquipment.plainCount(CivsRules.finishWorldWork(city, ladderWork, 20_000).workers.single(), "LADDER") shouldBe 63
+                    runtime.requirement(city, supplied) shouldBe null
+                    city = CivsRules.finishWorldWork(city, ladderWork, 25_000)
+                    ladderWork.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                        .setBlockData(Bukkit.createBlockData(cell.after), false) }
+                    CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 15
+                    runtime.invalidate(ladderWork.workerId)
+                    runtime.pulse(listOf(city))
+                    requireNotNull(runtime.plan(city, city.workers.single())).changes.isNotEmpty() shouldBe true
+                    runtime.requirement(city, city.workers.single()) shouldBe null
                 }
                 tasks.close()
+            }
+        }
+    }
+
+    test("quarry preparation debits only the missing carried batch through one replayable physical receipt") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-pickup").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MinePickup")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = CivsEquipment.collectSupplies(spatialWorker(mine, "IRON_PICKAXE", supplies = false),
+                    mapOf("COBBLESTONE" to 5L, "TORCH" to 2L))
+                var city = spatialCity(world.uid, listOf(mine), worker).let {
+                    it.copy(inventory = requireNotNull(it.inventory).copy(mode = CivStorageMode.PHYSICAL))
+                }
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                val control = requireNotNull(mine.control)
+                val container = world.getBlockAt(control.x, control.y, control.z).also { it.type = Material.BARREL }
+                val barrel = (container.state as Barrel).inventory
+                barrel.setItem(0, ItemStack(Material.COBBLESTONE, 40))
+                barrel.setItem(1, ItemStack(Material.LADDER, 20))
+                barrel.setItem(2, ItemStack(Material.TORCH, 12))
+                CivsStorage(plugin) { arrayOf(container.state) }.use { storage ->
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false })
+                        runtime.pulse(listOf(city))
+                        val pickup = requireNotNull(runtime.plan(city, worker))
+                        pickup.changes shouldBe emptyList()
+                        pickup.outputs shouldBe emptyMap()
+                        pickup.miningStep shouldBe null
+                        pickup.storageInputs(worker) shouldBe mapOf("LADDER" to 16L, "TORCH" to 6L, "COBBLESTONE" to 27L)
+                        citizenAtStorage(world, CitizenPoint(pickup.standing.x + .5, pickup.standing.y.toDouble(), pickup.standing.z + .5), control) shouldBe true
+                        val id = UUID.randomUUID()
+                        storage.reserve(city, id)
+                        val plan = storage.prepareWork(city, mine.id, pickup.storageInputs(worker), pickup.outputs, pickup.changes)
+                        val after = CivsRules.finishWorldWork(city, pickup, 20_000).copy(inventory = plan.inventoryAfter)
+                        val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
+                            worldChanges = plan.worldChanges).validated()
+                        storage.buildingAvailable(city, mine.id) shouldBe mapOf("COBBLESTONE" to 40L, "LADDER" to 20L, "TORCH" to 12L)
+                        CivsEquipment.plainCount(worker, "LADDER") shouldBe 0
+                        storage.seal(receipt, keepViewersOpen = true)
+                        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                        city = receipt.after
+                        city.mineProgress shouldBe null
+                        city.workers.single().skills shouldBe worker.skills
+                        city.workers.single().completedCycles shouldBe 1L
+                        CivsLogistics.QUARRY_SUPPLIES.forEach { (material, amount) ->
+                            CivsEquipment.plainCount(city.workers.single(), material).toLong() shouldBe amount
+                        }
+                        storage.buildingAvailable(city, mine.id) shouldBe mapOf("COBBLESTONE" to 13L, "LADDER" to 4L, "TORCH" to 6L)
+                        shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, pickup, 25_000) }.reason shouldBe "stale-delivery"
+                    }
+                }
+                tasks.close()
+            }
+        }
+    }
+
+    test("a full resident bag blocks quarry pickup without loss and a completed mine needs no new batch") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-pickup-full").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MinePickupFull")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                val worker = spatialWorker(mine, "IRON_PICKAXE", supplies = false).let { miner ->
+                    CivsEquipment.replace(miner, CivsEquipment.slots(miner).mapIndexed { index, item ->
+                        if (index >= CivsEquipment.BAG) CivResidentItem("DIRT", 64) else item
+                    })
+                }
+                var city = spatialCity(world.uid, listOf(mine), worker)
+                val stock = CivsLogistics.QUARRY_SUPPLIES.toMap()
+                val messages = mutableListOf<String>()
+                val handler = worksiteLogHandler(messages)
+                plugin.logger.addHandler(handler)
+                try {
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false })
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "resident-inventory-full"
+                        messages.any { "worksite_blocked" in it && "resident-inventory-full" in it } shouldBe true
+                        worker.items!!.drop(CivsEquipment.BAG).all { it == CivResidentItem("DIRT", 64) } shouldBe true
+                        stock shouldBe CivsLogistics.QUARRY_SUPPLIES
+                        val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                        val bottom = CivsWorksiteLayouts.vector(layout["ladderBottom"])
+                        val floors = layout.getAsJsonArray("floors")
+                        val steps = (bottom.y - floors.last().asJsonObject["feetY"].asInt) * 2 + floors.sumOf {
+                            val cells = it.asJsonObject.getAsJsonArray("floorCells").size()
+                            cells * 4 + (cells + 7) / 8
+                        }
+                        city = city.copy(mineProgress = mapOf(mine.id.toString() to steps.toLong()))
+                        runtime.invalidate(worker.id)
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "mine-complete"
+                        runtime.requirement(city, worker) shouldBe null
+                    }
+                } finally {
+                    plugin.logger.removeHandler(handler)
+                    tasks.close()
+                }
             }
         }
     }
@@ -451,6 +575,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
                         Bukkit.createBlockData("minecraft:ladder[facing=$facing,waterlogged=false]")
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    val control = requireNotNull(mine.control)
+                    world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
                     val counts = mutableMapOf("COBBLESTONE" to 1_000L, "LADDER" to 1_000L, "TORCH" to 1_000L)
                     var actions = 0
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
@@ -478,16 +604,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                     citizenStandable(world, work.standing) shouldBe true
                                 }
                                 runtime.validate(city, work)
-                                work.inputs.forEach { (key, amount) ->
+                                work.storageInputs(worker).forEach { (key, amount) ->
                                     counts[key] = counts.getValue(key) - amount
                                     (counts.getValue(key) >= 0) shouldBe true
                                 }
                                 work.outputs.forEach { (key, amount) -> counts[key] = counts.getOrDefault(key, 0) + amount }
                                 work.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
                                     .setBlockData(Bukkit.createBlockData(cell.after), false) }
-                                city = city.copy(workers = listOf(worker.copy(completedCycles = worker.completedCycles + 1,
-                                    items = work.equipmentAfter ?: worker.items)),
-                                    mineProgress = mapOf(mine.id.toString() to requireNotNull(work.miningStep)))
+                                city = CivsRules.finishWorldWork(city, work, 20_000 + actions * 5_000L)
                                 runtime.invalidate(worker.id)
                                 actions++
                             }
@@ -522,9 +646,14 @@ private fun spatialBuilding(style: String, role: String, level: Int, anchor: Civ
         CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["max"]))))
 }
 
-private fun spatialWorker(building: CivBuilding, material: String) = CivWorker(UUID.randomUUID(), "Рабочий", building.id,
+private fun spatialWorker(building: CivBuilding, material: String, supplies: Boolean = true) = CivWorker(UUID.randomUUID(), "Рабочий", building.id,
     nextDeliveryAt = 1,
-    items = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also { it[4] = CivResidentItem(material, 1) })
+    items = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
+        it[4] = CivResidentItem(material, 1)
+        if (supplies && building.type == BuildingType.QUARRY) CivsLogistics.QUARRY_SUPPLIES.entries.forEachIndexed { index, (supply, amount) ->
+            it[CivsEquipment.BAG + index] = CivResidentItem(supply, amount.toInt())
+        }
+    })
 
 private fun spatialCity(worldId: UUID, buildings: List<CivBuilding>, worker: CivWorker): Settlement {
     val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 3, CivPosition(50, 63, 5), 0, "fixture/hall",

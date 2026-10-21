@@ -83,6 +83,18 @@ internal object CivsEquipment {
         when { it == null -> material.maxStackSize; it.material == material.name && it.data == null -> material.maxStackSize - it.amount; else -> 0 }
     }
 
+    /** Plan a complete storage pickup; a full bag leaves the original equipment untouched. */
+    fun collectSupplies(worker: CivWorker, supplies: Map<String, Long>): CivWorker {
+        val items = slots(worker).toMutableList()
+        supplies.forEach { (material, amount) ->
+            val maximum = Material.valueOf(material).maxStackSize
+            require(amount in 1..maximum.toLong())
+            if (insert(items, CivResidentItem(material, amount.toInt()), amount.toInt(), maximum) != amount.toInt())
+                throw CivsRejection("resident-inventory-full")
+        }
+        return replace(worker, items)
+    }
+
     fun giveRequestedSupply(worker: CivWorker, player: Player, material: Material, amount: Long): Pair<CivWorker, List<CivNativePlayerSlot>> {
         require(amount in 1..material.maxStackSize.toLong())
         val items = slots(worker).toMutableList()

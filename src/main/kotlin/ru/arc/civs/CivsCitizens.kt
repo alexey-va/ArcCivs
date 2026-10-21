@@ -1800,7 +1800,8 @@ internal fun citizenWanderTarget(city: Settlement, storage: CivPosition, workerI
 
 internal fun citizenStandable(world: World, point: CivPosition): Boolean {
     if (!citizenChunkReady(world, point.x shr 4, point.z shr 4) ||
-        point.y <= world.minHeight || point.y + 1 >= world.maxHeight) return false
+        point.y <= world.minHeight || point.y + 1 >= world.maxHeight ||
+        !citizenPacketCampfireClear(world, point.point())) return false
     val feet = world.getBlockAt(point.x, point.y, point.z)
     val head = world.getBlockAt(point.x, point.y + 1, point.z)
     val floor = world.getBlockAt(point.x, point.y - 1, point.z)

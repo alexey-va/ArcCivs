@@ -20,7 +20,7 @@ data class CivWorldWork(
     val equipmentAfter: List<CivResidentItem?>? = null,
     val focus: CivPosition? = null,
 ) {
-    // Equipping a tool explicitly picks it up from storage; ordinary work can use carried supplies.
+    // Equipment-only actions explicitly pick up goods from storage; ordinary work uses carried supplies first.
     fun storageInputs(worker: CivWorker): Map<String, Long> = if (equipmentAfter != null && changes.isEmpty()) inputs
         else CivsEquipment.storageInputs(worker, inputs)
 }
@@ -122,7 +122,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val required = currentNeed(city, worker)?.let { need -> need.material?.let { it to need.amount } }
             ?: plan(city, worker)?.takeUnless { it.changes.isEmpty() && it.equipmentAfter != null }
                 ?.inputs?.entries?.firstOrNull()?.let { it.key to it.value } ?: return null
-        return required.first to maxOf(required.second, Material.matchMaterial(required.first)?.maxStackSize?.toLong() ?: 1)
+        val quarryBatch = worker.assignment?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
+            ?.let { CivsLogistics.QUARRY_SUPPLIES[required.first] }
+        if (quarryBatch != null && currentNeed(city, worker)?.material == null) return null
+        return required.first to (quarryBatch ?: maxOf(required.second, Material.matchMaterial(required.first)?.maxStackSize?.toLong() ?: 1))
     }
 
     private fun blocked(worker: CivWorker, status: String, material: String? = null, amount: Long = 1,
@@ -170,6 +173,24 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun toolSuffix(type: BuildingType) = when (type) {
         BuildingType.FARM -> "_HOE"; BuildingType.FORESTER -> "_AXE"; else -> "_PICKAXE"
+    }
+
+    private fun prepareQuarry(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
+        val required = CivsLogistics.QUARRY_SUPPLIES.mapValues { (material, batch) ->
+            (batch - CivsEquipment.plainCount(worker, material)).coerceAtLeast(0)
+        }.filterValues { it > 0 }
+        val available = stock(city, building.id)
+        required.entries.firstOrNull { (material, amount) -> (available[material] ?: 0) < amount }?.let { (material, _) ->
+            return blocked(worker, "waiting-${material.lowercase()}", material, CivsLogistics.QUARRY_SUPPLIES.getValue(material))
+        }
+        val supplied = try { CivsEquipment.collectSupplies(worker, required) } catch (failure: CivsRejection) {
+            if (failure.reason != "resident-inventory-full") throw failure
+            return blocked(worker, "resident-inventory-full", point = building.control, reason = failure.reason)
+        }
+        val standing = citizenStorageTarget(city, building, world)
+            ?: return blocked(worker, "storage-unavailable", point = building.control, reason = "quarry-supplies-inaccessible")
+        return work(worker, building, standing, emptyList(), required, status = "waiting-materials", duration = 1_000)
+            .copy(equipmentAfter = CivsEquipment.slots(supplied))
     }
 
     private fun farm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -348,6 +369,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val progress = city.mineProgress.orEmpty()[building.id.toString()] ?: 0L
         val scan = mineCursors[building.id]?.takeIf { it.first == building.level && it.second == progress }
         val scanStart = (scan?.third ?: progress.toInt()).coerceAtMost(steps.size)
+        if (scanStart == steps.size) return blocked(worker, "mine-complete")
+        // Take a useful batch before descending, then use it until a supply runs out.
+        if (CivsLogistics.QUARRY_SUPPLIES.keys.any { CivsEquipment.plainCount(worker, it) == 0 })
+            return prepareQuarry(city, worker, building, world)
         val pending = steps.drop(scanStart)
         for ((offset, step) in pending.take(16).withIndex()) {
             val (local, after) = step
@@ -393,11 +418,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 }
             }
             val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
-            // Excavation happens before placing the next ladder, even if supplies have
-            // not arrived yet. Keep the same durable step until its ladder is installed.
+            // Keep the same durable step until the paid ladder is installed.
             val excavating = target?.material == Material.LADDER && !block.type.isAir && block.type != Material.LADDER
             val costs = if (excavating) emptyMap() else supportWork?.let { mapOf(it.name to 1L) }.orEmpty()
-            costs.keys.firstOrNull { (CivsEquipment.available(worker, stock(city, building.id))[it] ?: 0) < 1 }?.let { material ->
+            costs.keys.firstOrNull { CivsEquipment.plainCount(worker, it) < 1 }?.let { material ->
                 return blocked(worker, "waiting-${material.lowercase()}", material)
             }
             val standing = beside(city, worker, building, world, point, ladder = true) ?: return null
