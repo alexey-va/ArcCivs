@@ -8,6 +8,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
+import org.bukkit.Bukkit
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Difficulty
 import org.bukkit.Location
@@ -17,6 +18,7 @@ import org.bukkit.Sound
 import org.bukkit.SoundCategory
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
+import org.bukkit.block.data.Ageable
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Monster
@@ -30,6 +32,8 @@ import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.world.ChunkMock
 import org.mockbukkit.mockbukkit.world.Coordinate
 import org.mockbukkit.mockbukkit.world.WorldMock
+import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.npc.PacketPlayerNpc
 import ru.arc.paper.npc.PacketNpcProfile
 import ru.arc.paper.npc.PacketNpcPose
@@ -41,6 +45,151 @@ import java.util.concurrent.CompletableFuture
 import java.util.function.Predicate
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("farmer commits three mature crops across paused scans without wandering or reporting false growth") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("resident-multi-harvest").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("ResidentMultiHarvest")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                val worker = spatialWorker(farm, "IRON_HOE")
+                var city = spatialCity(world.uid, listOf(farm), worker)
+                val plots = CivsWorksiteLayouts.field(farm)
+                val mature = listOf(0, 20, 21).map { plots[it].let { soil -> soil.copy(y = soil.y + 1) } }
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                plots.forEach { soil ->
+                    world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                    world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                        (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+                }
+                mature.forEach { point -> world.getBlockAt(point.x, point.y, point.z).blockData =
+                    (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge } }
+                CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                farm.control!!.let { world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL }
+                val viewer = paper.addPlayer("HarvestViewer")
+                viewer.teleport(Location(world, 9.5, 65.0, -19.5))
+                val packets = mockk<PaperPacketNpcs>(relaxed = true)
+                var actorAt = viewer.location.clone()
+                var actorValid = true
+                lateinit var actor: PacketPlayerNpc
+                every { packets.spawnPlayer(any(), any()) } answers {
+                    actorAt = firstArg<Location>().clone()
+                    val profile = secondArg<PacketNpcProfile>()
+                    actor = mockk<PacketPlayerNpc>(relaxed = true) {
+                        every { uniqueId } returns profile.uuid
+                        every { isValid } answers { actorValid }
+                        every { this@mockk.world } returns world
+                        every { location } answers { actorAt.clone() }
+                        every { height } returns 1.8
+                        every { eyeHeight } returns 1.62
+                        every { scale } returns 1.0
+                        every { pose } returns PacketNpcPose.STANDING
+                        every { teleport(any()) } answers { actorAt = firstArg<Location>().clone(); Unit }
+                        every { remove() } answers { actorValid = false; Unit }
+                    }
+                    actor
+                }
+                every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
+                var paused = false
+                var now = 1_000L
+                val harvested = mutableListOf<CivPosition>()
+                var pending: Pair<CivInventoryTransaction, CompletableFuture<Settlement>>? = null
+                CivsStorage(plugin) { emptyArray() }.use { storage ->
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) },
+                            storage::isWorldLocked, { paused })
+                        lateinit var residents: CivsCitizens
+                        residents = CivsCitizens(plugin, { listOf(city) }, { cityId, workerId, _, _, _, _, at ->
+                            cityId shouldBe city.id
+                            workerId shouldBe worker.id
+                            pending shouldBe null
+                            val current = city.workers.single()
+                            val work = requireNotNull(runtime.plan(city, current))
+                            residents.requireWorldWorkArrival(city.id, worker.id, work)
+                            runtime.validate(city, work)
+                            val id = UUID.randomUUID()
+                            storage.reserve(city, id)
+                            val plan = storage.prepareWork(city, farm.id, work.storageInputs(current), work.outputs, work.changes)
+                            val after = CivsRules.finishWorldWork(city, work, at).copy(inventory = plan.inventoryAfter)
+                            val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
+                                worldChanges = plan.worldChanges).validated()
+                            storage.seal(receipt, keepViewersOpen = true)
+                            harvested += requireNotNull(work.focus)
+                            paused = true
+                            CompletableFuture<Settlement>().also { pending = receipt to it }
+                        }, { _, _, _ -> }, workPlan = runtime::plan, workIdleReason = runtime::idleReason, packetOwner = packets)
+                        try {
+                            runtime.pulse(listOf(city))
+                            val first = requireNotNull(runtime.plan(city, city.workers.single()))
+                            residents.pulse(now)
+                            actor.teleport(first.standing.let { Location(world, it.x + .5, it.y.toDouble(), it.z + .5) })
+                            val workingAt = actorAt.clone()
+                            fun pulseResidents(delta: Long = 1_000) {
+                                now += delta
+                                residents.pulse(now)
+                                repeat(80) { residents.activateNavigating() }
+                            }
+                            repeat(3) { cycle ->
+                                var pausedWhileWorking = false
+                                repeat(8) {
+                                    if (runtime.plan(city, city.workers.single()) == null) runtime.pulse(listOf(city))
+                                    pulseResidents()
+                                    if (!pausedWhileWorking && pending == null &&
+                                        residents.status(worker.id) == "workers.status.working-field") {
+                                        val chosen = requireNotNull(runtime.plan(city, city.workers.single()))
+                                        paused = true
+                                        repeat(4) { runtime.pulse(listOf(city)) }
+                                        pulseResidents(500)
+                                        runtime.plan(city, city.workers.single()) shouldBe chosen
+                                        residents.status(worker.id) shouldBe "workers.status.working-field"
+                                        actorAt shouldBe workingAt
+                                        pending shouldBe null
+                                        shouldThrow<CivsRejection> { runtime.validate(city, chosen) }.reason shouldBe "city-busy"
+                                        paused = false
+                                        pausedWhileWorking = true
+                                    }
+                                    if (runtime.plan(city, city.workers.single()) == null && pending == null) {
+                                        residents.status(worker.id) shouldBe "workers.status.searching-work"
+                                        actorAt shouldBe workingAt
+                                    }
+                                }
+                                pausedWhileWorking shouldBe true
+                                val (receipt, completion) = requireNotNull(pending)
+                                harvested.size shouldBe cycle + 1
+                                runtime.plan(city, city.workers.single())?.focus shouldBe mature[cycle]
+                                repeat(4) { runtime.pulse(listOf(city)) }
+                                pulseResidents()
+                                actorAt shouldBe workingAt
+                                mature.drop(cycle).forEach { point ->
+                                    val age = world.getBlockAt(point.x, point.y, point.z).blockData as Ageable
+                                    age.age shouldBe age.maximumAge
+                                }
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                city = receipt.after
+                                storage.unlock(receipt.id)
+                                runtime.invalidate(worker.id)
+                                paused = false
+                                pending = null
+                                completion.complete(city)
+                                pulseResidents()
+                                residents.status(worker.id) shouldBe "workers.status.searching-work"
+                                actorAt shouldBe workingAt
+                            }
+                            harvested shouldBe mature
+                            city.workers.single().completedCycles shouldBe 3
+                            city.inventory!!.buildingStock(farm.id) shouldBe mapOf("WHEAT" to 3L, "WHEAT_SEEDS" to 3L)
+                            mature.forEach { point -> (world.getBlockAt(point.x, point.y, point.z).blockData as Ageable).age shouldBe 0 }
+                            repeat(5) { runtime.pulse(listOf(city)) }
+                            runtime.idleReason(city, city.workers.single()) shouldBe "waiting-growth"
+                        } finally { residents.closeAsync().join() }
+                    }
+                }
+                tasks.close()
+            }
+        }
+    }
+
     test("monster defence recruits only nearby residents of its victim's city and limits visible melee to once a second") {
         residentRuntime { h ->
             val victim = h.owner.collisionActors().single()
@@ -461,6 +610,30 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("idle wandering stays slow and never wears roads even on a faster surface") {
+        residentRuntime { h ->
+            // Negative wander offsets cross chunk zero and need the route's extra loaded margin.
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            h.surfaceMultiplier = 1.25
+            val actor = h.owner.collisionActors().single()
+            var walked = 0.0
+            for (tick in 0 until 512) {
+                // Coarse pulses retry a target rejected before this test loaded its margin.
+                if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
+                val before = actor.location
+                h.owner.activateNavigating()
+                val distance = before.distance(actor.location)
+                (distance <= .118251) shouldBe true
+                walked += distance
+                if (walked >= .5) break
+            }
+            (walked >= .5) shouldBe true
+            h.owner.status(h.workerId) shouldBe "workers.status.unassigned"
+            h.steps shouldBe emptyList()
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("a courier unloads once then walks back to its warehouse and waits beside the real barrel") {
         residentRuntime { h ->
             val warehouse = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
@@ -484,23 +657,35 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.pendingUnload.complete(h.city)
             h.owner.pulse(4_000)
             h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
+            var normalSteps = 0
+            var normalDistance = 0.0
+            var fasterDistance = 0.0
             for (tick in 1..2_000) {
                 val before = actor.location
                 h.owner.activateNavigating()
                 if (tick % 20 == 0) h.owner.pulse(4_000)
-                (before.distance(actor.location) <= .215001) shouldBe true
+                val distance = before.distance(actor.location)
+                (distance <= .172 * h.surfaceMultiplier + .000001) shouldBe true
+                if (h.surfaceMultiplier == 1.0) {
+                    normalDistance = maxOf(normalDistance, distance)
+                    if (distance > .000001 && ++normalSteps == 5) h.surfaceMultiplier = 1.25
+                } else fasterDistance = maxOf(fasterDistance, distance)
                 if (h.owner.status(h.workerId) == "workers.status.waiting-orders") break
             }
+            (kotlin.math.abs(normalDistance - .172) < .000001) shouldBe true
+            (kotlin.math.abs(fasterDistance - .215) < .000001) shouldBe true
             val atWarehouse = actor.location
             citizenAtStorage(h.world, CitizenPoint(atWarehouse.x, atWarehouse.y, atWarehouse.z), requireNotNull(warehouse.control)) shouldBe true
             citizenCanReachBlock(actor, requireNotNull(warehouse.control)) shouldBe true
             h.owner.status(h.workerId) shouldBe "workers.status.waiting-orders"
             h.steps.isNotEmpty() shouldBe true
+            val workSteps = h.steps.size
             repeat(80) { tick ->
                 h.owner.activateNavigating()
                 if (tick % 20 == 0) h.owner.pulse(5_000L + tick * 50)
                 actor.location shouldBe atWarehouse
             }
+            h.steps.size shouldBe workSteps
             h.unloads shouldBe 1
             h.deliveries shouldBe 0
             h.city.workers.single().completedCycles shouldBe 1
@@ -790,6 +975,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var unloads = 0
     var supplyRequests = 0
     var workReady = true
+    var surfaceMultiplier = 1.0
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
     val steps = mutableListOf<Pair<Location, Location>>()
@@ -853,6 +1039,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             },
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
             footstep = { _, _, _, from, to -> steps += from.clone() to to.clone() },
+            surfaceSpeed = { surfaceMultiplier },
             courierPlan = { _, _ -> courier }, dropoffCargo = { _, _, cargo, target ->
                 cargo shouldBe requireNotNull(courier).cargo
                 target shouldBe requireNotNull(courier).destinationBuildingId

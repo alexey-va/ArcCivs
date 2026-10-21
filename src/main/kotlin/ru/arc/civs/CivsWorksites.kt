@@ -30,12 +30,13 @@ data class CivWorldWork(
 /** Small live work cursor. Only real changed blocks and goods enter durable state, through CivsStorage. */
 internal class CivsWorksites(private val plugin: Plugin, private val worldAccess: CivsWorld,
     private val stock: (Settlement, UUID) -> Map<String, Long>,
-    private val locked: (UUID, CivPosition) -> Boolean) {
+    private val locked: (UUID, CivPosition) -> Boolean,
+    private val isPaused: (UUID) -> Boolean = { false }) {
     private data class Cached(val building: CivBuilding, val worker: CivWorker, val work: CivWorldWork)
     private val cached = hashMapOf<UUID, Cached>()
     private val cursors = hashMapOf<UUID, Int>()
     private data class FarmScan(val building: CivBuilding, val cycle: Long, val plots: List<CivPosition>,
-        var examined: Int = 0, var care: Pair<CivPosition, Int>? = null)
+        var examined: Int = 0, var care: Pair<CivPosition, Int>? = null, var blocked: Need? = null)
     private val farmScans = hashMapOf<UUID, FarmScan>()
     private data class Need(val building: CivBuilding, val cycle: Long, val status: String,
         val material: String? = null, val amount: Long = 1, val point: CivPosition? = null,
@@ -81,15 +82,18 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         farmScans.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
         mineSafety.keys.retainAll(workerIds)
-        if (jobs.isEmpty()) return
-        val (city, worker, building) = jobs[Math.floorMod(cursor++, jobs.size)]
+        // A persistence pause stops admission, not resident liveness or its bounded scan progress.
+        val availableJobs = jobs.filterNot { isPaused(it.first.id) }
+        if (availableJobs.isEmpty()) return
+        val (city, worker, building) = availableJobs[Math.floorMod(cursor++, availableJobs.size)]
         if (plan(city, worker) != null) return
         val world = plugin.server.getWorld(city.worldId) ?: return
         if (world.time in 12_000L..23_000L || city.inventory == null) return
         spotChecksRemaining = 32
         spotRaysRemaining = 8
         spotSearchPending = false
-        needs[worker.id] = Need(building, worker.completedCycles, if (building.type == BuildingType.QUARRY) "searching-work" else "waiting-growth")
+        needs[worker.id] = Need(building, worker.completedCycles,
+            if (building.type in setOf(BuildingType.FARM, BuildingType.QUARRY)) "searching-work" else "waiting-growth")
         val work = equipTool(city, worker, building, world) ?: when (building.type) {
             BuildingType.FARM -> farm(city, worker, building, world)
             BuildingType.FORESTER -> forest(city, worker, building, world)
@@ -106,6 +110,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     fun validate(city: Settlement, work: CivWorldWork) {
+        requireCivs(!isPaused(city.id), "city-busy")
         val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
         requireCivs(worker.assignment == work.buildingId && worker.completedCycles == work.cycle, "stale-delivery")
         requireCivs(plan(city, worker) == work, "stale-worksite")
@@ -135,10 +140,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     fun idleReason(city: Settlement, worker: CivWorker): String {
+        if (isPaused(city.id)) return "searching-work"
         val building = worker.assignment?.let(city::building) ?: return "unassigned"
         val suffix = toolSuffix(building.type)
         return if (CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
-        else currentNeed(city, worker)?.status ?: if (building.type == BuildingType.QUARRY) "searching-work" else "waiting-growth"
+        else currentNeed(city, worker)?.status ?:
+            if (building.type in setOf(BuildingType.FARM, BuildingType.QUARRY)) "searching-work" else "waiting-growth"
     }
 
     private fun currentNeed(city: Settlement, worker: CivWorker): Need? = needs[worker.id]?.takeIf {
@@ -236,7 +243,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val workers = city.workers.filter { it.assignment == building.id }
         val index = workers.indexOfFirst { it.id == worker.id }
         val plots = CivsWorksiteLayouts.field(building).filterIndexed { i, _ -> i % workers.size == index }
-        if (plots.isEmpty()) return null
+        if (plots.isEmpty()) return blocked(worker, "waiting-growth")
         val scan = farmScans[worker.id]?.takeIf { it.building == building && it.cycle == worker.completedCycles && it.plots == plots }
             ?: FarmScan(building, worker.completedCycles, plots).also { farmScans[worker.id] = it }
         // Keep the existing per-pulse budget, but inspect the complete field before choosing care.
@@ -263,6 +270,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     scan.examined--
                     return null
                 }
+                scan.blocked = needs.getValue(worker.id)
                 return@repeat
             }
             if (soil.type != Material.FARMLAND) {
@@ -285,12 +293,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if ((available[seed] ?: 0) > 0) return work(worker, building, standing,
                 listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1), status = "working-field")
             blocked(worker, "waiting-seeds", seed)
+            scan.blocked = needs.getValue(worker.id)
         }
-        if (scan.examined < plots.size) return null
+        if (scan.examined < plots.size) return blocked(worker, "searching-work")
         val work = scan.care?.let { (focus, resume) ->
             careCrop(city, worker, building, world, focus, available).also { if (it != null) cursors[worker.id] = resume }
         }
-        if (!spotSearchPending) farmScans.remove(worker.id)
+        if (!spotSearchPending) {
+            farmScans.remove(worker.id)
+            if (work == null && needs.getValue(worker.id).status == "searching-work")
+                needs[worker.id] = scan.blocked ?: needs.getValue(worker.id).copy(status = "waiting-growth")
+        }
         return work
     }
 
@@ -475,6 +488,18 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 reason = "liquid", blockMaterial = block.type.name)
             if (block.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = point,
                 reason = "unbreakable", blockMaterial = block.type.name)
+            // Sand/gravel can fall back into a completed clearance column before its floor
+            // is paid. Clear the real obstruction through an ordinary work receipt, retaining
+            // this floor's cursor; restarting the floor's rays can never see through the fall.
+            if (!shaftSupport && target?.material == Material.COBBLESTONE) {
+                for (height in 1..3) {
+                    val fallen = read(city, building, world, point.copy(y = point.y + height), worker = worker) ?: return null
+                    if (!fallen.type.hasGravity()) continue
+                    val standing = beside(city, worker, building, world, position(fallen), ladder = true) ?: return null
+                    return work(worker, building, standing, listOf(change(fallen, "minecraft:air")),
+                        outputs = drops(fallen, tool(worker)), status = "digging-mine", duration = 2_000, miningStep = next - 1)
+                }
+            }
             // An unfinished wall below the existing ladder is reached through the shaft.
             // Clear only its corresponding shaft cell first, using the ordinary receipt;
             // do not advance past the unpaid wall or remove an existing ladder's support.

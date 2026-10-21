@@ -71,6 +71,8 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
                     else listOf(ItemStack(Material.WHEAT_SEEDS))
                 }
                 type == Material.STONE -> listOf(ItemStack(Material.COBBLESTONE))
+                // Deterministic native drop sample; production still owns gravel/flint RNG.
+                type == Material.GRAVEL -> listOf(ItemStack(Material.GRAVEL))
                 type == Material.COBBLESTONE || type.name.endsWith("_LOG") -> listOf(ItemStack(type))
                 else -> error("Unspecified fixture drops for $type")
             }

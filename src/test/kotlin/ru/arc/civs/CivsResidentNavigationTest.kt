@@ -535,6 +535,44 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("route movement takes the short turn after accumulated rotations in either direction") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (sign in listOf(1, -1)) {
+                var at = Location(terrain.world, .5, 64.0, 3.5, sign * 539f, 0f)
+                val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, .5, 64.0, .5),
+                    { p -> p.x == 0 && p.z in 0..3 && p.y == 64 }, { _, _ -> true }, { 1.0 })
+                for (step in 0 until 256) {
+                    if (!route.searching) break
+                    route.expand()
+                }
+                route.searching shouldBe false
+                route.failure shouldBe null
+                val waypoint = requireNotNull(route.destination)
+                (waypoint.z < at.z) shouldBe true
+                // A small observed nudge makes the next actual leg -179 / +179 degrees.
+                at.x -= sign * kotlin.math.tan(Math.toRadians(1.0)) * (at.z - waypoint.z)
+                val first = requireNotNull(route.move(at, 1.0) { true })
+                (kotlin.math.abs(first.yaw - sign * 541f) < .001f) shouldBe true
+                (kotlin.math.abs(at.distance(first) - .215) < .000001) shouldBe true
+                var turned = kotlin.math.abs(first.yaw - at.yaw)
+                at = first
+                for (tick in 0 until 32) {
+                    if (route.finished) break
+                    val next = requireNotNull(route.move(at, 1.0) { true })
+                    (at.distance(next) <= .215001) shouldBe true
+                    turned += kotlin.math.abs(next.yaw - at.yaw)
+                    at = next
+                }
+                route.failure shouldBe null
+                route.finished shouldBe true
+                at.x shouldBe .5
+                at.z shouldBe .5
+                (turned <= 3.001f) shouldBe true
+            }
+        }
+    }
+
     test("heading takes the short turn across wraparound and terrain cannot load a missing chunk") {
         citizenTurn(179f, -179f, 24f) shouldBe 181f
         citizenTurn(0f, 120f, 24f) shouldBe 24f

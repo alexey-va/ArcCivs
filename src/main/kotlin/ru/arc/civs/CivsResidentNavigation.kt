@@ -308,7 +308,8 @@ internal class CitizenPacketRoute(
 }
 
 internal fun citizenTurn(from: Float, to: Float, limit: Float): Float {
-    val change = ((to - from + 540f) % 360f) - 180f
+    // Packet handles retain accumulated yaw; reduce it before the positive wrap.
+    val change = (((to - from) % 360f + 540f) % 360f) - 180f
     return from + change.coerceIn(-limit, limit)
 }
 

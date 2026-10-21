@@ -138,7 +138,8 @@ class CivsService(
     }
     lateinit var ui: CivsUi
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
-    private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) }, storage::isWorldLocked)
+    private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
+        storage::isWorldLocked, { it in busy || it in unhealthy })
     private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList() },
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
@@ -158,7 +159,7 @@ class CivsService(
             resumeCityActions()
             if (ready()) citizens.activateNavigating()
         }
-        tasks.runTimer(5, 5) { if (ready()) worksites.pulse(cities.values.filter { it.id !in unhealthy && it.id !in busy }) }
+        tasks.runTimer(5, 5) { if (ready()) worksites.pulse(cities.values) }
         tasks.runTimer(20, 20) { pulse() }
     }
 

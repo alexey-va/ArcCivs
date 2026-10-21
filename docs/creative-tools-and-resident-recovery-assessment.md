@@ -25,3 +25,34 @@ Direct builder-session Vault, tokens and player XP remain 0→0 in separate unit
 The same rows consume the same native item quantities; this adds no item grant,
 sale value, reward or offline catch-up. Current SELL and the planned contract
 transition are unchanged. The new diagnostic events observe state only.
+
+## 0.1.41: preserve field searches and recover a gravel obstruction
+
+Before, a temporarily saving city disappeared from worksite liveness and lost
+its partial field scan. After harvesting one crop, an incomplete new scan also
+reported waiting for growth and started idle walking. The correction retains
+the existing bounded scan across a save and holds the farmer in place until
+the next target or a complete empty pass. Native crop drops, tool wear, hunger,
+the 1.5-second action (3 seconds when hungry) and loaded-chunk limits stay the
+same. Restored useful harvest throughput is not measured or assigned a multiplier.
+
+The live miner remained at authored shaft step 147 because gravel refilled the
+two clearance cells above its unprocessed stone floor. A saved chunk timestamped
+2026-10-22 00:04:26 MSK confirms that obstruction; this is saved-world evidence,
+not a live block query. Recovery clears real falling blocks through the existing
+two-second native-drop action and durable receipt, leaving step 147 unchanged
+until the original floor action completes. It adds no synthetic block, item
+grant, drop probability, timer reward or offline catch-up.
+
+Direct Vault, tokens and player XP remain separately 0→0. Item drops are the
+unchanged native yields of actual harvested crops or removed falling blocks;
+restored mining throughput and resulting profession-skill progress are unmeasured.
+Current SELL and the planned contract transition remain unchanged.
+
+Productive travel is reduced from 0.215 to 0.172 blocks per tick before the
+unchanged Trails surface multiplier: 4.3→3.44 blocks/second at 20 TPS. The pure
+travel leg therefore takes 1.25 times as long over an unchanged path and surface;
+this is not a claim about total production throughput. Work durations and item
+quantities stay unchanged. Idle walking and combat retain their previous speeds.
+Only real productive footsteps wear paths; leisure remains excluded. Correcting
+accumulated yaw changes the turn direction, with no work reward or item grant.

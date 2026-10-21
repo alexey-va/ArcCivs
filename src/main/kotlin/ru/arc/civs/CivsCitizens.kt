@@ -530,7 +530,7 @@ class CivsCitizens(
             val before = npc.location
             val working = actor.attacker == null && (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))
             val speed = if (actor.attacker != null) 1.1 else if (working)
-                surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
+                .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             val next = motion.move(before, speed, { from, to -> residentStepAllowed(npc, from, to) }) { destination ->
                 (0..1).all { dy -> citizenOpenRouteDoor(city, route.allowedBuildings, before,
                     CivPosition(destination.blockX, destination.blockY + dy, destination.blockZ), doorBlocked) }

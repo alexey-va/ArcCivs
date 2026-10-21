@@ -21,8 +21,8 @@ import kotlin.math.floor
 
 /**
  * Physical resident bodies belong to this domain, not to the packet renderer.
- * Native-style contact adds a small horizontal impulse; a resident is never a solid
- * barrier or a reason to rewrite/cancel the player's observed movement.
+ * Contact makes the resident yield a small horizontal step; it never rewrites the
+ * player's velocity or observed movement, even when the resident cannot move aside.
  */
 internal class CivsResidentCollisions(
     plugin: Plugin,
@@ -31,7 +31,6 @@ internal class CivsResidentCollisions(
 ) : Listener, AutoCloseable {
     private var closed = false
     private var contactTick = Int.MIN_VALUE
-    private val pushedPlayers = hashSetOf<UUID>()
     private val pushedResidents = hashSetOf<UUID>()
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
@@ -50,7 +49,7 @@ internal class CivsResidentCollisions(
         for (npc in actors()) {
             if (!npc.isValid || npc.world != from.world || npc.pose == PacketNpcPose.SLEEPING ||
                 !residentBody(npc, npc.location).overlaps(body)) continue
-            pushApart(player, to.toVector(), npc, to.toVector().subtract(from.toVector()))
+            yieldResident(to.toVector(), npc, to.toVector().subtract(from.toVector()))
         }
     }
 
@@ -74,28 +73,26 @@ internal class CivsResidentCollisions(
         if (citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
                 first.height, first.widthZ / 2, bodies) == null) return true
         for (player in players) if (first.overlaps(player.boundingBox) || last.overlaps(player.boundingBox))
-            pushApart(player, player.location.toVector(), npc, from.toVector().subtract(to.toVector()))
+            yieldResident(player.location.toVector(), npc, from.toVector().subtract(to.toVector()))
         return false
     }
 
-    private fun pushApart(player: Player, playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
+    private fun yieldResident(playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
         val tick = Bukkit.getCurrentTick()
         if (contactTick != tick) {
             contactTick = tick
-            pushedPlayers.clear()
             pushedResidents.clear()
         }
         val away = npc.location.toVector().subtract(playerAt).setY(0.0)
         if (away.lengthSquared() < .000001) away.copy(movement).setY(0.0)
         if (away.lengthSquared() < .000001) away.setX(1.0)
-        // Entity.push uses a horizontal 0.05 impulse. Bound each body to one contact
-        // per tick so repeated move packets or a crowd cannot stack stronger pushes.
+        // Only the resident yields. Repeated move packets cannot stack its 0.05 step,
+        // and contact never sends a counter-impulse that fights the player's movement.
         away.normalize().multiply(.05)
-        if (pushedPlayers.add(player.uniqueId)) player.velocity = player.velocity.clone().subtract(away)
         if (!pushedResidents.add(npc.uniqueId)) return
         if (nudgeResident(npc, away.clone())) return
         // A wall behind the resident may leave either side free. If all three are
-        // blocked the player still passes; no velocity or position correction grows.
+        // blocked the resident stays put while the player passes unchanged.
         val tangent = Vector(-away.z, 0.0, away.x)
         if (!nudgeResident(npc, tangent)) nudgeResident(npc, tangent.clone().multiply(-1.0))
     }
@@ -103,7 +100,6 @@ internal class CivsResidentCollisions(
     override fun close() {
         if (closed) return
         closed = true
-        pushedPlayers.clear()
         pushedResidents.clear()
         HandlerList.unregisterAll(this)
     }

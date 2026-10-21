@@ -75,9 +75,9 @@ Completed work trips teach a bounded shared corridor preference (32 cities,
 512 outdoor cells each, 16 admitted cells per tick); authored buildings and
 fields remain excluded. Terrain conversion belongs solely to Trails. Support
 height includes paths and slabs. Player movement is never cancelled or rewritten
-by resident contact. Overlapping bodies receive at most one horizontal 0.05 push
-per tick; the resident yields into supported, collision-free space or a free side.
-A trapped resident remains passable to the player. Navigation still yields to
+by resident contact. Overlapping residents yield by at most 0.05 blocks per tick
+into supported, collision-free space or a free side. Contact never writes player
+velocity; even a trapped resident remains passable. Navigation still yields to
 real players without creating native NPC entities. Native world work uses a
 three-block eye-to-focus reach and unobstructed ray, stopping travel as soon as
 that real block is reachable. Storage accepts any visible valid side of its
@@ -171,9 +171,13 @@ is blocked, the shared recovery budget can select a clear spot in the same home
 through a clear swept sleeping envelope; without room the low pose is retained
 without work or travel. A cramped shelter does not start a sleeping pose.
 Idle residents choose safe loaded wandering targets within eight blocks of their
-workplace, otherwise home or town hall, at 0.55 of work speed. Base work speed is
-0.215 blocks per tick before the current surface multiplier. Routes avoid horizontal footprints
+workplace, otherwise home or town hall, at 0.55 of base motion speed. Base motion is
+0.215 blocks per tick; productive journeys use 0.8 of that, or 3.44 blocks/second
+at 20 TPS before the current Trails surface multiplier. Idle and combat movement
+retain their existing factors. Routes avoid horizontal footprints
 of foreign buildings and farm fields; idle wandering does not generate Trails wear.
+Productive journeys continue reporting real footsteps to Trails. Turning reduces
+accumulated yaw before choosing the shortest bounded turn, including route corners.
 The bounded search between world-work cycles holds the current position instead
 of starting an idle trip; food, threats and night shelter still take priority.
 Idle/evening campfire visits use existing lit campfires within 24 blocks of the
@@ -190,6 +194,10 @@ Only human viewers within 12 blocks hear ambient speech; sleeping or moving
 residents do not speak ambient lines. Per-resident intervals are 15–25 seconds,
 with a three-second shared minimum. Every intentional click greets its viewer,
 independently of the ambient cooldown. Campfire, sleep and actual speech diagnostics are emitted on transitions.
+The shared sound pack exposes all four existing clips of each voice profile to
+each speech event. Client selection remains random and can repeat a clip; ambient
+volume is 0.65 and a deliberate interaction reply remains 0.85. Diagnostics
+distinguish the voice event and ambient versus interaction trigger.
 One eligible nearby city per pulse fills vacant jobs in one persisted revision,
 builders first, one warehouse courier next, producers next, town-hall scribes last. Existing assignments and completed-cycle tokens
 are preserved; full jobs and inactive production sites are skipped.
@@ -282,6 +290,9 @@ unripe crop for four seconds. Watering maintains soil moisture and advances only
 age 3 to 4; optional fertilizer consumes one real bone meal at age 5 to reach 6.
 Care requires an actual soil or growth change, and an entire bounded field pass prioritizes harvesting over care. Exposed rain suppresses manual watering, including its free age checkpoint; covered plots may still need care. Native age checkpoints
 bound each growth-cycle bonus without a separate timer or restart catch-up.
+Temporary city saves pause work admission without deleting residents' scan cursors,
+partial field passes or valid targets. An incomplete field search holds the farmer
+in place; waiting for growth requires a completed pass without actionable work.
 Care retains field reach, protection and receipt validation; it grants no drops,
 profession training or hoe wear. Existing hunger still applies while working.
 FORESTER fells a real tree of at most 128 logs per
@@ -298,6 +309,10 @@ Mining secures exposed floor, walls, ceiling and lighting with paid carried supp
 before advancing, and harvests native drops one block per 2-second action. The three
 worksites therefore do not mint resources on a timer. The miner can reach visible
 blocks up to 4.5 blocks away; collision and line of sight still control each action.
+If falling blocks refill the authored clearance above the current shaft floor,
+the miner physically clears that obstruction before securing the floor. These
+recovery actions retain the current shaft step and use the same native drops,
+protection, work duration and durable receipt as ordinary excavation.
 Item-storage processors physically collect ingredients from their own control barrel
 before working. Both work admission and the final receipt require carried ingredients;
 output remains in the building store and couriers move it to its current endpoint.

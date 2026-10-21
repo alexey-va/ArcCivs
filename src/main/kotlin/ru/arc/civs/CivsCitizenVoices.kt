@@ -29,15 +29,18 @@ internal class CivsCitizenVoices(config: ConfigurationSection) {
     /** An intentional interaction always gets a reply, without spending the ambient speech budget. */
     fun greet(workerId: UUID, actor: PacketPlayerNpc, player: Player, sex: CivSex? = null) {
         if (!enabled || !actor.isValid || !player.isOnline || player.world != actor.world) return
-        emit(workerId, actor, CitizenVoiceEvent.GREET, listOf(player), sex)
+        emit(workerId, actor, CitizenVoiceEvent.GREET, listOf(player), sex, interaction = true)
     }
 
-    private fun emit(workerId: UUID, actor: PacketPlayerNpc, event: CitizenVoiceEvent, audience: Collection<Player>, sex: CivSex?) {
+    private fun emit(workerId: UUID, actor: PacketPlayerNpc, event: CitizenVoiceEvent, audience: Collection<Player>, sex: CivSex?,
+        interaction: Boolean = false) {
         val at = actor.location.add(0.0, actor.eyeHeight, 0.0)
         val sound = "$prefix.${citizenVoice(workerId, sex)}.${event.key}"
-        audience.forEach { it.playSound(at, sound, SoundCategory.NEUTRAL, 0.85f, 1f) }
+        val volume = if (interaction) 0.85f else 0.65f
+        audience.forEach { it.playSound(at, sound, SoundCategory.NEUTRAL, volume, 1f) }
         CivsDiagnostics.event("citizen_voice", "worker" to workerId, "world" to actor.world.uid,
-            "sound" to sound, "audience" to audience.size)
+            "sound" to sound, "voice_event" to event.key, "trigger" to if (interaction) "interaction" else "ambient",
+            "audience" to audience.size)
     }
 
     fun retain(workers: Set<UUID>) = clock.retain(workers)

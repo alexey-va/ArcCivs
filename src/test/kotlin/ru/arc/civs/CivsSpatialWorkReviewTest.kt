@@ -372,6 +372,94 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    test("a paused farm retains its sixteen-cell scan and chosen target but cannot execute it") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("paused-field-search").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("PausedFieldSearch")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                val worker = spatialWorker(farm, "IRON_HOE")
+                val city = spatialCity(world.uid, listOf(farm), worker)
+                val plots = CivsWorksiteLayouts.field(farm)
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                plots.forEach { soil ->
+                    world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                    world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                        (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+                }
+                CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                val mature = plots[20].let { it.copy(y = it.y + 1) }
+                world.getBlockAt(mature.x, mature.y, mature.z).blockData =
+                    (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+                var paused = false
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
+                    runtime.idleReason(city, worker) shouldBe "searching-work"
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe null
+                    runtime.idleReason(city, worker) shouldBe "searching-work"
+                    paused = true
+                    repeat(4) { runtime.pulse(listOf(city)) }
+                    runtime.plan(city, worker) shouldBe null
+                    paused = false
+                    runtime.pulse(listOf(city)) // Resume at cell sixteen, not at the beginning of the field.
+                    val work = requireNotNull(runtime.plan(city, worker))
+                    work.focus shouldBe mature
+                    paused = true
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe work
+                    shouldThrow<CivsRejection> { runtime.validate(city, work) }.reason shouldBe "city-busy"
+                    paused = false
+                    runtime.plan(city, worker) shouldBe work
+                    runtime.validate(city, work)
+                    runtime.pulse(listOf(city.copy(workers = emptyList())))
+                    runtime.plan(city, worker) shouldBe null
+                }
+                tasks.close()
+            }
+        }
+    }
+
+    test("farm reports growth only after a complete empty scan and retains a real missing-seed reason") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("complete-field-search").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("CompleteFieldSearch")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                val worker = spatialWorker(farm, "IRON_HOE")
+                val city = spatialCity(world.uid, listOf(farm), worker)
+                val plots = CivsWorksiteLayouts.field(farm)
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                plots.forEach { soil ->
+                    world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                    world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                        (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
+                }
+                CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    repeat(4) {
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "searching-work"
+                    }
+                    runtime.pulse(listOf(city))
+                    runtime.idleReason(city, worker) shouldBe "waiting-growth"
+                    val empty = plots.first().let { it.copy(y = it.y + 1) }
+                    world.getBlockAt(empty.x, empty.y, empty.z).type = Material.AIR
+                    runtime.invalidate(worker.id)
+                    repeat(8) { if (runtime.idleReason(city, worker) != "waiting-seeds") runtime.pulse(listOf(city)) }
+                    runtime.plan(city, worker) shouldBe null
+                    runtime.idleReason(city, worker) shouldBe "waiting-seeds"
+                    runtime.requirement(city, worker) shouldBe ("WHEAT_SEEDS" to 64L)
+                }
+                tasks.close()
+            }
+        }
+    }
+
     for ((name, storm, covered, age, moisture, watering) in listOf(
         FarmWeatherCase("exposed-rain", true, false, 2, 0, false),
         FarmWeatherCase("exposed-rain-checkpoint", true, false, 3, 7, false),
@@ -848,6 +936,102 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    test("a persisted mine floor clears fallen gravel again without advancing its cursor or duplicating drops") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-fallen-gravel").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineFallenGravel")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40)).copy(
+                    rotation = 270, bounds = CivBox(CivPosition(-102, 63, -50), CivPosition(-86, 82, -33)),
+                    entrance = CivPosition(-85, 69, -40), control = CivPosition(-93, 69, -40))
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                    .copy(radius = 200, mineProgress = mapOf(mine.id.toString() to 147L))
+                val floor = CivPosition(-89, 56, -40)
+                val lower = floor.copy(y = 57)
+                val upper = floor.copy(y = 58)
+                for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                // The saved production slice has a clear previous gallery and two fallen
+                // gravel blocks above this already-excavated, still-unpaid floor step.
+                for (y in 57..59) world.getBlockAt(-90, y, -40).type = Material.AIR
+                world.getBlockAt(-90, 56, -40).type = Material.COBBLESTONE
+                world.getBlockAt(-89, 59, -40).type = Material.AIR
+                world.getBlockAt(lower.x, lower.y, lower.z).type = Material.GRAVEL
+                world.getBlockAt(upper.x, upper.y, upper.z).type = Material.GRAVEL
+                var locked = true
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked && point == lower })
+                    val workerId = city.workers.single().id
+                    val originalStone = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
+                    val received = mutableMapOf<String, Long>()
+                    fun nextWork(): CivWorldWork {
+                        repeat(64) {
+                            runtime.pulse(listOf(city))
+                            runtime.plan(city, city.workers.single())?.let { return it }
+                        }
+                        error("Mine failed to resume: ${runtime.idleReason(city, city.workers.single())}")
+                    }
+                    fun commit(work: CivWorldWork) {
+                        runtime.validate(city, work)
+                        work.changes.forEach { cell ->
+                            val block = world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                            block.blockData.asString shouldBe cell.before
+                            block.setBlockData(Bukkit.createBlockData(cell.after), false)
+                        }
+                        city = CivsRules.finishWorldWork(city, work, 20_000 + city.workers.single().completedCycles * 5_000)
+                        work.outputs.forEach { (material, amount) -> received.merge(material, amount, Long::plus) }
+                        shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, work, 30_000) }.reason shouldBe "stale-delivery"
+                        runtime.invalidate(workerId)
+                    }
+                    try {
+                        repeat(16) { runtime.pulse(listOf(city)) }
+                        runtime.plan(city, city.workers.single()) shouldBe null
+                        runtime.idleReason(city, city.workers.single()) shouldBe "worksite-protected"
+                        city.workers.single().completedCycles shouldBe 0L
+                        world.getBlockAt(lower.x, lower.y, lower.z).type shouldBe Material.GRAVEL
+                        locked = false
+                        val first = nextWork()
+                        first.changes.single().position shouldBe lower
+                        first.changes.single().after shouldBe "minecraft:air"
+                        first.inputs shouldBe emptyMap()
+                        first.outputs shouldBe mapOf("GRAVEL" to 1L)
+                        first.miningStep shouldBe 147L
+                        citizenCanReachBlock(world, Location(world, first.standing.x + .5, first.standing.y + 1.62,
+                            first.standing.z + .5), lower, CITIZEN_MINE_REACH) shouldBe true
+                        commit(first)
+                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 147L
+                        // Model the native fall after clearing: the existing upper block
+                        // occupies the same lower cell, rather than inventing another item.
+                        world.getBlockAt(upper.x, upper.y, upper.z).type = Material.AIR
+                        world.getBlockAt(lower.x, lower.y, lower.z).type = Material.GRAVEL
+                        val fallenAgain = nextWork()
+                        fallenAgain.changes.single().position shouldBe lower
+                        fallenAgain.outputs shouldBe mapOf("GRAVEL" to 1L)
+                        fallenAgain.miningStep shouldBe 147L
+                        commit(fallenAgain)
+                        received["GRAVEL"] shouldBe 2L
+                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 147L
+                        var floorFinished = false
+                        for (attempt in 0 until 8) {
+                            val work = nextWork()
+                            work.outputs.getOrDefault("GRAVEL", 0) shouldBe 0L
+                            val paysFloor = work.changes.single().position == floor
+                            work.miningStep shouldBe if (paysFloor) 148L else 147L
+                            if (paysFloor) work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                            commit(work)
+                            if (paysFloor) { floorFinished = true; break }
+                        }
+                        floorFinished shouldBe true
+                        received["GRAVEL"] shouldBe 2L
+                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 148L
+                        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe originalStone - 1
+                    } finally { tasks.close() }
+                }
+            }
+        }
+    }
+
     test("work position search continues within its shared ray budget and reports an actual blocked ray only after exhaustion") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
@@ -1032,7 +1216,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
     }
 })
 
-private fun spatialBuilding(style: String, role: String, level: Int, anchor: CivPosition): CivBuilding {
+internal fun spatialBuilding(style: String, role: String, level: Int, anchor: CivPosition): CivBuilding {
     val type = when (role) { "farmer" -> BuildingType.FARM; "lumberjack" -> BuildingType.FORESTER; else -> BuildingType.QUARRY }
     val folder = if (role == "farmer") "agriculture/horticulture" else "fundamentals"
     val blank = CivBuilding(UUID.randomUUID(), type, level, anchor, 0, "civs/minecolonies/$style/$folder/$role$level",
@@ -1042,7 +1226,7 @@ private fun spatialBuilding(style: String, role: String, level: Int, anchor: Civ
         CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["max"]))))
 }
 
-private fun spatialWorker(building: CivBuilding, material: String, supplies: Boolean = true) = CivWorker(UUID.randomUUID(), "Рабочий", building.id,
+internal fun spatialWorker(building: CivBuilding, material: String, supplies: Boolean = true) = CivWorker(UUID.randomUUID(), "Рабочий", building.id,
     nextDeliveryAt = 1,
     items = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
         it[4] = CivResidentItem(material, 1)
@@ -1051,7 +1235,7 @@ private fun spatialWorker(building: CivBuilding, material: String, supplies: Boo
         }
     })
 
-private fun spatialCity(worldId: UUID, buildings: List<CivBuilding>, worker: CivWorker): Settlement {
+internal fun spatialCity(worldId: UUID, buildings: List<CivBuilding>, worker: CivWorker): Settlement {
     val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 3, CivPosition(50, 63, 5), 0, "fixture/hall",
         CivBox(CivPosition(46, 63, 1), CivPosition(54, 70, 5)), CivPosition(50, 64, 6), BuildingPhase.ACTIVE,
         control = CivPosition(50, 64, 3))

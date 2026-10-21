@@ -59,7 +59,7 @@ class CivsResidentCollisionsTest : FunSpec({
         near(touching.position.x, -.6)
     }
 
-    test("Creative contact adds one small horizontal impulse and never rewrites player movement") {
+    test("Creative contact makes the resident yield without rewriting player movement or velocity") {
         collisionScenario { f ->
             f.mode = GameMode.CREATIVE
             val destination = Location(f.world, -.45, 64.0, 0.0, 83f, -12f)
@@ -67,13 +67,49 @@ class CivsResidentCollisionsTest : FunSpec({
             event.to shouldBe destination
             event.isCancelled shouldBe false
             near(f.npcAt.x, .05)
-            near(f.velocity.x, -.05)
+            f.velocity.x shouldBe 0.0
             f.velocity.y shouldBe .2
             f.velocity.z shouldBe 0.0
             repeat(20) { f.move(destination).to shouldBe destination }
-            f.velocityWrites shouldBe 1
+            f.velocityWrites shouldBe 0
             f.nudgeAttempts shouldBe 1
             verify(exactly = 0) { f.player.teleport(any<Location>()) }
+        }
+    }
+
+    test("repeated contact with two trapped residents preserves player momentum and movement across ticks") {
+        collisionScenario { f ->
+            f.allowNudge = false
+            val momentum = Vector(.13, .2, -.07)
+            f.velocity = momentum.clone()
+            val second = mockk<PacketPlayerNpc> {
+                every { uniqueId } returns UUID.randomUUID()
+                every { isValid } returns true
+                every { world } returns f.world
+                every { pose } returns PacketNpcPose.STANDING
+                every { height } returns 1.8
+                every { scale } returns 1.0
+                every { location } answers { Location(f.world, 0.0, 64.0, .15) }
+            }
+            f.residents = listOf(f.npc, second)
+            val from = Location(f.world, -.8, 64.0, 0.0, 20f, 5f)
+            val to = Location(f.world, -.4, 64.0, 0.0, 83f, -12f)
+            repeat(20) {
+                repeat(5) {
+                    val event = f.move(to.clone(), from.clone())
+                    event.from shouldBe from
+                    event.to shouldBe to
+                    event.isCancelled shouldBe false
+                }
+                f.playerAt = to.clone()
+                f.owner.canResidentMove(f.npc, f.npcAt, f.npcAt.clone().add(-.2, 0.0, 0.0)) shouldBe false
+                f.velocity shouldBe momentum
+                f.tick()
+            }
+            f.velocityWrites shouldBe 0
+            f.nudgeAttempts shouldBe 120 // Two residents, three safe probes, once per tick.
+            f.npcAt shouldBe Location(f.world, 0.0, 64.0, 0.0)
+            verify(exactly = 0) { f.player.velocity; f.player.teleport(any<Location>()) }
         }
     }
 
@@ -113,7 +149,7 @@ class CivsResidentCollisionsTest : FunSpec({
             f.move(closer, destination).to shouldBe closer
             f.npcAt shouldBe trapped
             f.nudgeAttempts shouldBe 5 // One forward and two side probes; never a larger correction.
-            f.velocityWrites shouldBe 2
+            f.velocityWrites shouldBe 0
             verify(exactly = 0) { f.player.teleport(any<Location>()) }
         }
     }
@@ -153,15 +189,17 @@ class CivsResidentCollisionsTest : FunSpec({
             f.playerHeight = .6
             f.move(Location(f.world, -.4, 65.6, 0.0), Location(f.world, -2.0, 65.6, 0.0))
             f.velocityWrites shouldBe 0
+            f.nudgeAttempts shouldBe 0
             f.move(Location(f.world, -.4, 64.0, 0.0))
-            f.velocityWrites shouldBe 1
+            f.nudgeAttempts shouldBe 1
             f.tick()
             f.npcPose = PacketNpcPose.SLEEPING
             f.move(Location(f.world, -.4, 64.0, 0.0))
             f.npcPose = PacketNpcPose.STANDING
             f.npcValid = false
             f.move(Location(f.world, -.4, 64.0, 0.0))
-            f.velocityWrites shouldBe 1
+            f.velocityWrites shouldBe 0
+            f.nudgeAttempts shouldBe 1
         }
     }
 
@@ -179,7 +217,8 @@ class CivsResidentCollisionsTest : FunSpec({
             }
             f.residents = distant + f.npc
             f.move(Location(f.world, -.4, 64.0, 0.0)).to!!.x shouldBe -.4
-            f.velocityWrites shouldBe 1
+            f.velocityWrites shouldBe 0
+            f.nudgeAttempts shouldBe 1
             f.providerReads shouldBe 1
             verify(exactly = 0) { f.world.entities; f.world.players }
         }
@@ -204,18 +243,18 @@ class CivsResidentCollisionsTest : FunSpec({
         }
     }
 
-    test("resident walking nudges a nearby player but preserves its waypoint and read-only recovery occupancy") {
+    test("resident walking yields to a nearby player and preserves its waypoint and read-only recovery occupancy") {
         collisionScenario { f ->
             f.mode = GameMode.CREATIVE
             f.playerAt = Location(f.world, .7, 64.0, 0.0)
             val from = Location(f.world, 0.0, 64.0, 0.0)
             val to = Location(f.world, .2, 64.0, 0.0)
             f.owner.canResidentMove(f.npc, from, to) shouldBe false
-            f.velocityWrites shouldBe 1
-            (f.velocity.x > 0) shouldBe true
+            f.velocityWrites shouldBe 0
+            f.velocity shouldBe Vector(0.0, .2, 0.0)
             near(f.npcAt.x, -.05)
             f.owner.canResidentMove(f.npc, f.playerAt, f.playerAt) shouldBe false
-            f.velocityWrites shouldBe 1
+            f.velocityWrites shouldBe 0
             f.mode = GameMode.SPECTATOR
             f.owner.canResidentMove(f.npc, from, to) shouldBe true
             f.mode = GameMode.SURVIVAL
