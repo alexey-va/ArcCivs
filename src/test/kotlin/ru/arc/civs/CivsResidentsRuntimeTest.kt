@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
@@ -274,9 +275,22 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(21, 64, 0), emptyList(),
                 durationMillis = 1_500, status = "equipping-tool")
             h.owner.pulse(2_000)
-            repeat(160) { h.owner.activateNavigating() }
+            val control = requireNotNull(farm.control)
+            // The shared 1 ms search slice has no fixed operations-per-callback guarantee.
+            // Hold coarse time still and observe the first usable side, without timeout recovery.
+            for (tick in 1..2_000) {
+                val before = actor.location
+                h.owner.activateNavigating()
+                val at = actor.location
+                (before.distance(at) <= .215001) shouldBe true
+                if (citizenAtStorage(h.world, CitizenPoint(at.x, at.y, at.z), control) &&
+                    citizenCanReachBlock(actor, control)) break
+            }
             val arrival = actor.location
-            citizenAtStorage(h.world, CitizenPoint(arrival.x, arrival.y, arrival.z), requireNotNull(farm.control)) shouldBe true
+            withClue("arrival=$arrival status=${h.owner.status(h.workerId)}") {
+                citizenAtStorage(h.world, CitizenPoint(arrival.x, arrival.y, arrival.z), control) shouldBe true
+                citizenCanReachBlock(actor, control) shouldBe true
+            }
             (arrival.x < 20.0) shouldBe true
             repeat(40) { h.owner.activateNavigating() }
             actor.location shouldBe arrival
