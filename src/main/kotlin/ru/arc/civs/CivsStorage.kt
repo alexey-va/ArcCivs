@@ -187,6 +187,10 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedPlayers = mutableMapOf<UUID, UUID>()
     private val lockedWorld = mutableMapOf<Key, UUID>()
     private val index = CivsContainerIndex(plugin.server, tileEntities)
+    private val supplyCaptures = CivsSupplyCaptures(index, { city ->
+        val positions = index.positions(city)
+        city.buildings.associate { it.id to selectBuildingPositions(city, it.id, positions) }
+    }, ::captureSupplyContainer)
     private val materializationCursors = mutableMapOf<UUID, Int>()
     private val debitSearches = mutableMapOf<UUID, DebitSearch>()
     private var receiptBootstrap = false
@@ -214,18 +218,37 @@ class CivsStorage(private val plugin: Plugin,
         checkMain(); requireOpen()
         materializationCursors.clear()
         debitSearches.clear()
+        supplyCaptures.clear()
         index.replace(cities)
     }
-    fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city) }
+    fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city); supplyCaptures.update(city) }
     fun removeCity(cityId: UUID) {
         checkMain(); requireOpen()
         materializationCursors.remove(cityId)
         debitSearches.remove(cityId)
+        supplyCaptures.remove(cityId)
         index.remove(cityId)
     }
     fun refreshBuilding(city: Settlement, building: CivBuilding? = null) {
         checkMain(); requireOpen()
+        supplyCaptures.invalidate(city.id, building?.let { setOf(it.id) })
         index.refresh(city, building)
+    }
+
+    internal fun startSupplyCapture(city: Settlement): CivsSupplyCapture {
+        checkMain(); requireOpen()
+        return supplyCaptures.start(city)
+    }
+
+    internal fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null): Boolean {
+        checkMain(); requireOpen()
+        return supplyCaptures.current(city, result, buildingIds)
+    }
+
+    internal fun supplyRevision(cityId: UUID): Long { checkMain(); requireOpen(); return supplyCaptures.revision(cityId) }
+
+    internal fun invalidateSupply(cityId: UUID, buildingIds: Set<UUID>? = null) {
+        checkMain(); requireOpen(); supplyCaptures.invalidate(cityId, buildingIds)
     }
 
     /** Report native viewers within the settlement's current source membership. */
@@ -1042,8 +1065,13 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     private fun buildingPositions(city: Settlement, buildingId: UUID, controlOnly: Boolean = false): Map<CivPosition, String?> {
-        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         val positions = cityClaims[city.id]?.let(claims::get)?.positions ?: index.positions(city)
+        return selectBuildingPositions(city, buildingId, positions, controlOnly)
+    }
+
+    private fun selectBuildingPositions(city: Settlement, buildingId: UUID, positions: Map<CivPosition, String?>,
+        controlOnly: Boolean = false): Map<CivPosition, String?> {
+        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         return linkedMapOf<CivPosition, String?>().also { selected ->
             building.control?.takeIf { it in positions }?.let { selected[it] = positions[it] }
             if (!controlOnly && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && building.phase == BuildingPhase.ACTIVE) {
@@ -1098,6 +1126,21 @@ class CivsStorage(private val plugin: Plugin,
         val before = source.inventory.storageContents.map { it?.clone() }
         require(before.size == STORAGE_SLOTS)
         return Snapshot(source, before, before.map { it?.clone() }.toMutableList())
+    }
+
+    private fun captureSupplyContainer(city: Settlement, position: CivPosition, expectedType: String?): CivSupplyCapturedContainer? {
+        checkMain(); requireOpen()
+        val source = try { resolve(city, position, expectedType) } catch (failure: CivsRejection) {
+            if (failure.reason in setOf("storage-unavailable", "storage-container-invalid")) return null else throw failure
+        }
+        val contents = source.inventory.storageContents
+        require(contents.size == STORAGE_SLOTS)
+        return CivSupplyCapturedContainer(source.type, contents.map { item ->
+            if (isEmpty(item)) CivSupplyCapturedSlot(null, 0, false, 0) else {
+                val native = requireNotNull(item)
+                CivSupplyCapturedSlot(native.type.name, native.amount, plain(native) != null, native.maxStackSize)
+            }
+        })
     }
 
     private fun plan(inventory: CivInventory, snapshots: List<Snapshot>): CivStoragePlan {
@@ -1253,21 +1296,40 @@ class CivsStorage(private val plugin: Plugin,
     fun onEntityExplosion(event: EntityExplodeEvent) { event.blockList().removeIf(::locked) }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexPlace(event: BlockPlaceEvent) { index.changed(event.blockPlaced) }
+    fun indexPlace(event: BlockPlaceEvent) {
+        index.changed(event.blockPlaced)
+        if (event.blockPlaced.type.name in STORAGE_TYPES || event.blockReplacedState.type.name in STORAGE_TYPES)
+            supplyChanged(event.blockPlaced)
+    }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexBreak(event: BlockBreakEvent) { index.removed(event.block) }
+    fun indexBreak(event: BlockBreakEvent) { if (event.block.type.name in STORAGE_TYPES) supplyChanged(event.block); index.removed(event.block) }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexBlockExplosion(event: BlockExplodeEvent) { event.blockList().forEach(index::removed) }
+    fun indexBlockExplosion(event: BlockExplodeEvent) { event.blockList().forEach { if (it.type.name in STORAGE_TYPES) supplyChanged(it); index.removed(it) } }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexEntityExplosion(event: EntityExplodeEvent) { event.blockList().forEach(index::removed) }
+    fun indexEntityExplosion(event: EntityExplodeEvent) { event.blockList().forEach { if (it.type.name in STORAGE_TYPES) supplyChanged(it); index.removed(it) } }
     @EventHandler(priority = EventPriority.MONITOR)
-    fun indexChunkLoad(event: ChunkLoadEvent) { index.load(event.chunk) }
+    fun indexChunkLoad(event: ChunkLoadEvent) { index.load(event.chunk); supplyChunkChanged(event.chunk) }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexChunkUnload(event: ChunkUnloadEvent) { index.unload(event.chunk) }
+    fun indexChunkUnload(event: ChunkUnloadEvent) { supplyChunkChanged(event.chunk); index.unload(event.chunk) }
     @EventHandler(priority = EventPriority.MONITOR)
-    fun indexWorldLoad(event: WorldLoadEvent) { event.world.loadedChunks.forEach(index::load) }
+    fun indexWorldLoad(event: WorldLoadEvent) { event.world.loadedChunks.forEach { index.load(it); supplyChunkChanged(it) } }
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    fun indexWorldUnload(event: WorldUnloadEvent) { index.unloadWorld(event.world.uid) }
+    fun indexWorldUnload(event: WorldUnloadEvent) { event.world.loadedChunks.forEach(::supplyChunkChanged); index.unloadWorld(event.world.uid) }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun supplyClick(event: InventoryClickEvent) { supplyChanged(event.view.topInventory) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun supplyDrag(event: InventoryDragEvent) { supplyChanged(event.view.topInventory) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun supplyMove(event: InventoryMoveItemEvent) { supplyChanged(event.source); supplyChanged(event.destination) }
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun supplyPickup(event: InventoryPickupItemEvent) { supplyChanged(event.inventory) }
+
+    private fun supplyChanged(inventory: Inventory) {
+        holderPositions(inventory.holder).forEach { supplyCaptures.changed(it.worldId, it.position) }
+    }
+    private fun supplyChanged(block: Block) = supplyCaptures.changed(block.world.uid, CivPosition(block.x, block.y, block.z))
+    private fun supplyChunkChanged(chunk: Chunk) = supplyCaptures.chunkChanged(chunk.world.uid, chunk.x, chunk.z)
 
     override fun close() {
         checkMain()
@@ -1278,6 +1340,7 @@ class CivsStorage(private val plugin: Plugin,
         index.clear()
         materializationCursors.clear()
         debitSearches.clear()
+        supplyCaptures.clear()
     }
     private fun requireOpen() = check(!closed) { "CivsStorage is closed" }
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "CivsStorage requires Paper's main thread" }

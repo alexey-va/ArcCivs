@@ -1,0 +1,175 @@
+package ru.arc.civs
+
+import java.util.UUID
+
+/** Owner-only acceptance metadata; unrelated settlement revisions are deliberately excluded. */
+internal data class CivSupplyStorageKey(
+    val cityId: UUID, val worldId: UUID, val ownerId: UUID, val mode: CivStorageMode,
+    val buildingId: UUID, val type: BuildingType, val phase: BuildingPhase, val level: Int,
+    val bounds: CivBox, val control: CivPosition?, val positions: Map<CivPosition, String?>,
+    val virtualStock: Map<String, Long>, val generation: Long,
+)
+
+internal data class CivSupplyCapturedStore(
+    val stock: Map<String, Long>, val capacity: CivSupplyCapacity, val key: CivSupplyStorageKey,
+)
+
+internal data class CivSupplyCaptureResult(val cityId: UUID, val stores: Map<UUID, CivSupplyCapturedStore>)
+
+/** Detached slot values also detect native writers which do not emit inventory events. */
+internal data class CivSupplyCapturedSlot(val material: String?, val amount: Int, val plain: Boolean, val stackSize: Int)
+internal data class CivSupplyCapturedContainer(val type: String, val slots: List<CivSupplyCapturedSlot>)
+
+/** Storage-specific capture/version owner. Native references exist only inside the supplied owner-thread read. */
+internal class CivsSupplyCaptures(
+    private val index: CivsContainerIndex,
+    private val layout: (Settlement) -> Map<UUID, Map<CivPosition, String?>>,
+    private val read: (Settlement, CivPosition, String?) -> CivSupplyCapturedContainer?,
+) {
+    private class Store(var key: CivSupplyStorageKey) {
+        var contents: Map<CivPosition, CivSupplyCapturedContainer?>? = null
+    }
+    private val cities = mutableMapOf<UUID, Map<UUID, Store>>()
+    private val revisions = mutableMapOf<UUID, Long>()
+    private var generation = 0L
+
+    fun start(city: Settlement): CivsSupplyCapture {
+        val keys = update(city)
+        return CivsSupplyCapture(city, keys, read) { key, contents ->
+            val current = cities[city.id]?.get(key.buildingId)
+            if (current == null || current.key != key) key else {
+                if (current.contents?.let { it != contents } == true) dirty(city.id, current)
+                current.contents = contents.toMap()
+                current.key
+            }
+        }
+    }
+
+    fun current(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>?): Boolean {
+        if (city.id != result.cityId) return false
+        val keys = update(city)
+        return (buildingIds ?: result.stores.keys).all { id ->
+            result.stores[id]?.key?.let { it == keys[id] } == true
+        }
+    }
+
+    /** Metadata/index reads only; no inventory scans are added to city publication. */
+    fun update(city: Settlement): Map<UUID, CivSupplyStorageKey> {
+        val inventory = city.inventory?.validated() ?: run { if (city.id in cities) remove(city.id); return emptyMap() }
+        val positions = if (inventory.mode == CivStorageMode.PHYSICAL) layout(city) else emptyMap()
+        val previous = cities[city.id].orEmpty()
+        val next = city.buildings.associate { building ->
+            val old = previous[building.id]
+            val key = CivSupplyStorageKey(city.id, city.worldId, city.owner, inventory.mode,
+                building.id, building.type, building.phase, building.level, building.bounds, building.control,
+                positions[building.id].orEmpty().toMap(),
+                if (inventory.mode == CivStorageMode.VIRTUAL) inventory.buildingStock(building.id).toMap() else emptyMap(),
+                old?.key?.generation ?: 0L)
+            val store = if (old != null && old.key == key) old else Store(key).also { dirty(city.id, it) }
+            building.id to store
+        }
+        if (previous.keys != next.keys && previous.isNotEmpty()) revisions[city.id] = ++generation
+        cities[city.id] = next
+        return next.mapValues { it.value.key }
+    }
+
+    fun revision(cityId: UUID): Long = revisions[cityId] ?: 0L
+
+    fun invalidate(cityId: UUID, buildingIds: Set<UUID>? = null) {
+        val stores = cities[cityId] ?: return
+        (buildingIds ?: stores.keys).forEach { stores[it]?.let { store -> dirty(cityId, store) } }
+    }
+
+    fun changed(worldId: UUID, position: CivPosition) {
+        index.citiesAt(worldId, position).forEach { cityId ->
+            val stores = cities[cityId].orEmpty()
+            val controls = stores.values.mapNotNullTo(mutableSetOf()) { it.key.control }
+            stores.values.filter { store ->
+                val key = store.key
+                key.mode == CivStorageMode.PHYSICAL && (position in key.positions || key.control == position || position !in controls &&
+                    key.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && key.phase == BuildingPhase.ACTIVE &&
+                    key.bounds.contains(position.x, position.y, position.z))
+            }.forEach { dirty(cityId, it) }
+        }
+    }
+
+    fun chunkChanged(worldId: UUID, x: Int, z: Int) {
+        index.citiesInChunk(worldId, x, z).forEach { cityId ->
+            cities[cityId].orEmpty().values.filter { store ->
+                val key = store.key
+                key.mode == CivStorageMode.PHYSICAL && (key.control?.let { (it.x shr 4) == x && (it.z shr 4) == z } == true ||
+                    key.positions.keys.any { (it.x shr 4) == x && (it.z shr 4) == z } ||
+                    key.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && key.phase == BuildingPhase.ACTIVE &&
+                    x in (key.bounds.min.x shr 4)..(key.bounds.max.x shr 4) && z in (key.bounds.min.z shr 4)..(key.bounds.max.z shr 4))
+            }.forEach { dirty(cityId, it) }
+        }
+    }
+
+    fun remove(cityId: UUID) { cities.remove(cityId); revisions.remove(cityId) }
+    fun clear() { cities.keys.toList().forEach(::remove) }
+
+    private fun dirty(cityId: UUID, store: Store) {
+        store.key = store.key.copy(generation = ++generation)
+        revisions[cityId] = generation
+    }
+}
+
+/**
+ * One city-wide cursor, intended for the shared BudgetedTaskQueue. A step reads at most one
+ * authorized 27-slot chest half/barrel; only immutable numbers/coordinates survive the read.
+ * No locks are acquired. Event generations reject a capture changed between its native reads.
+ */
+internal class CivsSupplyCapture(
+    private val city: Settlement,
+    private val keys: Map<UUID, CivSupplyStorageKey>,
+    private val read: (Settlement, CivPosition, String?) -> CivSupplyCapturedContainer?,
+    private val finish: (CivSupplyStorageKey, Map<CivPosition, CivSupplyCapturedContainer?>) -> CivSupplyStorageKey,
+) {
+    private class Totals {
+        val stock = linkedMapOf<String, Long>()
+        val partialRoom = linkedMapOf<String, Long>()
+        val contents = linkedMapOf<CivPosition, CivSupplyCapturedContainer?>()
+        var emptySlots = 0
+    }
+    private val owner = Thread.currentThread()
+    private val totals = keys.mapValues { Totals() }
+    private val containers = linkedMapOf<CivPosition, Pair<String?, MutableList<UUID>>>().also { entries ->
+        keys.forEach { (buildingId, key) -> key.positions.forEach { (position, type) ->
+            entries.getOrPut(position) { type to mutableListOf() }.second += buildingId
+        } }
+    }.entries.iterator()
+    var result: CivSupplyCaptureResult? = null
+        private set
+
+    fun step(): Boolean {
+        check(Thread.currentThread() === owner) { "Supply capture requires its owning thread" }
+        if (result != null) return true
+        if (containers.hasNext()) {
+            val (position, entry) = containers.next()
+            val captured = read(city, position, entry.first)
+            entry.second.forEach { buildingId ->
+                val sum = totals.getValue(buildingId)
+                sum.contents[position] = captured
+                captured?.slots?.forEach { slot ->
+                    if (slot.material == null) sum.emptySlots++
+                    else if (slot.plain) {
+                        sum.stock.merge(slot.material, slot.amount.toLong(), Math::addExact)
+                        val room = (slot.stackSize - slot.amount).coerceAtLeast(0).toLong()
+                        if (room > 0) sum.partialRoom.merge(slot.material, room, Math::addExact)
+                    }
+                }
+            }
+            if (containers.hasNext()) return false
+        }
+        result = CivSupplyCaptureResult(city.id, keys.mapValues { (buildingId, key) ->
+            val sum = totals.getValue(buildingId)
+            val virtual = key.mode == CivStorageMode.VIRTUAL
+            val stock = if (virtual) key.virtualStock else sum.stock.toMap()
+            val capacity = if (virtual) CivSupplyCapacity(0, emptyMap(),
+                (27L * 64L * key.level - stock.values.sum()).coerceAtLeast(0))
+                else CivSupplyCapacity(sum.emptySlots, sum.partialRoom.toMap())
+            CivSupplyCapturedStore(stock, capacity, finish(key, sum.contents))
+        })
+        return true
+    }
+}

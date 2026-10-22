@@ -567,7 +567,7 @@ class CivsServiceTest : FunSpec({
             val source = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
             val target = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
             source.setItem(0, org.bukkit.inventory.ItemStack(Material.IRON_INGOT, 3))
-            source.setItem(1, org.bukkit.inventory.ItemStack(Material.STICK, 2))
+            source.setItem(1, org.bukkit.inventory.ItemStack(Material.COBBLESTONE, 2))
             val journals = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
             every { h.store.saveInventoryTransaction(any()) } answers {
                 CompletableFuture<CivInventoryTransaction>().also { journals += firstArg<CivInventoryTransaction>() to it }
@@ -575,7 +575,7 @@ class CivsServiceTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             val current = h.service.city(h.player)!!
-            val plan = CivsLogistics.plan(current, current.workers.first()) { h.service.localMaterials(h.player, it) }!!
+            val plan = h.supplyPlan(current.workers.first().id)
             val pickup = h.service.pickupCargo(current.id, current.workers.first().id, plan.cargo)
             source.getItem(0)!!.amount shouldBe 3
             h.service.city(h.player)!!.workers.first().cargo shouldBe null
@@ -604,6 +604,96 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("durable cargo with a removed source reserves only its surviving fallback destination") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val source = UUID.randomUUID()
+            val cargo = CivCargo(UUID.randomUUID(), source, source, UUID.randomUUID(), CivPosition(10, 64, -2),
+                "BREAD", 1, inventoryBacked = true)
+            val worker = h.city.workers.first().copy(cargo = cargo,
+                items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("BREAD", 1) else null })
+            val ready = h.city.copy(stock = Stock(), buildings = listOf(hall), workers = listOf(worker), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.start(); h.tick()
+            val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+                .get(h.service) as CivsSupplyDispatcher
+            dispatcher.plan(ready.id, worker.id)?.destinationBuildingId shouldBe hall.id
+            dispatcher.plan(ready.id, worker.id)?.cargo shouldBe cargo
+            dispatcher.failure(ready.id) shouldBe null
+        }
+    }
+
+    test("a resumed supply capture retires when a city save begins instead of spinning the native queue") {
+        serviceScenario { h ->
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))))
+            h.start()
+            val factory = CivsService::class.java.getDeclaredMethod("captureSupply", UUID::class.java, Map::class.java)
+                .also { it.isAccessible = true }
+            @Suppress("UNCHECKED_CAST")
+            val step = factory.invoke(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
+            val member = h.paper.addPlayer("SupplyBusyMember")
+            val save = h.service.addMember(h.player, member.name)
+            save.isDone shouldBe false
+            shouldThrow<CivsRejection> { step() }.reason shouldBe "city-busy"
+            h.commit(); save.join()
+            @Suppress("UNCHECKED_CAST")
+            val retry = factory.invoke(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
+            var result: CivSupplySnapshot? = null
+            repeat(16) { if (result == null) result = retry() }
+            result!!.cityId shouldBe h.city.id
+        }
+    }
+
+    test("reload clears dispatcher requests published before their first periodic observation") {
+        serviceScenario { h ->
+            h.start()
+            val current = requireNotNull(h.service.city(h.player))
+            val changed = current.copy(revision = current.revision + 1, workers = current.workers.mapIndexed { index, worker ->
+                if (index == 0) worker.copy(completedCycles = worker.completedCycles + 1) else worker
+            })
+            val publish = CivsService::class.java.getDeclaredMethod("publish", Settlement::class.java).also { it.isAccessible = true }
+            (publish.invoke(h.service, changed) as CompletableFuture<*>).join()
+            val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+                .get(h.service) as CivsSupplyDispatcher
+            dispatcher.cityIds() shouldBe setOf(current.id)
+            every { h.store.load() } returns CompletableFuture.completedFuture(emptyList())
+            val reloaded = h.service.reload(h.player)
+            dispatcher.cityIds() shouldBe emptySet()
+            h.tick(); reloaded.join()
+            h.service.city(h.player) shouldBe null
+            dispatcher.cityIds() shouldBe emptySet()
+        }
+    }
+
+    test("dispatcher ignores cosmetic revisions and refuses vanished stock before creating a pickup receipt") {
+        serviceScenario { h ->
+            val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
+            val smith = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.BLACKSMITH,
+                anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
+                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)), production = "IRON_PICKAXE")
+            val ready = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), warehouse, smith), workers = h.city.workers.take(2).mapIndexed { index, worker ->
+                    worker.copy(assignment = if (index == 0) warehouse.id else smith.id, nextDeliveryAt = 1)
+                })
+            civSupplyInputs(ready.copy(name = "Another name", revision = 12,
+                workers = ready.workers.map { it.copy(name = "Renamed", hunger = 4) })) shouldBe civSupplyInputs(ready)
+            h.world.loadChunk(1, 0)
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            h.world.getBlockAt(20, 63, 0).type = Material.BARREL
+            val source = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            source.setItem(0, ItemStack(Material.IRON_INGOT, 3))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.start()
+            val plan = h.supplyPlan(ready.workers.first().id)
+            source.clear() // External native writer with no inventory event, after async acceptance.
+            h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo).isCompletedExceptionally shouldBe true
+            h.service.city(h.player)!!.workers.first().cargo shouldBe null
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.first(), "IRON_INGOT") shouldBe 0
+            h.service.courierPlan(ready, ready.workers.first()) shouldBe null
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     test("worker-bag cargo waits for both journals and moves once through the real courier inventory") {
         serviceScenario { h ->
             val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
@@ -622,7 +712,7 @@ class CivsServiceTest : FunSpec({
                 buildings = listOf(h.city.buildings.first(), warehouse, quarry),
                 workers = listOf(h.city.workers.first().copy(assignment = warehouse.id, nextDeliveryAt = 1), producer))
             val meeting = CivPosition(20, 64, 3)
-            every { h.citizens.courierSources(ready.id, ready.workers.first().id) } returns mapOf(producer.id to meeting)
+            every { h.citizens.courierSupplySources(ready.id) } returns mapOf(producer.id to meeting)
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
             h.world.loadChunk(1, 0)
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
@@ -634,8 +724,7 @@ class CivsServiceTest : FunSpec({
             }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val plan = requireNotNull(CivsLogistics.plan(ready, ready.workers.first(), { emptyMap() },
-                mapOf(producer.id to meeting)) { _, _ -> 64L })
+            val plan = h.supplyPlan(ready.workers.first().id)
             val rejected = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
             journals.single().second.completeExceptionally(CivsRejection("storage-transaction-too-large")); h.tick()
             rejected.isCompletedExceptionally shouldBe true
@@ -682,9 +771,12 @@ class CivsServiceTest : FunSpec({
                 buildings = listOf(h.city.buildings.first(), warehouse, quarry),
                 workers = listOf(h.city.workers.first().copy(assignment = warehouse.id, nextDeliveryAt = 1), producer))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.world.loadChunk(1, 0)
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            h.world.getBlockAt(20, 63, 0).type = Material.BARREL
+            every { h.citizens.courierSupplySources(ready.id) } returns mapOf(producer.id to CivPosition(20, 64, 3))
             h.start()
-            val plan = requireNotNull(CivsLogistics.plan(ready, ready.workers.first(), { emptyMap() },
-                mapOf(producer.id to CivPosition(20, 64, 3))) { _, _ -> 64L })
+            val plan = h.supplyPlan(ready.workers.first().id)
             val member = h.paper.addPlayer("CargoWaitMember")
             val membership = h.service.addMember(h.player, member.name)
             val pickup = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
@@ -3475,7 +3567,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         service = CivsService(plugin, tasks, CivsSettings(Path.of("/tmp/civs-unused"), allowedWorlds, 96,
             maximumCities, 50_000, 4, 120, 48, 96), store, blueprints, Executor(Runnable::run), worldAdapter, renderer, citizens,
             backendTransfer = transfer, clock = { time }, boundaryRenderer = boundary,
-            storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin) { emptyArray() })
+            storageAdapter = storageFactory?.invoke(plugin) ?: CivsStorage(plugin) { emptyArray() },
+            supplyExecutor = Executor(Runnable::run))
     }
     fun prepareFounding(name: String, style: String): CompletableFuture<Unit> =
         service.beginFoundingSelection(player, name, style).thenCompose {
@@ -3483,6 +3576,14 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun supplyPlan(workerId: UUID): CivCourierPlan {
+        repeat(80) {
+            val current = requireNotNull(service.city(player))
+            service.courierPlan(current, current.workers.first { it.id == workerId })?.let { return it }
+            paper.performTicks(1)
+        }
+        error("Supply dispatcher did not assign worker $workerId within80 ticks")
+    }
     fun <T> await(future: CompletableFuture<T>): T {
         repeat(80) {
             if (future.isDone) return future.join()

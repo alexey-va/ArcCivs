@@ -13,9 +13,9 @@ internal class CivsContainerIndex(
 ) {
     private data class ChunkKey(val world: UUID, val x: Int, val z: Int)
     private data class Geometry(val world: UUID, val bounds: List<CivBox>, val controls: List<CivPosition>, val registered: List<CivPosition>) {
-        fun intersects(chunk: ChunkKey): Boolean = world == chunk.world && bounds.any {
+        fun intersects(chunk: ChunkKey): Boolean = world == chunk.world && (bounds.any {
             chunk.x in (it.min.x shr 4)..(it.max.x shr 4) && chunk.z in (it.min.z shr 4)..(it.max.z shr 4)
-        }
+        } || (controls + registered).any { (it.x shr 4) == chunk.x && (it.z shr 4) == chunk.z })
         fun contains(position: CivPosition): Boolean = bounds.any { it.contains(position.x, position.y, position.z) }
     }
     private class Entry(val geometry: Geometry) {
@@ -50,6 +50,15 @@ internal class CivsContainerIndex(
         update(city)
         return entries.getValue(city.id).positions
     }
+
+    /** Contents events start from chunk membership, never a scan across every city. */
+    fun citiesAt(worldId: UUID, position: CivPosition): Set<UUID> =
+        citiesInChunk(worldId, position.x shr 4, position.z shr 4).filterTo(linkedSetOf()) { id ->
+            entries[id]?.let { it.geometry.contains(position) || position in it.positions } == true
+        }
+
+    fun citiesInChunk(worldId: UUID, x: Int, z: Int): Set<UUID> =
+        subscribers[ChunkKey(worldId, x, z)].orEmpty().toSet()
 
     fun replace(cities: Collection<Settlement>) {
         // Explicit reload is also the resync boundary for external native edits that do not emit block events.

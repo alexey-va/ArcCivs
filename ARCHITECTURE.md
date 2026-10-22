@@ -387,9 +387,20 @@ reason and route planning from the committed pickup, including no-op pickups.
 A SITE hut can
 bootstrap its own construction; neither the target building nor the hall is a
 construction buffer. Explicit virtual mode uses the same hut-local scope.
-Active warehouses and builder huts can use their indexed internal containers. Couriers prefer
-construction requests, then rotate ingredient deliveries and collection of the currently
-selected output from other buildings by completed shipment count. Source-to-destination entrances must be within the existing
+Active warehouses and builder huts can use their indexed internal containers. One city-wide
+supply dispatcher captures native holders one 27-slot half/barrel per shared Core budget step.
+Only detached stock, capacity, requests, excess, positions and courier tokens enter its bounded
+CPU executor. A shared ledger assigns all couriers together: construction first, then waiting
+ordinary requests/collection with trip-distance and courier fairness. Source units, destination
+partial stacks/empty slots and producer meetings cannot be booked twice. Accepted empty trips
+survive unrelated city revisions; relevant native generations and domain inputs fence new
+results. Inventory events request refreshes; a fresh capture every 5 seconds also detects writers
+which bypass events. Stale inputs coalesce into a new calculation; failed trips receive backoff.
+Reload/close fence and drain jobs. Physical pickup freshly checks source surplus, demand, bag
+room, destination room and actual arrival before the existing durable receipt. Temporary
+reservations end only before pickup or at a definitive receipt outcome; unknown commits remain
+under recovery authority. Carried cargo remains durable even if its destination becomes full.
+Source-to-destination entrances must be within the existing
 88-block work-route bound. Warehouses use their own indexed native containers;
 ordinary producer sources and destinations are strictly their control barrels.
 Worksite orders include one spare IRON_HOE, IRON_AXE or IRON_PICKAXE per assigned

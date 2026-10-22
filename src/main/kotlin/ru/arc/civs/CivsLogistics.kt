@@ -80,7 +80,7 @@ object CivsLogistics {
         return requests
     }
 
-    private fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
+    internal fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(building) + when (building.type) {
@@ -179,11 +179,11 @@ object CivsLogistics {
             target.id, target.entrance, false)
     }
 
-    private fun shipmentId(city: UUID, worker: UUID, cycle: Long, source: UUID, target: UUID, material: String,
+    internal fun shipmentId(city: UUID, worker: UUID, cycle: Long, source: UUID, target: UUID, material: String,
         sourceWorkerId: UUID? = null): UUID = UUID.nameUUIDFromBytes(
         ("$city/$worker/$cycle/$source/$target/$material" + (sourceWorkerId?.let { "/$it" } ?: "")).toByteArray(StandardCharsets.UTF_8))
 
-    private fun constructionDestination(city: Settlement, buildingId: UUID, source: CivPosition): CivBuilding? {
+    internal fun constructionDestination(city: Settlement, buildingId: UUID, source: CivPosition): CivBuilding? {
         val stores = CivsRules.constructionStores(city, buildingId).filter { withinRoute(source, requireNotNull(it.control)) }
         return stores.firstOrNull { building -> city.workers.any { it.assignment == building.id } } ?: stores.firstOrNull()
     }

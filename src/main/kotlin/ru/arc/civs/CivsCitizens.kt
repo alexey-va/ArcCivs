@@ -83,6 +83,7 @@ class CivsCitizens(
     navigationWork: BudgetedTaskQueue? = null,
     navigationExecutor: Executor? = null,
     private val navigationClock: () -> Long = System::currentTimeMillis,
+    private val courierFailed: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
@@ -496,6 +497,34 @@ class CivsCitizens(
                     } == true && other.cycle.phase !in setOf(CitizenPhase.PAUSED, CitizenPhase.CLOSED)
                 }) return@mapNotNull null
             val feet = source.npc.location
+            worker.id to CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
+        }.toMap()
+    }
+
+    /** A missing actor can receive work before spawning; observed feet improve the trip estimate. */
+    internal fun courierPosition(cityId: UUID, workerId: UUID): CivPosition? {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid } ?: return null
+        val feet = actor.npc.location
+        return CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
+    }
+
+    internal fun courierUnavailable(cityId: UUID, workerId: UUID): Boolean {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId } ?: return false
+        return !actor.npc.isValid || actor.sleeping || actor.sheltering || actor.attacker != null ||
+            workerId in pendingHarm || actor.foodSource != null || actor.supplyPickup != null
+    }
+
+    /** One city-wide observation; the dispatcher reserves an offered producer for one courier. */
+    internal fun courierSupplySources(cityId: UUID): Map<UUID, CivPosition> {
+        checkMainThread()
+        val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return emptyMap()
+        return city.workers.mapNotNull { worker ->
+            val actor = actors[worker.id]?.takeIf { sourceReady(it, city, worker) } ?: return@mapNotNull null
+            if (actor.courierRetry.exhausted && courierObservedAt >= actor.courierRetryAfter) actor.courierRetry = CitizenRetry()
+            if (!actor.courierRetry.ready(courierObservedAt)) return@mapNotNull null
+            val feet = actor.npc.location
             worker.id to CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
         }.toMap()
     }
@@ -1932,6 +1961,9 @@ class CivsCitizens(
     }
 
     private fun pause(actor: Actor, reason: String, now: Long) {
+        actor.plan.courier?.takeIf { !it.carrying && reason in setOf("route-unreachable", "delivery-failed") }?.let {
+            courierFailed(actor.cityId, actor.workerId, it.cargo)
+        }
         releaseCourierSource(actor, now)
         stopCamp(actor, reason)
         cancelRoute(actor)

@@ -48,6 +48,7 @@ class CivsService(
     boundaryRenderer: CivsBoundaryRenderer? = null,
     storageAdapter: CivsStorage? = null,
     private val offlinePlayerData: ru.arc.paper.player.PaperOfflinePlayerData? = null,
+    supplyExecutor: Executor? = null,
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
         val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
@@ -151,9 +152,14 @@ class CivsService(
         productionReady = ::productionReady, workInputsReady = ::workInputsReady,
         backgroundActive = chunkLoading::active,
         navigationTasks = tasks, navigationWork = nativeWork,
+        courierFailed = { cityId, workerId, cargo ->
+            if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
+        },
         residentSupplySource = ::residentSupplySource, prepareSupplies = ::prepareResidentSupplies,
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
+    private val supply = CivsSupplyDispatcher(tasks, nativeWork, ::captureSupply, ::validateSupply, supplyExecutor, clock)
+    private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
 
     init {
         plugin.server.pluginManager.registerEvents(this, plugin)
@@ -162,10 +168,12 @@ class CivsService(
         tasks.runTimer(1, 1) {
             chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList())
             resumeCityActions()
+            if (ready()) supply.pulse()
             if (ready()) citizens.activateNavigating()
         }
         tasks.runTimer(5, 5) {
             if (ready()) {
+                pulseSupply()
                 worksites.pulse(cities.values)
                 citizens.pulseFieldWork(now())
             }
@@ -1419,12 +1427,65 @@ class CivsService(
             }
         }
 
-    private fun courierPlan(city: Settlement, worker: CivWorker): CivCourierPlan? =
-        CivsLogistics.plan(city, worker, localStocks(city), citizens.courierSources(city.id, worker.id)) { building, material ->
-            try { storage.cargoRoom(city, building, material) } catch (failure: CivsRejection) {
-                if (failure.reason in setOf("storage-unavailable", "storage-container-invalid", "building-not-found")) 0L else throw failure
+    internal fun courierPlan(city: Settlement, worker: CivWorker): CivCourierPlan? {
+        worker.cargo?.let { cargo ->
+            val target = CivsLogistics.destination(city, cargo) ?: return null
+            return CivCourierPlan(cargo, target.id, target.entrance, true)
+        }
+        return supply.plan(city.id, worker.id)?.takeIf { plan ->
+            worker.assignment == plan.cargo.warehouseId &&
+                CivsLogistics.shipmentId(city.id, worker.id, worker.completedCycles, plan.cargo.sourceBuildingId,
+                    plan.cargo.targetBuildingId, plan.cargo.material, plan.cargo.sourceWorkerId) == plan.cargo.id
+        }
+    }
+
+    private fun pulseSupply() {
+        val relevant = cities.values.filter { city -> city.pendingDeletion == null && city.inventory != null &&
+            city.id !in unhealthy && city.workers.any { worker ->
+                worker.cargo != null || worker.assignment?.let(city::building)?.type == BuildingType.WAREHOUSE
+            } }
+        val ids = relevant.mapTo(hashSetOf(), Settlement::id)
+        (supply.cityIds() - ids).forEach { supply.remove(it); supplyObservations.remove(it) }
+        for (city in relevant) {
+            val revision = storage.supplyRevision(city.id)
+            val previous = supplyObservations[city.id]
+            if (previous == null || revision != previous.first || now() - previous.second >= 5_000L) {
+                supply.request(city.id)
+                supplyObservations[city.id] = revision to now()
             }
         }
+    }
+
+    private fun captureSupply(cityId: UUID, retained: Map<UUID, CivCourierPlan>): () -> CivSupplySnapshot? {
+        val city = cities[cityId]?.takeIf { ready() && cityId !in unhealthy && it.pendingDeletion == null && it.inventory != null }
+            ?: throw CivsRejection("storage-unavailable")
+        if (cityId in busy) throw CivsRejection("city-busy")
+        val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
+            { citizens.courierPosition(cityId, it) }, { citizens.courierSupplySources(cityId) },
+            { citizens.courierUnavailable(cityId, it) })
+        return {
+            if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
+            if (cityId in busy) throw CivsRejection("city-busy")
+            capture.step()
+        }
+    }
+
+    private fun validateSupply(snapshot: CivSupplySnapshot, plans: Map<UUID, CivCourierPlan>): Boolean {
+        val city = cities[snapshot.cityId]?.takeIf { ready() && it.id !in busy && it.id !in unhealthy } ?: return false
+        val observation = snapshot.inputKey as? CivSupplyObservation ?: return false
+        if (observation.inputs != civSupplyInputs(city)) return false
+        if (plans.any { (workerId, plan) -> !plan.carrying && citizens.courierUnavailable(city.id, workerId) }) return false
+        val meetings = if (plans.values.any { !it.carrying && it.cargo.sourceWorkerId != null })
+            citizens.courierSupplySources(city.id) else emptyMap()
+        if (plans.values.any { !it.carrying && it.cargo.sourceWorkerId?.let { source ->
+                meetings[source] != it.cargo.sourceEntrance
+            } == true }) return false
+        val buildings = plans.values.flatMap { plan ->
+            if (plan.carrying || plan.cargo.sourceWorkerId != null) listOf(plan.destinationBuildingId)
+            else listOf(plan.cargo.sourceBuildingId, plan.destinationBuildingId)
+        }.toSet()
+        return storage.supplyCaptureCurrent(city, observation.capture, buildings)
+    }
 
     internal fun pickupCargo(cityId: UUID, workerId: UUID, requested: CivCargo): CompletableFuture<Settlement> =
         action("cargo_pickup", null, "city" to cityId, "worker" to workerId, "shipment" to requested.id) {
@@ -1435,17 +1496,30 @@ class CivsService(
                     rejectIf(cargo.id != requested.id, "stale-delivery")
                     return@afterCityAvailable CompletableFuture.completedFuture(city)
                 }
-                val cargo = if (requested.sourceWorkerId != null) {
-                    val source = city.workers.firstOrNull { it.id == requested.sourceWorkerId } ?: throw CivsRejection("stale-delivery")
-                    val amount = minOf(requested.amount, CivsLogistics.workerExcess(city, source)[requested.material] ?: 0L,
-                        CivsEquipment.supplyRoom(worker, Material.valueOf(requested.material)).toLong())
-                    rejectIf(amount == 0L, "stale-delivery")
-                    requested.copy(amount = amount)
+                val accepted = courierPlan(city, worker)?.takeUnless { it.carrying }?.cargo ?: throw CivsRejection("stale-delivery")
+                rejectIf(accepted.id != requested.id || accepted.sourceEntrance != requested.sourceEntrance, "stale-delivery")
+                val available = if (accepted.sourceWorkerId != null) {
+                    val source = city.workers.firstOrNull { it.id == accepted.sourceWorkerId } ?: throw CivsRejection("stale-delivery")
+                    CivsLogistics.workerExcess(city, source)[accepted.material] ?: 0L
                 } else {
-                    val current = courierPlan(city, worker)?.takeUnless { it.carrying } ?: throw CivsRejection("stale-delivery")
-                    rejectIf(current.cargo.id != requested.id || current.cargo.sourceEntrance != requested.sourceEntrance, "stale-delivery")
-                    current.cargo.copy(amount = minOf(current.cargo.amount, requested.amount))
+                    val count = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
+                    val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else
+                        city.building(accepted.sourceBuildingId)?.let { CivsLogistics.desiredStock(city, it)[accepted.material] } ?: 0L
+                    (count - reserve).coerceAtLeast(0)
                 }
+                val needed = if (accepted.sourceBuildingId != accepted.warehouseId) CivsLogistics.MAX_CARGO else {
+                    CivsLogistics.requests(city, localStocks(city)).firstOrNull { request ->
+                        request.material == accepted.material && (request.buildingId == accepted.targetBuildingId ||
+                            request.construction && city.construction?.let { order ->
+                                CivsRules.constructionStores(city, order.buildingId).any { it.id == accepted.targetBuildingId }
+                            } == true)
+                    }?.let { (it.needed - it.inTransit).coerceAtLeast(0) } ?: 0L
+                }
+                val amount = minOf(accepted.amount, requested.amount, available, needed,
+                    CivsEquipment.supplyRoom(worker, Material.valueOf(accepted.material)).toLong(),
+                    storage.cargoRoom(city, accepted.targetBuildingId, accepted.material))
+                rejectIf(amount <= 0L, "stale-delivery")
+                val cargo = accepted.copy(amount = amount)
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
                 if (cargo.sourceWorkerId != null) citizens.requireCargoPickupArrival(cityId, workerId, cargo)
                 else citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
@@ -1463,9 +1537,17 @@ class CivsService(
                         }, "carried_before" to carriedBefore,
                         "carried_after" to CivsEquipment.plainCount(saved.workers.first { it.id == workerId }, cargo.material),
                         "revision" to saved.revision)
+                    supply.release(cityId, workerId)
                     saved
                 }
             }
+        }.whenComplete { _, failure ->
+            val current = if (!closed) supply.plan(cityId, workerId)?.cargo else null
+            if (!closed && failure != null && cityId !in unhealthy && current?.id == requested.id &&
+                current.sourceEntrance == requested.sourceEntrance &&
+                CivsDiagnostics.rejection(failure)?.reason in
+                setOf("stale-delivery", "materials-missing", "storage-full", "route-unreachable", "building-not-found", "control-missing"))
+                supply.release(cityId, workerId, failed = true)
         }
 
     internal fun dropoffCargo(cityId: UUID, workerId: UUID, requested: CivCargo, destinationId: UUID): CompletableFuture<Settlement> =
@@ -1480,6 +1562,7 @@ class CivsService(
                     CivsLogistics.unload(before, workerId, cargo.id, now()).copy(inventory = inventory)
                 }.whenComplete { saved, failure ->
                     if (failure == null) {
+                        supply.release(cityId, workerId)
                         nextMaterialCheckAt = 0L
                         CivsDiagnostics.event("cargo_dropoff_committed", "city" to cityId, "worker" to workerId,
                             "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
@@ -1564,6 +1647,7 @@ class CivsService(
             }
             CivsDiagnostics.event("inventory_applied", "city" to tx.cityId, "transaction" to tx.id,
                 "revision" to tx.after.revision, "slots" to tx.changes.size)
+            storage.invalidateSupply(tx.cityId)
             store.save(tx.after).whenCompleteSync(tasks) { saved, failure ->
                 if (failure != null) return@whenCompleteSync fail(CivsRejection("inventory-recovery").also { it.initCause(failure) })
                 publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
@@ -2069,6 +2153,8 @@ class CivsService(
         checkMain()
         rejectIf(loading || closed, "not-ready")
         loading = true
+        supply.clear()
+        supplyObservations.clear()
         loadFailure = null
         chunkLoading.reset(maximumLoadedChunks)
         (previews.keys + selections.keys + requests.keys).toList().forEach { cancelPreview(it, "reload") }
@@ -2167,6 +2253,7 @@ class CivsService(
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
             previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion) {
             cities[city.id] = city
+            if (civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
             return CompletableFuture.completedFuture(Unit)
         }
         val expected = geometryGeneration
@@ -2180,6 +2267,8 @@ class CivsService(
             } else runCatching {
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
+                if (city == null) { supply.remove(cityId); supplyObservations.remove(cityId) }
+                else supply.request(cityId)
                 protection.publish(requireNotNull(prepared))
                 geometryGeneration++
             }.onSuccess { result.complete(Unit) }.onFailure(result::completeExceptionally)
@@ -2927,6 +3016,7 @@ class CivsService(
         if (closed) return
         closed = true
         initialized = false
+        supply.close()
         HandlerList.unregisterAll(this)
         placementAccess.clear()
         constructionFocus.clear()
@@ -2960,7 +3050,7 @@ class CivsService(
         updateHealth()
     }
 
-    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain)
+    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain, supply.drained())
 
     companion object {
         internal fun areasOverlap(a: CivPosition, ar: Int, b: CivPosition, br: Int): Boolean =
