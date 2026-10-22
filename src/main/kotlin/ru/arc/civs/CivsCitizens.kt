@@ -1384,7 +1384,7 @@ class CivsCitizens(
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) },
             { ground -> trip?.cost(ground, surfaceSpeed) ?: 1.0 })
-        val timeout = if (actor.sheltering) 10_000L else (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
+        val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = Route(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
         actor.route?.progressTick = navigationTick
@@ -1441,6 +1441,8 @@ class CivsCitizens(
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
             "tick" to Bukkit.getCurrentTick(), "navigation_tick" to navigationTick, "cadence_ms" to navigationCadenceMillis,
             "body_yaw" to actor.npc.bodyYaw, "head_yaw" to actor.npc.headYaw,
+            "previous_body_yaw" to actor.observedYaw,
+            "frame_turn_degrees" to actor.observedYaw?.let { abs(citizenAngleChange(it, actor.npc.bodyYaw)) },
             "turn_degrees" to actor.turnAmount,
             "waypoint" to route?.motion?.destination?.point()?.coordinates(), "remaining_nodes" to route?.motion?.remainingNodes,
             "path_progress" to route?.motion?.forwardProgress, "episode_progress" to actor.navigationEpisodeProgress,
@@ -2015,7 +2017,7 @@ class CivsCitizens(
         val city: Settlement?, val error: Throwable?)
 
     private companion object {
-        val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED")
+        val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 34)
     }
 }
 

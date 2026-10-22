@@ -700,6 +700,75 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a valid thirty-block night walk continues beyond ten seconds and reaches home without recovery") {
+        residentRuntime { h ->
+            val home = h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                schematicId = "house1", anchor = CivPosition(29, 64, 0), entrance = CivPosition(29, 64, 0),
+                bounds = CivBox(CivPosition(27, 64, -2), CivPosition(31, 68, 2)), control = null)
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + home,
+                workers = h.city.workers.map { it.copy(homeId = home.id) }))
+            for (x in -1..3) for (z in -1..1) h.world.loadChunk(x, z)
+            h.world.time = 13_000
+            val actor = h.owner.collisionActors().single()
+            val origin = requireNotNull(h.owner.residentFeet(h.workerId))
+            val messages = mutableListOf<String>()
+            val handler = object : Handler() {
+                override fun publish(record: LogRecord) { messages += record.message }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            h.logger.addHandler(handler)
+            try {
+                h.owner.pulse(2_000)
+                var walking = false
+                // Drain bounded A* admission without spending any simulated travel time.
+                for (frame in 1..512) {
+                    val before = requireNotNull(h.owner.residentFeet(h.workerId))
+                    h.owner.activateNavigating()
+                    val after = requireNotNull(h.owner.residentFeet(h.workerId))
+                    (before.distance(after) <= .118251) shouldBe true
+                    if (after.distanceSquared(origin) > .000001) { walking = true; break }
+                }
+                withClue("planner=${h.navigationState()} diagnostics=${messages.takeLast(4)}") { walking shouldBe true }
+                var atTenSeconds: Location? = null
+                var slept = false
+                // Thirty seconds is bounded and below this route's ordinary 55-second budget.
+                for (tick in 1..600) {
+                    val before = requireNotNull(h.owner.residentFeet(h.workerId))
+                    h.owner.activateNavigating()
+                    if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
+                    // Sleeping raises only the visible mesh; logical feet still prove a real arrival.
+                    val after = requireNotNull(h.owner.residentFeet(h.workerId))
+                    withClue("tick=$tick before=$before after=$after status=${h.owner.status(h.workerId)}") {
+                        (before.distance(after) <= .118251) shouldBe true
+                    }
+                    if (tick == 200) atTenSeconds = after
+                    if (tick == 220) {
+                        h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
+                        actor.pose shouldBe PacketNpcPose.STANDING
+                        home.bounds.contains(after.blockX, after.blockY, after.blockZ) shouldBe false
+                        (after.distance(requireNotNull(atTenSeconds)) > .5) shouldBe true
+                    }
+                    if (actor.pose == PacketNpcPose.SLEEPING) {
+                        (tick > 220) shouldBe true
+                        slept = true
+                        break
+                    }
+                }
+                withClue("status=${h.owner.status(h.workerId)} location=${actor.location} " +
+                    "planner=${h.navigationState()} diagnostics=${messages.takeLast(4)}") { slept shouldBe true }
+                val feet = requireNotNull(h.owner.residentFeet(h.workerId))
+                home.bounds.contains(feet.blockX, feet.blockY, feet.blockZ) shouldBe true
+                citizenPacketSupported(h.world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+                h.owner.status(h.workerId) shouldBe "workers.status.sleeping"
+                messages.none { "citizen_route_recovered" in it || "ARCCIVS_NAVIGATION_FAILED" in it } shouldBe true
+                h.spawns shouldBe 1
+                h.deliveries shouldBe 0
+                h.city.workers.single().completedCycles shouldBe 0L
+            } finally { h.logger.removeHandler(handler) }
+        }
+    }
+
     test("an enclosed builder waiting for materials recovers into its home at night without work credit") {
         residentRuntime { h ->
             val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)

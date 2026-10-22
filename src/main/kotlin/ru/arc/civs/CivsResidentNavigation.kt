@@ -346,6 +346,9 @@ internal class CitizenPacketRoute(
         forwardProgress += min(earned, from.distance(point))
         val dx = point.x - from.x
         val dz = point.z - from.z
+        // Exact geometric endpoints have no facing. A pure vertical leg must keep
+        // its incoming angle instead of inheriting Location's default zero yaw.
+        point.yaw = from.yaw
         if (heading != null || dx * dx + dz * dz > .00001) {
             val wanted = heading ?: Math.toDegrees(atan2(-dx, dz)).toFloat()
             point.yaw = citizenTurn(from.yaw, wanted, CITIZEN_TURN_PER_TICK)

@@ -66,6 +66,47 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("exact vertical endpoints preserve the incoming yaw and bounded pitch on ascent descent and settling") {
+        MockBukkitTestRuntime.open().use {
+            for ((startY, targetY) in listOf(64.0 to 65.0, 65.0 to 64.0, 64.1875 to 64.0)) {
+                val terrain = ResidentRouteTerrain()
+                if (startY % 1.0 == 0.0) for (y in 64..66)
+                    terrain.blocks[CivPosition(0, y, 0)] = Material.LADDER
+                for (yaw in listOf(47f, 179f, -179f, 539f, -539f)) {
+                    var at = Location(terrain.world, .5, startY, .5, yaw, 24f)
+                    val target = Location(terrain.world, .5, targetY, .5)
+                    val route = CitizenPacketRoute(terrain.world, at, target,
+                        { it.x == 0 && it.z == 0 && it.y in 64..66 }, { _, _ -> true }, { 1.0 })
+                    repeat(256) { if (route.searching) route.expand() }
+                    route.searching shouldBe false
+                    route.failure shouldBe null
+                    var moves = 0
+                    repeat(16) { tick ->
+                        route.move(at, 1.0) { true }?.let { next ->
+                            withClue("fromY=$startY targetY=$targetY yaw=$yaw tick=$tick from=$at next=$next") {
+                                next.x shouldBe at.x
+                                next.z shouldBe at.z
+                                next.yaw shouldBe yaw
+                                next.pitch shouldBe maxOf(0f, at.pitch - CITIZEN_TURN_PER_TICK)
+                                (at.distance(next) in .000001.. .215001) shouldBe true
+                                citizenPacketStepClear(terrain.world, CitizenPoint(at.x, at.y, at.z),
+                                    CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                            }
+                            at = next
+                            moves++
+                        }
+                    }
+                    (moves > 0) shouldBe true
+                    route.failure shouldBe null
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    at.yaw shouldBe yaw
+                    if (startY % 1.0 != 0.0) at.pitch shouldBe 16f
+                }
+            }
+        }
+    }
+
     test("sleep clearance rotates the full native body and rejects walls and fire beyond standing feet") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
@@ -776,6 +817,20 @@ class CivsResidentNavigationTest : FunSpec({
                     previousPitch = pitch
                 }
                 repeat(6) { citizenFace(npc, -sign * 179f, 48f); frame() }
+                // An exact settling endpoint must not reset either packet-shaped
+                // angle before the following horizontal route takes ownership.
+                val grounded = npc.location
+                npc.teleport(grounded.clone().add(0.0, .125, 0.0))
+                val settling = CitizenPacketRoute(terrain.world, npc.location, grounded,
+                    { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
+                repeat(256) { if (settling.searching) settling.expand() }
+                val settled = requireNotNull(settling.move(npc.location, .8 * 1.25) { true })
+                npc.teleport(settled)
+                npc.headYaw = settled.yaw
+                settling.finished shouldBe true
+                npc.bodyYaw shouldBe previousBody
+                npc.headYaw shouldBe previousHead
+                frame()
                 var route = CitizenPacketRoute(terrain.world, npc.location, Location(terrain.world, 5.5, 63.9375, .5),
                     { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
                 repeat(20_000) { if (route.searching) route.expand() }
