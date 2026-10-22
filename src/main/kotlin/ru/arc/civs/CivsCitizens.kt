@@ -779,7 +779,6 @@ class CivsCitizens(
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> {
                 val target = if (cycle.phase == CitizenPhase.TO_WORK) requireNotNull(actor.plan.workplace) else actor.plan.storage
                 if (arrivedAt(actor, city, world, target)) {
-                    cancelRoute(actor)
                     arriveForWork(actor, city, worker, now)
                     statuses[actor.workerId] = citizenWorkStatus(actor.plan, actor.cycle.phase) ?: actor.cycle.status()
                     // Arrival starts the observed work interval on this pulse. Its first
@@ -802,7 +801,6 @@ class CivsCitizens(
                             CitizenNavigationOutcome.PENDING -> Unit
                             CitizenNavigationOutcome.ARRIVED -> {
                                 route.trip?.let { paths.complete(city, it) }
-                                cancelRoute(actor)
                                 arriveForWork(actor, city, worker, now)
                             }
                             else -> pauseNavigation(actor, "route-unreachable", outcome.name.lowercase(), route.target, now)
@@ -919,6 +917,16 @@ class CivsCitizens(
     }
 
     private fun arriveForWork(actor: Actor, city: Settlement, worker: CivWorker, now: Long) {
+        actor.route?.takeIf { it.motion.forwardProgress > 0.0 }?.let { route ->
+            val actual = actor.npc.location.point()
+            CivsDiagnostics.event("citizen_route_arrived", "city" to city.id, "worker" to actor.workerId,
+                "mode" to "walked", "phase" to actor.cycle.phase, "cycle" to worker.completedCycles,
+                "from" to route.from.coordinates(), "actual" to actual.coordinates(), "target" to route.target.point().coordinates(),
+                "path_progress" to route.motion.forwardProgress, "displacement" to sqrt(route.from.distanceSquared(actual)),
+                "distance" to sqrt(actual.distanceSquared(route.target.point())),
+                "elapsed_ms" to now - route.startedAt)
+        }
+        cancelRoute(actor)
         if (actor.cycle.phase == CitizenPhase.TO_STORAGE && city.inventory != null && actor.plan.courier == null &&
             actor.plan.type !in CivsWorksites.TYPES &&
             (actor.plan.type == BuildingType.BUILDER_HUT || !workInputsReady(city, worker))) {
@@ -1240,6 +1248,7 @@ class CivsCitizens(
             CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
                 "outcome" to outcome.name.lowercase(), "target" to route.target.point().coordinates(),
                 "reason" to route.motion.failure, "actual" to actor.npc.location.point().coordinates(),
+                "from" to route.from.coordinates(), "path_progress" to route.motion.forwardProgress,
                 "path_nodes" to route.motion.nodeCount, "elapsed_ms" to now - route.startedAt)
             return
         }

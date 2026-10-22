@@ -1398,6 +1398,87 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    test("gravel arriving after a quarry floor was selected replaces the obstructed job before any paid receipt") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-late-gravel").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineLateGravel")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40)).copy(
+                    rotation = 270, bounds = CivBox(CivPosition(-102, 63, -50), CivPosition(-86, 82, -33)),
+                    entrance = CivPosition(-85, 69, -40), control = CivPosition(-93, 69, -40))
+                val floor = CivPosition(-87, 56, -39)
+                val floorStep = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.indexOfFirst {
+                    it.after == "minecraft:cobblestone" && CivsWorksiteLayouts.point(mine, it.point) == floor
+                }.also { (it >= 0) shouldBe true }.toLong()
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                    .copy(radius = 200, minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, floorStep)))
+                val fallen = floor.copy(y = 57)
+                for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                for (x in -89..-87) for (z in -40..-39) {
+                    for (y in 57..59) world.getBlockAt(x, y, z).type = Material.AIR
+                    world.getBlockAt(x, 60, z).type = Material.COBBLESTONE
+                    if (x != floor.x || z != floor.z) world.getBlockAt(x, 56, z).type = Material.COBBLESTONE
+                }
+                var paused = false
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
+                    val workerId = city.workers.single().id
+                    val originalStone = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
+                    fun nextWork(): CivWorldWork {
+                        repeat(64) {
+                            val before = world.rayTraces
+                            runtime.pulse(listOf(city))
+                            (world.rayTraces - before <= 8) shouldBe true
+                            runtime.plan(city, city.workers.single())?.let { return it }
+                        }
+                        error("Mine failed to replan: ${runtime.idleReason(city, city.workers.single())}")
+                    }
+                    fun commit(work: CivWorldWork) {
+                        runtime.validate(city, work)
+                        work.changes.forEach { cell ->
+                            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                                .setBlockData(Bukkit.createBlockData(cell.after), false)
+                        }
+                        city = CivsRules.finishWorldWork(city, work, 20_000 + city.workers.single().completedCycles * 5_000)
+                        runtime.invalidate(workerId)
+                    }
+                    try {
+                        val paidFloor = nextWork()
+                        paidFloor.changes.single().position shouldBe floor
+                        paidFloor.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        // The falling block was in flight when the floor ray was admitted.
+                        world.getBlockAt(fallen.x, fallen.y, fallen.z).type = Material.GRAVEL
+                        citizenCanReachBlock(world, Location(world, paidFloor.standing.x + .5,
+                            paidFloor.standing.y + 1.62, paidFloor.standing.z + .5), floor, CITIZEN_MINE_REACH) shouldBe false
+                        paused = true
+                        repeat(4) { runtime.pulse(listOf(city)) }
+                        runtime.plan(city, city.workers.single()) shouldBe paidFloor
+                        paused = false
+                        val clearance = nextWork()
+                        clearance.changes.single().position shouldBe fallen
+                        clearance.changes.single().after shouldBe "minecraft:air"
+                        clearance.inputs shouldBe emptyMap()
+                        clearance.outputs shouldBe mapOf("GRAVEL" to 1L)
+                        clearance.miningStep shouldBe floorStep
+                        city.workers.single().completedCycles shouldBe 0L
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe originalStone
+                        commit(clearance)
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe floorStep
+                        val resumed = nextWork()
+                        resumed.changes.single().position shouldBe floor
+                        resumed.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        commit(resumed)
+                        city.workers.single().completedCycles shouldBe 2L
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe floorStep + 1
+                        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
+                        CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe originalStone - 1
+                    } finally { tasks.close() }
+                }
+            }
+        }
+    }
+
     test("work position search continues within its shared ray budget and reports an actual blocked ray only after exhaustion") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->

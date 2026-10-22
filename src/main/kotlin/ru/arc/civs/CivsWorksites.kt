@@ -101,14 +101,22 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val availableJobs = jobs.filterNot { isPaused(it.first.id) }
         if (availableJobs.isEmpty()) return
         val (city, worker, building) = availableJobs[Math.floorMod(cursor++, availableJobs.size)]
-        val current = plan(city, worker)
-        if (current != null && building.type != BuildingType.FARM) return
+        var current = plan(city, worker)
+        if (current != null && building.type !in setOf(BuildingType.FARM, BuildingType.QUARRY)) return
         val world = plugin.server.getWorld(city.worldId) ?: return
         if (world.time in 12_000L..23_000L || city.inventory == null) return
         spotChecksRemaining = 32
         spotRaysRemaining = 8
         mineChecksRemaining = 24
         spotSearchPending = false
+        if (current != null && building.type == BuildingType.QUARRY) {
+            // Falling blocks can cover an admitted floor while its worker travels.
+            // Keep receipt pauses above this revalidation; reuse the normal planner
+            // to select the real prerequisite cut before charging the floor input.
+            if (quarryWorkAccessible(city, building, world, current)) return
+            invalidate(worker.id)
+            current = null
+        }
         needs[worker.id] = Need(building, worker.completedCycles,
             if (building.type in setOf(BuildingType.FARM, BuildingType.QUARRY)) "searching-work" else "waiting-growth")
         val fieldScan = if (building.type == BuildingType.FARM) scanFarm(city, worker, building, world) else null
@@ -128,6 +136,23 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             cached[worker.id] = Cached(building, worker, work)
         }
         if (current == null || work != null) reportWorksite(city, worker, building, work)
+    }
+
+    private fun quarryWorkAccessible(city: Settlement, building: CivBuilding, world: World, work: CivWorldWork): Boolean {
+        val focus = citizenWorkFocus(work) ?: return true
+        val p = work.standing
+        spotChecksRemaining--
+        if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
+            civsProtectedBuildings(city).any { it.id != building.id &&
+                (p.x in it.bounds.min.x..it.bounds.max.x && p.z in it.bounds.min.z..it.bounds.max.z ||
+                    CivsWorksiteLayouts.isField(it, p.x, p.z)) } ||
+            !citizenStandable(world, p) ||
+            !citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) return false
+        val eye = Location(world, p.x + .5, p.y + 1.62, p.z + .5)
+        return citizenBlockAimPoints(eye, focus).any { aim ->
+            spotRaysRemaining--
+            citizenCanReachBlockPoint(world, eye, focus, aim, citizenWorkReach(building.type))
+        }
     }
 
     fun validate(city: Settlement, work: CivWorldWork) {

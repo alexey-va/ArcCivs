@@ -248,6 +248,42 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("a rounded doorway corner cannot skip the thin open door between its sampled endpoints") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in -72..-67) for (z in -49..-46) terrain.blocks[CivPosition(x, 70, z)] = Material.OAK_PLANKS
+            for (y in 71..72) {
+                terrain.blocks[CivPosition(-69, y, -48)] = Material.OAK_PLANKS
+                val door = CivPosition(-69, y, -49)
+                terrain.blocks[door] = Material.OAK_DOOR
+                // Saved Spawn doorway: east-facing, right-hinged, open, with a 3/16 panel.
+                terrain.boxes[door] = listOf(BoundingBox(0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0))
+            }
+            val fourth = CitizenPoint(-67.67777777777778, 71.0, -48.45458333333333)
+            val fifth = CitizenPoint(-67.77777777777779, 71.0, -48.48864583333333)
+            citizenPacketBodyClear(terrain.world, fourth, false) shouldBe true
+            citizenPacketBodyClear(terrain.world, fifth, false) shouldBe true
+            citizenPacketStepClear(terrain.world, fourth, fifth, false) shouldBe false
+
+            var at = Location(terrain.world, -67.5, 71.0, -46.5, 180f, 0f)
+            val target = Location(terrain.world, -71.5, 71.0, -48.5)
+            val route = CitizenPacketRoute(terrain.world, at, target,
+                { p -> p.y == 71 && (p.x == -68 && p.z in -49..-47 || p.z == -49 && p.x in -72..-68) },
+                { _, _ -> true }, { 1.0 })
+            repeat(5_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            repeat(160) { tick ->
+                route.move(at, .55) { true }?.let { next ->
+                    (at.distance(next) <= .118251) shouldBe true
+                    at = next
+                }
+                withClue("tick=$tick at=$at") { route.failure shouldBe null }
+            }
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+        }
+    }
+
     test("one shared admission budget gives every queued route progress and cancellation releases search") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
@@ -918,6 +954,7 @@ class CivsResidentNavigationTest : FunSpec({
 /** Explicit geometric unit fixture. It does not model a live server or claim native client movement. */
 private class ResidentRouteTerrain {
     val blocks = mutableMapOf<CivPosition, Material>()
+    val boxes = mutableMapOf<CivPosition, List<BoundingBox>>()
     var loaded = true
     var blockReads = 0
     val world = mockk<World>()
@@ -937,7 +974,7 @@ private class ResidentRouteTerrain {
             native.getOrPut(point) {
                 val shape = mockk<VoxelShape> {
                     every { boundingBoxes } answers {
-                        if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, when (material(point)) {
+                        boxes[point] ?: if (material(point).isSolid) listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, when (material(point)) {
                             Material.DIRT_PATH -> .9375
                             Material.CAMPFIRE, Material.SOUL_CAMPFIRE -> .4375
                             else -> 1.0

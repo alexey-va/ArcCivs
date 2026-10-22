@@ -546,6 +546,21 @@ internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: Citize
 
 private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
                                       occupied: CitizenPoint, collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)?): Boolean {
+    // Both ends of a short rounded corner can be clear while its middle clips a
+    // thin door panel. Sweep the same body used below through native block boxes.
+    val obstacles = mutableListOf<BoundingBox>()
+    for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
+        for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt()) {
+            if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
+            for (y in floor(min(from.y, to.y) + .001).toInt()..floor(max(from.y, to.y) + 1.799).toInt()) {
+                if (y !in world.minHeight until world.maxHeight) return false
+                val state = collision?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
+                if (state.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
+                else if (!allowDoors || !state.door) obstacles += state.boxes
+            }
+        }
+    if (citizenSlideBody(org.bukkit.util.Vector(from.x, from.y + .001, from.z),
+            org.bukkit.util.Vector(to.x, to.y + .001, to.z), .299, 1.798, .299, obstacles) != null) return false
     val distance = sqrt(from.distanceSquared(to))
     val samples = kotlin.math.ceil(distance / .15).toInt().coerceIn(1, 16)
     for (index in 1..samples) {
