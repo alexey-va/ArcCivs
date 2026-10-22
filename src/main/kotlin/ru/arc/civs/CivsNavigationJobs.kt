@@ -1,0 +1,233 @@
+package ru.arc.civs
+
+import org.bukkit.Bukkit
+import org.bukkit.Location
+import org.bukkit.World
+import org.bukkit.block.Block
+import org.bukkit.util.BoundingBox
+import ru.arc.core.BoundedAsyncExecutor
+import ru.arc.core.BudgetedTaskQueue
+import ru.arc.core.LifecycleTaskScope
+import java.util.concurrent.CancellationException
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
+import kotlin.math.floor
+
+/**
+ * Main-thread capture/result owner, like MineColonies' job/result/controller split. Core owns
+ * native scheduling and bounded worker admission. Each route has one pure slice OR one native
+ * cursor, never a worker waiting for Paper. Closing fences every result before draining workers.
+ */
+internal class CivsResidentNavigation(
+    private val tasks: LifecycleTaskScope,
+    nativeWork: BudgetedTaskQueue? = null,
+    executor: Executor? = null,
+) {
+    private class Job(val route: CitizenPacketRoute, val search: CitizenNavigationSearch) {
+        val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
+        var searching: CompletableFuture<CitizenSearchResult>? = null
+        var capturing: CompletableFuture<Unit>? = null
+        var capture: CitizenNavigationCapture? = null
+    }
+    private val owner = Thread.currentThread()
+    private val epoch = tasks.token()
+    private val ownsWork = nativeWork == null
+    private val work = nativeWork ?: BudgetedTaskQueue(tasks, SEARCH_OPERATIONS_PER_TICK, SEARCH_BUDGET_NANOS,
+        System::nanoTime, MAXIMUM_JOBS)
+    private val ownedExecutor = if (executor == null) BoundedAsyncExecutor("ArcCivs-navigation", 1, MAXIMUM_JOBS) else null
+    private val executor = executor ?: requireNotNull(ownedExecutor)
+    private val jobs = linkedMapOf<CitizenPacketRoute, Job>()
+    private var closed = false
+    private var terminal = CompletableFuture.completedFuture(Unit)
+
+    fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
+                stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
+                travelCost: (Block) -> Double): CitizenPacketRoute =
+        admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost))
+
+    fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute {
+        checkOwner()
+        // Replacing an unfinished search releases its admission slot. A ready previous path
+        // remains with the caller so a blocked-person detour can fall back to waiting on it.
+        if (route.searching) route.cancel()
+        return admit(route.replan(from, bodies))
+    }
+
+    private fun admit(route: CitizenPacketRoute): CitizenPacketRoute {
+        checkOwner()
+        retireCancelled()
+        if (closed || !tasks.isCurrent(epoch)) { route.planningFailed("cancelled"); return route }
+        if (jobs.size >= MAXIMUM_JOBS) { route.planningFailed("planner-busy"); return route }
+        val job = Job(route, route.newSearch())
+        jobs[route] = job
+        route.attachAsync(job.search::cancel)
+        dispatch(job, emptyList())
+        return route
+    }
+
+    /** Never waits. Native continuations and this pump spend the same authoritative tick budget. */
+    fun pulse() {
+        checkOwner()
+        if (closed) return
+        if (!tasks.isCurrent(epoch)) { clear(); return }
+        retireCancelled()
+        poll()
+        work.drainAvailable { Bukkit.getCurrentTick().toLong() }
+        poll()
+    }
+
+    private fun poll() {
+        for (job in jobs.values.toList()) {
+            if (!job.route.searching) continue
+            try {
+                val searching = job.searching
+                if (searching != null && searching.isDone) {
+                    job.searching = null
+                    val result = searching.join() // isDone above; no blocking gameplay-thread wait.
+                    job.route.recordSearch(result)
+                    if (result.probes.isEmpty()) {
+                        job.route.acceptSearch(result)
+                    } else {
+                        job.route.phase("capturing")
+                        val cursor = CitizenNavigationCapture(job.route, result.probes, job.terrain)
+                        job.capture = cursor
+                        job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching }, cursor::step)
+                    }
+                }
+                val capturing = job.capturing
+                if (job.route.searching && capturing != null && capturing.isDone) {
+                    job.capturing = null
+                    capturing.join() // Completion/failure only, never an incomplete future.
+                    val capture = requireNotNull(job.capture)
+                    job.capture = null
+                    dispatch(job, capture.result)
+                }
+            } catch (failure: RuntimeException) {
+                job.route.planningFailed(reason(failure))
+            }
+        }
+        retireCancelled()
+    }
+
+    private fun dispatch(job: Job, captures: List<CitizenSearchCapture>) {
+        job.route.phase("searching")
+        val search = job.search
+        // The runnable captures these two detached values, not Job/route or the owner callbacks.
+        job.searching = try { CompletableFuture.supplyAsync({ search.advance(captures) }, executor) }
+        catch (_: RejectedExecutionException) { CompletableFuture.failedFuture(RejectedExecutionException("Navigation worker is full")) }
+    }
+
+    private fun retireCancelled() {
+        val iterator = jobs.entries.iterator()
+        while (iterator.hasNext()) {
+            val job = iterator.next().value
+            if (job.route.searching) continue
+            job.search.cancel()
+            job.capturing?.cancel(false)
+            job.searching?.cancel(false)
+            job.capture = null
+            job.terrain.clear()
+            iterator.remove()
+        }
+    }
+
+    fun clear() {
+        checkOwner()
+        if (closed) return
+        closed = true
+        jobs.keys.toList().forEach(CitizenPacketRoute::cancel)
+        retireCancelled()
+        if (ownsWork) work.close()
+        terminal = ownedExecutor?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
+    }
+
+    fun drained(): CompletableFuture<Unit> = terminal.copy()
+
+    private fun checkOwner() = check(Thread.currentThread() === owner) { "Resident navigation requires its owning thread" }
+
+    private fun reason(failure: RuntimeException): String {
+        var cause: Throwable = failure
+        while (cause is CompletionException && cause.cause != null) cause = requireNotNull(cause.cause)
+        return when (cause) {
+            is CitizenNavigationCaptureLimit -> "capture-budget"
+            is CancellationException -> "cancelled"
+            is RejectedExecutionException -> "planner-busy"
+            else -> "planner-error"
+        }
+    }
+
+    companion object {
+        const val SEARCH_OPERATIONS_PER_TICK = 384
+        const val SEARCH_BUDGET_NANOS = 1_000_000L
+        const val MAXIMUM_JOBS = 48
+    }
+}
+
+internal class CitizenNavigationCaptureLimit : RuntimeException()
+
+/**
+ * One native block or policy callback per step. Geometry is retained only for this search;
+ * rebuilding a route starts with fresh terrain, and movement always bypasses the planning cache.
+ * A shared cache would require change listeners for all writers; the current bounded MVP does not.
+ */
+internal class CitizenNavigationCapture(
+    private val route: CitizenPacketRoute,
+    private val probes: List<CitizenSearchProbe>,
+    private val cached: MutableMap<CivPosition, CitizenTerrainBlock>,
+) {
+    private val bounds = route.captureLimits()
+    private val completed = mutableListOf<CitizenSearchCapture>()
+    val result: List<CitizenSearchCapture> get() = completed.toList()
+    private var probeIndex = 0
+    private var positions = emptyList<CivPosition>()
+    private var positionIndex = 0
+    private var blocks = emptyMap<CivPosition, CitizenTerrainBlock>()
+    private var candidates: List<CitizenSearchEdge>? = null
+    private var candidateIndex = 0
+    private val admitted = mutableListOf<CitizenSearchEdge>()
+
+    fun step(): Boolean {
+        if (probeIndex >= probes.size) return true
+        val probe = probes[probeIndex]
+        if (positions.isEmpty()) {
+            val n = probe.node
+            val y = floor(n.y).toInt()
+            // Full candidate body, support/heat row and +/-1 ascent. Include adjacent columns
+            // for an off-centre initial body, not just the centre-to-centre planned edge.
+            positions = buildList {
+                for (x in n.x - 1..n.x + 1) for (z in n.z - 1..n.z + 1) for (by in y - 2..y + 3)
+                    add(CivPosition(x, by, z))
+            }
+        }
+        while (positionIndex < positions.size) {
+            val point = positions[positionIndex++]
+            if (point in cached) continue
+            if (cached.size >= MAXIMUM_BLOCKS) throw CitizenNavigationCaptureLimit()
+            cached[point] = route.captureBlock(point)
+            return false
+        }
+        if (candidates == null) {
+            blocks = positions.associateWith { cached.getValue(it) }
+            candidates = citizenSearchCandidates(probe, blocks, bounds.first, bounds.second)
+        }
+        val edges = requireNotNull(candidates)
+        if (candidateIndex < edges.size) {
+            val edge = edges[candidateIndex++]
+            admitted += edge.copy(permitted = route.capturePermission(probe.from, edge.node.point()))
+            return false
+        }
+        completed += CitizenSearchCapture(probe, blocks, admitted.toList())
+        admitted.clear()
+        probeIndex++
+        positions = emptyList()
+        positionIndex = 0
+        blocks = emptyMap()
+        candidates = null
+        candidateIndex = 0
+        return probeIndex >= probes.size
+    }
+
+    companion object { const val MAXIMUM_BLOCKS = 32_768 }
+}

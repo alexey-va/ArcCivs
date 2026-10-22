@@ -17,9 +17,116 @@ import org.bukkit.util.BoundingBox
 import org.bukkit.util.VoxelShape
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.npc.PacketPlayerNpc
+import ru.arc.core.BoundedAsyncExecutor
+import ru.arc.core.BudgetedTaskQueue
+import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.LifecycleTaskScope
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
 
 class CivsResidentNavigationTest : FunSpec({
+    test("native capture shares one tick allowance fairly and bounded admission releases cancelled jobs") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("NavigationBudget")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
+            var tick = 0L
+            work.drainAvailable { tick }
+            val owner = CivsResidentNavigation(tasks, work, Executor(Runnable::run))
+            val terrain = ResidentRouteTerrain()
+            fun request() = owner.request(terrain.world, Location(terrain.world, .5, 64.0, .5),
+                Location(terrain.world, 5.5, 64.0, .5), terrain::allowed, { _, _ -> true }, { 1.0 })
+            try {
+                val routes = List(CivsResidentNavigation.MAXIMUM_JOBS) { request() }
+                routes.sumOf { it.capturedBlocks } shouldBe 0
+                request().failure shouldBe "planner-busy"
+                owner.pulse()
+                routes.sumOf { it.capturedBlocks } shouldBe 1
+                owner.pulse()
+                routes.sumOf { it.capturedBlocks } shouldBe 1
+                // Each real scheduler tick spends just one operation across all residents.
+                while (routes.any { it.capturedBlocks == 0 } && tick < routes.size) {
+                    tick++
+                    paper.performTicks(1)
+                    owner.pulse()
+                }
+                routes.all { it.capturedBlocks == 1 } shouldBe true
+                routes.first().cancel()
+                val replacement = request()
+                replacement.failure shouldBe null
+                replacement.searching shouldBe true
+                owner.clear()
+                val captured = terrain.blockReads
+                tick++
+                paper.performTicks(1)
+                owner.pulse()
+                terrain.blockReads shouldBe captured
+                routes.all { !it.searching && !it.navigating } shouldBe true
+                replacement.navigating shouldBe false
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+            }
+        }
+    }
+
+    test("a real worker only sees detached terrain and a cancelled completed slice cannot apply") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val main = Thread.currentThread()
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("NavigationThreads")))
+            val work = BudgetedTaskQueue(tasks, nanoTime = { 0L })
+            var tick = 0L
+            work.drainAvailable { tick }
+            val worker = BoundedAsyncExecutor("NavigationTest", 1, 48, false)
+            val workerThreads = ConcurrentHashMap.newKeySet<Thread>()
+            val executor = Executor { command -> worker.execute { workerThreads += Thread.currentThread(); command.run() } }
+            val owner = CivsResidentNavigation(tasks, work, executor)
+            val terrain = ResidentRouteTerrain()
+            var permissions = 0
+            fun request(targetX: Double) = owner.request(terrain.world, Location(terrain.world, .5, 64.0, .5),
+                Location(terrain.world, targetX, 64.0, .5),
+                { point -> check(Thread.currentThread() === main); permissions++; terrain.allowed(point) },
+                { _, _ -> check(Thread.currentThread() === main); permissions++; true },
+                { check(Thread.currentThread() === main); permissions++; 1.0 })
+            try {
+                val cancelled = request(5.5)
+                // Test-only barrier: make the result complete before cancellation, without sleeps.
+                worker.submit { Unit }.get(5, TimeUnit.SECONDS)
+                cancelled.cancel()
+                owner.pulse()
+                cancelled.nodeCount shouldBe 0
+                cancelled.capturedBlocks shouldBe 0
+                cancelled.endpoint shouldBe null
+                terrain.blockReads shouldBe 0
+
+                val route = request(3.5)
+                while (route.searching && tick < CitizenNavigationSearch.MAXIMUM_NODES) {
+                    worker.submit { Unit }.get(5, TimeUnit.SECONDS)
+                    owner.pulse()
+                    tick++
+                    paper.performTicks(1)
+                }
+                withClue("phase=${route.preparationPhase} nodes=${route.nodeCount} captured=${route.capturedBlocks}") {
+                    route.searching shouldBe false
+                    route.failure shouldBe null
+                }
+                route.endpoint shouldBe CitizenPoint(3.5, 64.0, .5)
+                (route.searchNanos > 0) shouldBe true
+                (permissions > 0) shouldBe true
+                (workerThreads.isNotEmpty() && main !in workerThreads) shouldBe true
+                cancelled.preparationPhase shouldBe "cancelled"
+                cancelled.endpoint shouldBe null
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+                worker.closeAsync().get(5, TimeUnit.SECONDS)
+            }
+        }
+    }
+
     test("a fractional ladder start descends onto its current rung and turns out through a low landing") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("fractional-ladder").also(paper.server::addWorld)
@@ -33,7 +140,7 @@ class CivsResidentNavigationTest : FunSpec({
             citizenPacketBodyClear(world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
             val route = CitizenPacketRoute(world, at, Location(world, 2.5, 64.0, .5),
                 { p -> p.x in 0..2 && p.z == 0 && p.y in 64..66 }, { _, _ -> true }, { 1.0 })
-            repeat(3_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             route.searching shouldBe false
             repeat(80) {
@@ -58,7 +165,7 @@ class CivsResidentNavigationTest : FunSpec({
             var at = Location(terrain.world, .5, 65.0, .5)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 3.5, 64.0, .5),
                 { p -> p.x in 0..3 && p.z == 0 && p.y in 64..65 }, { _, _ -> true }, { 1.0 })
-            repeat(3_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
             route.finished shouldBe true
@@ -77,7 +184,7 @@ class CivsResidentNavigationTest : FunSpec({
                     val target = Location(terrain.world, .5, targetY, .5)
                     val route = CitizenPacketRoute(terrain.world, at, target,
                         { it.x == 0 && it.z == 0 && it.y in 64..66 }, { _, _ -> true }, { 1.0 })
-                    repeat(256) { if (route.searching) route.expand() }
+                    route.prepare()
                     route.searching shouldBe false
                     route.failure shouldBe null
                     var moves = 0
@@ -150,7 +257,7 @@ class CivsResidentNavigationTest : FunSpec({
                 val route = CitizenPacketRoute(terrain.world, at,
                     Location(terrain.world, 20.5, 64.0, if (diagonal) 20.5 else .5),
                     { p -> p.x in 0..20 && p.z in 0..20 && p.y == 64 }, { _, _ -> true }, { 1.0 })
-                repeat(20_000) { if (route.searching) route.expand() }
+                route.prepare()
                 route.searching shouldBe false
                 route.failure shouldBe null
                 repeat(60) { tick ->
@@ -170,7 +277,7 @@ class CivsResidentNavigationTest : FunSpec({
             var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 20.5, 64.0, .5),
                 { p -> p.x in 0..20 && p.z == 0 && p.y == 64 }, { _, _ -> true }, { 1.0 })
-            repeat(20_000) { if (route.searching) route.expand() }
+            route.prepare()
             repeat(4) { at = requireNotNull(route.move(at, 1.0) { true }) }
             // The next step crosses a waypoint. A player blocking that tick must leave its
             // full budget unspent rather than allow a jump when the player moves away.
@@ -203,7 +310,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 4.5, 64.0, .5),
                 { p -> p.x in 0..4 && p.z in 0..2 && p.y in 63..64 },
                 { from, _ -> plannedStarts += from; true }, { 1.0 })
-            repeat(5_000) { if (route.searching) route.expand() }
+            route.prepare()
             plannedStarts.first() shouldBe origin
             route.failure shouldBe null
             repeat(120) { route.move(at, 1.0) { true }?.let { at = it } }
@@ -219,7 +326,7 @@ class CivsResidentNavigationTest : FunSpec({
             val terrain = ResidentRouteTerrain()
             for (z in -2..2) for (y in 64..65) terrain.blocks[CivPosition(2, y, z)] = Material.STONE
             val route = terrain.route()
-            repeat(20_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             route.searching shouldBe false
             var at = Location(terrain.world, .5, 64.0, .5)
@@ -240,7 +347,7 @@ class CivsResidentNavigationTest : FunSpec({
 
             val changed = ResidentRouteTerrain()
             val second = changed.route()
-            repeat(2_000) { if (second.searching) second.expand() }
+            second.prepare()
             val next = requireNotNull(second.destination)
             changed.blocks[CivPosition(next.blockX, 64, next.blockZ)] = Material.STONE
             second.move(Location(changed.world, .5, 64.0, .5, -90f, 0f), 1.0) { true } shouldBe null
@@ -270,7 +377,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = CitizenPacketRoute(terrain.world, at, target,
                 { p -> p.y == 71 && (p.x == -68 && p.z in -49..-47 || p.z == -49 && p.x in -72..-68) },
                 { _, _ -> true }, { 1.0 })
-            repeat(5_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             repeat(160) { tick ->
                 route.move(at, .55) { true }?.let { next ->
@@ -284,23 +391,6 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    test("one shared admission budget gives every queued route progress and cancellation releases search") {
-        MockBukkitTestRuntime.open().use {
-            val terrain = ResidentRouteTerrain()
-            val owner = CivsResidentNavigation()
-            val routes = List(48) {
-                owner.request(terrain.world, Location(terrain.world, .5, 64.0, .5),
-                    Location(terrain.world, 5.5, 64.0, .5), terrain::allowed, { _, _ -> true }, { 1.0 })
-            }
-            repeat(60) { owner.pulse() }
-            routes.all { it.nodeCount > 0 } shouldBe true
-            val searching = routes.filter { it.searching }
-            owner.clear()
-            searching.all { !it.searching && !it.navigating } shouldBe true
-            routes.forEach(CitizenPacketRoute::cancel)
-        }
-    }
-
     test("one-block ascent and descent keep every intermediate body outside solid support") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
@@ -308,7 +398,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = CitizenPacketRoute(terrain.world, Location(terrain.world, .5, 64.0, .5),
                 Location(terrain.world, 2.5, 64.0, .5),
                 { point -> point.x in 0..2 && point.z == 0 && point.y in 64..65 }, { _, _ -> true }, { 1.0 })
-            repeat(2_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             var at = Location(terrain.world, .5, 64.0, .5)
             var climbed = false
@@ -352,7 +442,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = CitizenPacketRoute(terrain.world, at, target,
                 { p -> (0..2).any { p.x == dx * it && p.z == dz * it } && p.y in 63..65 },
                 { _, _ -> true }, { 1.0 })
-            repeat(2_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.searching shouldBe false
             route.failure shouldBe null
             var moved = 0
@@ -389,7 +479,7 @@ class CivsResidentNavigationTest : FunSpec({
                     Location(terrain.world, from.x, from.y, from.z), Location(terrain.world, to.x, to.y, to.z),
                     { p -> p.z == 0 && p.x in 0..1 && p.y in 63..65 && (obstacle != "protected" || p.x != 1) },
                     { _, _ -> true }, { 1.0 })
-                repeat(2_000) { if (route.searching) route.expand() }
+                route.prepare()
                 withClue(obstacle) { route.failure shouldBe "no-path" }
             }
         }
@@ -407,7 +497,7 @@ class CivsResidentNavigationTest : FunSpec({
                 val target = if (returning) low else high
                 val route = CitizenPacketRoute(terrain.world, at, target,
                     { p -> p.x in 0..1 && p.z == 0 && p.y in 63..65 }, { _, _ -> true }, { 1.0 })
-                repeat(2_000) { if (route.searching) route.expand() }
+                route.prepare()
                 route.failure shouldBe null
                 repeat(100) { route.move(at, 1.0) { true }?.let { at = it } }
                 route.failure shouldBe null
@@ -432,7 +522,7 @@ class CivsResidentNavigationTest : FunSpec({
             val high = Location(terrain.world, 1.5, 64.0 + height, .5)
             val route = CitizenPacketRoute(terrain.world, if (returning) high else low, if (returning) low else high,
                 { p -> p.x in 0..1 && p.z == 0 && p.y in 64..66 }, { _, _ -> true }, { 1.0 })
-            repeat(2_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe "no-path"
         }
     }
@@ -450,7 +540,7 @@ class CivsResidentNavigationTest : FunSpec({
                     val route = CitizenPacketRoute(terrain.world, at,
                         Location(terrain.world, target.x + .5, target.y.toDouble(), target.z + .5),
                         { p -> p.x in -10..8 && p.z in -5..5 && p.y in 64..65 }, { _, _ -> true }, { 1.0 })
-                    repeat(20_000) { if (route.searching) route.expand() }
+                    route.prepare()
                     route.failure shouldBe null
                     route.searching shouldBe false
                     repeat(200) {
@@ -474,7 +564,7 @@ class CivsResidentNavigationTest : FunSpec({
                 val fire = terrain.world.getBlockAt(2, 64, 0).blockData as Lightable
                 fire.isLit = false
                 val route = terrain.route()
-                repeat(2_000) { if (route.searching) route.expand() }
+                route.prepare()
                 route.failure shouldBe null
                 fire.isLit = true // Shapes remain identical; execution must recheck the heat.
                 var at = Location(terrain.world, .5, 64.0, .5)
@@ -495,7 +585,7 @@ class CivsResidentNavigationTest : FunSpec({
                 citizenPacketCampfireClear(terrain.world, exposed) shouldBe false
                 val route = CitizenPacketRoute(terrain.world, Location(terrain.world, exposed.x, exposed.y, exposed.z),
                     Location(terrain.world, 5.5, 64.0, .5), terrain::allowed, { _, _ -> true }, { 1.0 })
-                repeat(2_000) { if (route.searching) route.expand() }
+                route.prepare()
                 route.failure shouldBe null
                 var at = Location(terrain.world, exposed.x, exposed.y, exposed.z)
                 repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
@@ -545,11 +635,11 @@ class CivsResidentNavigationTest : FunSpec({
                 { it.x in 0..5 && it.y == 64 && it.z == 0 && citizenIdleTerrain(terrain.world, it, buildings) },
                 { _, _ -> true }, { 1.0 })
             val outside = route(emptyList())
-            repeat(2_000) { if (outside.searching) outside.expand() }
+            outside.prepare()
             outside.failure shouldBe "no-path"
 
             val indoors = route(listOf(hall))
-            repeat(2_000) { if (indoors.searching) indoors.expand() }
+            indoors.prepare()
             indoors.failure shouldBe null
             var at = Location(terrain.world, .5, 64.0, .5)
             repeat(80) { indoors.move(at, 1.0) { true }?.let { at = it } }
@@ -562,7 +652,7 @@ class CivsResidentNavigationTest : FunSpec({
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
             val route = terrain.route()
-            repeat(2_000) { if (route.searching) route.expand() }
+            route.prepare()
             val waypoint = requireNotNull(route.destination)
             var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
             repeat(10) {
@@ -591,7 +681,7 @@ class CivsResidentNavigationTest : FunSpec({
                 val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 16.5, 64.0, toZ + .5),
                     { p -> p.x in 0..16 && p.z in -4..6 && p.y == 64 }, { _, _ -> true },
                     { block -> trip.cost(block) { 1.0 } })
-                repeat(20_000) { if (route.searching) route.expand() }
+                route.prepare()
                 route.failure shouldBe null
                 route.searching shouldBe false
                 val walked = linkedSetOf<CivPosition>()
@@ -633,7 +723,7 @@ class CivsResidentNavigationTest : FunSpec({
                 Location(terrain.world, 5.5, 64.0, .5),
                 { p -> terrain.allowed(p) && citizenRouteCellAllowed(protectedCity, emptySet(), p.x, p.z) },
                 { _, _ -> true }, { block -> preferred.cost(block) { 1.0 } })
-            repeat(20_000) { if (detour.searching) detour.expand() }
+            detour.prepare()
             detour.failure shouldBe null
             var at = Location(terrain.world, .5, 64.0, .5)
             repeat(160) { detour.move(at, 1.0) { true }?.let { next ->
@@ -646,7 +736,7 @@ class CivsResidentNavigationTest : FunSpec({
             val tree = CitizenPacketRoute(terrain.world, Location(terrain.world, .5, 64.0, .5),
                 Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.y == 64 && p.z == 0 },
                 { _, _ -> true }, { block -> preferred.cost(block) { 1.0 } })
-            repeat(2_000) { if (tree.searching) tree.expand() }
+            tree.prepare()
             tree.failure shouldBe "no-path"
         }
     }
@@ -669,7 +759,7 @@ class CivsResidentNavigationTest : FunSpec({
                     val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 16.5, at.y, .5),
                         { p -> p.x in 0..16 && p.z in 0..detour && p.y in 63..64 }, { _, _ -> true },
                         { ground -> trip.cost(ground) { if (it.type == Material.COBBLESTONE) 1.3 else 1.0 } })
-                    repeat(20_000) { if (route.searching) route.expand() }
+                    route.prepare()
                     route.failure shouldBe null
                     route.searching shouldBe false
                     val walked = linkedSetOf<CivPosition>()
@@ -705,7 +795,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = CitizenPacketRoute(terrain.world, Location(terrain.world, .95, 63.9375, .5),
                 Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.z == 0 && p.y in 63..64 },
                 { _, _ -> true }, { block -> trip.cost(block) { 1.0 } })
-            repeat(2_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             route.searching shouldBe false
             var at = Location(terrain.world, .95, 63.9375, .5)
@@ -736,10 +826,7 @@ class CivsResidentNavigationTest : FunSpec({
                 var at = Location(terrain.world, .5, 64.0, 3.5, sign * 539f, 0f)
                 val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, .5, 64.0, .5),
                     { p -> p.x == 0 && p.z in 0..3 && p.y == 64 }, { _, _ -> true }, { 1.0 })
-                for (step in 0 until 256) {
-                    if (!route.searching) break
-                    route.expand()
-                }
+                route.prepare()
                 route.searching shouldBe false
                 route.failure shouldBe null
                 val waypoint = requireNotNull(route.destination)
@@ -782,7 +869,7 @@ class CivsResidentNavigationTest : FunSpec({
             var at = Location(terrain.world, .5, 63.9375, .5, -90f, 0f)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 5.5, 63.9375, 5.5),
                 { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
-            repeat(20_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             var rounded = false
             var turns = 0f
@@ -822,7 +909,7 @@ class CivsResidentNavigationTest : FunSpec({
             var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 8.5, 64.0, .5),
                 { it.x in -3..8 && it.z == 0 && it.y == 64 }, { _, _ -> true }, { 1.0 })
-            repeat(3_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             repeat(3) { at = requireNotNull(route.move(at, 1.0) { true }) }
             (route.forwardProgress > .64) shouldBe true
@@ -854,7 +941,7 @@ class CivsResidentNavigationTest : FunSpec({
             // Neither a newly planned path nor a different observed origin contributes credit.
             for (origin in listOf(at, at.clone().add(2.0, 0.0, 0.0))) {
                 val replanned = route.replan(origin, emptyList())
-                repeat(3_000) { if (replanned.searching) replanned.expand() }
+                replanned.prepare()
                 replanned.failure shouldBe null
                 replanned.forwardProgress shouldBe 0.0
                 replanned.move(origin, 1.0, { _, _ -> false }) { true }
@@ -874,7 +961,7 @@ class CivsResidentNavigationTest : FunSpec({
             val initialDistance = at.distance(goal)
             val route = CitizenPacketRoute(terrain.world, at, goal,
                 { corridor(it.x, it.z) && it.y == 64 }, { _, _ -> true }, { 1.0 })
-            repeat(20_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             repeat(3) { at = requireNotNull(route.move(at, 1.0) { true }) }
             (at.distance(goal) > initialDistance) shouldBe true
@@ -900,7 +987,7 @@ class CivsResidentNavigationTest : FunSpec({
             var at = Location(terrain.world, .5, 64.0, .5, 90f, 0f)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 3.5, 65.0, .5),
                 { it.x in 0..3 && it.z == 0 && it.y in 64..65 }, { _, _ -> true }, { 1.0 })
-            repeat(3_000) { if (route.searching) route.expand() }
+            route.prepare()
             route.failure shouldBe null
             var stationaryTurns = 0
             var advanced = false
@@ -976,7 +1063,7 @@ class CivsResidentNavigationTest : FunSpec({
                 npc.teleport(grounded.clone().add(0.0, .125, 0.0))
                 val settling = CitizenPacketRoute(terrain.world, npc.location, grounded,
                     { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
-                repeat(256) { if (settling.searching) settling.expand() }
+                settling.prepare()
                 val settled = requireNotNull(settling.move(npc.location, .8 * 1.25) { true })
                 npc.teleport(settled)
                 npc.headYaw = settled.yaw
@@ -986,7 +1073,7 @@ class CivsResidentNavigationTest : FunSpec({
                 frame()
                 var route = CitizenPacketRoute(terrain.world, npc.location, Location(terrain.world, 5.5, 63.9375, .5),
                     { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
-                repeat(20_000) { if (route.searching) route.expand() }
+                route.prepare()
                 var replanned = false
                 repeat(180) {
                     val before = npc.location
@@ -1000,7 +1087,7 @@ class CivsResidentNavigationTest : FunSpec({
                         val pushed = npc.location.add(.05, 0.0, 0.0)
                         npc.teleport(pushed)
                         route = route.replan(npc.location, emptyList()).also { route.cancel() }
-                        repeat(20_000) { if (route.searching) route.expand() }
+                        route.prepare()
                         route.failure shouldBe null
                         replanned = true
                     }
@@ -1025,9 +1112,9 @@ class CivsResidentNavigationTest : FunSpec({
                 val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 5.5, 64.0, .5),
                     { it.x in 0..5 && it.y == 64 && if (narrow) it.z == 0 else it.z in -2..2 },
                     { _, _ -> true }, { 1.0 })
-                repeat(20_000) { if (route.searching) route.expand() }
+                route.prepare()
                 val detour = route.replan(at, listOf(person))
-                repeat(20_000) { if (detour.searching) detour.expand() }
+                detour.prepare()
                 if (narrow) {
                     detour.failure shouldBe "no-path"
                     route.navigating shouldBe true
@@ -1062,8 +1149,19 @@ class CivsResidentNavigationTest : FunSpec({
     }
 })
 
+/** Synchronous driver for the same capture/solver protocol as production; this is not a tick count. */
+private fun CitizenPacketRoute.prepare() {
+    val maximumOperations = CitizenNavigationCapture.MAXIMUM_BLOCKS + CitizenNavigationSearch.MAXIMUM_NODES * 64
+    var operations = 0
+    while (searching && operations++ < maximumOperations) expand()
+    withClue("phase=$preparationPhase nodes=$nodeCount captured=$capturedBlocks operations=$operations failure=$failure") {
+        searching shouldBe false
+    }
+}
+
 /** Explicit geometric unit fixture. It does not model a live server or claim native client movement. */
 private class ResidentRouteTerrain {
+    private val ownerThread = Thread.currentThread()
     val blocks = mutableMapOf<CivPosition, Material>()
     val boxes = mutableMapOf<CivPosition, List<BoundingBox>>()
     var loaded = true
@@ -1080,6 +1178,7 @@ private class ResidentRouteTerrain {
         every { world.getChunkAt(any<Int>(), any<Int>(), false) } returns chunk
         every { chunk.loadLevel } returns Chunk.LoadLevel.ENTITY_TICKING
         every { world.getBlockAt(any<Int>(), any<Int>(), any<Int>()) } answers {
+            check(Thread.currentThread() === ownerThread) { "Native geometry read outside the owner thread" }
             blockReads++
             val point = CivPosition(firstArg(), secondArg(), thirdArg())
             native.getOrPut(point) {

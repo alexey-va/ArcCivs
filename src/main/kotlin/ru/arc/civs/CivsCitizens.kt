@@ -33,6 +33,9 @@ import org.bukkit.plugin.Plugin
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.Vector
 import ru.arc.observability.StructuredDebugLine
+import ru.arc.core.BudgetedTaskQueue
+import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.npc.PacketNpcProfile
 import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.npc.PacketNpcInteraction
@@ -42,6 +45,7 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.logging.Level
 import kotlin.math.abs
@@ -75,9 +79,15 @@ class CivsCitizens(
     private val prepareSupplies: (UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
     private val backgroundActive: (UUID) -> Boolean = { false },
+    navigationTasks: LifecycleTaskScope? = null,
+    navigationWork: BudgetedTaskQueue? = null,
+    navigationExecutor: Executor? = null,
+    private val navigationClock: () -> Long = System::currentTimeMillis,
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
-    private val navigation = CivsResidentNavigation()
+    private val ownsNavigationTasks = navigationTasks == null
+    private val residentTasks = navigationTasks ?: LifecycleTaskScope(BukkitTaskScheduler(plugin))
+    private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor)
     private val paths = CivsPaths()
     private val threats: CivsResidentThreats
     private val skins: List<CitizenSkin>
@@ -155,8 +165,9 @@ class CivsCitizens(
         }
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.logger.info("ArcCivs resident backend=packets maximum=$maxActive viewer_range=$viewerRange " +
-            "path_steps_per_tick=${CivsResidentNavigation.SEARCH_OPERATIONS_PER_TICK} " +
-            "path_budget_micros=${CivsResidentNavigation.SEARCH_BUDGET_NANOS / 1_000}")
+            "pathfinding=async-a-star path_jobs_max=${CivsResidentNavigation.MAXIMUM_JOBS} " +
+            "path_capture_budget=" + if (navigationWork != null) "shared-native-work" else
+                "${CivsResidentNavigation.SEARCH_OPERATIONS_PER_TICK}steps/${CivsResidentNavigation.SEARCH_BUDGET_NANOS / 1_000}us")
     }
 
     fun pulse(nowMillis: Long) {
@@ -634,7 +645,7 @@ class CivsCitizens(
         checkMainThread()
         if (closed.get() || actors.isEmpty()) return
         navigationTick++
-        val now = System.currentTimeMillis()
+        val now = navigationClock()
         navigationCadenceMillis = if (navigationAt == 0L) 0 else (now - navigationAt).coerceAtLeast(0)
         navigationAt = now
         paths.pulse()
@@ -676,7 +687,18 @@ class CivsCitizens(
                 cancelRoute(actor)
                 continue
             }
-            if (route.motion.searching) continue
+            if (route.motion.searching) {
+                if (now >= route.preparationReportAfter) {
+                    route.preparationReportAfter = now + 10_000
+                    CivsDiagnostics.event("citizen_route_preparing", "city" to actor.cityId,
+                        "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
+                        "phase" to actor.cycle.phase, "state" to route.motion.preparationPhase,
+                        "elapsed_ms" to route.timing.preparationElapsed(now),
+                        "path_nodes" to route.motion.nodeCount, "captured_blocks" to route.motion.capturedBlocks,
+                        "actual" to npc.location.point().coordinates(), "target" to route.target.point().coordinates())
+                }
+                continue
+            }
             route.previousMotion?.let { previous ->
                 if (route.motion.failure != null && route.replanReason == "player-blocked") {
                     // A person can seal a narrow corridor. Keep the original route ready
@@ -685,7 +707,7 @@ class CivsCitizens(
                     route.motion = previous
                 } else previous.cancel()
                 route.previousMotion = null
-                route.motionReady(navigationTick)
+                route.motionReady(navigationTick, now)
                 actor.navigationEpisodeProgress = 0.0
                 route.path = null
             }
@@ -710,9 +732,9 @@ class CivsCitizens(
                 route.planningReported = true
                 // Shared A* admission can wait many frames. Only frames with a ready
                 // route are movement opportunities; its first turn is not a stall.
-                route.motionReady(navigationTick)
+                route.motionReady(navigationTick, now)
                 actor.navigationEpisodeProgress = 0.0
-                val elapsed = System.currentTimeMillis() - route.startedAt
+                val elapsed = (now - route.startedAt).coerceAtLeast(0)
                 if (elapsed >= 1_000 || route.storageReason != null) CivsDiagnostics.event("citizen_route_ready", "city" to actor.cityId,
                     "worker" to actor.workerId, "route_started_at" to route.startedAt,
                     "reason" to route.storageReason, "source" to route.storageBuilding,
@@ -730,7 +752,7 @@ class CivsCitizens(
             if (motion.finished) {
                 if (route.intermediate) {
                     cancelRoute(actor)
-                    startRoute(actor, npc.world, route.authored, System.currentTimeMillis(), route.idleAnchor)
+                    startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }
                 route.trip?.let { paths.complete(city, it) }
@@ -799,7 +821,7 @@ class CivsCitizens(
             else if (motion.finished) {
                 if (route.intermediate) {
                     cancelRoute(actor)
-                    startRoute(actor, npc.world, route.authored, System.currentTimeMillis(), route.idleAnchor)
+                    startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }
                 route.trip?.let { paths.complete(city, it) }
@@ -922,7 +944,7 @@ class CivsCitizens(
                         if (route.completion == null && route.path == null) observePath(route)
                         val outcome = citizenNavigationOutcome(route.completion,
                             arrivedAt(actor, city, world, target),
-                            now - route.startedAt, route.timeoutMillis, (actor.route?.motion?.navigating == true))
+                            route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
                         when (outcome) {
                             CitizenNavigationOutcome.PENDING -> Unit
                             CitizenNavigationOutcome.ARRIVED -> {
@@ -1017,7 +1039,7 @@ class CivsCitizens(
             return true
         }
         if (now < actor.combatRouteAfter || wanderBudget == 0) return true
-        if (actor.route?.let { it.motion.navigating && now - it.startedAt < it.timeoutMillis } == true && actor.combatDestination?.let {
+        if (actor.route?.let { it.motion.navigating && !it.timedOut(now) } == true && actor.combatDestination?.let {
                 retreat || it.point().distanceSquared(foe.point()) <= 3.0 * 3.0
             } == true) return true
         wanderBudget--
@@ -1098,7 +1120,7 @@ class CivsCitizens(
         }
         if (actor.route == null) startRoute(actor, world, target, now)
         actor.route?.let { route ->
-            if (route.completion != null || now - route.startedAt > route.timeoutMillis) {
+            if (route.completion != null || route.timedOut(now)) {
                 // A supply detour may retry normally, but never teleport into work from a food trip.
                 cancelRoute(actor)
                 actor.supplyRetryAt = now + 1_000
@@ -1346,7 +1368,7 @@ class CivsCitizens(
         }
         val route = actor.route
         if (activeVisit.arrivedAt != null || route == null || route.completion != null ||
-            !route.chunks.ready(world) || now - route.startedAt > route.timeoutMillis) {
+            !route.chunks.ready(world) || route.timedOut(now)) {
             stopCamp(actor, if (activeVisit.arrivedAt != null) "left-seat" else "route-ended")
             return false
         }
@@ -1363,7 +1385,7 @@ class CivsCitizens(
             val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED
                 else citizenNavigationOutcome(route.completion,
                     arrived(actor.npc.location, route.target),
-                    now - route.startedAt, route.timeoutMillis, (actor.route?.motion?.navigating == true))
+                    route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
             if (outcome == CitizenNavigationOutcome.PENDING) return
             if (outcome != CitizenNavigationOutcome.ARRIVED && recoverNavigation(actor, route.target, now, idleAnchor = anchor)) {
                 actor.wander.finish(now, true)
@@ -1419,8 +1441,9 @@ class CivsCitizens(
         statuses[actor.workerId] = "moving-to-storage"
         if (actor.route == null) startRoute(actor, world, target, now)
         actor.route?.let { route ->
-            if (route.completion != null || now - route.startedAt > route.timeoutMillis)
-                recoverNavigation(actor, route.target, now)
+            if (route.completion != null || route.timedOut(now)) {
+                if (!retryPreparation(actor, route, now)) recoverNavigation(actor, route.target, now)
+            }
         }
         return true
     }
@@ -1483,11 +1506,25 @@ class CivsCitizens(
         }
         val route = actor.route
         if (route == null) { startRoute(actor, world, target, now); return }
-        if (route.completion != null || now - route.startedAt > route.timeoutMillis) {
+        if (route.completion != null || route.timedOut(now)) {
             // Keep the failed attempt until the shared recovery budget can admit it.
             // Cancelling it here used to restart the same impossible route every pulse.
-            recoverNavigation(actor, route.target, now)
+            if (!retryPreparation(actor, route, now)) recoverNavigation(actor, route.target, now)
         }
+    }
+
+    /** Capacity/capture failures retry after a quiet backoff; they never justify teleporting. */
+    private fun retryPreparation(actor: Actor, route: Route, now: Long): Boolean {
+        val reason = route.motion.failure?.takeIf { it in PREPARATION_FAILURES } ?: return false
+        val retryAt = route.preparationRetryAt ?: (now + 5_000).also { route.preparationRetryAt = it }
+        if (now >= retryAt) {
+            CivsDiagnostics.event("citizen_route_preparing", "city" to actor.cityId,
+                "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
+                "phase" to actor.cycle.phase, "state" to "retry", "reason" to reason,
+                "actual" to actor.npc.location.point().coordinates(), "target" to route.target.point().coordinates())
+            cancelRoute(actor)
+        }
+        return true
     }
 
     private fun shelterOccupied(actor: Actor): List<BoundingBox> = buildList {
@@ -1665,6 +1702,9 @@ class CivsCitizens(
             "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
             "path_nodes" to route?.motion?.nodeCount, "path_failure" to route?.motion?.failure,
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
+            "search_state" to route?.motion?.preparationPhase,
+            "preparation_ms" to route?.timing?.preparationElapsed(now), "travel_ms" to route?.timing?.elapsed(now),
+            "captured_blocks" to route?.motion?.capturedBlocks, "search_nanos" to route?.motion?.searchNanos,
             "tick" to Bukkit.getCurrentTick(), "navigation_tick" to navigationTick, "cadence_ms" to navigationCadenceMillis,
             "body_yaw" to actor.npc.bodyYaw, "head_yaw" to actor.npc.headYaw,
             "previous_body_yaw" to actor.observedYaw,
@@ -1676,7 +1716,7 @@ class CivsCitizens(
             "suppressed" to actor.navigationSuppressed,
             "work_focus" to actor.plan.worldWork?.focus, "work_standing" to actor.plan.worldWork?.standing,
             "mining_step" to actor.plan.worldWork?.miningStep,
-            "strategy" to "packet-grid"))
+            "strategy" to "packet-async-a-star"))
         actor.navigationSuppressed = 0
         return true
     }
@@ -1695,6 +1735,8 @@ class CivsCitizens(
         val report = navigationDiagnostic(actor, reason, route.target, now)
         route.replanAttempts++
         route.replanReason = reason
+        route.timing.prepare(now)
+        route.preparationReportAfter = now + 2_000
         route.previousMotion = route.motion
         route.motion = navigation.replan(route.motion, from, bodies)
         route.completion = null
@@ -1748,7 +1790,8 @@ class CivsCitizens(
         val failed = actor.route ?: return false
         // Planning latency and a temporary player obstruction are not proof of an impossible route.
         if (failed.motion.searching || failed.motion.waitingForCollision || now < actor.nextRecoveryAt || actor.attacker != null) return false
-        if (failed.motion.failure == null && failed.completion == null && now - failed.startedAt <= failed.timeoutMillis) return false
+        if (failed.motion.failure in PREPARATION_FAILURES) return false
+        if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now)) return false
         if (recoveryBudget == 0 || idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
             actor.plan.idleReason !in listOf(null, "placing") ||
             actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return false
@@ -2167,6 +2210,7 @@ class CivsCitizens(
         campfires.clear()
         voices.clear()
         navigation.clear()
+        if (ownsNavigationTasks) residentTasks.close()
         paths.clear()
         val failure = runCatching { threats.close() }.exceptionOrNull()
         HandlerList.unregisterAll(this)
@@ -2179,15 +2223,12 @@ class CivsCitizens(
         pendingHarm.clear()
         spawnRetries.clear()
         statuses.clear()
-        try {
-            packets.closeAsync().whenComplete { _, error ->
-                val terminal = failure ?: error
-                if (failure != null && error != null && failure !== error) failure.addSuppressed(error)
-                if (terminal == null) result.complete(null) else result.completeExceptionally(terminal)
-            }
-        } catch (error: Throwable) {
-            if (failure != null && failure !== error) error.addSuppressed(failure)
-            result.completeExceptionally(error)
+        val packetRetirement = try { packets.closeAsync() }
+            catch (error: Throwable) { CompletableFuture.failedFuture<Void>(error) }
+        CompletableFuture.allOf(packetRetirement, navigation.drained()).whenComplete { _, error ->
+            val terminal = failure ?: error
+            if (failure != null && error != null && failure !== error) failure.addSuppressed(error)
+            if (terminal == null) result.complete(null) else result.completeExceptionally(terminal)
         }
         return result.copy()
     }
@@ -2265,13 +2306,19 @@ class CivsCitizens(
         var progressSinceObservation = 0.0
         var progressSinceReplan = 0.0
         var progressTick = 0L
+        val timing = CitizenRouteTiming(startedAt, timeoutMillis)
+        var preparationReportAfter = startedAt + 2_000
+        var preparationRetryAt: Long? = null
 
-        fun motionReady(tick: Long) {
+        fun motionReady(tick: Long, now: Long) {
+            timing.ready(now)
             observedProgress = motion.forwardProgress
             progressSinceObservation = 0.0
             progressSinceReplan = 0.0
             progressTick = tick
         }
+
+        fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?, val pickup: Boolean = false)
@@ -2281,7 +2328,9 @@ class CivsCitizens(
         val city: Settlement?, val error: Throwable?)
 
     private companion object {
-        val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 34)
+        val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 48)
+        val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "planner-busy", "planner-error",
+            "chunk-unloaded", "cancelled", "broken-path")
     }
 }
 
@@ -2321,12 +2370,40 @@ internal data class CitizenViewer(val worldId: UUID, val point: CitizenPoint)
 
 /** Null completion means no callback; a received null reason means native completion, not verified arrival. */
 internal data class CitizenNavigationCompletion(val cancelReason: String?)
+
+/** Owning-thread route clock: preparation/replanning never spends the allowance for walking. */
+internal class CitizenRouteTiming(private val startedAt: Long, private val timeoutMillis: Long) {
+    private var preparingSince = startedAt
+    private var walkingSince: Long? = null
+    private var walkedMillis = 0L
+    private var observedElapsed = 0L
+
+    fun ready(now: Long) {
+        if (walkingSince == null) walkingSince = now
+    }
+
+    fun prepare(now: Long) {
+        walkedMillis = elapsed(now)
+        walkingSince = null
+        preparingSince = now
+    }
+
+    fun elapsed(now: Long): Long {
+        val current = walkedMillis + (walkingSince?.let { (now - it).coerceAtLeast(0) } ?: 0L)
+        observedElapsed = maxOf(observedElapsed, current)
+        return observedElapsed
+    }
+    fun preparationElapsed(now: Long): Long = if (walkingSince == null) (now - preparingSince).coerceAtLeast(0) else 0L
+    fun timedOut(now: Long, searching: Boolean): Boolean = !searching && walkingSince != null && elapsed(now) > timeoutMillis
+}
+
 internal enum class CitizenNavigationOutcome { PENDING, ARRIVED, CANCELLED, COMPLETED_OUTSIDE_ARRIVAL, TIMED_OUT, STOPPED }
 internal fun citizenNavigationOutcome(completion: CitizenNavigationCompletion?, arrived: Boolean,
-    elapsedMillis: Long, timeoutMillis: Long, navigating: Boolean): CitizenNavigationOutcome = when {
+    elapsedMillis: Long, timeoutMillis: Long, navigating: Boolean, searching: Boolean = false): CitizenNavigationOutcome = when {
     completion?.cancelReason != null -> CitizenNavigationOutcome.CANCELLED
     arrived -> CitizenNavigationOutcome.ARRIVED
     completion != null -> CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
+    searching -> CitizenNavigationOutcome.PENDING
     elapsedMillis > timeoutMillis -> CitizenNavigationOutcome.TIMED_OUT
     !navigating -> CitizenNavigationOutcome.STOPPED
     else -> CitizenNavigationOutcome.PENDING

@@ -7,7 +7,7 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
-ArcCore host 0.1.19 and bundled Core helpers 2.7.50 are mandatory; the shared
+ArcCore host 0.1.19 and bundled Core helpers 2.7.54 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
@@ -58,16 +58,36 @@ minutes per birth, then 40 to adulthood. Children use half-scale player NPCs,
 play and wander, and cannot take jobs. Progress never catches up offline.
 Working adults lose one hunger per active minute and consume existing bread
 from their bag; hunger at or below six doubles work time. Family, hunger and
-member-name changes use the existing city write queue, without starving behind work. `CivsResidentNavigation` incrementally plans
-bounded routes in loaded chunks, sharing at most 384 search operations or one millisecond
-per tick across residents. Each route visits at most 4096 nodes; an edge checks a
-0.6-by-1.8-block body and at most one block of ascent or descent.
+member-name changes use the existing city write queue, without starving behind work.
+`CivsResidentNavigation` separates terrain capture, an asynchronous A* job and
+the packet movement controller. Up to 48 pending routes share one Core bounded
+worker. The worker consumes detached numeric collision shapes and captured
+permission/cost decisions; it never calls Bukkit or route-policy callbacks.
+Small demanded neighbourhoods are captured on the owner thread through the
+service's shared `BudgetedTaskQueue` (512 operations or four milliseconds per
+tick across native work). A standalone navigation owner uses 384 operations or
+one millisecond. These are aggregate budgets between indivisible native calls,
+not a promise that copying collision geometry is free. Each route admits at
+most 4096 search nodes and 32768 captured cells. Missing chunks are unavailable;
+search never loads them, and an unknown frontier cannot prove that no path exists.
+A per-job heuristic weight preserves ordinary cost ordering for trips up to
+32 blocks, then rises linearly to two at 64 blocks. This retains local road
+preferences and follows MineColonies' bounded search approach for longer trips;
+minimum-cost routes are not guaranteed there. Route-local terrain is released on completion or
+cancellation, and replanning captures fresh data. Cancellation and lifecycle
+tokens fence late results; shutdown observes the owned worker's drain.
+Edges retain a 0.6-by-1.8-block body, fractional support and the existing step
+height limit. Ladder entry, climb and exit are explicit actions: the controller
+centres the actor before climbing. Door opening remains owner-thread movement.
 Movement revalidates live collision and support before accepting a step and
 spends a tick's remaining distance across clear waypoints, without
 banking time behind an obstruction or cutting through a step or corner.
 An interrupted ladder route can settle onto real support in its current column.
-Work checks the actual position independently of planner completion. A failed or stuck
-route may recover to a validated loaded safe endpoint, resetting footsteps.
+Preparation and replanning never consume the walking timeout or stall clock.
+Capacity, capture and search-budget failures back off and retry without safe
+teleport recovery. Work checks the actual position independently of planner
+completion. A physically failed or stuck route may recover to a validated loaded
+safe endpoint, resetting footsteps.
 The same arrival, work and cycle-token checks still apply. Actual work-route
 crossings use Trails 2.3.20's `TrailsFootTrafficActor` entry point; Trails retains
 the ordinary permission, protection, terrain progression and persistence pipeline.
@@ -160,8 +180,10 @@ The first pioneer arrives after 30s,
 then one per 60s while a viewer is nearby; each arrival commits its remaining
 receipt before spawning. A restart never grants extra residents or catches up multiple arrivals. At night, residents shelter in their active house when
 available and otherwise use the town hall, then enter the native sleeping pose.
-After a failed night route or ten seconds, the existing shared safe-recovery
-budget can move them into a freshly validated, loaded home position. A blocked
+After a physically failed night route or its full distance-based walking
+timeout, the existing shared safe-recovery budget can move them into a freshly
+validated, loaded home position. Preparation time does not spend that timeout;
+planner capacity and search/capture budgets cannot trigger this recovery. A blocked
 or occupied destination retains the failed attempt for a later pulse. Sleep
 arrival grants no work credit, delivery or synthetic footsteps. The pose chooses
 a clear direction using the full sleeping body, skin, armour and idle arm motion;

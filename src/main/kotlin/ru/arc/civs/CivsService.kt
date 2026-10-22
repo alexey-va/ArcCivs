@@ -150,6 +150,7 @@ class CivsService(
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady,
         backgroundActive = chunkLoading::active,
+        navigationTasks = tasks, navigationWork = nativeWork,
         residentSupplySource = ::residentSupplySource, prepareSupplies = ::prepareResidentSupplies,
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)

@@ -6,7 +6,6 @@ import org.bukkit.World
 import org.bukkit.block.data.type.Door
 import org.bukkit.util.BoundingBox
 import java.util.ArrayDeque
-import java.util.PriorityQueue
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.floor
@@ -14,40 +13,9 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-/** One fair search budget for the whole resident runtime. All world reads stay on the server thread. */
-internal class CivsResidentNavigation {
-    private val searching = ArrayDeque<CitizenPacketRoute>()
-
-    fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
-                stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
-                travelCost: (org.bukkit.block.Block) -> Double): CitizenPacketRoute =
-        CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost).also(searching::addLast)
-
-    fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute =
-        route.replan(from, bodies).also(searching::addLast)
-
-    fun pulse() {
-        val deadline = System.nanoTime() + SEARCH_BUDGET_NANOS
-        var remaining = SEARCH_OPERATIONS_PER_TICK
-        while (remaining-- > 0 && searching.isNotEmpty()) {
-            val route = searching.removeFirst()
-            if (route.searching) route.expand()
-            if (route.searching) searching.addLast(route)
-            if (System.nanoTime() >= deadline) break
-        }
-    }
-
-    fun clear() { searching.forEach(CitizenPacketRoute::cancel); searching.clear() }
-
-    companion object {
-        const val SEARCH_OPERATIONS_PER_TICK = 384
-        const val SEARCH_BUDGET_NANOS = 1_000_000L
-    }
-}
-
 /**
- * Incremental, loaded-terrain A*. Native collision shapes are cached only while planning;
- * every movement is checked against fresh shapes, including the full 0.6 by 1.8 body.
+ * Owns one route and its main-thread movement. The same detached A* serves async jobs and
+ * deterministic direct callers; every accepted move checks fresh full-body native geometry.
  */
 internal class CitizenPacketRoute(
     private val world: World,
@@ -58,11 +26,8 @@ internal class CitizenPacketRoute(
     private val travelCost: (org.bukkit.block.Block) -> Double,
     private val avoiding: List<BoundingBox> = emptyList(),
 ) {
-    private data class Cell(val x: Int, val y: Double, val z: Int, val climbing: Boolean = false, val initial: Boolean = false) {
-        fun point() = CitizenPoint(x + .5, y, z + .5)
-    }
-    private data class Entry(val cell: Cell, val cost: Double, val score: Double, val order: Int)
-    private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true) {
+    private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
+                           val action: CitizenRouteAction = CitizenRouteAction.WALK) {
         private val length = sqrt(start.distanceSquared(point))
         private var highWater = 0.0
 
@@ -83,19 +48,21 @@ internal class CitizenPacketRoute(
             return min(earned, sqrt(from.distanceSquared(to)))
         }
     }
-    private val start = Cell(from.blockX, from.y, from.blockZ, initial = true)
     private val origin = CitizenPoint(from.x, from.y, from.z)
-    private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
-    private val costs = hashMapOf(start to 0.0)
-    private val parents = hashMapOf<Cell, Cell>()
-    private val cells = hashMapOf<Triple<Int, Double, Int>, List<Cell>>()
-    private val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
-    private val weights = hashMapOf<Cell, Double>()
+    private val minimumY = world.minHeight
+    private val maximumY = world.maxHeight
     private val path = ArrayDeque<Waypoint>()
-    private var expanding: Entry? = null
-    private var edges: Iterator<Cell>? = null
-    private var serial = 0
     private var visited = 0
+    private var asyncCancellation: (() -> Unit)? = null
+    private var directSearch: CitizenNavigationSearch? = null
+    private var directCapture: CitizenNavigationCapture? = null
+    private val directTerrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
+    var preparationPhase = "queued"
+        private set
+    var capturedBlocks = 0
+        private set
+    var searchNanos = 0L
+        private set
     var searching = true
         private set
     var failure: String? = null
@@ -114,9 +81,15 @@ internal class CitizenPacketRoute(
     val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
     val remainingNodes: Int get() = path.size
 
-    init { open += Entry(start, 0.0, heuristic(start), serial++) }
-
-    fun cancel() { searching = false; finished = true; releaseSearch(); path.clear() }
+    fun cancel() {
+        searching = false
+        finished = true
+        preparationPhase = "cancelled"
+        asyncCancellation?.invoke()
+        asyncCancellation = null
+        releaseSearch()
+        path.clear()
+    }
 
     fun replan(from: Location, bodies: List<BoundingBox>): CitizenPacketRoute =
         CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone))
@@ -125,136 +98,77 @@ internal class CitizenPacketRoute(
         citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
             .299, 1.798, .299, avoiding) == null
 
+    /** Direct deterministic driver; production requests use the owner/executor and the identical solver. */
     fun expand() {
+        if (!searching || asyncCancellation != null) return
+        val search = directSearch ?: newSearch().also { directSearch = it }
+        try {
+            val capture = directCapture
+            if (capture != null && !capture.step()) return
+            val result = search.advance(capture?.result.orEmpty())
+            recordSearch(result)
+            if (result.probes.isNotEmpty()) {
+                preparationPhase = "capturing"
+                directCapture = CitizenNavigationCapture(this, result.probes, directTerrain)
+            } else acceptSearch(result)
+        } catch (_: CitizenNavigationCaptureLimit) {
+            fail("capture-budget")
+        }
+    }
+
+    internal fun newSearch() = CitizenNavigationSearch(origin, CitizenPoint(target.x, target.y, target.z),
+        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) })
+
+    internal fun attachAsync(cancel: () -> Unit) {
+        check(directSearch == null) { "A direct route cannot be submitted after search started" }
+        asyncCancellation = cancel
+        preparationPhase = "queued"
+    }
+
+    internal fun phase(value: String) { if (searching) preparationPhase = value }
+    internal fun recordSearch(result: CitizenSearchResult) {
+        visited = result.nodes
+        searchNanos += result.searchNanos
+    }
+    internal fun planningFailed(reason: String) { if (searching) fail(reason) }
+    internal fun captureLimits() = minimumY to maximumY
+
+    /** One bounded native capture. The resulting graph contains no World/Block or mutable shapes. */
+    internal fun captureBlock(point: CivPosition): CitizenTerrainBlock {
+        if (point.y !in minimumY until maximumY || !citizenChunkReady(world, point.x shr 4, point.z shr 4))
+            return CitizenTerrainBlock.UNAVAILABLE
+        val block = world.getBlockAt(point.x, point.y, point.z)
+        val boxes = block.collisionShape.boundingBoxes.map {
+            CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
+        }
+        capturedBlocks++
+        return CitizenTerrainBlock(true, block.isLiquid, block.blockData is Door,
+            Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), allowed(point), travelCost(block), boxes)
+    }
+
+    internal fun capturePermission(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to)
+
+    internal fun acceptSearch(result: CitizenSearchResult) {
         if (!searching) return
-        if (expanding?.cell?.let { !citizenChunkReady(world, it.x shr 4, it.z shr 4) } == true) {
-            fail("chunk-unloaded")
-            return
+        result.failure?.let { fail(it); return }
+        val steps = result.path?.toMutableList() ?: return
+        // A nudge must not introduce a needless centre-and-reverse segment. The shortcut is
+        // checked against current native geometry on this owner thread before accepting it.
+        if (steps.size > 1 && steps.first().point.let {
+                floor(it.x) == floor(origin.x) && floor(it.z) == floor(origin.z) && it.y == origin.y
+            }) {
+            val next = steps[1].point
+            if (next.y == origin.y && permits(origin, next) && citizenPacketStepClear(world, origin, next, true)) steps.removeAt(0)
         }
-        val pending = edges
-        if (pending != null && pending.hasNext()) {
-            val current = requireNotNull(expanding)
-            val next = pending.next()
-            // A resident can start anywhere inside a path/slab cell after a push or an
-            // earlier arrival. Validating from its centre can admit a blocked first corner.
-            val from = if (current.cell == start) origin else current.cell.point()
-            if (citizenStepHeightAllowed(current.cell.y, next.y) && permits(from, next.point()) &&
-                citizenPacketStepClear(world, from, next.point(), allowDoors = true, collision = ::collision)) offer(current, next)
-            return
+        var previous = origin
+        for (step in steps) {
+            path.addLast(Waypoint(previous, step.point, action = step.action))
+            previous = step.point
         }
-        edges = null
-        expanding = null
-        var current = open.poll()
-        while (current != null && costs[current.cell] != current.cost) current = open.poll()
-        if (current == null) { fail("no-path"); return }
-        if (++visited > 4096) { fail("search-budget"); return }
-        val cell = current.cell
-        if (!citizenChunkReady(world, cell.x shr 4, cell.z shr 4)) { fail("chunk-unloaded"); return }
-        if (cell.x == target.blockX && cell.z == target.blockZ && abs(cell.y - target.y) <= .5) {
-            val reversed = ArrayDeque<Cell>()
-            var node = cell
-            while (node != start) {
-                reversed.addFirst(node)
-                node = parents[node] ?: run { fail("broken-path"); return }
-            }
-            // A path within the starting cell still has to reach its real authored endpoint.
-            if (reversed.isEmpty()) reversed += Cell(target.blockX, target.y, target.blockZ)
-            // Replanning after a nudge must not walk back to this cell's centre and
-            // immediately reverse again. Keep that node when it is needed to clear a corner.
-            if (reversed.size > 1 && reversed.first().let { it.x == start.x && it.z == start.z && it.y == origin.y }) {
-                val next = reversed.elementAt(1).point()
-                if (next.y == origin.y && permits(origin, next) &&
-                    citizenPacketStepClear(world, origin, next, true, collision = ::collision)) reversed.removeFirst()
-            }
-            var previous = origin
-            for (cell in reversed) {
-                val point = cell.point()
-                path.addLast(Waypoint(previous, point))
-                previous = point
-            }
-            searching = false
-            releaseSearch()
-            return
-        }
-        expanding = current
-        edges = sequence {
-            // A cancelled ascent/ladder exit can leave feet between supports or off centre.
-            // First reach a real support in this column before looking for a neighbour.
-            if (cell == start) yieldAll(standingCells(cell.x, cell.y, cell.z))
-            for (dx in -1..1) for (dz in -1..1) {
-                if (dx == 0 && dz == 0) continue
-                val x = cell.x + dx
-                val z = cell.z + dz
-                yieldAll(cells.getOrPut(Triple(x, cell.y, z)) { standingCells(x, cell.y, z) })
-            }
-            // A quarry's ladder connects adjacent floors without inventing a solid support block.
-            val at = world.getBlockAt(cell.x, floor(cell.y).toInt(), cell.z)
-            if (Tag.CLIMBABLE.isTagged(at.type)) for (dy in listOf(-1, 0, 1)) {
-                val next = Cell(cell.x, floor(cell.y) + dy, cell.z, true)
-                if (allowed(CivPosition(next.x, floor(next.y).toInt(), next.z)) &&
-                    Tag.CLIMBABLE.isTagged(world.getBlockAt(next.x, floor(next.y).toInt(), next.z).type) &&
-                    citizenPacketBodyClear(world, next.point(), true, collision = ::collision)) yield(next)
-            }
-        }.iterator()
-    }
-
-    private fun offer(previous: Entry, next: Cell) {
-        val p = next.point()
-        if (abs(p.x - start.point().x) > 96 || abs(p.z - start.point().z) > 96 ||
-            abs(p.y - start.y) > 96) return
-        val distance = sqrt((if (previous.cell == start) origin else previous.cell.point()).distanceSquared(p))
-        val weight = weights.getOrPut(next) {
-            travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z))
-        }
-        if (!weight.isFinite()) return
-        // Preferences change planning cost, never velocity. The minimum cost remains one.
-        val cost = previous.cost + distance * weight.coerceIn(1.0, CivsPaths.ORDINARY_COST)
-        if (cost >= (costs[next] ?: Double.POSITIVE_INFINITY)) return
-        costs[next] = cost
-        parents[next] = previous.cell
-        open += Entry(next, cost, cost + heuristic(next), serial++)
-    }
-
-    private fun heuristic(cell: Cell): Double {
-        val dx = cell.x + .5 - target.x
-        val dz = cell.z + .5 - target.z
-        // A path or slab may finish within the admitted half-block vertical tolerance.
-        val dy = max(0.0, abs(cell.y - target.y) - .5)
-        return sqrt(dx * dx + dy * dy + dz * dz)
-    }
-
-    private fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
-        val key = CivPosition(x, y, z)
-        return collisions[key] ?: citizenCollisionSnapshot(world, x, y, z).also {
-            // Each search is already bounded by 4096 expanded cells and a 96-block region.
-            // Cap shape retention independently when one region contains many small shapes.
-            if (collisions.size < 16_384) collisions[key] = it
-        }
-    }
-
-    private fun standingCells(x: Int, y: Double, z: Int): List<Cell> {
-        if (!citizenChunkReady(world, x shr 4, z shr 4)) return emptyList()
-        val result = linkedSetOf<Cell>()
-        val base = floor(y).toInt()
-        for (by in base - 2..base + 1) {
-            if (by < world.minHeight || by + 2 >= world.maxHeight) continue
-            val block = world.getBlockAt(x, by, z)
-            if (block.isLiquid) continue
-            if (Tag.CLIMBABLE.isTagged(block.type)) {
-                val point = CitizenPoint(x + .5, by.toDouble(), z + .5)
-                if (allowed(CivPosition(x, by, z)) && citizenPacketBodyClear(world, point, true, collision = ::collision))
-                    result += Cell(x, by.toDouble(), z, true)
-            }
-            for (box in collision(x, by, z).localBoxes) {
-                if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
-                val height = by + box.maxY
-                if (!citizenStepHeightAllowed(y, height)) continue
-                val point = CitizenPoint(x + .5, height, z + .5)
-                if (allowed(CivPosition(x, floor(height + .001).toInt(), z)) &&
-                    citizenPacketBodyClear(world, point, true, collision = ::collision)) result += Cell(x, height, z)
-            }
-        }
-        return result.toList()
+        searching = false
+        preparationPhase = "ready"
+        asyncCancellation = null
+        releaseSearch()
     }
 
     /**
@@ -300,7 +214,10 @@ internal class CitizenPacketRoute(
             // Keep vertical and horizontal legs in separate packets: interpolating diagonally
             // from below a step to its top would cut through the solid support's side.
             val waypoint = to.clone()
-            if (to.y > point.y + .0001) {
+            if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
+                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
+                waypoint.y = point.y
+            } else if (to.y > point.y + .0001) {
                 waypoint.x = point.x
                 waypoint.z = point.z
             } else if (to.y < point.y - .0001 &&
@@ -437,20 +354,20 @@ internal class CitizenPacketRoute(
     private fun fail(reason: String) {
         failure = reason
         searching = false
+        preparationPhase = "failed"
+        asyncCancellation?.invoke()
+        asyncCancellation = null
         path.clear()
         releaseSearch()
     }
 
     private fun releaseSearch() {
-        open.clear()
-        cells.clear()
-        collisions.clear()
-        weights.clear()
-        parents.clear()
-        costs.clear()
-        edges = null
-        expanding = null
+        directSearch?.cancel()
+        directSearch = null
+        directCapture = null
+        directTerrain.clear()
     }
+
 }
 
 internal const val CITIZEN_TURN_PER_TICK = 8f
@@ -536,7 +453,7 @@ internal fun citizenPacketCampfireClear(world: World, point: CitizenPoint, from:
  * extra height class; a few thousandths account for observed rounded feet Y.
  * Native support, full-body sweeps and permissions remain separate checks.
  */
-private fun citizenStepHeightAllowed(fromY: Double, toY: Double): Boolean {
+internal fun citizenStepHeightAllowed(fromY: Double, toY: Double): Boolean {
     val lower = min(fromY, toY)
     val upper = max(fromY, toY)
     if (upper - lower <= 1.01) return true

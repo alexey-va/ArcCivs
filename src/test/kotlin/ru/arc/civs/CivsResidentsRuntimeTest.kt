@@ -32,6 +32,7 @@ import org.mockbukkit.mockbukkit.block.BlockMock
 import org.mockbukkit.mockbukkit.world.ChunkMock
 import org.mockbukkit.mockbukkit.world.Coordinate
 import org.mockbukkit.mockbukkit.world.WorldMock
+import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.npc.PacketPlayerNpc
@@ -42,6 +43,10 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 import java.util.function.Predicate
 import java.util.logging.Handler
 import java.util.logging.LogRecord
@@ -308,7 +313,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a field route queued for more than forty navigation ticks gets its full movement deadline after planning") {
+    test("a field route queued beyond ninety seconds keeps its identity and gets its full movement deadline after planning") {
         residentRuntime { h ->
             val farm = h.assignFarm()
             val actor = h.owner.collisionActors().single()
@@ -324,27 +329,39 @@ class CivsResidentsRuntimeTest : FunSpec({
             }
             h.logger.addHandler(handler)
             try {
+                h.navigationNow = 2_000L
+                h.holdNavigation = true
                 h.owner.pulse(2_000)
                 val beforeSearch = actor.location
+                val route = requireNotNull(h.routeIdentity())
+                val teleports = h.teleports
+                for (tick in 1..512) {
+                    if (h.pendingNavigationWorkers > 0) break
+                    h.navigate(advanceMillis = 0)
+                }
+                h.pendingNavigationWorkers shouldBe 1
                 repeat(60) {
-                    // One slow native read exhausts the shared one-millisecond search
-                    // budget, preserving a real pending A* route across more than forty ticks.
-                    h.world.slowNextChunkRead = true
-                    h.owner.activateNavigating()
+                    // Hold the actual submitted planner task beyond both the old field
+                    // deadline and ninety seconds, while native ticks and work pulses continue.
+                    h.navigate(advanceMillis = 2_000)
+                    h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+                    (h.routeIdentity() === route) shouldBe true
                     actor.location.toVector() shouldBe beforeSearch.toVector()
                     actor.bodyYaw shouldBe beforeSearch.yaw
+                    h.teleports shouldBe teleports
                     h.deliveries shouldBe 0
                 }
-                h.world.delayedChunkReads shouldBe 60
-                h.world.slowNextChunkRead = false
+                h.navigationNow shouldBe 122_000L
+                h.pendingNavigationWorkers shouldBe 1
+                h.releaseNavigation()
                 var arrived = false
                 for (tick in 1..512) {
                     val before = actor.location
-                    h.owner.activateNavigating()
+                    h.navigate()
                     val after = actor.location
                     (before.distance(after) <= .172001) shouldBe true
                     (kotlin.math.abs(citizenAngleChange(before.yaw, after.yaw)) <= 8.0001f) shouldBe true
-                    if (tick % 5 == 0) h.owner.pulseFieldWork(2_000L + tick * 50)
+                    if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
                     if (h.deliveries == 1) {
                         citizenCanReachBlock(actor, focus) shouldBe true
                         h.owner.requireWorldWorkArrival(h.city.id, h.workerId, requireNotNull(h.work))
@@ -357,11 +374,140 @@ class CivsResidentsRuntimeTest : FunSpec({
                     "planner=${h.navigationState()} diagnostics=${messages.takeLast(4)}") {
                     arrived shouldBe true
                 }
-                messages.none { "ARCCIVS_NAVIGATION_FAILED" in it } shouldBe true
+                messages.none { "citizen_route_recovered" in it || "ARCCIVS_NAVIGATION_FAILED" in it } shouldBe true
                 h.spawns shouldBe 1
+                h.steps.isNotEmpty() shouldBe true
                 h.deliveries shouldBe 1
+                h.pendingDelivery.isDone shouldBe false
                 h.city.workers.single().completedCycles shouldBe 0L
+                h.commitWork()
+                h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+                h.city.workers.single().completedCycles shouldBe 1L
+                h.deliveries shouldBe 1
             } finally { h.logger.removeHandler(handler) }
+        }
+    }
+
+    for (journey in listOf("shelter", "empty courier return"))
+    test("a transient planner rejection backs off then resumes a real $journey walk without teleporting") {
+        residentRuntime { h ->
+            val actor = h.owner.collisionActors().single()
+            val sheltering = journey == "shelter"
+            val destination = if (sheltering) {
+                h.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                    schematicId = "house1", anchor = CivPosition(12, 64, 0), entrance = CivPosition(12, 64, 0),
+                    bounds = CivBox(CivPosition(10, 64, -2), CivPosition(14, 68, 2)), control = null).also { home ->
+                    h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + home,
+                        workers = h.city.workers.map { it.copy(homeId = home.id) }))
+                    h.world.time = 13_000
+                }
+            } else {
+                h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null).also { warehouse ->
+                    h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                        if (it.id == warehouse.id) warehouse else it
+                    }))
+                }
+            }
+            h.city.workers.single().cargo shouldBe null
+            val travellingStatus = if (sheltering) "workers.status.sheltering" else "workers.status.moving-to-storage"
+            val arrivedStatus = if (sheltering) "workers.status.sleeping" else "workers.status.waiting-orders"
+            val maximumStep = if (sheltering) .118251 else .172001
+            h.navigationNow = 2_000L
+            h.navigationRejections = 1
+            h.owner.pulse(2_000L)
+            h.owner.status(h.workerId) shouldBe travellingStatus
+            val failedRoute = requireNotNull(h.routeIdentity())
+            val origin = requireNotNull(h.owner.residentFeet(h.workerId))
+            val teleports = h.teleports
+            for (tick in 1..64) {
+                if (h.routeFailure() != null) break
+                h.navigate(advanceMillis = 0)
+            }
+            h.navigationRejections shouldBe 0
+            h.routeFailure() shouldBe "planner-busy"
+            h.owner.pulse(2_000L) // The first observed preparation failure starts its five-second backoff.
+            for (now in listOf(2_500L, 4_000L, 6_999L)) {
+                h.navigationNow = now
+                h.navigate(advanceMillis = 0)
+                h.owner.pulse(now)
+                (h.routeIdentity() === failedRoute) shouldBe true
+                h.routeFailure() shouldBe "planner-busy"
+                h.owner.residentFeet(h.workerId) shouldBe origin
+                h.teleports shouldBe teleports
+                h.deliveries shouldBe 0
+            }
+            h.navigationNow = 7_000L
+            h.navigate(advanceMillis = 0)
+            h.owner.pulse(7_000L)
+            h.routeIdentity() shouldBe null
+            h.owner.residentFeet(h.workerId) shouldBe origin
+            h.teleports shouldBe teleports
+
+            h.navigationNow = 7_001L
+            h.owner.pulse(7_001L)
+            val retry = requireNotNull(h.routeIdentity())
+            (retry === failedRoute) shouldBe false
+            h.teleports shouldBe teleports
+            var arrived = false
+            var walked = 0.0
+            for (tick in 1..512) {
+                val before = requireNotNull(h.owner.residentFeet(h.workerId))
+                val yaw = actor.bodyYaw
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                val after = requireNotNull(h.owner.residentFeet(h.workerId))
+                val distance = before.distance(after)
+                (distance <= maximumStep) shouldBe true
+                if (actor.pose != PacketNpcPose.SLEEPING)
+                    (kotlin.math.abs(citizenAngleChange(yaw, actor.bodyYaw)) <= 8.0001f) shouldBe true
+                walked += distance
+                if (h.owner.status(h.workerId) == arrivedStatus) {
+                    arrived = true
+                    break
+                }
+            }
+            withClue("journey=$journey status=${h.owner.status(h.workerId)} location=${actor.location} planner=${h.navigationState()}") {
+                arrived shouldBe true
+            }
+            (walked > 1.0) shouldBe true
+            val feet = requireNotNull(h.owner.residentFeet(h.workerId))
+            if (sheltering) {
+                actor.pose shouldBe PacketNpcPose.SLEEPING
+                destination.bounds.contains(feet.blockX, feet.blockY, feet.blockZ) shouldBe true
+                citizenPacketSupported(h.world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+            } else {
+                val control = requireNotNull(destination.control)
+                citizenAtStorage(h.world, CitizenPoint(feet.x, feet.y, feet.z), control) shouldBe true
+                citizenCanReachBlock(actor, control) shouldBe true
+            }
+            h.spawns shouldBe 1
+            h.pickups shouldBe 0
+            h.unloads shouldBe 0
+            h.deliveries shouldBe 0
+            h.city.workers.single().cargo shouldBe null
+            h.city.workers.single().completedCycles shouldBe 0L
+        }
+    }
+
+    test("closing residents waits for accepted work on its owned navigation executor") {
+        residentRuntime(useOwnedNavigationExecutor = true) { h ->
+            val entered = CountDownLatch(1)
+            val release = CountDownLatch(1)
+            val exited = CountDownLatch(1)
+            try {
+                h.ownedNavigationExecutor().execute {
+                    entered.countDown()
+                    try { release.await() } finally { exited.countDown() }
+                }
+                entered.await(2, TimeUnit.SECONDS) shouldBe true
+                val retired = h.owner.closeAsync()
+                h.owner.activeCount() shouldBe 0
+                retired.isDone shouldBe false
+                release.countDown()
+                retired.get(2, TimeUnit.SECONDS)
+                exited.await(2, TimeUnit.SECONDS) shouldBe true
+                retired.isDone shouldBe true
+            } finally { release.countDown() }
         }
     }
 
@@ -392,7 +538,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             distant.teleport(Location(h.world, 18.5, 64.0, .5))
             outsider.teleport(Location(h.world, 4.5, 64.0, -1.5))
             val residents = h.city.workers
-            h.owner.activateNavigating()
+            h.navigate()
             h.owner.pulse(5_000)
             h.owner.status(h.workerId) shouldBe "workers.status.defending"
             h.owner.status(helperId) shouldBe "workers.status.defending"
@@ -432,12 +578,12 @@ class CivsResidentsRuntimeTest : FunSpec({
             victim.teleport(start)
             val monster = h.monsterAt(12.5, .5)
             h.owner.pulse(2_000)
-            h.owner.activateNavigating()
+            h.navigate()
             h.owner.pulse(3_000)
             h.owner.status(h.workerId) shouldBe "workers.status.retreating"
             for (tick in 0 until 2_000) {
                 val before = victim.location
-                h.owner.activateNavigating()
+                h.navigate()
                 (before.distance(victim.location) <= .236501) shouldBe true
                 if (victim.location.distanceSquared(start) >= 4.0 * 4.0) break
             }
@@ -505,9 +651,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
             h.workReady = CivsEquipment.usableCount(h.city.workers.single(), "STONE") > 0
             h.owner.pulse(3_000)
-            if (carried) repeat(20) { h.owner.activateNavigating() }
+            if (carried) repeat(20) { h.navigate() }
             else for (tick in 1..512) {
-                h.owner.activateNavigating()
+                h.navigate()
                 val at = actor.location
                 if (citizenAtStorage(h.world, CitizenPoint(at.x, at.y, at.z), hut.control!!)) break
             }
@@ -589,7 +735,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.work = null
             h.idleReason = "searching-work"
             h.owner.pulse(3_000)
-            repeat(160) { h.owner.activateNavigating() }
+            repeat(160) { h.navigate() }
             actor.location.distanceSquared(start) shouldBe 0.0
             h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
             h.deliveries shouldBe 0
@@ -599,7 +745,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 durationMillis = 2_000, focus = CivPosition(18, 56, 0), status = "digging-mine")
             h.owner.pulse(4_000)
             repeat(1_000) {
-                h.owner.activateNavigating()
+                h.navigate()
                 (actor.location.y <= start.y) shouldBe true
             }
             (actor.location.y < start.y - .1) shouldBe true
@@ -626,7 +772,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             // Cold mock block reads may need more calls, but every movement must stay continuous.
             for (index in 0 until 2_000) {
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 if ((index + 1) % 20 == 0) h.owner.pulse(2_000L)
                 (before.distance(actor.location) <= .215001) shouldBe true
                 if (actor.location.distanceSquared(destination) <= 8.0 * 8.0) break
@@ -653,7 +799,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             var recovered = false
             repeat(80) { index ->
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 if ((index + 1) % 20 == 0) h.owner.pulse(2_000L + (index + 1) * 50)
                 if (before.distance(actor.location) > 8.0) recovered = true
             }
@@ -697,7 +843,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             }
             var slept = false
             for (tick in 1..400) {
-                h.owner.activateNavigating()
+                h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(2_000 + tick * 50L)
                 if (actors.all { it.pose == PacketNpcPose.SLEEPING }) { slept = true; break }
             }
@@ -749,19 +895,19 @@ class CivsResidentsRuntimeTest : FunSpec({
             // owner must revalidate the pose even when its route has completed.
             visitor.teleport(reserved)
             for (tick in 1..512) {
-                h.owner.activateNavigating()
+                h.navigate()
                 if (resident.location.distanceSquared(reserved) < .000001) break
             }
             withClue("location=${resident.location} ${h.navigationState()}") {
                 resident.location.toVector() shouldBe reserved.toVector()
             }
             // Let the route owner retire its final waypoint before the arrival pulse.
-            h.owner.activateNavigating()
+            h.navigate()
             h.owner.pulse(4_000)
             resident.pose shouldBe PacketNpcPose.STANDING
             var slept = false
             for (tick in 1..400) {
-                h.owner.activateNavigating()
+                h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(4_000 + tick * 50L)
                 if (resident.pose == PacketNpcPose.SLEEPING) { slept = true; break }
             }
@@ -858,7 +1004,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(3_000)
             actor.pose shouldBe PacketNpcPose.STANDING
             actor.location shouldBe origin
-            repeat(30) { h.owner.activateNavigating() }
+            repeat(30) { h.navigate() }
             actor.location.y shouldBe 63.0
             citizenPacketSupported(h.world, CitizenPoint(actor.location.x, actor.location.y, actor.location.z)) shouldBe true
             h.deliveries shouldBe 0
@@ -882,7 +1028,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.world.time = 0
             for (now in listOf(3_000L, 4_000L)) {
                 h.owner.pulse(now)
-                repeat(40) { h.owner.activateNavigating() }
+                repeat(40) { h.navigate() }
                 actor.pose shouldBe PacketNpcPose.SLEEPING
                 actor.location shouldBe sleepingPosition
                 h.owner.workingResidentIds(h.city.id) shouldBe emptySet()
@@ -927,7 +1073,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 // Drain bounded A* admission without spending any simulated travel time.
                 for (frame in 1..512) {
                     val before = requireNotNull(h.owner.residentFeet(h.workerId))
-                    h.owner.activateNavigating()
+                    h.navigate()
                     val after = requireNotNull(h.owner.residentFeet(h.workerId))
                     (before.distance(after) <= .118251) shouldBe true
                     if (after.distanceSquared(origin) > .000001) { walking = true; break }
@@ -938,7 +1084,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 // Thirty seconds is bounded and below this route's ordinary 55-second budget.
                 for (tick in 1..600) {
                     val before = requireNotNull(h.owner.residentFeet(h.workerId))
-                    h.owner.activateNavigating()
+                    h.navigate()
                     if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
                     // Sleeping raises only the visible mesh; logical feet still prove a real arrival.
                     val after = requireNotNull(h.owner.residentFeet(h.workerId))
@@ -993,7 +1139,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             // A player occupying every recovery destination must keep the same failed route pending.
             h.owner.residentStepAllowed = { _, from, to -> from.distanceSquared(to) > .000001 }
             h.owner.pulse(2_000)
-            repeat(200) { h.owner.activateNavigating() }
+            repeat(200) { h.navigate() }
             h.owner.pulse(13_001)
             actor.location.x shouldBe 20.5
             h.owner.status(h.workerId) shouldBe "workers.status.sheltering"
@@ -1010,7 +1156,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.residentFeet(h.workerId) shouldBe recovered
             h.owner.residentFeet(h.workerId)?.add(0.0, 10.0, 0.0) // Caller mutation cannot alter the saved feet.
             h.owner.residentFeet(h.workerId) shouldBe recovered
-            repeat(20) { h.owner.activateNavigating() }
+            repeat(20) { h.navigate() }
             actor.location.y shouldBe lying.y // Gravity must not undo the pose-only floor clearance.
             // The pose is rechecked against the current world, not trusted until morning.
             for ((dx, dz) in listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1))
@@ -1040,7 +1186,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 // Coarse pulses retry a target rejected before this test loaded its margin.
                 if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 val distance = before.distance(actor.location)
                 (distance <= .118251) shouldBe true
                 walked += distance
@@ -1080,7 +1226,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             cargo.sourceEntrance shouldBe CivPosition(22, 64, 0)
             shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, cargo) }.reason shouldBe "route-unreachable"
             val sourceAt = producer.location
-            repeat(20) { h.owner.activateNavigating() }
+            repeat(20) { h.navigate() }
             producer.location shouldBe sourceAt
             (h.workerId in h.owner.workingResidentIds(h.city.id)) shouldBe false
             h.pickups shouldBe 0
@@ -1148,7 +1294,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             if (outcome == "pickup") {
                 var now = 3_000L
                 for (frame in 0 until 384) {
-                    h.owner.activateNavigating()
+                    h.navigate()
                     if (frame % 20 == 0) {
                         now += 1_000L
                         h.owner.pulse(now)
@@ -1181,7 +1327,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 }
                 val now = if (outcome == "expiry") 92_000L else 4_000L
                 h.owner.pulse(now)
-                if (outcome == "combat") h.owner.activateNavigating()
+                if (outcome == "combat") h.navigate()
                 h.owner.pulse(now + 1_000)
                 h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
                 h.pickups shouldBe 0
@@ -1305,7 +1451,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             try {
                 for (tick in 1..frameLimit) {
                     val before = actor.location
-                    h.owner.activateNavigating()
+                    h.navigate()
                     if (tick % 20 == 0) {
                         h.owner.pulse(4_000)
                         frames += "$tick:${actor.location}:${h.owner.status(h.workerId)}"
@@ -1332,7 +1478,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.steps.isNotEmpty() shouldBe true
             val workSteps = h.steps.size
             repeat(80) { tick ->
-                h.owner.activateNavigating()
+                h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(5_000L + tick * 50)
                 actor.location shouldBe atWarehouse
             }
@@ -1377,7 +1523,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.deliveries shouldBe 0
             for (tick in 1..160) {
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(3_000L + tick * 50)
                 // A fresh plan walks from the summon, without a stale route or recovery jump.
                 (before.distance(actor.location) <= .215001) shouldBe true
@@ -1411,7 +1557,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(2_000)
             h.owner.status(h.workerId) shouldBe "workers.status.working-field"
             shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
-            repeat(20) { h.owner.activateNavigating() }
+            repeat(20) { h.navigate() }
             actor.location.toVector() shouldBe observed.toVector()
             verify(atLeast = 1) { actor.swingMainHand() }
             verify(atLeast = 1) { actor.pitch = match { it > 45f } }
@@ -1446,7 +1592,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 verify(atLeast = 1) { actor.swingMainHand() }
                 repeat(20) {
                     val before = actor.location
-                    h.owner.activateNavigating()
+                    h.navigate()
                     val after = actor.location
                     after.toVector() shouldBe observed.toVector()
                     (kotlin.math.abs(citizenAngleChange(before.yaw, after.yaw)) <= 8.0001f) shouldBe true
@@ -1522,7 +1668,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.deliveries shouldBe 0
             for (tick in 1..160) {
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 (before.distance(actor.location) <= .215001) shouldBe true
                 if (tick % 20 == 0) h.owner.pulse(2_000L + tick * 50)
                 if (h.deliveries != 0) break
@@ -1544,7 +1690,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(21, 64, 0), emptyList(),
                 durationMillis = 1_500, status = "equipping-tool")
             h.owner.pulse(2_000)
-            repeat(20) { h.owner.activateNavigating() }
+            repeat(20) { h.navigate() }
             actor.location.toVector() shouldBe otherSide.toVector()
             h.owner.pulse(3_500)
             h.deliveries shouldBe 1
@@ -1566,7 +1712,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             // Hold coarse time still and observe the first usable side, without timeout recovery.
             for (tick in 1..2_000) {
                 val before = actor.location
-                h.owner.activateNavigating()
+                h.navigate()
                 val at = actor.location
                 (before.distance(at) <= .215001) shouldBe true
                 if (citizenAtStorage(h.world, CitizenPoint(at.x, at.y, at.z), control) &&
@@ -1578,7 +1724,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 citizenCanReachBlock(actor, control) shouldBe true
             }
             (arrival.x < 20.0) shouldBe true
-            repeat(40) { h.owner.activateNavigating() }
+            repeat(40) { h.navigate() }
             actor.location shouldBe arrival
             h.deliveries shouldBe 0
             h.owner.pulse(3_000)
@@ -1631,17 +1777,20 @@ private fun runtimeSleepingBody(npc: PacketPlayerNpc): BoundingBox {
     }
 }
 
-private fun residentRuntime(block: (ResidentRuntime) -> Unit) {
+private fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, block: (ResidentRuntime) -> Unit) {
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open().use { paper ->
-            val fixture = ResidentRuntime(paper)
-            try { block(fixture) } finally { fixture.owner.closeAsync().join() }
+            val fixture = ResidentRuntime(paper, useOwnedNavigationExecutor)
+            try { block(fixture) } finally { fixture.close() }
         }
     }
 }
 
-private class ResidentRuntime(paper: MockBukkitTestRuntime) {
+private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean) : AutoCloseable {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
+    private val navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+    private val navigationWork = BudgetedTaskQueue(navigationTasks, nanoTime = { 0L })
+    private val navigationWorkers = ArrayDeque<Runnable>()
     val logger get() = plugin.logger
     val world = ResidentRuntimeWorld().also(paper.server::addWorld)
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
@@ -1649,6 +1798,12 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var viewing = true
     var background = false
     var spawns = 0
+    var teleports = 0
+        private set
+    var navigationNow: Long? = null
+    var holdNavigation = false
+    var navigationRejections = 0
+    val pendingNavigationWorkers: Int get() = navigationWorkers.size
     var hits = 0
     var deliveries = 0
     var unloads = 0
@@ -1721,6 +1876,7 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 every { pose } answers { npcPose }
                 every { pose = any() } answers { npcPose = firstArg() }
                 every { teleport(any()) } answers {
+                    teleports++
                     position = firstArg<Location>().clone()
                     npcBodyYaw = position.yaw; npcPitch = position.pitch
                     Unit
@@ -1756,7 +1912,15 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
                 supplyRequests++
                 pendingSupplies
-            }, backgroundActive = { background })
+            }, backgroundActive = { background }, navigationTasks = navigationTasks, navigationWork = navigationWork,
+            navigationExecutor = if (useOwnedNavigationExecutor) null else Executor { task ->
+                if (navigationRejections > 0) {
+                    navigationRejections--
+                    throw RejectedExecutionException("Transient navigation fixture admission failure")
+                }
+                if (holdNavigation) navigationWorkers += task else task.run()
+            },
+            navigationClock = { navigationNow ?: System.currentTimeMillis() })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -1778,16 +1942,38 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     }
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
+    fun navigate(advanceMillis: Long = 50L) {
+        navigationNow = navigationNow?.plus(advanceMillis)
+        paper.performTicks(1)
+        owner.activateNavigating()
+    }
+    fun releaseNavigation() {
+        holdNavigation = false
+        while (navigationWorkers.isNotEmpty()) navigationWorkers.removeFirst().run()
+    }
+    override fun close() {
+        try { owner.closeAsync().join() } finally {
+            navigationWork.close()
+            navigationTasks.close()
+        }
+    }
+    private fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
+        isAccessible = true
+        get(target)
+    }
+    /** Read-only identity distinguishes an accepted pending route from a silent replacement. */
+    fun routeIdentity(worker: UUID = workerId): Any? =
+        (field(owner, "actors") as Map<*, *>)[worker]?.let { field(it, "route") }
+    fun routeFailure(worker: UUID = workerId): String? =
+        routeIdentity(worker)?.let { (field(it, "motion") as CitizenPacketRoute).failure }
+    fun ownedNavigationExecutor(): Executor =
+        requireNotNull(field(requireNotNull(field(owner, "navigation")), "ownedExecutor") as? Executor)
     /** Read-only failure context; runtime behavior never depends on private test access. */
     fun navigationState(worker: UUID = workerId): String = runCatching {
-        fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
-            isAccessible = true
-            get(target)
-        }
         val actor = (field(owner, "actors") as Map<*, *>)[worker] ?: return@runCatching "no actor"
         val route = field(actor, "route")
         val motion = route?.let { field(it, "motion") as CitizenPacketRoute }
-        val queue = field(requireNotNull(field(owner, "navigation")), "searching") as Collection<*>
+        val queue = field(requireNotNull(field(owner, "navigation")), "jobs") as Map<*, *>
         val shelter = field(actor, "shelter") as? CivPosition
         val feet = owner.residentFeet(worker)
         val chunksReady = if (shelter == null || feet == null) null else
@@ -1846,9 +2032,6 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
 
 /** A stone plane with no tile entities. Only pinned MockBukkit's missing terrain queries are supplied. */
 private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
-    var slowNextChunkRead = false
-    var delayedChunkReads = 0
-        private set
     val threatEntities = mutableListOf<Entity>()
     val particles = mutableListOf<Triple<Particle, Int, Location>>()
     val sounds = mutableListOf<Triple<Sound, Float, Float>>()
@@ -1911,13 +2094,8 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
     }
 
     override fun getChunkAt(x: Int, z: Int, generate: Boolean): ChunkMock {
-        if (slowNextChunkRead) {
-            slowNextChunkRead = false
-            delayedChunkReads++
-            Thread.sleep(2)
-        }
         // Preserve native generation/loaded bookkeeping without recording every hot
-        // load-level lookup in MockK under the production one-millisecond A* budget.
+        // load-level lookup in MockK during bounded snapshot capture.
         super.getChunkAt(x, z, generate)
         return chunkFixtures.getOrPut(x to z) {
             object : ChunkMock(this@ResidentRuntimeWorld, x, z) {
