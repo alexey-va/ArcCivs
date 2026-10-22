@@ -82,8 +82,8 @@ class CivsStoreTest : FreeSpec({
         reopened shouldBe saved
         reopened.minePlans shouldBe mapOf(mine.id.toString() to CivMinePlanState(2, 3, 180))
         reopened.mineProgress shouldBe old.mineProgress
-        val size = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.size.toLong()
-        for (state in listOf(CivMinePlanState(1, 3, 180), CivMinePlanState(3, 3, 180),
+        val size = requireNotNull(CivsMinePlan.forBuilding(mine, 2)).steps.size.toLong()
+        for (state in listOf(CivMinePlanState(1, 3, 180), CivMinePlanState(4, 3, 180),
             CivMinePlanState(2, -1, 180), CivMinePlanState(2, size + 1, 180), CivMinePlanState(2, 3, 179))) {
             shouldThrow<CivsRejection> { CivsRules.validate(reopened.copy(minePlans = mapOf(mine.id.toString() to state))) }
                 .reason shouldBe "invalid-state"

@@ -120,8 +120,10 @@ data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
 /** Null buildingId retires the whole city. Native control cleanup follows this durable intent. */
 data class CivDeletion(val buildingId: UUID?)
 
-/** V2 physical construction cursor; legacyStep records the untouched pre-cutover ordinal. */
-data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep: Long? = null)
+/** Versioned physical construction cursor; legacyStep records the untouched pre-cutover ordinal. */
+data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep: Long? = null,
+    /** V2's exact saved prefix is retained when a first real V3 receipt starts its independent cursor. */
+    val v2Step: Long? = null)
 
 data class Settlement(
     val id: UUID,

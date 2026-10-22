@@ -96,6 +96,40 @@ class CivsStorageTest : FunSpec({
         return building
     }
 
+    test("worker-bag pickup refuses a full real warehouse and never borrows custom-stack space") {
+        val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
+        val quarry = addLocalBuilding(BuildingType.QUARRY, 10)
+        val courier = CivWorker(UUID.randomUUID(), "Courier", warehouse.id, nextDeliveryAt = 1)
+        val producer = CivWorker(UUID.randomUUID(), "Miner", quarry.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COAL", 64) else null })
+        city = city.copy(workers = listOf(courier, producer)).let(CivsRules::validate)
+        val target = (world.getBlockAt(6, 64, 0).state as Barrel).inventory
+        repeat(target.size) { target.setItem(it, ItemStack(Material.STONE, 64)) }
+        val custom = named(Material.COAL, 63)
+        target.setItem(target.size - 1, custom)
+        val sources = mapOf(producer.id to CivPosition(10, 64, 3))
+        val cargo = requireNotNull(CivsLogistics.plan(city, courier, { emptyMap() }, sources) { _, _ -> 64L }).cargo
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        storage.cargoRoom(city, warehouse.id, "COAL") shouldBe 0L
+        shouldThrow<CivsRejection> { storage.prepareCargoPickup(city, cargo) }.reason shouldBe "storage-full"
+        CivsEquipment.plainCount(city.workers.last(), "COAL") shouldBe 64
+        target.getItem(target.size - 1) shouldBe custom
+        target.setItem(0, null)
+        storage.cargoRoom(city, warehouse.id, "COAL") shouldBe 64L
+        val prepared = storage.prepareCargoPickup(city, cargo)
+        prepared.changes shouldBe emptyList()
+        val picked = CivsLogistics.pickup(city, courier.id, cargo).copy(inventory = prepared.inventoryAfter)
+        val receipt = CivInventoryTransaction(id, city.id, city.revision, picked, prepared.changes).validated()
+        storage.seal(receipt, keepViewersOpen = true)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        target.getItem(0) shouldBe null
+        target.getItem(target.size - 1) shouldBe custom
+        CivsEquipment.plainCount(receipt.after.workers.first(), "COAL") shouldBe 64
+        CivsEquipment.plainCount(receipt.after.workers.last(), "COAL") shouldBe 0
+    }
+
     test("resident transfers retain native metadata in both directions and replay each endpoint once") {
         val player = paper.addPlayer("EquipmentOwner")
         player.openInventory(paper.server.createInventory(player, 9))

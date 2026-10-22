@@ -244,7 +244,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                                     runtime.validate(city, work)
                                     val id = UUID.randomUUID()
                                     storage.reserve(city, id)
-                                    val plan = storage.prepareWork(city, farm.id, work.storageInputs(current), work.outputs, work.changes)
+                                    val plan = storage.prepareWork(city, farm.id, work.storageInputs(current), emptyMap(), work.changes)
                                     val after = CivsRules.finishWorldWork(city, work, at).copy(inventory = plan.inventoryAfter)
                                     val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
                                         worldChanges = plan.worldChanges).validated()
@@ -258,7 +258,9 @@ class CivsResidentsRuntimeTest : FunSpec({
                             harvested.toSet() shouldBe mature.toSet()
                             harvested.size shouldBe 3
                             city.workers.sumOf(CivWorker::completedCycles) shouldBe 3L
-                            city.inventory!!.buildingStock(farm.id) shouldBe mapOf("WHEAT" to 3L, "WHEAT_SEEDS" to 3L)
+                            city.inventory!!.buildingStock(farm.id) shouldBe emptyMap()
+                            city.workers.sumOf { CivsEquipment.plainCount(it, "WHEAT") } shouldBe 3L
+                            city.workers.sumOf { CivsEquipment.plainCount(it, "WHEAT_SEEDS") } shouldBe 3L
                             mature.forEach { point -> (world.getBlockAt(point.x, point.y, point.z).blockData as Ageable).age shouldBe 0 }
                             plots.filter { it.copy(y = it.y + 1) !in mature }.forEach { soil ->
                                 (world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData as Ageable).age shouldBe 3
@@ -1025,6 +1027,126 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (ground in listOf(Material.STONE, Material.FARMLAND, Material.DIRT_PATH))
+    test("worker-bag pickup on $ground holds the real producer and requires a nearby observed courier") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
+                anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            val courierId = UUID.randomUUID()
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
+                workers = h.city.workers.map { it.copy(items = List(CivsEquipment.SLOTS) { slot ->
+                    if (slot == CivsEquipment.BAG) CivResidentItem("COAL", 64) else null
+                }) } + CivWorker(courierId, "Courier", warehouse.id, nextDeliveryAt = 1)))
+            val producer = h.owner.collisionActors().single()
+            h.world.getBlockAt(22, 63, 0).type = ground
+            val standingY = if (ground == Material.STONE) 64.0 else 63.9375
+            producer.teleport(Location(h.world, 22.5, standingY, .5))
+            h.courierProvider = { city, worker -> if (worker.id == courierId)
+                CivsLogistics.plan(city, worker, { emptyMap() }, h.owner.courierSources(city.id, worker.id)) { _, _ -> 64L }
+                else null }
+            h.onPickup = { cityId, workerId, cargo -> h.owner.requireCargoPickupArrival(cityId, workerId, cargo) }
+            h.owner.pulse(2_000)
+            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            val cargo = requireNotNull(h.courierProvider!!.invoke(h.city, h.city.workers.last())).cargo
+            cargo.sourceEntrance shouldBe CivPosition(22, 64, 0)
+            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, cargo) }.reason shouldBe "route-unreachable"
+            val sourceAt = producer.location
+            repeat(20) { h.owner.activateNavigating() }
+            producer.location shouldBe sourceAt
+            (h.workerId in h.owner.workingResidentIds(h.city.id)) shouldBe false
+            h.pickups shouldBe 0
+            courier.teleport(Location(h.world, 21.5, 64.0, .5))
+            h.owner.pulse(3_000); h.owner.pulse(4_000); h.owner.pulse(5_000)
+            h.pickups shouldBe 1
+            h.city.workers.last().cargo shouldBe null
+            val actual = requireNotNull(h.pickedCargo)
+            producer.teleport(sourceAt.clone().add(3.0, 0.0, 0.0))
+            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }.reason shouldBe "route-unreachable"
+            producer.teleport(sourceAt)
+            h.city = CivsLogistics.pickup(h.city, courierId, actual)
+            h.pendingPickup.complete(h.city)
+            h.owner.pulse(6_000)
+            h.city.workers.last().cargo!!.sourceWorkerId shouldBe h.workerId
+            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 0
+            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 64
+            h.pickups shouldBe 1
+        }
+    }
+
+    test("a working producer accumulates a stack but a full bag can offer its small surplus immediately") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 22.5, 64.0, .5))
+            fun bag(amount: Int, full: Boolean = false) = List<CivResidentItem?>(CivsEquipment.SLOTS) { slot -> when {
+                slot == 4 -> CivResidentItem("IRON_HOE", 1)
+                slot == CivsEquipment.BAG -> CivResidentItem("COAL", amount)
+                full && slot > CivsEquipment.BAG -> CivResidentItem("IRON_AXE", 1)
+                else -> null
+            } }
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1)) })
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(22, 64, 0),
+                listOf(CivPlanBlock(CivPosition(23, 63, 0), "minecraft:stone", "minecraft:air")),
+                outputs = mapOf("WHEAT" to 1L), durationMillis = 30_000, status = "working-field")
+            h.owner.pulse(2_000)
+            val courier = UUID.randomUUID()
+            h.owner.courierSources(h.city.id, courier) shouldBe emptyMap()
+            h.owner.status(h.workerId) shouldBe "workers.status.working-field"
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(64)) })
+            h.owner.courierSources(h.city.id, courier).keys shouldBe setOf(h.workerId)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1, full = true)) })
+            h.owner.courierSources(h.city.id, courier).keys shouldBe setOf(h.workerId)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1, full = true).toMutableList().also { slots ->
+                slots[CivsEquipment.BAG + 1] = CivResidentItem("OAK_SAPLING", 1)
+            }) })
+            h.work = h.work!!.copy(inputs = mapOf("OAK_SAPLING" to 1L), outputs = mapOf("OAK_LOG" to 4L))
+            h.owner.pulse(3_000)
+            h.owner.courierSources(h.city.id, courier) shouldBe emptyMap()
+            CivsEquipment.plainCount(h.city.workers.single(), "OAK_SAPLING") shouldBe 1
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("expired worker rendezvous releases the producer and retries rarely after three failures") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
+                anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            val courierId = UUID.randomUUID()
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
+                workers = h.city.workers.map { it.copy(items = List(CivsEquipment.SLOTS) { slot ->
+                    if (slot == CivsEquipment.BAG) CivResidentItem("COAL", 64) else null
+                }) } + CivWorker(courierId, "Courier", warehouse.id, nextDeliveryAt = 1)))
+            h.owner.collisionActors().single().teleport(Location(h.world, 22.5, 64.0, .5))
+            h.courierProvider = { city, worker -> if (worker.id == courierId)
+                CivsLogistics.plan(city, worker, { emptyMap() }, h.owner.courierSources(city.id, worker.id)) { _, _ -> 64L }
+                else null }
+            var start = 2_000L
+            var expired = 0L
+            repeat(3) { attempt ->
+                h.owner.pulse(start)
+                h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
+                expired = start + 90_000L
+                h.owner.pulse(expired); h.owner.pulse(expired + 1)
+                h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
+                h.owner.status(h.workerId) shouldBe "workers.status.waiting-inputs"
+                start = expired + if (attempt == 0) 5_001L else 15_001L
+            }
+            h.owner.pulse(expired + 59_999L)
+            h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
+            h.owner.pulse(expired + 60_001L)
+            h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
+            h.pickups shouldBe 0
+            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
+            h.city.workers.last().cargo shouldBe null
+        }
+    }
+
     test("a courier unloads once then walks back to its warehouse and waits beside the real barrel") {
         residentRuntime { h ->
             val warehouse = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
@@ -1417,6 +1539,11 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     var surfaceMultiplier = 1.0
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
+    var courierProvider: ((Settlement, CivWorker) -> CivCourierPlan?)? = null
+    var pickups = 0
+    var pickedCargo: CivCargo? = null
+    var onPickup: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> }
+    val pendingPickup = CompletableFuture<Settlement>()
     val steps = mutableListOf<Pair<Location, Location>>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
@@ -1492,7 +1619,13 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
             footstep = { _, _, _, from, to -> steps += from.clone() to to.clone() },
             surfaceSpeed = { surfaceMultiplier },
-            courierPlan = { _, _ -> courier }, dropoffCargo = { _, _, cargo, target ->
+            courierPlan = { city, worker -> courierProvider?.invoke(city, worker) ?: courier },
+            pickupCargo = { city, worker, cargo ->
+                onPickup(city, worker, cargo)
+                pickups++
+                pickedCargo = cargo
+                pendingPickup
+            }, dropoffCargo = { _, _, cargo, target ->
                 cargo shouldBe requireNotNull(courier).cargo
                 target shouldBe requireNotNull(courier).destinationBuildingId
                 unloads++
@@ -1625,10 +1758,15 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
             override fun isPassable(): Boolean = type.isAir
             override fun getBoundingBox(): BoundingBox = if (type == Material.LADDER)
                 BoundingBox(x.toDouble(), y.toDouble(), z + 13.0 / 16.0, x + 1.0, y + 1.0, z + 1.0)
-            else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + if (type.isAir) 0.0 else 1.0, z + 1.0)
+            else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + when (type) {
+                Material.AIR, Material.CAVE_AIR, Material.VOID_AIR -> 0.0
+                Material.FARMLAND, Material.DIRT_PATH -> .9375
+                else -> 1.0
+            }, z + 1.0)
             override fun getCollisionShape(): VoxelShape = when {
                 type.isAir -> EMPTY_SHAPE
                 type == Material.LADDER -> LADDER_SHAPE
+                type == Material.FARMLAND || type == Material.DIRT_PATH -> LOWERED_SHAPE
                 else -> FULL_SHAPE
             }
         }
@@ -1674,6 +1812,7 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         }
         private val EMPTY_SHAPE = shape(emptyList())
         private val FULL_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
+        private val LOWERED_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .9375, 1.0)))
         private val LADDER_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0)))
     }
 }

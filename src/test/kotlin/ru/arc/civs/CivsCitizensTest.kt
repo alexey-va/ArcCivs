@@ -21,6 +21,64 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
+    for (rotation in listOf(0, 90, 180, 270))
+    test("mine waypoints at rotation $rotation cross the upper transfer before using the separate corner ladder in either direction") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("corner-ladder-waypoints").also(paper.server::addWorld)
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 80, 0), rotation)
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            fun data(spec: String) = org.bukkit.Bukkit.createBlockData(spec).also { if (!it.material.isAir) it.rotate(when (rotation) {
+                90 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
+                180 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
+                270 -> org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90
+                else -> org.bukkit.block.structure.StructureRotation.NONE
+            }) }
+            for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
+            for (step in geometry.steps) {
+                val point = CivsWorksiteLayouts.point(mine, step.point)
+                world.getBlockAt(point.x, point.y, point.z).blockData =
+                    data(step.after ?: "minecraft:air")
+            }
+            val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+            val upperTransfer = bottom.copy(y = mine.anchor.y + geometry.transferFeetY)
+            val cornerTransfer = CivsWorksiteLayouts.point(mine, geometry.extensionLadder)
+            val lower = cornerTransfer.copy(y = mine.anchor.y + geometry.floors.last().feetY)
+            val above = bottom.copy(y = bottom.y + 4)
+            for (y in bottom.y..above.y) {
+                val backing = CivsWorksiteLayouts.point(mine, geometry.backing).copy(y = y)
+                world.getBlockAt(backing.x, y, backing.z).type = Material.COBBLESTONE
+                world.getBlockAt(bottom.x, y, bottom.z).blockData = data(
+                    "minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+            }
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+            fun at(point: CivPosition) = Location(world, point.x + .5, point.y.toDouble(), point.z + .5)
+            citizenMineWaypoint(city, world, at(bottom), lower) shouldBe upperTransfer
+            citizenMineWaypoint(city, world, at(upperTransfer), lower) shouldBe cornerTransfer
+            // The actual destination needs no intermediate waypoint; startRoute goes there directly.
+            citizenMineWaypoint(city, world, at(cornerTransfer), lower) shouldBe null
+            citizenMineWaypoint(city, world, at(lower), above) shouldBe cornerTransfer
+            citizenMineWaypoint(city, world, at(cornerTransfer), above) shouldBe upperTransfer
+            citizenMineWaypoint(city, world, at(upperTransfer), above) shouldBe bottom
+        }
+    }
+
+    test("only a mine leg passes beneath another foundation with its complete headroom gap") {
+        val mine = spatialBuilding("nordic", "miner", 1, CivPosition(0, 80, 0))
+        val bottom = CivsWorksiteLayouts.point(mine, requireNotNull(CivsMinePlan.forBuilding(mine)).bottom)
+        val point = CivPosition(10, bottom.y - 5, 10)
+        val home = building(BuildingType.HOUSE, CivPosition(10, 80, 10)).copy(
+            bounds = CivBox(CivPosition(9, 80, 9), CivPosition(12, 85, 12)))
+        val current = city(listOf(mine, home), CivWorker(UUID.randomUUID(), "Miner", mine.id), null)
+        val allowed = setOf(mine.id)
+        citizenRouteCellAllowed(current, allowed, point.x, point.z) shouldBe false
+        citizenRoutePointAllowed(current, allowed, point) shouldBe false
+        citizenRoutePointAllowed(current, allowed, point, mine) shouldBe true
+        citizenRoutePointAllowed(current, allowed, point, home) shouldBe false
+        val tooShallow = home.copy(bounds = home.bounds.copy(min = home.bounds.min.copy(y = point.y + 4)))
+        citizenRoutePointAllowed(current.copy(buildings = listOf(mine, tooShallow)), allowed, point, mine) shouldBe false
+        citizenRoutePointAllowed(current.copy(buildings = listOf(mine, home.copy(type = BuildingType.QUARRY))), allowed, point, mine) shouldBe false
+    }
+
     test("a courier waits for durable pickup before walking to unload and retries full storage without losing cargo") {
         val cycle = CitizenCycle(token(90_000), 1_000, pickupAtWorkplace = true)
         cycle.start()

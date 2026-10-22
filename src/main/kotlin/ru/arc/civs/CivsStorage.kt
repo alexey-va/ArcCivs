@@ -530,7 +530,25 @@ class CivsStorage(private val plugin: Plugin,
 
     fun prepareCargoPickup(city: Settlement, cargo: CivCargo): CivStoragePlan {
         require(cargo.amount in 1L..64L)
+        if (cargo.sourceWorkerId != null) {
+            checkClaim(city)
+            reject(cargoRoom(city, cargo.targetBuildingId, cargo.material) < cargo.amount, "storage-full")
+            return CivStoragePlan(requireNotNull(city.inventory), emptyList())
+        }
         return prepareBuildingDebit(city, cargo.sourceBuildingId, mapOf(cargo.material to cargo.amount))
+    }
+
+    /** A prospective worker handoff never starts without space in the destination's real holders. */
+    fun cargoRoom(city: Settlement, buildingId: UUID, material: String): Long {
+        checkMain(); requireOpen()
+        if (city.inventory?.mode == CivStorageMode.VIRTUAL) return warehouseSpace(city, buildingId).coerceAtMost(CivsLogistics.MAX_CARGO)
+        val maximum = requireNotNull(stack(material, 1)).maxStackSize
+        var room = 0L
+        for (source in localSources(city, buildingId)) for (current in source.inventory.storageContents) {
+            room += if (isEmpty(current)) maximum else plain(current)?.takeIf { it.material == material }?.let { maximum - it.amount } ?: 0
+            if (room >= CivsLogistics.MAX_CARGO) return CivsLogistics.MAX_CARGO
+        }
+        return room
     }
 
     fun prepareCargoDropoff(city: Settlement, cargo: CivCargo, destinationBuildingId: UUID): CivStoragePlan {

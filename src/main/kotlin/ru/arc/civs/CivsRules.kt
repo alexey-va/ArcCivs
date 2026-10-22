@@ -597,20 +597,26 @@ object CivsRules {
         check(productionAvailable(city, building) && building.type in CivsWorksites.TYPES, "invalid-assignment")
         val equipped = work.equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
         val supplied = if (work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
-        val progressed = supplied.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
+        val produced = if (work.outputs.isNotEmpty())
+            CivsEquipment.collectSupplies(supplied, work.outputs) else supplied
+        val progressed = produced.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
         val updated = if (work.changes.isEmpty() || work.cropCare) progressed else CivsResidents.trained(progressed, building.type)
-        check(work.miningPlanVersion == null || work.miningPlanVersion == CivsMinePlan.VERSION && work.miningStep != null,
+        check(work.miningPlanVersion == null || work.miningPlanVersion in 2..CivsMinePlan.VERSION && work.miningStep != null,
             "stale-worksite")
         val progress = work.miningStep?.takeIf { work.miningPlanVersion == null }?.let { next ->
             city.mineProgress.orEmpty() + (building.id.toString() to next)
         } ?: city.mineProgress
-        val plans = work.miningStep?.takeIf { work.miningPlanVersion == CivsMinePlan.VERSION }?.let { next ->
+        val plans = work.miningStep?.takeIf { work.miningPlanVersion != null }?.let { next ->
             val key = building.id.toString()
             val previous = city.minePlans?.get(key)
+            val version = requireNotNull(work.miningPlanVersion)
+            val plan = CivsMinePlan.forBuilding(building, version) ?: reject("stale-worksite")
             check(building.type == BuildingType.QUARRY && work.changes.isNotEmpty() &&
-                next in (previous?.nextStep ?: 0)..100_000L, "stale-worksite")
-            city.minePlans.orEmpty() + (key to CivMinePlanState(CivsMinePlan.VERSION, next,
-                previous?.legacyStep ?: city.mineProgress?.get(key)))
+                (previous == null || version >= previous.version) &&
+                next in (previous?.takeIf { it.version == version }?.nextStep ?: 0)..plan.steps.size.toLong(), "stale-worksite")
+            city.minePlans.orEmpty() + (key to CivMinePlanState(version, next,
+                previous?.legacyStep ?: city.mineProgress?.get(key),
+                previous?.takeIf { it.version == 2 && version == CivsMinePlan.VERSION }?.nextStep ?: previous?.v2Step))
         } ?: city.minePlans
         return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
             mineProgress = progress, minePlans = plans))
@@ -686,9 +692,11 @@ object CivsRules {
             city.minePlans?.let { plans -> snapshot(plans.size <= MAX_BUILDINGS && plans.all { (id, plan) ->
                 val buildingId = java.util.UUID.fromString(id)
                 val building = city.building(buildingId)
-                val size = building?.takeIf { it.type == BuildingType.QUARRY }?.let(CivsMinePlan::forBuilding)?.steps?.size
+                val size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, plan.version) }?.steps?.size
+                val v2Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 2) }?.steps?.size
                 buildingId.toString() == id && size != null && present(plan) &&
-                    plan.version == CivsMinePlan.VERSION && plan.nextStep in 0..size.toLong() &&
+                    plan.version in 2..CivsMinePlan.VERSION && plan.nextStep in 0..size.toLong() &&
+                    (plan.v2Step == null || plan.version == CivsMinePlan.VERSION && v2Size != null && plan.v2Step in 0..v2Size.toLong()) &&
                     plan.legacyStep == city.mineProgress?.get(id)
             }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }

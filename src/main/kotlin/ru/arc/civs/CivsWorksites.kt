@@ -20,6 +20,7 @@ data class CivWorldWork(
     val equipmentAfter: List<CivResidentItem?>? = null,
     val focus: CivPosition? = null,
     val miningPlanVersion: Int? = null,
+    val miningGenerator: Boolean = false,
 ) {
     val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
 
@@ -143,9 +144,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val p = work.standing
         spotChecksRemaining--
         if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
-            civsProtectedBuildings(city).any { it.id != building.id &&
-                (p.x in it.bounds.min.x..it.bounds.max.x && p.z in it.bounds.min.z..it.bounds.max.z ||
-                    CivsWorksiteLayouts.isField(it, p.x, p.z)) } ||
+            civsProtectedBuildings(city).any { it.id != building.id && protectedByBuilding(building, it, p, 1) } ||
             !citizenStandable(world, p) ||
             !citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) return false
         val eye = Location(world, p.x + .5, p.y + 1.62, p.z + .5)
@@ -204,6 +203,24 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (task.block in scan.deferredAirWalls && task.material == Material.COBBLESTONE && block.type.isAir) continue
                 requireCivs(!mineProtectionNeeded(block, task.material), "stale-worksite")
             }
+        }
+        if (work.miningGenerator) {
+            val geometry = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("stale-worksite")
+            val standing = requireNotNull(geometry.generatorStanding)
+            requireCivs(building.type == BuildingType.QUARRY && work.miningPlanVersion == CivsMinePlan.VERSION &&
+                work.miningStep == geometry.steps.size.toLong() &&
+                work.focus == CivsWorksiteLayouts.point(building, requireNotNull(geometry.generator)) &&
+                quarryWorkAccessible(city, building, world, work), "stale-worksite")
+            for (task in mineFrontier(city, building, world, geometry, standing.copy(y = standing.y - 1), emptySet())
+                ?: throw CivsRejection("protected-area")) {
+                val block = read(city, building, world, CivsWorksiteLayouts.point(building, task.block))
+                    ?: throw CivsRejection("protected-area")
+                requireCivs(!mineProtectionNeeded(block, task.material), "stale-worksite")
+            }
+            for (torch in geometry.floors.last().torches.filter {
+                kotlin.math.abs(it.x - standing.x) + kotlin.math.abs(it.z - standing.z) == 1
+            }) requireCivs(read(city, building, world, CivsWorksiteLayouts.point(building, torch))?.type == Material.TORCH,
+                "stale-worksite")
         }
     }
 
@@ -551,16 +568,20 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (!tool(worker).type.name.endsWith("_PICKAXE")) return null
         val geometry = CivsMinePlan.forBuilding(building)
             ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "mine-layout-missing")
-        val bottom = geometry.bottom
         val steps = geometry.steps
-        // A missing V2 cursor starts a world-state inspection, never reinterpretation
-        // of V1's ordinal. The first actual receipt commits this cutover atomically.
+        // Each geometry has its own ordinal. The first real V3 receipt preserves
+        // both older prefixes and commits the independent inspected V3 cursor.
         val state = city.minePlans?.get(building.id.toString())
-        val progress = state?.nextStep ?: 0L
-        if (state?.version?.let { it != CivsMinePlan.VERSION } == true || progress !in 0..steps.size.toLong())
+        val progress = state?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
+        if (state?.version?.let { it !in 2..CivsMinePlan.VERSION } == true || progress !in 0..steps.size.toLong())
             return blocked(worker, "worksite-layout", point = building.anchor, reason = "mine-progress-invalid")
-        val legacy = geometry.legacyCompleted(city.mineProgress?.get(building.id.toString()) ?: 0L)
+        val v1 = geometry.legacyCompleted(city.mineProgress?.get(building.id.toString()) ?: 0L)
             ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "legacy-mine-progress-invalid")
+        val v2Step = state?.takeIf { it.version == 2 }?.nextStep ?: state?.v2Step ?: 0L
+        val v2Plan = CivsMinePlan.forBuilding(building, 2)
+        val v2 = v2Plan?.completed(v2Step)
+            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v2-mine-progress-invalid")
+        val legacy = v1 + v2
         val scan = mineCursors[building.id]?.takeIf { it.first == building.level && it.second == progress }
         val scanStart = (scan?.third ?: progress.toInt()).coerceAtMost(steps.size)
         // Take a useful batch before descending, then use it until a supply runs out.
@@ -577,7 +598,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             // excavation invalidate clears it even when progress did not move.
             mineCursors[building.id] = Triple(building.level, progress, scanStart)
         }
-        if (scanStart == steps.size) return blocked(worker, "mine-complete")
+        if (scanStart == steps.size) return generateStone(city, worker, building, world, geometry, progress)
         val pending = steps.drop(scanStart)
         for ((offset, step) in pending.take(16).withIndex()) {
             val local = step.point
@@ -596,9 +617,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             // Existing sound shaft walls already support a ladder; replacing them first can
             // deadlock a miner who must dig the first stone to obtain cobblestone.
             val shaftSupport = step.shaftSupport
-            val soundWall = shaftSupport && target?.material == Material.COBBLESTONE &&
-                block.type.isOccluding && !block.type.hasGravity() && block.type !in UNBREAKABLE
-            if (soundWall || target?.matches(block.blockData) == true || target == null && (block.type.isAir || block.type == Material.TORCH)) {
+            val soundSupport = block.type.isOccluding && !block.type.hasGravity() && block.type !in UNBREAKABLE
+            val soundWall = shaftSupport && target?.material == Material.COBBLESTONE && soundSupport
+            val retainedLight = block.type == Material.TORCH && geometry.floors.any { local in it.torches }
+            if (soundWall || target?.matches(block.blockData) == true || target == null && (block.type.isAir || retainedLight)) {
                 // Already-dug/legacy cells and unchanged-cursor prerequisites still
                 // need their currently open frontier secured before skipping ahead.
                 val protection = secureMine(city, worker, building, world, geometry, step, progress, emptySet(), next)
@@ -609,9 +631,16 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             // A legacy completed cell that now contains a new solid object is not a
             // license to remodel it. Gravity falls and missing supports use real repairs.
+            val previousMaterial = legacy[local]?.let { Bukkit.createBlockData(it).material }
             if (legacy.containsKey(local) && !block.type.isAir && !block.type.hasGravity() && block.type != Material.TORCH &&
-                (legacy[local] == null || legacy[local] == "minecraft:cobblestone" && target?.material == Material.COBBLESTONE))
-                return blocked(worker, "worksite-obstacle", point = point, reason = "legacy-cell-changed", blockMaterial = block.type.name)
+                block.type != previousMaterial) {
+                // V2 could retain a sound native wall instead of placing its planned
+                // cobblestone. Only that final completed support step carries this
+                // historical permission; paid floors and later replacements do not.
+                val previousV2 = v2Plan?.steps.orEmpty().asSequence().take(v2Step.toInt()).lastOrNull { it.point == local }
+                if (previousV2?.shaftSupport != true || previousV2.after != "minecraft:cobblestone" || !soundSupport)
+                    return blocked(worker, "worksite-obstacle", point = point, reason = "legacy-cell-changed", blockMaterial = block.type.name)
+            }
             if (block.isLiquid) return blocked(worker, "worksite-liquid", point = point,
                 reason = "liquid", blockMaterial = block.type.name)
             if (block.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = point,
@@ -626,7 +655,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 }
             }
             if (shaftSupport) {
-                val shaftPoint = CivsWorksiteLayouts.point(building, CivPosition(bottom.x, local.y, bottom.z))
+                val shaftPoint = CivsWorksiteLayouts.point(building, geometry.ladderForBacking(local))
                 val shaft = read(city, building, world, shaftPoint, worker = worker) ?: return null
                 if (shaft.isLiquid) return blocked(worker, "worksite-liquid", point = shaftPoint,
                     reason = "liquid", blockMaterial = shaft.type.name)
@@ -652,15 +681,53 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 return blocked(worker, "waiting-${material.lowercase()}", material)
             }
             val standing = beside(city, worker, building, world, point, ladder = true) ?: return null
-            val outputs = if (block.type.isAir || block.type == Material.LADDER || block.type == Material.TORCH) emptyMap() else drops(block, tool(worker))
+            val outputs = if (block.type.isAir) emptyMap() else drops(block, tool(worker))
             return work(worker, building, standing, listOf(change(block, if (excavating) "minecraft:air" else target?.asString ?: "minecraft:air")), costs, outputs,
                 "digging-mine", duration = 2_000, miningStep = if (excavating) next - 1 else next)
         }
-        if (mineCursors[building.id]?.third == steps.size || scanStart == steps.size) blocked(worker, "mine-complete")
+        if (mineCursors[building.id]?.third == steps.size) return generateStone(city, worker, building, world, geometry, progress)
         return null
     }
 
-    /** Physical frontier: at most 18 connectivity cells and 24 protection tasks, including future-cut liquid faces. */
+    private fun generateStone(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        geometry: CivsMinePlan, progress: Long): CivWorldWork? {
+        val local = requireNotNull(geometry.generator)
+        val point = CivsWorksiteLayouts.point(building, local)
+        val block = read(city, building, world, point, worker = worker) ?: return null
+        if (block.type != Material.COBBLESTONE && block.type != Material.STONE) return blocked(worker, "worksite-obstacle", point = point,
+            reason = "generator-face-changed", blockMaterial = block.type.name)
+        val localStanding = requireNotNull(geometry.generatorStanding)
+        val support = localStanding.copy(y = localStanding.y - 1)
+        val protection = secureMine(city, worker, building, world, geometry,
+            CivsMinePlan.Step(support, "minecraft:cobblestone", "gallery", geometry.floors.last().index, "generator"),
+            progress, emptySet())
+        if (protection != null || spotSearchPending || currentNeed(city, worker)?.status != "searching-work") return protection
+        val floor = geometry.floors.last()
+        for (torch in floor.torches.filter { kotlin.math.abs(it.x - localStanding.x) + kotlin.math.abs(it.z - localStanding.z) == 1 }) {
+            val light = read(city, building, world, CivsWorksiteLayouts.point(building, torch), worker = worker) ?: return null
+            if (light.type == Material.TORCH) continue
+            if (!light.type.isAir) return blocked(worker, "worksite-obstacle", point = position(light),
+                reason = "generator-light-changed", blockMaterial = light.type.name)
+            if (CivsEquipment.plainCount(worker, "TORCH") == 0) return prepareQuarry(city, worker, building, world)
+            val standing = beside(city, worker, building, world, position(light), ladder = true) ?: return null
+            return work(worker, building, standing, listOf(change(light, "minecraft:torch")),
+                inputs = mapOf("TORCH" to 1L), status = "securing-mine", duration = 2_000, miningStep = progress)
+        }
+        val standing = CivsWorksiteLayouts.point(building, localStanding)
+        val roll = java.util.concurrent.ThreadLocalRandom.current().nextInt(100)
+        val output = generatorOutput(roll, roll != 99 || Bukkit.createBlockData("minecraft:iron_ore").isPreferredTool(tool(worker)))
+        // This permanent face is worked physically; the existing native receipt
+        // atomically captures one item, one tool use and the completed work cycle.
+        val nextFace = if (block.type == Material.COBBLESTONE) "minecraft:stone" else "minecraft:cobblestone"
+        val work = work(worker, building, standing, listOf(change(block, nextFace)),
+            outputs = mapOf(output to 1L), status = "digging-mine", duration = 6_000, miningStep = geometry.steps.size.toLong(),
+            miningGenerator = true)
+        if (!quarryWorkAccessible(city, building, world, work)) return blocked(worker, "worksite-no-access", point = point,
+            reason = "generator-no-supported-position", blockMaterial = block.type.name)
+        return work
+    }
+
+    /** Fixed-size shaft/access frontier; native checks are still shared across bounded pulses. */
     private fun mineFrontier(city: Settlement, building: CivBuilding, world: World,
         geometry: CivsMinePlan, around: CivPosition, excavations: Set<CivPosition>,
         worker: CivWorker? = null): List<MineProtection>? {
@@ -669,9 +736,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val connected = hashSetOf<CivPosition>()
         if ((effect.x to effect.z) in geometry.shaftColumns) {
             val open = hashSetOf<CivPosition>()
-            // Only the current 3x3x2 air component belongs to this frontier. A
+            // Only the current two-row air component belongs to this frontier. A
             // prospective cut must not connect a cave before its real receipt does.
-            for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y - 1, effect.y + 1)) {
+            for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y, effect.y + 1)) {
                 for ((x, z) in geometry.shaftColumns) {
                     val local = CivPosition(x, y, z)
                     val block = read(city, building, world, CivsWorksiteLayouts.point(building, local), worker = worker)
@@ -679,7 +746,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     if (block.type.isAir || block.type == Material.LADDER || block.type == Material.TORCH) open += local
                 }
             }
-            val pending = ArrayDeque(open.filter { it.x == geometry.bottom.x && it.z == geometry.bottom.z })
+            val pending = ArrayDeque(open.filter { local ->
+                val ladder = geometry.ladderAt(local.y)
+                local.x == ladder.x && local.z == ladder.z ||
+                    local.y >= geometry.transferFeetY && local.x == geometry.bottom.x && local.z == geometry.bottom.z ||
+                    local.y == geometry.bottom.y && (local.x to local.z) in geometry.openingColumns
+            })
             while (pending.isNotEmpty()) {
                 val point = pending.removeFirst()
                 if (!connected.add(point)) continue
@@ -690,8 +762,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
         return buildList {
             if ((effect.x to effect.z) in geometry.shaftColumns) {
-                val central = effect.x == geometry.bottom.x && effect.z == geometry.bottom.z
-                for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y - 1, effect.y + 1)) {
+                val central = geometry.ladderAt(effect.y).let { effect.x == it.x && effect.z == it.z } ||
+                    effect.y >= geometry.transferFeetY && effect.x == geometry.bottom.x && effect.z == geometry.bottom.z
+                for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y, effect.y + 1)) {
                     for ((x, z) in geometry.shaftColumns) {
                         if (CivPosition(x, y, z) !in connected) continue
                         // Opening the central column touches only the previous outer ring.
@@ -734,7 +807,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     if (none { it.block == adjacent }) add(MineProtection(excavated, adjacent, null))
                 }
             }
-        }.also { check(it.size <= 24) }
+        }.distinct().also { check(it.size <= 54) }
     }
 
     private fun mineExposed(task: MineProtection, excavations: Set<CivPosition>, opening: Block): Boolean {
@@ -775,9 +848,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val standing = beside(city, worker, building, world, point, ladder = true) ?: run {
                 // A one-high cut can expose a far corner before a resident can
                 // enter it. Only empty shaft shell may await its ordered lower row.
-                val lowerRowEnd = if (task.exposed.y > geometry.lowest &&
-                    (task.exposed.x to task.exposed.z) in geometry.shaftColumns)
-                    geometry.steps.indexOfLast { it.stage == "shaft" && it.point.y == task.exposed.y - 1 } + 1 else 0
+                val lowerRowEnd = geometry.lowerClearanceEnd(task.exposed)
                 if (!spotSearchPending && currentNeed(city, worker)?.status == "worksite-no-access" &&
                     task.material == Material.COBBLESTONE && block.type.isAir && effectiveProgress < lowerRowEnd) {
                     scan.deferredAirWalls += task.block
@@ -789,7 +860,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             return work(worker, building, standing, listOf(change(block, task.material.createBlockData().asString)),
                 inputs = mapOf(task.material.name to 1L), status = "securing-mine", duration = 2_000,
-                miningStep = city.minePlans?.get(building.id.toString())?.nextStep ?: 0L)
+                miningStep = city.minePlans?.get(building.id.toString())?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L)
         }
         if (scan.next < tasks.size) { spotSearchPending = true; blocked(worker, "searching-work") }
         return null
@@ -807,9 +878,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (point.y !in world.minHeight until world.maxHeight) return denied("worksite-protected", "outside-world-height")
         if (!world.isChunkLoaded(point.x shr 4, point.z shr 4)) return denied("worksite-unloaded", "chunk-unloaded")
         if (locked(city.worldId, point)) return denied("worksite-protected", "world-operation-locked")
-        if (civsProtectedBuildings(city).any { (!allowOwn || it.id != building.id) &&
-                (point.x in it.bounds.min.x..it.bounds.max.x && point.z in it.bounds.min.z..it.bounds.max.z ||
-                    CivsWorksiteLayouts.isField(it, point.x, point.z)) }) return denied("worksite-protected", "other-building")
+        if (civsProtectedBuildings(city).any { (!allowOwn || it.id != building.id) && protectedByBuilding(building, it, point) })
+            return denied("worksite-protected", "other-building")
         val block = world.getBlockAt(point.x, point.y, point.z)
         if (block.getState(false) is TileState) return denied("worksite-obstacle", "block-entity", block.type)
         if (!world.worldBorder.isInside(block.location)) return denied("worksite-protected", "world-border", block.type)
@@ -826,13 +896,14 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         var shaftApproach: CivPosition? = null
         if (ladder) CivsMinePlan.forBuilding(building)?.let { geometry ->
             val local = CivsMinePlan.localPoint(building, target)
+            val approach = if (local.y >= geometry.transferFeetY) geometry.bottom else geometry.extensionLadder
             val gallery = (local.x to local.z) !in geometry.shaftColumns && geometry.floors.any { floor ->
                 floor.cells.any { it.x == local.x && it.z == local.z && local.y in it.y..it.y + 4 }
             }
-            if (local.y in geometry.lowest..geometry.bottom.y &&
-                kotlin.math.abs(local.x.toLong() - geometry.bottom.x) <= 2 &&
-                kotlin.math.abs(local.z.toLong() - geometry.bottom.z) <= 2 && !gallery) {
-                val shaft = CivsWorksiteLayouts.point(building, geometry.bottom)
+            if (local.y in geometry.lowest until geometry.bottom.y &&
+                kotlin.math.abs(local.x.toLong() - approach.x) <= 2 &&
+                kotlin.math.abs(local.z.toLong() - approach.z) <= 2 && !gallery) {
+                val shaft = CivsWorksiteLayouts.point(building, approach)
                 shaftApproach = shaft
                 // A one-block cut exposes a placement face before its cave floor
                 // has headroom for a resident. Prefer the existing shaft approach.
@@ -862,9 +933,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (shaft != null && (kotlin.math.abs(p.x.toLong() - shaft.x) > 1 ||
                     kotlin.math.abs(p.z.toLong() - shaft.z) > 1)) { nextPosition(); continue }
             if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
-                civsProtectedBuildings(city).any { (!allowOwn || it.id != building.id) &&
-                    (p.x in it.bounds.min.x..it.bounds.max.x && p.z in it.bounds.min.z..it.bounds.max.z ||
-                        CivsWorksiteLayouts.isField(it, p.x, p.z)) }) { nextPosition(); continue }
+                civsProtectedBuildings(city).any { (!allowOwn || it.id != building.id) && protectedByBuilding(building, it, p, 1) })
+                { nextPosition(); continue }
             if (!citizenStandable(world, p)) { nextPosition(); continue }
             if (offset.x == 0 && offset.z == 0 && world.getBlockAt(p.x, p.y, p.z).type != Material.LADDER) { nextPosition(); continue }
             if (!citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) { nextPosition(); continue }
@@ -905,7 +975,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun work(worker: CivWorker, building: CivBuilding, standing: CivPosition, changes: List<CivPlanBlock>,
         inputs: Map<String, Long> = emptyMap(), outputs: Map<String, Long> = emptyMap(), status: String,
-        duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null): CivWorldWork {
+        duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null, miningGenerator: Boolean = false): CivWorldWork {
         val slots = CivsEquipment.slots(worker)
         val hand = slots[4]?.stack()
         val meta = hand?.itemMeta as? org.bukkit.inventory.meta.Damageable
@@ -928,7 +998,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val dy = cell.position.y.toDouble() - standing.y
                 val dz = cell.position.z.toDouble() - standing.z
                 dx * dx + dy * dy + dz * dz
-            }?.position, miningPlanVersion = miningStep?.let { CivsMinePlan.VERSION })
+            }?.position, miningPlanVersion = miningStep?.let { CivsMinePlan.VERSION }, miningGenerator = miningGenerator)
     }
 
     private fun drops(block: Block, tool: ItemStack): Map<String, Long> = block.getDrops(tool).filter { !it.type.isAir }
@@ -938,7 +1008,16 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
     private fun put(map: MutableMap<String, Long>, key: String, value: Long) { if (value > 0) map[key] = value else map.remove(key) }
 
+    private fun protectedByBuilding(workplace: CivBuilding, other: CivBuilding, point: CivPosition, headroom: Int = 0): Boolean =
+        (point.x in other.bounds.min.x..other.bounds.max.x && point.z in other.bounds.min.z..other.bounds.max.z ||
+            CivsWorksiteLayouts.isField(other, point.x, point.z)) &&
+            (workplace.type != BuildingType.QUARRY || !CivsMinePlan.belowFoundation(other, point.y, headroom))
+
     companion object {
+        internal fun generatorOutput(roll: Int, canMineIron: Boolean): String {
+            require(roll in 0..99)
+            return when { roll < 95 -> "COBBLESTONE"; roll < 99 -> "COAL"; canMineIron -> "RAW_IRON"; else -> "COBBLESTONE" }
+        }
         val TYPES = setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY)
         private val SOILS = setOf(Material.DIRT, Material.GRASS_BLOCK, Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.FARMLAND)
         private val TREE_SOILS = SOILS + Material.PODZOL + Material.MYCELIUM + Material.MOSS_BLOCK

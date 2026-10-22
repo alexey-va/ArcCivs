@@ -1259,14 +1259,18 @@ class CivsService(
                 if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                 else citizens.requireWorldWorkArrival(cityId, workerId, work)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
+                var completedWork: Settlement? = null
                 inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
                     if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                     else citizens.requireWorldWorkArrival(cityId, workerId, work)
                     val currentWorker = current.workers.first { it.id == workerId }
-                    storage.prepareWork(current, assignment, work.storageInputs(currentWorker), work.outputs, work.changes)
-                }, keepViewersOpen = true) { before, inventory ->
-                    CivsRules.finishWorldWork(before, work, at).copy(inventory = inventory)
+                    completedWork = try { CivsRules.finishWorldWork(current, work, at) } catch (failure: CivsRejection) {
+                        if (failure.reason == "resident-inventory-full") throw CivsRejection("storage-full") else throw failure
+                    }
+                    storage.prepareWork(current, assignment, work.storageInputs(currentWorker), emptyMap(), work.changes)
+                }, keepViewersOpen = true) { _, inventory ->
+                    requireNotNull(completedWork).copy(inventory = inventory)
                 }.whenCompleteSync(tasks) { saved, failure ->
                     if (failure == null && saved != null) {
                         val completed = saved.workers.first { it.id == workerId }
@@ -1410,7 +1414,11 @@ class CivsService(
         }
 
     private fun courierPlan(city: Settlement, worker: CivWorker): CivCourierPlan? =
-        CivsLogistics.plan(city, worker, localStocks(city))
+        CivsLogistics.plan(city, worker, localStocks(city), citizens.courierSources(city.id, worker.id)) { building, material ->
+            try { storage.cargoRoom(city, building, material) } catch (failure: CivsRejection) {
+                if (failure.reason in setOf("storage-unavailable", "storage-container-invalid", "building-not-found")) 0L else throw failure
+            }
+        }
 
     internal fun pickupCargo(cityId: UUID, workerId: UUID, requested: CivCargo): CompletableFuture<Settlement> =
         action("cargo_pickup", null, "city" to cityId, "worker" to workerId, "shipment" to requested.id) {
@@ -1421,17 +1429,34 @@ class CivsService(
                     rejectIf(cargo.id != requested.id, "stale-delivery")
                     return@afterCityAvailable CompletableFuture.completedFuture(city)
                 }
-                val current = courierPlan(city, worker)?.takeUnless { it.carrying } ?: throw CivsRejection("stale-delivery")
-                rejectIf(current.cargo.id != requested.id || current.cargo.sourceEntrance != requested.sourceEntrance, "stale-delivery")
-                val cargo = current.cargo.copy(amount = minOf(current.cargo.amount, requested.amount))
+                val cargo = if (requested.sourceWorkerId != null) {
+                    val source = city.workers.firstOrNull { it.id == requested.sourceWorkerId } ?: throw CivsRejection("stale-delivery")
+                    val amount = minOf(requested.amount, CivsLogistics.workerExcess(city, source)[requested.material] ?: 0L,
+                        CivsEquipment.supplyRoom(worker, Material.valueOf(requested.material)).toLong())
+                    rejectIf(amount == 0L, "stale-delivery")
+                    requested.copy(amount = amount)
+                } else {
+                    val current = courierPlan(city, worker)?.takeUnless { it.carrying } ?: throw CivsRejection("stale-delivery")
+                    rejectIf(current.cargo.id != requested.id || current.cargo.sourceEntrance != requested.sourceEntrance, "stale-delivery")
+                    current.cargo.copy(amount = minOf(current.cargo.amount, requested.amount))
+                }
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
-                citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
+                if (cargo.sourceWorkerId != null) citizens.requireCargoPickupArrival(cityId, workerId, cargo)
+                else citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
+                val sourceBefore = cargo.sourceWorkerId?.let { sourceId -> city.workers.first { it.id == sourceId } }
+                    ?.let { CivsEquipment.plainCount(it, cargo.material) }
+                val carriedBefore = CivsEquipment.plainCount(worker, cargo.material)
                 inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.pickup(before, workerId, cargo).copy(inventory = inventory)
                 }.thenApply { saved ->
                     CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,
                         "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
-                        "source" to cargo.sourceBuildingId, "revision" to saved.revision)
+                        "source" to cargo.sourceBuildingId, "source_worker" to cargo.sourceWorkerId,
+                        "source_before" to sourceBefore, "source_after" to cargo.sourceWorkerId?.let { sourceId ->
+                            saved.workers.firstOrNull { it.id == sourceId }?.let { CivsEquipment.plainCount(it, cargo.material) }
+                        }, "carried_before" to carriedBefore,
+                        "carried_after" to CivsEquipment.plainCount(saved.workers.first { it.id == workerId }, cargo.material),
+                        "revision" to saved.revision)
                     saved
                 }
             }
@@ -1444,6 +1469,7 @@ class CivsService(
                 val cargo = city.workers.firstOrNull { it.id == workerId }?.cargo ?: throw CivsRejection("stale-delivery")
                 rejectIf(cargo.id != requested.id || CivsLogistics.destination(city, cargo)?.id != destinationId, "stale-delivery")
                 citizens.requireStorageArrival(cityId, workerId, destinationId)
+                val carriedBefore = CivsEquipment.plainCount(city.workers.first { it.id == workerId }, cargo.material)
                 inventoryMutation(cityId, { storage.prepareCargoDropoff(it, cargo, destinationId) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.unload(before, workerId, cargo.id, now()).copy(inventory = inventory)
                 }.whenComplete { saved, failure ->
@@ -1451,6 +1477,8 @@ class CivsService(
                         nextMaterialCheckAt = 0L
                         CivsDiagnostics.event("cargo_dropoff_committed", "city" to cityId, "worker" to workerId,
                             "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
+                            "source_worker" to cargo.sourceWorkerId, "carried_before" to carriedBefore,
+                            "carried_after" to CivsEquipment.plainCount(saved.workers.first { it.id == workerId }, cargo.material),
                             "destination" to destinationId, "revision" to saved.revision)
                     }
                 }

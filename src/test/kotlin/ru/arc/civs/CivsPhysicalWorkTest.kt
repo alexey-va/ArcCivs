@@ -90,6 +90,8 @@ class CivsPhysicalWorkTest : FunSpec({
                 water.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.WATER }
                 val changed = CivsRules.finishWorldWork(city, harvest, 20_000)
                 changed.workers.single().completedCycles shouldBe 1
+                CivsEquipment.plainCount(changed.workers.single(), "WHEAT").toLong() shouldBe harvest.outputs.getValue("WHEAT")
+                changed.inventory!!.buildingStock(farm.id) shouldBe emptyMap()
                 shouldThrow<CivsRejection> { CivsRules.finishWorldWork(changed, harvest, 20_001) }
             }
             tasks.close()
