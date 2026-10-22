@@ -326,6 +326,117 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (returning in listOf(false, true))
+    test("a lowered path connects the farm stair and deck at direction $dx,$dz returning=$returning") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val stair = CivPosition(dx, 64, dz)
+            terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
+            terrain.blocks[stair] = Material.OAK_STAIRS
+            // The observed medievaloak farm has a bottom straight stair above a
+            // 15/16 dirt path. These are the vanilla shape boxes, rotated with its rise.
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+            })
+            terrain.blocks[CivPosition(dx * 2, 64, dz * 2)] = Material.OAK_PLANKS
+            val path = Location(terrain.world, .5, 63.9375, .5)
+            val deck = Location(terrain.world, dx * 2 + .5, 65.0, dz * 2 + .5)
+            var at = (if (returning) deck else path).clone().also {
+                val sign = if (returning) -1 else 1
+                it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+            }
+            val target = if (returning) path else deck
+            val route = CitizenPacketRoute(terrain.world, at, target,
+                { p -> (0..2).any { p.x == dx * it && p.z == dz * it } && p.y in 63..65 },
+                { _, _ -> true }, { 1.0 })
+            repeat(2_000) { if (route.searching) route.expand() }
+            route.searching shouldBe false
+            route.failure shouldBe null
+            var moved = 0
+            repeat(100) {
+                route.move(at, 1.0) { true }?.let { next ->
+                    (at.distance(next) <= .215001) shouldBe true
+                    for (sample in 0..10) {
+                        val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
+                        citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                    }
+                    at = next
+                    moved++
+                }
+            }
+            (moved > 0) shouldBe true
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+        }
+    }
+
+    test("a lowered path transition still respects a swept head obstacle and a protected destination") {
+        MockBukkitTestRuntime.open().use {
+            for (obstacle in listOf("headroom", "protected")) {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
+                terrain.blocks[CivPosition(1, 64, 0)] = Material.STONE
+                if (obstacle == "headroom") terrain.blocks[CivPosition(0, 66, 0)] = Material.STONE
+                val from = CitizenPoint(.5, 63.9375, .5)
+                val to = CitizenPoint(1.5, 65.0, .5)
+                citizenPacketBodyClear(terrain.world, from, false) shouldBe true
+                citizenPacketBodyClear(terrain.world, to, false) shouldBe true
+                val route = CitizenPacketRoute(terrain.world,
+                    Location(terrain.world, from.x, from.y, from.z), Location(terrain.world, to.x, to.y, to.z),
+                    { p -> p.z == 0 && p.x in 0..1 && p.y in 63..65 && (obstacle != "protected" || p.x != 1) },
+                    { _, _ -> true }, { 1.0 })
+                repeat(2_000) { if (route.searching) route.expand() }
+                withClue(obstacle) { route.failure shouldBe "no-path" }
+            }
+        }
+    }
+
+    test("rounded observed path feet settle onto native support before crossing the taller edge in either direction") {
+        MockBukkitTestRuntime.open().use {
+            for (returning in listOf(false, true)) {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
+                terrain.blocks[CivPosition(1, 64, 0)] = Material.STONE
+                val low = Location(terrain.world, .5, 63.94, .5)
+                val high = Location(terrain.world, 1.5, 65.0, .5)
+                var at = (if (returning) high else low).clone()
+                val target = if (returning) low else high
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> p.x in 0..1 && p.z == 0 && p.y in 63..65 }, { _, _ -> true }, { 1.0 })
+                repeat(2_000) { if (route.searching) route.expand() }
+                route.failure shouldBe null
+                repeat(100) { route.move(at, 1.0) { true }?.let { at = it } }
+                route.failure shouldBe null
+                route.finished shouldBe true
+                at.x shouldBe target.x
+                at.z shouldBe target.z
+                at.y shouldBe if (returning) 63.9375 else 65.0
+                citizenPacketSupported(terrain.world, CitizenPoint(at.x, at.y, at.z)) shouldBe true
+            }
+        }
+    }
+
+    for (height in listOf(1.5, 2.0)) for (returning in listOf(false, true))
+    test("a $height block ledge remains unreachable returning=$returning") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            terrain.blocks[CivPosition(1, 64, 0)] = Material.STONE
+            terrain.blocks[CivPosition(1, 65, 0)] = if (height == 1.5) Material.OAK_SLAB else Material.STONE
+            if (height == 1.5) terrain.boxes[CivPosition(1, 65, 0)] =
+                listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0))
+            val low = Location(terrain.world, .5, 64.0, .5)
+            val high = Location(terrain.world, 1.5, 64.0 + height, .5)
+            val route = CitizenPacketRoute(terrain.world, if (returning) high else low, if (returning) low else high,
+                { p -> p.x in 0..1 && p.z == 0 && p.y in 64..66 }, { _, _ -> true }, { 1.0 })
+            repeat(2_000) { if (route.searching) route.expand() }
+            route.failure shouldBe "no-path"
+        }
+    }
+
     for (material in listOf(Material.CAMPFIRE, Material.SOUL_CAMPFIRE)) {
         test("work and social ingress routes walk around a lit $material without touching its footprint") {
             MockBukkitTestRuntime.open().use {

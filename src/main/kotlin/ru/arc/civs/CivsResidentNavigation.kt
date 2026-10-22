@@ -138,7 +138,7 @@ internal class CitizenPacketRoute(
             // A resident can start anywhere inside a path/slab cell after a push or an
             // earlier arrival. Validating from its centre can admit a blocked first corner.
             val from = if (current.cell == start) origin else current.cell.point()
-            if (abs(next.y - current.cell.y) <= 1.01 && permits(from, next.point()) &&
+            if (citizenStepHeightAllowed(current.cell.y, next.y) && permits(from, next.point()) &&
                 citizenPacketStepClear(world, from, next.point(), allowDoors = true, collision = ::collision)) offer(current, next)
             return
         }
@@ -248,7 +248,7 @@ internal class CitizenPacketRoute(
             for (box in collision(x, by, z).localBoxes) {
                 if (box.maxY <= 0 || box.minX > .5 || box.maxX < .5 || box.minZ > .5 || box.maxZ < .5) continue
                 val height = by + box.maxY
-                if (abs(height - y) > 1.01) continue
+                if (!citizenStepHeightAllowed(y, height)) continue
                 val point = CitizenPoint(x + .5, height, z + .5)
                 if (allowed(CivPosition(x, floor(height + .001).toInt(), z)) &&
                     citizenPacketBodyClear(world, point, true, collision = ::collision)) result += Cell(x, height, z)
@@ -530,9 +530,24 @@ internal fun citizenPacketCampfireClear(world: World, point: CitizenPoint, from:
     return true
 }
 
+/**
+ * Path/farmland support is 1/16 below a full block. Its edge to the next full
+ * level spans 17/16, including the centre of a bottom stair. Admit only that
+ * extra height class; a few thousandths account for observed rounded feet Y.
+ * Native support, full-body sweeps and permissions remain separate checks.
+ */
+private fun citizenStepHeightAllowed(fromY: Double, toY: Double): Boolean {
+    val lower = min(fromY, toY)
+    val upper = max(fromY, toY)
+    if (upper - lower <= 1.01) return true
+    return upper - lower <= 17.0 / 16.0 + .005 &&
+        abs(lower - (floor(lower) + 15.0 / 16.0)) <= .005 &&
+        abs(upper - kotlin.math.round(upper)) <= .005
+}
+
 internal fun citizenPacketStepClear(world: World, from: CitizenPoint, to: CitizenPoint, allowDoors: Boolean,
                                    collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): Boolean {
-    if (abs(to.y - from.y) > 1.01) return false
+    if (!citizenStepHeightAllowed(from.y, to.y)) return false
     if (from.y != to.y) {
         val high = max(from.y, to.y)
         val aboveFrom = CitizenPoint(from.x, high, from.z)
