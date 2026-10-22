@@ -124,6 +124,40 @@ class CivsChunkLoadingTest : FunSpec({
         }
     }
 
+    test("global debug retains a failed ticket release after its city retires") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            h.cities = listOf(city)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            repeat(25) { h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            h.added.size shouldBe 16
+            val failed = h.added.first()
+            h.failRelease = failed
+            try {
+                h.cities = emptyList()
+                h.pulse()
+                h.runtime.active(city.id) shouldBe false
+                h.runtime.retainedChunks shouldBe 1
+                val state = h.runtime.debug(null)
+                state["total"] shouldBe 0
+                state["releaseFailures"] shouldBe 1
+                state["leasedChunks"] shouldBe 0
+                val chunks = state["chunks"] as Map<*, *>
+                chunks["total"] shouldBe 1
+                chunks["truncated"] shouldBe false
+                val entry = (chunks["entries"] as List<*>).single() as Map<*, *>
+                entry["world"] shouldBe failed.worldId.toString()
+                entry["x"] shouldBe failed.x
+                entry["z"] shouldBe failed.z
+                entry["releaseFailed"] shouldBe true
+                entry["leased"] shouldBe false
+                h.removed.count { it == failed } shouldBe 1
+            } finally { h.failRelease = null }
+        }
+    }
+
     test("missing chunks never activate a city and configuration preserves valid limits") {
         chunkRuntime { h ->
             val city = chunkCity(h.world.uid, radius = 1)
@@ -170,6 +204,7 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
     var cities = emptyList<Settlement>()
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
+    var failRelease: PaperChunkKey? = null
     val loads = linkedMapOf<PaperChunkKey, CompletableFuture<Chunk?>>()
     val runtime: CivsChunkLoading
 
@@ -191,7 +226,11 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
                 added += key
                 return PaperChunkTicketAddResult.ADDED
             }
-            override fun remove(key: PaperChunkKey): Boolean { removed += key; return true }
+            override fun remove(key: PaperChunkKey): Boolean {
+                removed += key
+                check(key != failRelease) { "Fixture ticket release failure" }
+                return true
+            }
         }
         runtime = CivsChunkLoading(plugin, limit, permissions, { PaperChunkTicketRegistry(backend) },
             { w, x, z -> CompletableFuture<Chunk?>().also { loads[PaperChunkKey(w.uid, x, z)] = it } }, { now }, { 0L })

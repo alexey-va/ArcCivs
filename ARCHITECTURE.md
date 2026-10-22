@@ -350,6 +350,14 @@ Mining secures exposed floor, walls, ceiling and lighting with paid carried supp
 before advancing, and harvests native drops one block per 2-second action. The three
 worksites therefore do not mint resources on a timer. The miner can reach visible
 blocks up to 4.5 blocks away; collision and line of sight still control each action.
+Mining work positions stay inside the authored shaft, transfer and gallery interiors;
+a nearby natural cave outside that volume is never a valid stance. Cached work and
+actual work arrival enforce the same boundary. The underground work route also
+stays in those passages; the outdoor approach to the
+upper ladder keeps ordinary city routing. After a failed final approach, the
+worksite excludes that stance briefly and selects another supported, visible position
+for the same action. Temporary planner congestion, unloaded chunks and player
+collisions do not reject a stance; work begins only after real arrival.
 If falling blocks refill the authored clearance above the current shaft floor,
 the miner physically clears that obstruction before securing the floor. These
 recovery actions retain the current shaft step and use the same native drops,

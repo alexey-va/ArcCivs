@@ -16,10 +16,16 @@ class CivsCommand(
     private val ui: CivsUi,
     private val text: CivsText,
     private val tasks: LifecycleTaskScope,
+    private val debugState: (String, UUID?, UUID?) -> Map<String, Any?> = { _, _, _ -> mapOf("available" to false) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (!sender.hasPermission("arccivs.use")) {
             sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+            return true
+        }
+        if (args.firstOrNull() == "debug") {
+            if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+            else CivsDebug.lines(args.drop(1), debugState).forEach(sender::sendMessage)
             return true
         }
         if (args.firstOrNull() == "status" && args.size <= 2 && sender.hasPermission("arccivs.admin")) {
@@ -54,8 +60,11 @@ class CivsCommand(
 
     companion object {
         internal fun completions(use: Boolean, admin: Boolean, args: Array<out String>): List<String> {
-            if (!use || args.size != 1) return emptyList()
-            return (listOf("preview") + if (admin) listOf("status", "reload") else emptyList()).filter { it.startsWith(args[0], true) }
+            if (!use) return emptyList()
+            if (admin && args.size == 2 && args[0] == "debug")
+                return (listOf("all") + CivsDebug.systems).filter { it.startsWith(args[1], true) }
+            if (args.size != 1) return emptyList()
+            return (listOf("preview") + if (admin) listOf("status", "debug", "reload") else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         internal fun statusLine(host: CivsUiHost, city: Settlement?): String {

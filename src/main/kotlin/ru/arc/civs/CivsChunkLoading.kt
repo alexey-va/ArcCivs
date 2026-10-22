@@ -75,6 +75,38 @@ internal class CivsChunkLoading(
         it.ready && permissions.allowed(it.owner, it.worldName)
     } == true
 
+    /** Last observed lifecycle state; no readiness/world reads, provider checks or new tickets. */
+    internal fun debug(cityId: UUID?, ownerIds: Set<UUID>? = null): Map<String, Any?> {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        val now = clock()
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val ids = (cities.keys + statuses.keys).filter { cityId == null || it == cityId }
+        val keys = if (cityId == null) wanted.keys + leases.keys + ready + pending.keys + retryAt.keys + releaseFailures
+            else ids.flatMapTo(linkedSetOf()) { cities[it]?.chunks.orEmpty() }
+        val owners = ownerIds ?: if (cityId == null) null else ids.mapNotNullTo(hashSetOf()) { cities[it]?.owner }
+        return sample(ids) { id ->
+            val state = cities[id]
+            mapOf("city" to id.toString(), "status" to statuses[id], "admitted" to (state != null),
+                "readyLastPulse" to state?.ready,
+                "activeLastPulse" to (!closed && !failed && state?.ready == true && statuses[id] == "active"),
+                "owner" to state?.owner?.toString(), "world" to state?.area?.world?.toString(),
+                "requiredChunks" to state?.chunks?.size, "readyChunks" to state?.chunks?.count(ready::contains),
+                "leasedChunks" to state?.chunks?.count(leases::containsKey),
+                "pendingChunks" to state?.chunks?.count(pending::containsKey))
+        } + mapOf("source" to "owner-cache", "freshWorldRead" to false, "closed" to closed, "failed" to failed,
+            "generation" to generation, "maximumChunks" to maximumChunks,
+            "wantedChunks" to keys.count(wanted::containsKey), "leasedChunks" to keys.count(leases::containsKey),
+            "readyChunks" to keys.count(ready::contains), "pendingChunks" to keys.count(pending::containsKey),
+            "queuedReplies" to replies.count { cityId == null || it.key in keys },
+            "releaseFailures" to keys.count(releaseFailures::contains),
+            "chunks" to sample(keys) { key -> mapOf("world" to key.worldId.toString(), "x" to key.x, "z" to key.z,
+                "wantedBy" to wanted[key], "leased" to (key in leases), "readyLastPulse" to (key in ready),
+                "pendingGeneration" to pending[key], "retryInMillis" to retryAt[key]?.let { (it - now).coerceAtLeast(0) },
+                "releaseFailed" to (key in releaseFailures)) },
+            "permissions" to permissions.debug(owners))
+    }
+
     fun pulse(settlements: Collection<Settlement>) {
         if (closed || failed) return
         val available = settlements.filter { it.pendingDeletion == null && it.worldId !in unloading }

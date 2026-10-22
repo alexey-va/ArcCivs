@@ -198,6 +198,38 @@ class CivsStorage(private val plugin: Plugin,
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
+    /** Reservations and cached capture/index state, without resolving a single native inventory. */
+    internal fun debug(cityId: UUID?): Map<String, Any?> {
+        checkMain()
+        fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val selected = claims.entries.filter { cityId == null || it.value.city.id == cityId }
+        val claimIds = selected.mapTo(hashSetOf()) { it.key }
+        val containers = locked.entries.filter { cityId == null || it.value in claimIds }
+        val worldCells = lockedWorld.entries.filter { cityId == null || it.value in claimIds }
+        val players = lockedPlayers.entries.filter { cityId == null || it.value in claimIds }
+        return sample(selected) { (id, claim) -> mapOf("receipt" to id.toString(), "city" to claim.city.id.toString(),
+            "revision" to claim.city.revision, "world" to claim.city.worldId.toString(),
+            "player" to claim.playerId?.toString(), "sourceMembershipContainers" to claim.positions.size,
+            "worldPositions" to claim.worldPositions.size,
+            "lockedContainers" to containers.count { it.value == id }, "lockedWorldCells" to worldCells.count { it.value == id })
+        } + mapOf("source" to "owner-cache", "closed" to closed, "receiptBootstrap" to receiptBootstrap,
+            "lockedContainers" to sample(containers) { (key, receipt) -> mapOf("world" to key.worldId.toString(),
+                "position" to point(key.position), "receipt" to receipt.toString()) },
+            "lockedWorldCells" to sample(worldCells) { (key, receipt) -> mapOf("world" to key.worldId.toString(),
+                "position" to point(key.position), "receipt" to receipt.toString()) },
+            "lockedPlayers" to sample(players) { mapOf("player" to it.key.toString(), "receipt" to it.value.toString()) },
+            "debitSearches" to sample(debitSearches.entries.filter { cityId == null || it.key == cityId }) { (id, search) ->
+                mapOf("city" to id.toString(), "world" to search.worldId.toString(), "cursor" to search.cursor,
+                    "positions" to search.positions.size, "ordered" to search.ordered.size,
+                    "candidates" to search.candidates.size, "buildings" to search.buildings?.size,
+                    "required" to sample(search.required.entries) { mapOf("material" to it.key, "amount" to it.value) }) },
+            "materializationCursors" to sample(materializationCursors.entries.filter { cityId == null || it.key == cityId }) {
+                mapOf("city" to it.key.toString(), "cursor" to it.value) },
+            "containerIndex" to index.debug(cityId), "supplyCaptures" to supplyCaptures.debug(cityId))
+    }
+
     /** Receipt owners are unknown until local journal IO completes; keep before/after states unambiguous. */
     fun beginReceiptBootstrap() {
         checkMain(); requireOpen()

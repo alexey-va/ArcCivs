@@ -48,6 +48,31 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("global worksite debug includes the ninth city's cached need beyond the city row sample") {
+        serviceScenario { h ->
+            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
+                schematicId = "civs/minecolonies/nordic/fundamentals/lumberjack1", production = "OAK_LOG")
+            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1)
+            val ninth = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), forester),
+                workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL)))
+            val earlier = List(8) { h.city.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), workers = emptyList()) }
+            val cities = earlier + ninth
+            every { h.store.load() } returns CompletableFuture.completedFuture(cities)
+            h.start()
+            h.paper.performTicks(5) // The only eligible worksite belongs to the ninth city.
+            h.service.settlements().map { it.id } shouldBe cities.map { it.id }
+            val global = h.service.debugState("worksites", null, null)
+            global["total"] shouldBe 1
+            global["truncated"] shouldBe false
+            val entry = (global["entries"] as List<*>).single() as Map<*, *>
+            entry["worker"] shouldBe worker.id.toString()
+            (entry["need"] as Map<*, *>)["building"] shouldBe forester.id.toString()
+            h.service.debugState("worksites", earlier.first().id, null)["total"] shouldBe 0
+            h.service.debugState("worksites", ninth.id, null)["entries"] shouldBe global["entries"]
+            h.saves shouldBe emptyList()
+        }
+    }
+
     test("useful crop care requires arrival at the plot and commits its cycle only through the journal") {
         serviceScenario { h ->
             val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)

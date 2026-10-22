@@ -155,6 +155,7 @@ class CivsService(
         courierFailed = { cityId, workerId, cargo ->
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
         },
+        workPositionFailed = worksites::rejectStanding,
         residentSupplySource = ::residentSupplySource, prepareSupplies = ::prepareResidentSupplies,
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
@@ -183,6 +184,86 @@ class CivsService(
 
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
+    /** Manual operator reads use current memory only; no plans, native captures or writes are started. */
+    fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> {
+        check(Bukkit.isPrimaryThread())
+        val selected = if (cityId == null) cities.values.take(8) else listOfNotNull(cities[cityId])
+        if (cityId != null && selected.isEmpty()) return mapOf("error" to "city-not-found")
+        if (workerId != null && selected.none { city -> city.workers.any { it.id == workerId } })
+            return mapOf("error" to "worker-not-found")
+        val total = if (cityId == null) cities.size else selected.size
+        val selectedWorkers = if (cityId == null) null else selected.flatMap { city ->
+            city.workers.filter { workerId == null || it.id == workerId }
+        }
+        fun rows(transform: (Settlement) -> Map<String, Any?>): Map<String, Any?> = mapOf(
+            "total" to total, "truncated" to (total > selected.size), "entries" to selected.map(transform))
+        return when (system) {
+            "citizens" -> citizens.debug(cityId, workerId)
+            "worksites" -> worksites.debug(selectedWorkers?.mapTo(hashSetOf()) { it.id },
+                selectedWorkers?.mapNotNullTo(hashSetOf()) { it.assignment })
+            "supply" -> supply.debug(cityId, workerId)
+            "storage" -> storage.debug(cityId)
+            "chunks" -> chunkLoading.debug(cityId, if (cityId == null) null else selected.mapTo(hashSetOf()) { it.owner })
+            "construction" -> rows { city ->
+                val order = city.construction
+                mapOf("city" to city.id, "revision" to city.revision, "busy" to (city.id in busy),
+                    "unhealthy" to (city.id in unhealthy), "placing" to (city.id in placing),
+                    "operation_pending" to (city.id in operations), "native_run" to placementRuns[city.id],
+                    "focus" to constructionFocus[city.id]?.position,
+                    "supply_need" to constructionSupplyNeeds[city.id]?.materials?.entries?.take(8)?.associate { it.toPair() },
+                    "queue_total" to city.constructionQueue.orEmpty().size, "queue" to city.constructionQueue.orEmpty().take(8),
+                    "order" to order?.let { mapOf("id" to it.id, "building" to it.buildingId, "phase" to it.phase,
+                        "done" to it.workDone, "required" to it.workRequired, "credit" to it.workCredit,
+                        "blocks_placed" to it.blocksPlaced, "blocks_required" to it.blocksRequired,
+                        "failure" to it.failure, "reserved_batch" to it.payment?.reservedBatch,
+                        "awaiting" to it.payment?.awaiting?.entries?.take(8)?.associate { row -> row.toPair() }) })
+            }
+            "resources" -> rows { city ->
+                val workers = city.workers.filter { workerId == null || it.id == workerId }
+                mapOf("city" to city.id, "revision" to city.revision, "mode" to city.inventory?.mode,
+                    "stock" to city.stock, "total_workers" to workers.size, "truncated_workers" to (workers.size > 8),
+                    "workers" to workers.take(8).map { worker -> mapOf("worker" to worker.id,
+                        "assignment" to worker.assignment, "shipment" to worker.cargo?.id,
+                        "cargo" to worker.cargo?.let { mapOf("material" to it.material, "amount" to it.amount,
+                            "source" to it.sourceBuildingId, "destination" to it.targetBuildingId, "source_worker" to it.sourceWorkerId) },
+                        "items" to CivsEquipment.slots(worker).take(CivsEquipment.MAX_SLOTS).mapIndexedNotNull { slot, item ->
+                            item?.let { mapOf("slot" to slot, "material" to it.material, "amount" to it.amount,
+                                "custom_data" to (it.data != null)) }
+                        }) })
+            }
+            "residents" -> rows { city ->
+                val workers = city.workers.filter { workerId == null || it.id == workerId }
+                mapOf("city" to city.id, "population_pending" to (city.id in populationPending),
+                    "last_population_minute" to populationMinuteAt[city.id], "immigration" to city.immigration,
+                    "total_workers" to workers.size, "truncated_workers" to (workers.size > 8),
+                    "workers" to workers.take(8).map { mapOf("worker" to it.id, "name" to it.name,
+                        "assignment" to it.assignment, "cycles" to it.completedCycles, "health" to it.health,
+                        "hunger" to it.hunger, "home" to it.homeId, "sex" to it.sex, "child_minutes" to it.childMinutes,
+                        "skills" to it.skills, "injury" to lastInjury[it.id]) },
+                    "families_total" to city.families.orEmpty().size, "families" to city.families.orEmpty().take(8),
+                    "corpses_total" to city.corpses.orEmpty().size, "corpses" to city.corpses.orEmpty().take(8).map {
+                        mapOf("worker" to it.worker.id, "position" to it.position, "died_at" to it.diedAt,
+                            "expires_at" to it.expiresAt, "killer" to it.killerName, "killer_type" to it.killerType, "cause" to it.cause)
+                    })
+            }
+            "overview" -> mapOf("ready" to ready(), "loading" to loading, "closed" to closed,
+                "health" to mapOf("state" to health.state, "recovery_backlog" to health.recoveryBacklog,
+                    "active_leases" to health.activeLeases, "dependencies" to health.dependencies),
+                "load_failure" to loadFailure, "cities_total" to cities.size, "city_rows_truncated" to (total > selected.size),
+                "active_npcs" to citizens.activeCount(), "pending_operations" to completions.size,
+                "inventory_recovery_total" to inventoryRecovery.size, "blocked_recovery_total" to blockedRecovery.size,
+                "previews" to previews.size, "selections" to selections.size, "preview_loads" to previewLoads.size,
+                "pending_founders" to pendingFounders.size, "pending_confirmations" to pendingConfirmations.size,
+                "pending_building_orders" to pendingBuildingOrders.size, "geometry_generation" to geometryGeneration,
+                "cities" to selected.map { city -> mapOf("city" to city.id, "name" to city.name, "owner" to city.owner,
+                    "world" to city.worldId, "revision" to city.revision, "workers" to city.workers.size,
+                    "buildings" to city.buildings.size, "busy" to (city.id in busy), "unhealthy" to (city.id in unhealthy),
+                    "inventory_recovery" to inventoryRecovery.values.count { it.cityId == city.id },
+                    "deletion_pending" to (city.pendingDeletion != null),
+                    "pending_controls" to city.pendingControls.orEmpty().take(8).map { mapOf("building" to it.buildingId, "position" to it.position) }) })
+            else -> mapOf("error" to "unknown-system")
+        }
+    }
     override fun ready(): Boolean = initialized && !closed && !loading
     override fun unavailableReason(): String? = loadFailure ?: if (!initialized && unhealthy.isNotEmpty()) "storage-unavailable" else null
     override fun styles(): List<String> = CivsBlueprints.STYLES

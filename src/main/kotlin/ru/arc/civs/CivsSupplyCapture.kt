@@ -28,10 +28,32 @@ internal class CivsSupplyCaptures(
 ) {
     private class Store(var key: CivSupplyStorageKey) {
         var contents: Map<CivPosition, CivSupplyCapturedContainer?>? = null
+        var capturedGeneration: Long? = null
+        var capturedAt: Long? = null
     }
     private val cities = mutableMapOf<UUID, Map<UUID, Store>>()
     private val revisions = mutableMapOf<UUID, Long>()
     private var generation = 0L
+
+    /** Captured metadata only; a dirty generation is reported rather than recaptured. */
+    internal fun debug(cityId: UUID?): Map<String, Any?> {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        val now = System.currentTimeMillis()
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val selected = cities.entries.filter { cityId == null || it.key == cityId }
+        return sample(selected) { (id, stores) -> mapOf("city" to id.toString(), "revision" to revisions[id],
+            "stores" to sample(stores.entries) { (building, store) -> mapOf("building" to building.toString(),
+                "mode" to store.key.mode.name, "type" to store.key.type.name, "phase" to store.key.phase.name,
+                "generation" to store.key.generation, "capturedGeneration" to store.capturedGeneration,
+                "stale" to (store.capturedGeneration != store.key.generation),
+                "captureAgeMillis" to store.capturedAt?.let { (now - it).coerceAtLeast(0) },
+                "indexedContainers" to store.key.positions.size, "capturedContainers" to store.contents?.size,
+                "unavailableContainers" to store.contents?.values?.count { it == null },
+                "virtualMaterialKinds" to store.key.virtualStock.size) })
+        } + mapOf("source" to "cached-supply-capture", "generation" to generation,
+            "storeCount" to selected.sumOf { it.value.size }, "freshNativeRead" to false)
+    }
 
     fun start(city: Settlement): CivsSupplyCapture {
         val keys = update(city)
@@ -40,6 +62,8 @@ internal class CivsSupplyCaptures(
             if (current == null || current.key != key) key else {
                 if (current.contents?.let { it != contents } == true) dirty(city.id, current)
                 current.contents = contents.toMap()
+                current.capturedGeneration = current.key.generation
+                current.capturedAt = System.currentTimeMillis()
                 current.key
             }
         }

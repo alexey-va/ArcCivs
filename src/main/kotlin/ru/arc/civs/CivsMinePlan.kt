@@ -159,6 +159,19 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
         add(Step(requireNotNull(generator), "minecraft:cobblestone", "gallery", floors.last().index, "generator"))
     }
 
+    // Occupied shell/floor cells are never worker space. Native support and full-body
+    // clearance still decide whether an authored passage is usable at this moment.
+    private val workPassage = buildMap<CivPosition, Boolean> {
+        steps.forEach { step -> put(step.point, step.after == null ||
+            step.after.startsWith("minecraft:ladder[") || step.after == "minecraft:torch") }
+        // The existing schematic supplies the upper ladder/access, before procedural cuts.
+        for (y in bottom.y..bottom.y + 3) for ((x, z) in accessColumns)
+            if (x != backing.x || z != backing.z) put(CivPosition(x, y, z), true)
+    }.filterValues { it }.keys
+
+    fun containsWorkStanding(local: CivPosition): Boolean =
+        local in workPassage && local.copy(y = local.y + 1) in workPassage
+
     private fun alignedFloors(count: Int): List<Floor> {
         fun point(d: Int, s: Int, y: Int) = CivPosition(center.x + forward.first * d - forward.second * s,
             y, center.z + forward.second * d + forward.first * s)
@@ -243,6 +256,9 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
             val plan = forBuilding(building) ?: return false
             return plan.containsShaft(localPoint(building, world))
         }
+
+        fun workStandingAllowed(building: CivBuilding, world: CivPosition): Boolean =
+            building.type == BuildingType.QUARRY && forBuilding(building)?.containsWorkStanding(localPoint(building, world)) == true
 
         /** Mine routes/cuts may pass below buildings, retaining three untouched foundation layers. */
         fun belowFoundation(building: CivBuilding, y: Int, headroom: Int = 0): Boolean =

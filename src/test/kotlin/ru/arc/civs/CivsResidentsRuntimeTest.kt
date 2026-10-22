@@ -718,6 +718,164 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a failed final mine approach selects another inside stance for the same block and delivers once without recovery") {
+        residentRuntime { h ->
+            val first = h.prepareMineWork(CivPosition(26, 64, 0))
+            val alternative = first.copy(standing = CivPosition(24, 64, 0))
+            val quarry = requireNotNull(h.city.building(first.buildingId))
+            CivsMinePlan.workStandingAllowed(quarry, first.standing) shouldBe true
+            CivsMinePlan.workStandingAllowed(quarry, alternative.standing) shouldBe true
+            citizenStandable(h.world, first.standing) shouldBe true
+            citizenStandable(h.world, alternative.standing) shouldBe true
+            val actor = h.owner.collisionActors().single()
+            val origin = actor.location
+            h.onWorkPositionFailed = { city, worker, failed ->
+                city.id shouldBe h.city.id
+                worker.id shouldBe h.workerId
+                failed shouldBe first
+                h.work = alternative
+                true
+            }
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
+            for (tick in 1..1_000) {
+                if (h.routeFailure() != null) break
+                h.navigate(advanceMillis = 0)
+            }
+            withClue(h.navigationState()) { h.routeFailure() shouldBe "no-path" }
+            actor.location.toVector() shouldBe origin.toVector()
+            h.failedWorkPositions shouldBe emptyList()
+            h.deliveries shouldBe 0
+
+            h.owner.pulse(2_000)
+            h.failedWorkPositions shouldBe listOf(first)
+            h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
+            h.routeIdentity() shouldBe null
+            actor.location.toVector() shouldBe origin.toVector()
+            val selections = h.workPlans
+            h.navigationNow = 2_001L
+            h.owner.pulse(2_001)
+            (h.workPlans > selections) shouldBe true
+            h.work shouldBe alternative
+            requireNotNull(h.routeIdentity())
+            for (tick in 1..1_000) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .172001) shouldBe true
+                h.failedWorkPositions shouldBe listOf(first)
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            (actor.location.x > origin.x && actor.location.x < requireNotNull(first.focus).x) shouldBe true
+            CivsMinePlan.workStandingAllowed(quarry,
+                CivPosition(actor.location.blockX, actor.location.blockY, actor.location.blockZ)) shouldBe true
+            citizenCanReachBlock(actor, requireNotNull(first.focus), CITIZEN_MINE_REACH) shouldBe true
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, alternative)
+            h.owner.status(h.workerId) shouldBe "workers.status.digging-mine"
+            h.spawns shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0L
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            h.commitWork()
+            h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
+            h.city.workers.single().completedCycles shouldBe 1L
+            h.deliveries shouldBe 1
+            h.failedWorkPositions shouldBe listOf(first)
+        }
+    }
+
+    test("a transient mine planner rejection preserves the selected standing position") {
+        residentRuntime { h ->
+            val work = h.prepareMineWork(CivPosition(24, 64, 0))
+            val actor = h.owner.collisionActors().single()
+            val origin = actor.location
+            h.onWorkPositionFailed = { _, _, _ -> true }
+            h.navigationNow = 2_000L
+            h.navigationRejections = 1
+            h.owner.pulse(2_000)
+            for (tick in 1..1_000) {
+                if (h.routeFailure() != null) break
+                h.navigate(advanceMillis = 0)
+            }
+            h.navigationRejections shouldBe 0
+            withClue(h.navigationState()) { h.routeFailure() shouldBe "planner-busy" }
+            h.owner.pulse(2_000)
+            h.failedWorkPositions shouldBe emptyList()
+            h.work shouldBe work
+            actor.location.toVector() shouldBe origin.toVector()
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0L
+        }
+    }
+
+    test("a player collision preserves the mine stance and work resumes after the player leaves") {
+        residentRuntime { h ->
+            val work = h.prepareMineWork(CivPosition(24, 64, 0))
+            val actor = h.owner.collisionActors().single()
+            val origin = actor.location
+            var blockedSteps = 0
+            h.owner.residentStepAllowed = { _, _, _ -> blockedSteps++; false }
+            h.onWorkPositionFailed = { _, _, _ -> true }
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000)
+            for (tick in 1..1_000) {
+                h.navigate(advanceMillis = 0)
+                if (tick % 20 == 0) h.owner.pulse(2_000)
+                if (blockedSteps >= 100) break
+            }
+            withClue(h.navigationState()) { (blockedSteps >= 100) shouldBe true }
+            actor.location.toVector() shouldBe origin.toVector()
+            h.failedWorkPositions shouldBe emptyList()
+            h.work shouldBe work
+            h.deliveries shouldBe 0
+            h.owner.residentStepAllowed = { _, _, _ -> true }
+            for (tick in 1..1_000) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .172001) shouldBe true
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            h.failedWorkPositions shouldBe emptyList()
+            h.work shouldBe work
+            citizenCanReachBlock(actor, requireNotNull(work.focus), CITIZEN_MINE_REACH) shouldBe true
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0L
+        }
+    }
+
+    test("a mining receipt requires observed feet inside the authored gallery even when the block stays in reach") {
+        residentRuntime { h ->
+            val focus = CivPosition(27, 64, 3)
+            val work = h.prepareMineWork(CivPosition(28, 64, 3), focus)
+            val quarry = requireNotNull(h.city.building(work.buildingId))
+            val actor = h.owner.collisionActors().single()
+            val inside = Location(h.world, 28.5, 64.0, 3.5)
+            val outside = Location(h.world, 29.5, 64.0, 3.5)
+            CivsMinePlan.workStandingAllowed(quarry, CivPosition(28, 64, 3)) shouldBe true
+            CivsMinePlan.workStandingAllowed(quarry, CivPosition(29, 64, 3)) shouldBe false
+            actor.teleport(inside)
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.digging-mine"
+            h.owner.pulse(3_500)
+            h.deliveries shouldBe 1
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            actor.teleport(outside)
+            citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe true
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            actor.teleport(inside)
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.deliveries shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0L
+        }
+    }
+
     test("a miner waits on its ladder while the next job is searched instead of climbing toward an idle surface walk") {
         residentRuntime { h ->
             val quarry = h.assignQuarry()
@@ -1811,6 +1969,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var workReady = true
     var foodSource: UUID? = null
     var workPlans = 0
+    val failedWorkPositions = mutableListOf<CivWorldWork>()
+    var onWorkPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false }
     var surfaceMultiplier = 1.0
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
@@ -1920,7 +2080,11 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
                 }
                 if (holdNavigation) navigationWorkers += task else task.run()
             },
-            navigationClock = { navigationNow ?: System.currentTimeMillis() })
+            navigationClock = { navigationNow ?: System.currentTimeMillis() },
+            workPositionFailed = { city, worker, failed ->
+                failedWorkPositions += failed
+                onWorkPositionFailed(city, worker, failed)
+            })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -2023,6 +2187,26 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     }
     fun assignQuarry(): CivBuilding = assignFarm().copy(type = BuildingType.QUARRY, schematicId = "miner1", production = "COBBLESTONE").also { quarry ->
         city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
+    }
+    fun prepareMineWork(standing: CivPosition, focus: CivPosition = CivPosition(25, 64, 0)): CivWorldWork {
+        val previous = assignQuarry()
+        requireNotNull(previous.control).let { world.getBlockAt(it.x, it.y, it.z).type = Material.AIR }
+        // This anchor puts the authored first gallery on the fixture's supported y=64 plane.
+        val quarry = spatialBuilding("medievaloak", "miner", 1, CivPosition(20, 75, 8))
+            .copy(id = previous.id, production = "COBBLESTONE")
+        city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
+        for (x in 18..27) for (z in -1..1) for (y in 64..66)
+            if (x == 18 || x == 27 || z != 0 || y == 66) world.getBlockAt(x, y, z).type = Material.STONE
+        for (y in focus.y..focus.y + 2) world.getBlockAt(focus.x, y, focus.z).type = Material.STONE
+        owner.collisionActors().single().teleport(Location(world, 19.5, 64.0, .5))
+        val geometry = requireNotNull(CivsMinePlan.forBuilding(quarry))
+        val localFocus = CivsMinePlan.localPoint(quarry, focus)
+        val step = geometry.steps.indexOfFirst { it.point == localFocus && it.after == null }
+        check(step >= 0) { "Missing canonical mine step for $localFocus" }
+        return CivWorldWork(workerId, 0, quarry.id, standing,
+            listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")), durationMillis = 1_500,
+            status = "digging-mine", miningStep = step.toLong(), focus = focus, miningPlanVersion = geometry.version)
+            .also { work = it }
     }
     fun commitHit() {
         city = CivsRules.hurtResident(city, city.owner, workerId, damage)

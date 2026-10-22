@@ -64,6 +64,8 @@ internal class CivsSupplyDispatcher(
             step = null; snapshot = null
         }
     }
+    private data class CaptureSummary(val generation: Long, val at: Long, val stores: Int,
+        val requests: Int, val couriers: Int, val workerSources: Int)
     private class City {
         var generation = 0L
         var requested = true
@@ -71,6 +73,8 @@ internal class CivsSupplyDispatcher(
         var failure: String? = null
         var job: Job? = null
         var plans = emptyMap<UUID, CivCourierPlan>()
+        var captured: CaptureSummary? = null
+        var acceptedGeneration: Long? = null
         val ages = hashMapOf<CivSupplyTask, Long>()
         val lastAssigned = hashMapOf<UUID, Long>()
         val blockedWorkers = hashMapOf<UUID, Long>()
@@ -98,6 +102,63 @@ internal class CivsSupplyDispatcher(
     fun retained(cityId: UUID): Map<UUID, CivCourierPlan> { checkOwner(); return cities[cityId]?.plans?.toMap().orEmpty() }
     fun failure(cityId: UUID): String? { checkOwner(); return cities[cityId]?.failure }
     fun cityIds(): Set<UUID> { checkOwner(); return cities.keys.toSet() }
+
+    /** Owner observations only: no capture, acceptance, future joins or reservation changes. */
+    internal fun debug(cityId: UUID?, workerId: UUID? = null): Map<String, Any?> {
+        checkOwner()
+        val now = clock()
+        fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val selected = cities.entries.filter { cityId == null || it.key == cityId }
+        fun selectedPlans(city: City) = city.plans.entries.filter {
+            workerId == null || it.key == workerId || it.value.cargo.sourceWorkerId == workerId }
+        return sample(selected) { (id, city) ->
+            val plans = selectedPlans(city)
+            val job = city.job
+            val snapshot = job?.snapshot
+            mapOf("city" to id.toString(), "generation" to city.generation,
+                "requested" to city.requested, "failure" to city.failure,
+                "retryAfterMillis" to if (city.after > now) city.after - now else 0L,
+                "acceptedGeneration" to city.acceptedGeneration,
+                "capture" to city.captured?.let { mapOf("generation" to it.generation,
+                    "ageMillis" to (now - it.at).coerceAtLeast(0), "generationStale" to (it.generation != city.generation),
+                    "stores" to it.stores, "requests" to it.requests, "couriers" to it.couriers,
+                    "workerSources" to it.workerSources) },
+                "job" to job?.let { mapOf("generation" to it.generation,
+                    "phase" to when { it.step != null -> "capturing"; it.result != null -> "allocating"; else -> "captured" },
+                    "cancelled" to it.cancelled.get(), "nativeDone" to it.native?.isDone,
+                    "allocationDone" to it.result?.isDone, "snapshotPresent" to (it.snapshot != null)) },
+                "assignments" to sample(plans) { (worker, plan) ->
+                    val cargo = plan.cargo
+                    mapOf("worker" to worker.toString(), "shipment" to cargo.id.toString(),
+                        "carrying" to plan.carrying, "inventoryBacked" to cargo.inventoryBacked,
+                        "material" to cargo.material, "amount" to cargo.amount,
+                        "warehouse" to cargo.warehouseId.toString(), "sourceBuilding" to cargo.sourceBuildingId.toString(),
+                        "sourceWorker" to cargo.sourceWorkerId?.toString(), "sourceEntrance" to point(cargo.sourceEntrance),
+                        "targetBuilding" to cargo.targetBuildingId.toString(), "destinationBuilding" to plan.destinationBuildingId.toString(),
+                        "destinationEntrance" to point(plan.destinationEntrance),
+                        "assignedAgeMillis" to city.lastAssigned[worker]?.let { (now - it).coerceAtLeast(0) }) },
+                "reservations" to mapOf("waitingPickup" to plans.count { !it.value.carrying },
+                    "carrying" to plans.count { it.value.carrying }, "units" to plans.sumOf { it.value.cargo.amount }),
+                "capturedRequests" to snapshot?.let { sample(it.requests) { request -> mapOf(
+                    "building" to request.buildingId.toString(), "material" to request.material,
+                    "needed" to request.needed, "inTransit" to request.inTransit, "construction" to request.construction) } },
+                "capturedWorkerSources" to snapshot?.let { sample(it.workerSources.filter {
+                    workerId == null || it.workerId == workerId }) { source -> mapOf("worker" to source.workerId.toString(),
+                    "building" to source.buildingId.toString(), "meeting" to point(source.meeting),
+                    "excess" to sample(source.excess.entries) { mapOf("material" to it.key, "amount" to it.value) }) } },
+                "waitingTasks" to city.ages.size,
+                "blockedWorkers" to sample(city.blockedWorkers.entries.filter { workerId == null || it.key == workerId }) {
+                    mapOf("worker" to it.key.toString(), "remainingMillis" to (it.value - now).coerceAtLeast(0)) },
+                "blockedTrips" to sample(city.blockedTrips.entries.filter { workerId == null || it.key.worker == workerId }) {
+                    mapOf("source" to it.key.source.toString(), "sourceWorker" to it.key.worker?.toString(),
+                        "target" to it.key.target.toString(), "material" to it.key.material,
+                        "remainingMillis" to (it.value - now).coerceAtLeast(0)) })
+        } + mapOf("source" to "owner-cache", "closed" to closed,
+            "pendingJobs" to selected.count { it.value.job != null },
+            "assignmentCount" to selected.sumOf { selectedPlans(it.value).size })
+    }
 
     /** Release only before pickup or after a definitive receipt outcome; unknown commits stay reserved. */
     fun release(cityId: UUID, workerId: UUID, failed: Boolean = false) {
@@ -157,6 +218,8 @@ internal class CivsSupplyDispatcher(
                 val snapshot = requireNotNull(job.step).invoke()
                 if (snapshot == null) false else {
                     require(snapshot.cityId == id) { "Supply capture returned another city" }
+                    city.captured = CaptureSummary(job.generation, clock(), snapshot.stores.size,
+                        snapshot.requests.size, snapshot.couriers.size, snapshot.workerSources.size)
                     job.snapshot = snapshot; job.step = null; true
                 }
             }
@@ -195,6 +258,7 @@ internal class CivsSupplyDispatcher(
                 for ((worker, plan) in result.plans) if (city.plans[worker]?.cargo?.id != plan.cargo.id)
                     city.lastAssigned[worker] = now
                 city.plans = result.plans.toMap()
+                city.acceptedGeneration = job.generation
                 city.ages.keys.retainAll(result.seen)
                 for (key in result.seen) city.ages.putIfAbsent(key, now)
                 result.served.forEach(city.ages::remove)

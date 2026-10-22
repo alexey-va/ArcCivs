@@ -42,6 +42,14 @@ internal class CivsResidentNavigation(
     private var closed = false
     private var terminal = CompletableFuture.completedFuture(Unit)
 
+    internal fun debug(): Map<String, Any?> {
+        checkOwner()
+        return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to MAXIMUM_JOBS,
+            "native_pending" to jobs.values.count { it.capturing?.isDone == false },
+            "worker_pending" to jobs.values.count { it.searching?.isDone == false },
+            "captured_blocks" to jobs.values.sumOf { it.terrain.size })
+    }
+
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
                 stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
                 travelCost: (Block) -> Double): CitizenPacketRoute =

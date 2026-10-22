@@ -25,7 +25,25 @@ internal class CivsChunkPermissions(
     private val states = linkedMapOf<Subject, State>()
     private val pending = mutableSetOf<State>()
     private val replies = ConcurrentLinkedQueue<Reply>()
+    private val owner = Thread.currentThread()
     @Volatile private var closed = false
+
+    /** The provider is deliberately not consulted, even for an expired allowance. */
+    internal fun debug(ownerIds: Set<UUID>? = null): Map<String, Any?> {
+        check(Thread.currentThread() === owner) { "Chunk permissions debug requires its owning thread" }
+        val now = clock()
+        val selected = states.entries.filter { ownerIds == null || it.key.owner in ownerIds }
+        return mapOf("source" to "permission-cache", "providerChecked" to false, "closed" to closed,
+            "total" to selected.size, "truncated" to (selected.size > 8),
+            "pending" to if (ownerIds == null) pending.size else selected.count { it.value in pending },
+            "unattributedPending" to if (ownerIds == null) pending.count { it !in states.values } else null,
+            "queuedReplies" to replies.count { ownerIds == null || it.subject.owner in ownerIds },
+            "entries" to selected.take(8).map { (subject, state) -> mapOf("owner" to subject.owner.toString(),
+                "world" to subject.world, "pending" to (state in pending),
+                "cachedAllowanceUnexpired" to (!closed && now < state.allowedUntil),
+                "allowanceRemainingMillis" to (state.allowedUntil - now).coerceAtLeast(0),
+                "nextCheckInMillis" to (state.nextCheck - now).coerceAtLeast(0)) })
+    }
 
     fun pulse(subjects: Collection<Pair<UUID, String>>) {
         if (closed) return

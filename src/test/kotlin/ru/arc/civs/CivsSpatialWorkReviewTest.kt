@@ -1285,14 +1285,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
                 val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
-                // An interior gallery target keeps this reach/occlusion test inside
-                // planned clearance, without asking the new shaft to seal its stance.
-                val local = geometry.floors.first().let { floor -> floor.cells[floor.sections.first().second + 9] }.let { it.copy(y = it.y + 3) }
+                // Use gallery feet level so every tested stance also has authored headroom.
+                val local = geometry.floors.first().let { floor -> floor.cells[floor.sections.first().second + 9] }.let { it.copy(y = it.y + 1) }
                 val step = geometry.steps.indexOfFirst { it.stage == "gallery" && it.point == local && it.after == null }
                 val city = spatialCity(world.uid, listOf(mine), worker).copy(
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, step.toLong())))
                 val target = CivsWorksiteLayouts.point(mine, local)
                 val standing = target.copy(x = target.x + 2)
+                CivsMinePlan.workStandingAllowed(mine, standing) shouldBe true
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 for (y in target.y..target.y + 2) world.getBlockAt(standing.x, y, standing.z).type = Material.AIR
                 // A gap permits the ray, but offers no floor for any of the old adjacent probes.
@@ -1526,9 +1526,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
                 val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
-                // An interior gallery target keeps this reach/occlusion test inside
-                // planned clearance, without asking the new shaft to seal its stance.
-                val local = geometry.floors.first().let { floor -> floor.cells[floor.sections.first().second + 9] }.let { it.copy(y = it.y + 3) }
+                // Use gallery feet level so the ray probes retain two authored body rows.
+                val local = geometry.floors.first().let { floor -> floor.cells[floor.sections.first().second + 9] }.let { it.copy(y = it.y + 1) }
                 val step = geometry.steps.indexOfFirst { it.stage == "gallery" && it.point == local && it.after == null }
                 val city = spatialCity(world.uid, listOf(mine), worker).copy(
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, step.toLong())))

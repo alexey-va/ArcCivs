@@ -26,6 +26,25 @@ internal class CivsContainerIndex(
     private val chunks = mutableMapOf<ChunkKey, MutableMap<CivPosition, String>>()
     private val subscribers = mutableMapOf<ChunkKey, MutableSet<UUID>>()
 
+    /** Loaded-chunk observations already owned by this index; never refreshes native state. */
+    internal fun debug(cityId: UUID?): Map<String, Any?> {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        fun point(p: CivPosition) = "${p.x},${p.y},${p.z}"
+        fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
+            "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
+        val selected = entries.entries.filter { cityId == null || it.key == cityId }
+        val selectedChunks = if (cityId == null) chunks.keys else selected.flatMapTo(linkedSetOf()) { it.value.chunks }
+        return sample(selected) { (id, entry) -> mapOf("city" to id.toString(), "world" to entry.geometry.world.toString(),
+            "buildingBounds" to entry.geometry.bounds.size, "controls" to entry.geometry.controls.size,
+            "registeredContainers" to entry.geometry.registered.size, "observedChunks" to entry.chunks.size,
+            "containers" to sample(entry.positions.entries) {
+                mapOf("position" to point(it.key), "type" to it.value) })
+        } + mapOf("source" to "cached-container-index", "freshNativeRead" to false,
+            "indexedContainerCount" to selected.sumOf { it.value.positions.size },
+            "chunks" to sample(selectedChunks) { key -> mapOf("world" to key.world.toString(), "x" to key.x, "z" to key.z,
+                "containers" to chunks[key]?.size, "subscribers" to subscribers[key]?.size) })
+    }
+
     fun update(city: Settlement) {
         val geometry = Geometry(city.worldId, city.buildings.map(CivBuilding::bounds),
             city.buildings.mapNotNull(CivBuilding::control), city.inventory?.containers.orEmpty())
