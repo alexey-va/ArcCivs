@@ -74,6 +74,7 @@ class CivsCitizens(
     private val residentSupplySource: (Settlement, CivWorker) -> UUID? = { _, _ -> null },
     private val prepareSupplies: (UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
+    private val backgroundActive: (UUID) -> Boolean = { false },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val navigation = CivsResidentNavigation()
@@ -190,14 +191,13 @@ class CivsCitizens(
             val world = plugin.server.getWorld(city.worldId)
             // Native inventory slots can change before the canonical cargo revision is published.
             // Keep this exact transfer stationary until its receipt resolves instead of choosing a new request.
-            val plan = if (actor.supplyPickup != null) actor.plan
-                else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
+            val plan = currentPlan(actor, city, worker, nowMillis)
             val reason = when {
                 actor.cityId != city.id || actor.worldId != city.worldId -> "unavailable"
                 world == null -> "world-unloaded"
                 !actor.npc.isValid -> "unavailable"
                 actor.npc.world.uid != city.worldId -> "unavailable"
-                !citizenHasViewer(city.worldId, actor.npc.location.point(), viewers, viewerRange) -> "sleeping"
+                !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers) -> "sleeping"
                 plan == null -> "storage-unavailable"
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                     !plan.chunksReady(world) || actor.route?.chunks?.ready(world) == false -> "chunk-unloaded"
@@ -217,19 +217,20 @@ class CivsCitizens(
             }
         }
 
-        var budget = citizenSpawnBudget(actors.size, maxActive)
-        for ((workerId, pair) in workers) {
-            if (workerId in actors) continue
-            val (city, worker) = pair
-            if (workerId in pendingHarm) continue
-            val plan = plan(city, worker)
+        var budget = citizenSpawnBudget(0, maxActive)
+        val candidates = workers.values.filter { it.second.id !in actors && it.second.id !in pendingHarm }
+            .map { (city, worker) -> Triple(city, worker, plan(city, worker)) }
+            .sortedByDescending { (city, _, plan) -> plan != null &&
+                citizenHasViewer(city.worldId, plan.spawnOrigin.point(), viewers, viewerRange) }
+        for ((city, worker, plan) in candidates) {
+            val workerId = worker.id
+            val visible = plan != null && citizenHasViewer(city.worldId, plan.spawnOrigin.point(), viewers, viewerRange)
             val world = plugin.server.getWorld(city.worldId)
             val reason = when {
                 plan == null -> "storage-unavailable"
                 world == null -> "world-unloaded"
-                !citizenHasViewer(city.worldId, plan.spawnOrigin.point(), viewers, viewerRange) -> "sleeping"
+                !activeAt(city.id, city.worldId, plan.spawnOrigin.point(), viewers) -> "sleeping"
                 !plan.chunksReady(world) -> "chunk-unloaded"
-                actors.size >= maxActive -> "capacity"
                 else -> null
             }
             if (reason != null) {
@@ -243,10 +244,16 @@ class CivsCitizens(
             }
             val retry = spawnRetries[workerId]?.takeIf { it.first == plan }?.second ?: CitizenRetry()
             if (!retry.ready(nowMillis)) continue
+            if (actors.size >= maxActive && visible) actors.values.firstOrNull { actor ->
+                actor.workerId !in pendingHarm && actor.supplyPickup == null &&
+                    actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
+                    !citizenHasViewer(actor.worldId, actor.npc.location.point(), viewers, viewerRange)
+            }?.let { remove(it, "capacity") }
+            if (actors.size >= maxActive) { statuses[workerId] = "capacity"; continue }
             budget-- // Failed spawns consume the same per-pulse budget as successful spawns.
             var npc: PacketPlayerNpc? = null
             try {
-                val point = spawnPoint(requireNotNull(world), requireNotNull(plan).spawnOrigin, city.workers.indexOf(worker), viewers)
+                val point = spawnPoint(city.id, requireNotNull(world), requireNotNull(plan).spawnOrigin, city.workers.indexOf(worker), viewers)
                 if (point == null) {
                     retry.fail(nowMillis)
                     spawnRetries[workerId] = plan to retry
@@ -299,8 +306,8 @@ class CivsCitizens(
             val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
             val world = actor.npc.world
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
-                !citizenHasViewer(city.worldId, actor.npc.location.point(), viewers, viewerRange)) continue
-            val plan = citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) } ?: continue
+                !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
+            val plan = currentPlan(actor, city, worker, nowMillis) ?: continue
             if (plan.worldWork == null && plan.idleReason != "searching-work" || !plan.chunksReady(world) ||
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                 actor.route?.chunks?.ready(world) == false) continue
@@ -313,6 +320,17 @@ class CivsCitizens(
                 logFailure(actor, "field-handoff", error)
             }
         }
+    }
+
+    /** New work cannot replace an accepted meeting; a changed producer token releases it first. */
+    private fun currentPlan(actor: Actor, city: Settlement, worker: CivWorker, now: Long): CitizenPlan? {
+        if (actor.courierHeld && (worker.assignment != actor.plan.token.assignmentId ||
+                worker.completedCycles != actor.plan.token.completedCycles)) {
+            actors.values.filter { it.courierPickupStartedAt != null && it.plan.courier?.cargo?.sourceWorkerId == worker.id }
+                .forEach { pause(it, "route-unreachable", now) }
+        }
+        return if (actor.supplyPickup != null || actor.courierHeld) actor.plan
+            else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
     }
 
     private fun reconcilePlan(actor: Actor, nextPlan: CitizenPlan): Boolean {
@@ -410,7 +428,7 @@ class CivsCitizens(
             citizenStandable(world, point) && citizenPacketBodyClear(world, point.point(), false) &&
                 citizenIdleTerrain(world, point, current.buildings) && citizenControlClear(current, point) &&
                 citizenRouteCellAllowed(current, setOf(building.id), point.x, point.z) &&
-                citizenHasViewer(current.worldId, point.point(), viewers, viewerRange) &&
+                activeAt(current.id, current.worldId, point.point(), viewers) &&
                 point.location(world).let { destination -> residentStepAllowed(npc, destination, destination) &&
                     actors.values.none { other -> other !== actor && other.npc.isValid && other.worldId == current.worldId &&
                         other.npc.location.distanceSquared(destination) < .8 * .8 } }
@@ -494,7 +512,7 @@ class CivsCitizens(
         val excess = CivsLogistics.workerExcess(city, worker)
         if (excess.isEmpty()) return false
         // Finish useful work while a stack accumulates; idle or blocked producers can hand over a partial stack.
-        if (actor.plan.worldWork != null && actor.cycle.phase != CitizenPhase.PAUSED &&
+        if (!actor.courierHeld && actor.plan.worldWork != null && actor.cycle.phase != CitizenPhase.PAUSED &&
             excess.values.none { it >= CivsLogistics.MAX_CARGO } &&
             hasCapacity(city, actor.plan)) return false
         val feet = actor.npc.location
@@ -647,7 +665,7 @@ class CivsCitizens(
                 actor.lookYaw?.let { citizenFace(npc, it, actor.lookPitch, if (actor.attacker != null) 16f else CITIZEN_TURN_PER_TICK) }
             }
             if (route == null || actor.workerId in pendingHarm || !npc.isValid ||
-                !citizenHasViewer(actor.worldId, npc.location.point(), viewers, viewerRange) ||
+                !activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
                 !route.chunks.ready(npc.world)) {
                 actor.footsteps.reset()
                 continue
@@ -1236,7 +1254,7 @@ class CivsCitizens(
         val player = actor.npc
         if (player.world.uid != city.worldId || player.world.time in 12_000L..23_000L ||
             !citizenChunkReady(player.world, player.location.blockX shr 4, player.location.blockZ shr 4) ||
-            !citizenHasViewer(city.worldId, player.location.point(), viewers(), viewerRange)) return null
+            !activeAt(city.id, city.worldId, player.location.point(), viewers())) return null
         return player.takeIf { actor.plan.workplace?.let { arrivedAt(actor, city, player.world, it) } == true }
     }
 
@@ -1756,7 +1774,7 @@ class CivsCitizens(
                     routeMine(actor, city).takeIf { idleAnchor == null }) &&
                 (home == null || home.bounds.contains(candidate.x, candidate.y, candidate.z)) &&
                 (idleAnchor == null || citizenWithinIdleArea(idleAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings)) &&
-                citizenHasViewer(city.worldId, candidate.point(), viewers, viewerRange)
+                activeAt(city.id, city.worldId, candidate.point(), viewers)
         }
         val storage = storageForTarget(actor, city, authored)
         val point = (when {
@@ -2033,14 +2051,14 @@ class CivsCitizens(
         }
     }
 
-    private fun spawnPoint(world: World, storage: CivPosition, ordinal: Int, viewers: List<CitizenViewer>): Location? {
+    private fun spawnPoint(cityId: UUID, world: World, storage: CivPosition, ordinal: Int, viewers: List<CitizenViewer>): Location? {
         val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1,
             1 to -1, -1 to -1, 2 to 0, -2 to 0, 0 to 2, 0 to -2)
         return offsets.indices.asSequence().map { offsets[(it + ordinal) % offsets.size] }
             .map { (x, z) -> CivPosition(storage.x + x, storage.y, storage.z + z) }
             .filter { citizenStandable(world, it) }
             .map { it.location(world) }
-            .filter { citizenHasViewer(world.uid, it.point(), viewers, viewerRange) }
+            .filter { activeAt(cityId, world.uid, it.point(), viewers) }
             .firstOrNull { location ->
                 val body = citizenStandingBounds(location, 1.0)
                 actors.values.none { actor ->
@@ -2069,9 +2087,12 @@ class CivsCitizens(
     private fun pruneViewers(excluding: UUID? = null) {
         val viewers = viewers(excluding)
         actors.values.toList().filter { !it.npc.isValid ||
-            !citizenHasViewer(it.worldId, it.npc.location.point(), viewers, viewerRange) }
+            !activeAt(it.cityId, it.worldId, it.npc.location.point(), viewers) }
             .forEach { remove(it, "sleeping") }
     }
+
+    private fun activeAt(cityId: UUID, worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>): Boolean =
+        backgroundActive(cityId) || citizenHasViewer(worldId, point, viewers, viewerRange)
 
     @EventHandler(priority = EventPriority.MONITOR)
     fun onQuit(event: PlayerQuitEvent) = pruneViewers(event.player.uniqueId)

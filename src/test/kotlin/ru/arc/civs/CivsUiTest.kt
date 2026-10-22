@@ -404,14 +404,18 @@ class CivsUiTest : FunSpec({
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it,
                 "${if (buildingScreen) "quarry" else "resident"}-pickaxe-creative-ru", h.screen, listOf(588, 380)) }
             val ready = h.screen
+            val renderCount = h.screens.size
             h.click("give_request", screen = ready)
             h.click("give_request", screen = ready)
+            h.screens.size shouldBe renderCount
+            h.screen shouldBe ready
             verify(exactly = if (buildingScreen) 1 else 0) { h.host.giveBuildingRequest(h.player, building.id, "IRON_PICKAXE") }
             verify(exactly = if (buildingScreen) 0 else 1) { h.host.giveWorkerRequest(h.player, worker.id, "IRON_PICKAXE") }
             verify(exactly = 0) { h.host.transferResidentItem(any(), any(), any(), any(), any()) }
             request = null
             receipt.complete(Unit)
             h.paper.performTicks(2)
+            h.screens.size shouldBe renderCount + 1
             h.screen.buttons.map { it.id.value } shouldNotContain "give_request"
             h.player.inventory.contents.all { it == null || it.type.isAir } shouldBe true
         }
@@ -1132,11 +1136,20 @@ class CivsUiTest : FunSpec({
             every { h.host.supplyConstruction(h.player, target.id, hut.id) } returns hutTransfer
             h.ui.openBuilding(h.player, base.id, hut.id); h.paper.performTicks(2)
             val before = h.screen
+            val renderCount = h.screens.size
+            val freshMaterials = CompletableFuture<Map<String, Long>>()
+            every { h.host.buildingMaterials(h.player, target.id) } returns freshMaterials
             h.click("supply"); h.click("supply", screen = before)
-            h.screen.buttons shouldBe emptyList()
+            h.screens.size shouldBe renderCount
+            h.screen shouldBe before
             stored = 7L
             h.player.inventory.clear()
             hutTransfer.complete(CivsSupplyResult(5L, 13L, false)); h.paper.performTicks(2)
+            h.screens.size shouldBe renderCount
+            h.screen shouldBe before
+            h.click("supply", screen = before)
+            freshMaterials.complete(mapOf("COBBLESTONE" to 20L)); h.paper.performTicks(2)
+            h.screens.size shouldBe renderCount + 1
             materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "7", "20", "0")
             h.body() shouldContain "Передано: 5. Ещё нужно: 13."
             h.body().contains("Освободите место и повторите.") shouldBe false
@@ -1213,11 +1226,13 @@ class CivsUiTest : FunSpec({
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
             h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
             val before = h.screen
+            val renderCount = h.screens.size
             h.click("supply"); h.click("supply", screen = before)
-            h.body() shouldBe "Handing over materials…"
-            h.screen.buttons shouldBe emptyList()
+            h.screens.size shouldBe renderCount
+            h.screen shouldBe before
             stored = 7L
             pending.complete(CivsSupplyResult(5L, 12L, false)); h.paper.performTicks(2)
+            h.screens.size shouldBe renderCount + 1
             h.body() shouldContain "7 / 19"
             h.body() shouldContain "Transferred: 5. Still needed: 12."
             h.body().contains("Free up space") shouldBe false
@@ -1253,8 +1268,16 @@ class CivsUiTest : FunSpec({
                 ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("COBBLESTONE" to 19L),
                 payment = CivConstructionPayment()))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
-            every { h.host.supplyConstruction(h.player, building.id) } returns CompletableFuture.failedFuture(CivsRejection("construction-supplies-empty"))
-            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.click("supply"); h.paper.performTicks(2)
+            val failedTransfer = CompletableFuture<CivsSupplyResult>()
+            every { h.host.supplyConstruction(h.player, building.id) } returns failedTransfer
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
+            val before = h.screen
+            val renderCount = h.screens.size
+            h.click("supply")
+            h.screens.size shouldBe renderCount
+            h.screen shouldBe before
+            failedTransfer.completeExceptionally(CivsRejection("construction-supplies-empty")); h.paper.performTicks(2)
+            h.screens.size shouldBe renderCount + 1
             h.screen.id shouldBe "civs.building-materials"
             h.body() shouldContain "Your inventory has no plain items needed for this construction."
             h.body() shouldContain "0 / 19"

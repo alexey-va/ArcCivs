@@ -59,7 +59,7 @@ play and wander, and cannot take jobs. Progress never catches up offline.
 Working adults lose one hunger per active minute and consume existing bread
 from their bag; hunger at or below six doubles work time. Family, hunger and
 member-name changes use the existing city write queue, without starving behind work. `CivsResidentNavigation` incrementally plans
-bounded routes in loaded chunks, sharing at most 96 search steps or one millisecond
+bounded routes in loaded chunks, sharing at most 384 search operations or one millisecond
 per tick across residents. Each route visits at most 4096 nodes; an edge checks a
 0.6-by-1.8-block body and at most one block of ascent or descent.
 Movement revalidates live collision and support before accepting a step and
@@ -339,7 +339,17 @@ FARM and FORESTER perform work directly at field/tree cells, without a per-cell
 return trip. Legacy abstract-stock producers retain their old return trip. The chosen processor output is persisted
 per building; a full destination pauses delivery. Farming takes 1.5 seconds per
 physical action (3 seconds when hungry), retaining native crop growth and drops.
-No offline production/catch-up.
+Without the owner's effective `arccivs.chunkload` permission, residents retire
+outside viewer range. With fresh owner permission and a complete set of native
+ENTITY_TICKING plugin tickets, the same physical simulation runs without viewers;
+there is no elapsed-time catch-up or synthetic crop growth. LuckPerms lookup uses
+static/server plus settlement-world context, supports offline owners, defaults
+to deny, refreshes every 15 seconds and expires positive answers after 30 seconds.
+Chunk admission covers the settlement square plus one chunk margin, generates no
+new terrain, admits whole cities within a global configurable 2048-chunk budget,
+limits pending loads to four and acquisitions to two per tick, and releases leases
+on permission loss, city removal, reload, world unload and shutdown. Core owns
+reference-counted native ticket leases. Nearby viewers retain NPC admission priority.
 
 ## Warehouse logistics
 

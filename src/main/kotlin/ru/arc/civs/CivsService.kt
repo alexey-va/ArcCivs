@@ -140,6 +140,8 @@ class CivsService(
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
         storage::isWorldLocked, { it in busy || it in unhealthy })
+    private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
+        permissions = CivsChunkPermissions(plugin, clock), clock = clock)
     private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList() },
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
@@ -147,6 +149,7 @@ class CivsService(
         surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady,
+        backgroundActive = chunkLoading::active,
         residentSupplySource = ::residentSupplySource, prepareSupplies = ::prepareResidentSupplies,
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
@@ -156,6 +159,7 @@ class CivsService(
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
         tasks.runTimer(1, 1) {
+            chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList())
             resumeCityActions()
             if (ready()) citizens.activateNavigating()
         }
@@ -1241,7 +1245,8 @@ class CivsService(
     override fun reload(player: Player): CompletableFuture<Unit> = action("reload", player) {
         rejectIf(!player.hasPermission("arccivs.admin"), "not-authorized")
         rejectIf(busy.isNotEmpty() || placing.isNotEmpty() || previewLoads.isNotEmpty(), "city-busy")
-        loadCities()
+        plugin.reloadConfig()
+        loadCities(CivsSettings.chunkLoadingMaximum(plugin.config, plugin.logger::warning))
     }
 
     private fun deliver(cityId: UUID, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long, constructionId: UUID?, at: Long): CompletableFuture<Settlement> = action("deliver", null, "city" to cityId, "worker" to workerId, "cycle" to cycle) {
@@ -2059,11 +2064,12 @@ class CivsService(
         return result
     }
 
-    private fun loadCities(): CompletableFuture<Unit> {
+    private fun loadCities(maximumLoadedChunks: Int = settings.maximumLoadedChunks): CompletableFuture<Unit> {
         checkMain()
         rejectIf(loading || closed, "not-ready")
         loading = true
         loadFailure = null
+        chunkLoading.reset(maximumLoadedChunks)
         (previews.keys + selections.keys + requests.keys).toList().forEach { cancelPreview(it, "reload") }
         citizens.pulse(now()) // Provider is empty while loading: despawn previous runtime actors.
         val result = tracked<Unit>()
@@ -2232,7 +2238,7 @@ class CivsService(
         if (now() < nextStorageTransferAt) return
         val candidates = cities.values.filter { city ->
             city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && city.inventory?.mode == CivStorageMode.PHYSICAL && pendingMaterials(city) > 0 &&
-                plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
+                settlementActive(city)
         }
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(storageCursor++, candidates.size)]
@@ -2348,9 +2354,9 @@ class CivsService(
     }
 
     private fun pulseControls() {
-        val nearby = plugin.server.onlinePlayers.mapNotNull(::city).distinctBy { it.id }.filter { city ->
-            plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
-        }
+        val nearby = cities.values.filter { city -> chunkLoading.active(city.id) ||
+            plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) } &&
+                plugin.server.onlinePlayers.any { city.canManage(it.uniqueId) } }
         // Existing paid orders finish with their original receipt before conversion to actual item storage.
         nearby.firstOrNull { it.inventory == null && it.construction == null && it.id !in busy && it.id !in unhealthy }?.let { old ->
             runCatching { mutate(old.id) { city ->
@@ -2380,8 +2386,8 @@ class CivsService(
     private fun pulseImmigration() {
         cities.values.firstOrNull { city ->
             city.id !in busy && city.id !in unhealthy && CivsRules.immigrationDue(city, now()) &&
-                plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId &&
-                    player.location.toVector().distanceSquared(org.bukkit.util.Vector(city.center.x.toDouble(), city.center.y.toDouble(), city.center.z.toDouble())) <= settings.viewerRange * settings.viewerRange }
+                (chunkLoading.active(city.id) || plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId &&
+                    player.location.toVector().distanceSquared(org.bukkit.util.Vector(city.center.x.toDouble(), city.center.y.toDouble(), city.center.z.toDouble())) <= settings.viewerRange * settings.viewerRange })
         }?.let { city ->
             runCatching { mutate(city.id) {
                 val id = UUID.randomUUID()
@@ -2394,8 +2400,10 @@ class CivsService(
         }
     }
 
-    private fun populationActive(city: Settlement): Boolean = city.pendingDeletion == null && city.id !in unhealthy &&
+    private fun settlementActive(city: Settlement): Boolean = chunkLoading.active(city.id) ||
         plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
+
+    private fun populationActive(city: Settlement): Boolean = city.pendingDeletion == null && city.id !in unhealthy && settlementActive(city)
 
     /** Active-time only; one queued update per city prevents continuous work from starving its clock. */
     private fun pulsePopulation() {
@@ -2449,7 +2457,7 @@ class CivsService(
     private fun pulseAutoAssignments() {
         val city = cities.values.firstOrNull { city ->
             city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && CivsRules.needsAutoAssignment(city) &&
-                plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId && city.contains(player.location.blockX, player.location.blockZ) }
+                settlementActive(city)
         } ?: return
         runCatching { mutate(city.id) { CivsRules.autoAssign(it, it.owner, now()) } }.onSuccess { future ->
             future.whenCompleteSync(tasks) { saved, failure ->
@@ -2494,7 +2502,7 @@ class CivsService(
         val candidates = cities.values.filter { city ->
             city.construction == null && city.pendingDeletion == null && city.constructionQueue.orEmpty().isNotEmpty() &&
                 city.id !in busy && city.id !in unhealthy && city.id !in placing &&
-                plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
+                settlementActive(city)
         }
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(queueCursor++, candidates.size)]
@@ -2860,7 +2868,7 @@ class CivsService(
         health = RuntimeHealthContribution(
             state = when { closed || !initialized && !loading -> RuntimeHealthState.DOWN; loading -> RuntimeHealthState.STARTING; unhealthy.isNotEmpty() -> RuntimeHealthState.DEGRADED; else -> RuntimeHealthState.UP },
             recoveryBacklog = cities.values.count { it.construction != null } + unhealthy.count { it !in cities },
-            activeLeases = previews.size + selections.size + placing.size,
+            activeLeases = previews.size + selections.size + placing.size + chunkLoading.retainedChunks,
             schemas = mapOf("city" to 1, "plan" to 1),
             dependencies = mapOf("storage" to (initialized && unhealthy.isEmpty())),
         )
@@ -2929,6 +2937,7 @@ class CivsService(
         operations.clear()
         citizenDrain = runCatching { citizens.closeAsync() }
             .getOrElse { CompletableFuture.failedFuture(it) }
+        runCatching { chunkLoading.close() }.onFailure { log("release settlement chunks", it) }
         physics.close()
         world.close()
         HandlerList.unregisterAll(protection)

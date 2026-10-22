@@ -81,6 +81,11 @@ open class ArcCivsPlugin : JavaPlugin() {
             Files.createDirectories(root)
             if (!Files.exists(file)) requireNotNull(getResource("config.yml")).use { Files.copy(it, file) }
             val configuration = YamlConfiguration().apply { load(file.toFile()) }
+            if (!configuration.contains("chunk-loading.maximum-chunks")) {
+                configuration.set("chunk-loading.maximum-chunks", 2048)
+                configuration.save(file.toFile())
+            }
+            CivsSettings.chunkLoadingMaximum(configuration, logger::warning)
             val serverId = networkServer(configuration)
             val settings = CivsSettings.read(configuration)
             val text = CivsText.load(this, configuration)

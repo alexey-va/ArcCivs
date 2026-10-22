@@ -5,7 +5,7 @@ api-version: '1.21.11'
 authors: [RusCrafting]
 description: Player settlements, construction and working citizens
 depend: [ArcCore, packetevents, WorldEdit]
-softdepend: [Lands, Trails, ItemsAdder]
+softdepend: [Lands, Trails, ItemsAdder, LuckPerms]
 commands:
   civs:
     aliases: [city]
@@ -19,3 +19,6 @@ permissions:
   arccivs.admin:
     description: Inspect and recover settlements
     default: op
+  arccivs.chunkload:
+    description: Keep the owner's settlement loaded and residents active without nearby players
+    default: false

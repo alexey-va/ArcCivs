@@ -47,6 +47,32 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("a permitted loaded city spawns and completes physical field work without viewers then retires on revoke") {
+        residentRuntime { h ->
+            Bukkit.getOnlinePlayers().forEach { it.teleport(Location(h.world, 1_000.5, 64.0, .5)) }
+            h.owner.pulse(1_001)
+            h.owner.activeCount() shouldBe 0
+            h.background = true
+            h.owner.pulse(1_500)
+            h.owner.activeCount() shouldBe 1
+            h.spawns shouldBe 2
+            val work = h.beginCare("watering")
+            for (at in 3_000L..6_000L step 1_000L) h.owner.pulseFieldWork(at)
+            h.deliveries shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.commitWork()
+            h.owner.pulse(7_000)
+            h.city.workers.single().completedCycles shouldBe 1
+            h.background = false
+            h.owner.pulse(8_000)
+            h.owner.activeCount() shouldBe 0
+            h.owner.pulseFieldWork(9_000)
+            h.deliveries shouldBe 1
+        }
+    }
+
     for ((farmerCount, ripensDuringCare) in listOf(1 to false, 2 to false, 1 to true))
         test("$farmerCount farmers harvest three nearby crops without rescanning between receipts (ripens during care: $ripensDuringCare)") {
         failOnUnsupportedMockBukkitOperation {
@@ -1076,6 +1102,97 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (outcome in listOf("pickup", "night", "food", "combat", "assignment", "cycle", "expiry"))
+    test("a new ripe crop preserves the accepted partial-stack rendezvous until $outcome") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
+                anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            val courierId = UUID.randomUUID()
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
+                workers = h.city.workers.map { it.copy(items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                    4 -> CivResidentItem("IRON_HOE", 1)
+                    6 -> CivResidentItem("WHEAT", 24)
+                    7 -> CivResidentItem("WHEAT_SEEDS", 43)
+                    else -> null
+                } }) } + CivWorker(courierId, "Courier", warehouse.id, nextDeliveryAt = 1)))
+            h.idleReason = "waiting-growth"
+            val producer = h.owner.collisionActors().single()
+            producer.teleport(Location(h.world, 22.5, 64.0, .5))
+            h.courierProvider = { city, worker -> if (worker.id == courierId)
+                CivsLogistics.plan(city, worker, { emptyMap() }, h.owner.courierSources(city.id, worker.id)) { _, _ -> 64L }
+                else null }
+            h.onPickup = { cityId, workerId, cargo -> h.owner.requireCargoPickupArrival(cityId, workerId, cargo) }
+            h.owner.pulse(2_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-courier"
+            val sourceAt = producer.location
+            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            val courierAt = courier.location
+            val selectedBefore = h.workPlans
+            val focus = CivPosition(23, 64, 1)
+            h.world.getBlockAt(focus.x, focus.y, focus.z).blockData =
+                (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 1),
+                listOf(CivPlanBlock(focus, "minecraft:wheat[age=7]", "minecraft:wheat[age=0]")),
+                outputs = mapOf("WHEAT" to 1L, "WHEAT_SEEDS" to 1L), durationMillis = 30_000,
+                status = "working-field", focus = focus)
+            h.owner.pulse(3_000)
+            h.owner.pulseFieldWork(3_050)
+            h.workPlans shouldBe selectedBefore
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-courier"
+            h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
+            producer.location shouldBe sourceAt
+            (h.workerId in h.owner.workingResidentIds(h.city.id)) shouldBe false
+            if (outcome == "pickup") {
+                var now = 3_000L
+                for (frame in 0 until 384) {
+                    h.owner.activateNavigating()
+                    if (frame % 20 == 0) {
+                        now += 1_000L
+                        h.owner.pulse(now)
+                        h.owner.pulseFieldWork(now + 50)
+                    }
+                    producer.location shouldBe sourceAt
+                    if (h.pickups > 0) break
+                }
+                withClue("courier=${courier.location} ${h.navigationState(courierId)}") { h.pickups shouldBe 1 }
+                (courier.location.distanceSquared(courierAt) > 4.0) shouldBe true
+                val cargo = requireNotNull(h.pickedCargo)
+                cargo.material shouldBe "WHEAT"
+                cargo.amount shouldBe 24L
+                CivsEquipment.plainCount(h.city.workers.first(), "WHEAT") shouldBe 24
+                CivsEquipment.plainCount(h.city.workers.last(), "WHEAT") shouldBe 0
+                h.city = CivsLogistics.pickup(h.city, courierId, cargo)
+                h.pendingPickup.complete(h.city)
+                h.owner.pulse(now + 1_000)
+                CivsEquipment.plainCount(h.city.workers.first(), "WHEAT") shouldBe 0
+                CivsEquipment.plainCount(h.city.workers.last(), "WHEAT") shouldBe 24
+                h.city.workers.last().cargo!!.id shouldBe cargo.id
+                h.pickups shouldBe 1
+            } else {
+                when (outcome) {
+                    "night" -> h.world.time = 13_000
+                    "food" -> h.foodSource = warehouse.id
+                    "combat" -> h.monsterAt(24.5, .5)
+                    "assignment" -> h.city = h.city.copy(workers = h.city.workers.map { if (it.id == h.workerId) it.copy(assignment = null) else it })
+                    "cycle" -> h.city = h.city.copy(workers = h.city.workers.map { if (it.id == h.workerId) it.copy(completedCycles = 1) else it })
+                }
+                val now = if (outcome == "expiry") 92_000L else 4_000L
+                h.owner.pulse(now)
+                if (outcome == "combat") h.owner.activateNavigating()
+                h.owner.pulse(now + 1_000)
+                h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
+                h.pickups shouldBe 0
+                h.city.workers.last().cargo shouldBe null
+                CivsEquipment.plainCount(h.city.workers.first(), "WHEAT") shouldBe 24
+            }
+            (h.owner.status(h.workerId) == "workers.status.waiting-courier") shouldBe false
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("a working producer accumulates a stack but a full bag can offer its small surplus immediately") {
         residentRuntime { h ->
             val farm = h.assignFarm()
@@ -1530,12 +1647,15 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
     val workerId = UUID.randomUUID()
     var viewing = true
+    var background = false
     var spawns = 0
     var hits = 0
     var deliveries = 0
     var unloads = 0
     var supplyRequests = 0
     var workReady = true
+    var foodSource: UUID? = null
+    var workPlans = 0
     var surfaceMultiplier = 1.0
     val pendingSupplies = CompletableFuture<Settlement>()
     var courier: CivCourierPlan? = null
@@ -1631,11 +1751,12 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
                 unloads++
                 pendingUnload
             },
-            workPlan = { _, _ -> work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets,
+            workPlan = { _, _ -> workPlans++; work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets,
+            residentSupplySource = { _, worker -> foodSource.takeIf { worker.id == workerId } },
             workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
                 supplyRequests++
                 pendingSupplies
-            })
+            }, backgroundActive = { background })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }

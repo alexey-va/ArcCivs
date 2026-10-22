@@ -5,7 +5,9 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
+import io.mockk.unmockkConstructor
 import io.mockk.unmockkObject
 import io.mockk.verify
 import io.papermc.paper.connection.PlayerGameConnection
@@ -1989,40 +1991,59 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("reloaded queue starts its head from fresh terrain and removes that id only with the order commit") {
-        serviceScenario { h ->
-            val viewer = h.paper.addPlayer("QueueViewer")
-            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
-            val site = h.city.buildings.last().copy(phase = BuildingPhase.SITE,
-                control = CivPosition(10, 63, 0), entrance = CivPosition(10, 64, 3))
-            val hut = site.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, phase = BuildingPhase.ACTIVE,
-                anchor = CivPosition(20, 64, 0), bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)),
-                entrance = CivPosition(20, 64, 3), control = null)
-            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
-            h.world.getBlockAt(10, 63, 3).type = Material.DIRT
-            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-                buildings = listOf(h.city.buildings.first(), site, hut), constructionQueue = listOf(site.id),
-                workers = listOf(h.city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1)))
-            val immutable = CivPlacementPlan(site.id, city.id, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING),
-                listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:dirt", "minecraft:stone")), "a".repeat(64))
-            val fresh = immutable.copy(id = UUID.randomUUID(), blocks = immutable.blocks.map { it.copy(before = "minecraft:oak_planks") })
-            val snapshot = mockk<ArcSchematicSnapshot>()
-            every { snapshot.blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
-            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-            every { h.store.loadPlan(site.id) } returns CompletableFuture.completedFuture(immutable)
-            every { h.store.loadSchematic(site.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
-            every { h.blueprints.recover(immutable) } returns CompletableFuture.completedFuture(snapshot)
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(fresh)
-            every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
-            every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
-            h.start(); h.paper.performTicks(20)
-            h.saves.single().first.construction!!.id shouldBe fresh.id
-            h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
-            verify(exactly = 1) { h.worldAdapter.capture(city.id, city.owner, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING), any(), site) }
-            verify(exactly = 1) { h.store.savePlan(fresh) }
-            h.commit()
-            h.service.city(h.player)!!.constructionQueue shouldBe emptyList()
-            h.service.city(h.player)!!.construction!!.buildingId shouldBe site.id
+    for (background in listOf(false, true)) test("reloaded queue starts its head from fresh terrain and removes that id only with the order commit background=$background") {
+        mockkConstructor(CivsChunkLoading::class)
+        try {
+            var backgroundActive = false
+            every { anyConstructed<CivsChunkLoading>().active(any()) } answers { backgroundActive }
+            serviceScenario { h ->
+                if (!background) {
+                    val viewer = h.paper.addPlayer("QueueViewer")
+                    viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+                }
+                val site = h.city.buildings.last().copy(phase = BuildingPhase.SITE,
+                    control = CivPosition(10, 63, 0), entrance = CivPosition(10, 64, 3))
+                val hut = site.copy(id = UUID.randomUUID(), type = BuildingType.BUILDER_HUT, phase = BuildingPhase.ACTIVE,
+                    anchor = CivPosition(20, 64, 0), bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)),
+                    entrance = CivPosition(20, 64, 3), control = null)
+                h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+                h.world.getBlockAt(10, 63, 3).type = Material.DIRT
+                val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                    buildings = listOf(h.city.buildings.first(), site, hut), constructionQueue = listOf(site.id),
+                    workers = listOf(h.city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1)))
+                val immutable = CivPlacementPlan(site.id, city.id, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING),
+                    listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:dirt", "minecraft:stone")), "a".repeat(64))
+                val fresh = immutable.copy(id = UUID.randomUUID(), blocks = immutable.blocks.map { it.copy(before = "minecraft:oak_planks") })
+                val snapshot = mockk<ArcSchematicSnapshot>()
+                every { snapshot.blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+                every { h.store.loadPlan(site.id) } returns CompletableFuture.completedFuture(immutable)
+                every { h.store.loadSchematic(site.id) } returns CompletableFuture.completedFuture(byteArrayOf(1))
+                every { h.blueprints.recover(immutable) } returns CompletableFuture.completedFuture(snapshot)
+                every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(fresh)
+                every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+                every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+                h.start(); h.paper.performTicks(20)
+                if (background) {
+                    h.paper.server.onlinePlayers.isEmpty() shouldBe true
+                    h.saves shouldBe emptyList()
+                    h.service.city(h.player)!!.construction shouldBe null
+                    h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
+                    verify(exactly = 0) { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+                    backgroundActive = true
+                    h.time += 5_000L
+                    h.paper.performTicks(20)
+                }
+                h.saves.single().first.construction!!.id shouldBe fresh.id
+                h.service.city(h.player)!!.constructionQueue shouldBe listOf(site.id)
+                verify(exactly = 1) { h.worldAdapter.capture(city.id, city.owner, city.worldId, site.copy(phase = BuildingPhase.CONSTRUCTING), any(), site) }
+                verify(exactly = 1) { h.store.savePlan(fresh) }
+                h.commit()
+                h.service.city(h.player)!!.constructionQueue shouldBe emptyList()
+                h.service.city(h.player)!!.construction!!.buildingId shouldBe site.id
+            }
+        } finally {
+            unmockkConstructor(CivsChunkLoading::class)
         }
     }
 

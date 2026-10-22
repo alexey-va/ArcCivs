@@ -524,7 +524,8 @@ class CivsUi internal constructor(
                 add(button(player, "intake", "warehouse.intake", STOCK) { openIntake(player, buildingId) })
                 add(button(player, "deposit", "warehouse.deposit", COMMIT) {
                     perform(player, "civs.warehouse", "warehouse.title", { host.depositMaterials(player, buildingId) },
-                        success = { showWarehouse(player, buildingId, current) }, failure = { showWarehouse(player, buildingId, current, it) })
+                        success = { showWarehouse(player, buildingId, current) }, failure = { showWarehouse(player, buildingId, current, it) },
+                        workingKey = null)
                 })
                 if (materials.isNotEmpty()) add(button(player, "withdraw", "warehouse.withdraw", STOCK) { showWithdraw(player, buildingId) })
             }
@@ -552,7 +553,8 @@ class CivsUi internal constructor(
                     tr(player, "warehouse.material", "material" to materialName(player, material), "amount" to minOf(64L, count)), STOCK,
                     warehouseAmount(player, own[material] ?: 0, reserve[material] ?: 0)) {
                     perform(player, "civs.withdraw", "warehouse.withdraw-title", { host.withdrawMaterial(player, buildingId, material) },
-                        success = { showWarehouse(player, buildingId) }, failure = { showWithdraw(player, buildingId, current, it) })
+                        success = { showWarehouse(player, buildingId) }, failure = { showWithdraw(player, buildingId, current, it) },
+                        workingKey = null)
                 })
             }
             pages(player, current, materials.size) { showWithdraw(player, buildingId, it) }
@@ -695,7 +697,8 @@ class CivsUi internal constructor(
                 add(requestButton(player, request, "buildings.request-unavailable", "buildings.give-help", give = {
                     perform(player, "civs.building", "buildings.detail-title",
                         { host.giveBuildingRequest(player, buildingId, request.material.name) },
-                        success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
+                        success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) },
+                        workingKey = null)
                 }, refresh = { showBuilding(player, buildingId) }))
             }
             if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
@@ -844,14 +847,14 @@ class CivsUi internal constructor(
                 add(button(player, "supply", "materials.supply", STOCK) {
                     perform(player, "civs.building-materials", "materials.title", { host.supplyConstruction(player, buildingId) },
                         success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
-                        workingKey = "materials.supplying")
+                        workingKey = null)
                 }.copy(tooltip = tr(player, "materials.supply-help")))
             }
             if (canChange && (isAdmin(player) || player.gameMode == GameMode.CREATIVE))
                 add(button(player, "grant", "materials.grant", COMMIT) {
                     perform(player, "civs.building-materials", "materials.title", { host.grantConstructionMaterials(player, buildingId) },
                         success = ::supplied, failure = { showBuildingMaterials(player, buildingId, estimate, current, it) },
-                        workingKey = "materials.supplying")
+                        workingKey = null)
                 }.copy(tooltip = tr(player, "materials.grant-help")))
             if (order == null && queued == null) add(button(player, "start",
                 if (city.construction == null && city.constructionQueue.orEmpty().isEmpty()) "materials.start" else "queue.add", COMMIT) {
@@ -867,8 +870,9 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val order = city.construction ?: return if (workerId == null) showBuilding(player, hutId, feedback)
             else showWorker(player, workerId, feedback)
-        val visit = present(player, "civs.builder-materials", "materials.title",
-            listOf(body(player, "materials.loading")), emptyList()) ?: return
+        val visit = visits[player.uniqueId]?.takeIf { it.screenId == "civs.builder-materials" && current(player, it) }
+            ?: present(player, "civs.builder-materials", "materials.title",
+                listOf(body(player, "materials.loading")), emptyList()) ?: return
         val future = try { host.buildingMaterials(player, order.buildingId) }
             catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { materials, error ->
@@ -928,7 +932,7 @@ class CivsUi internal constructor(
                 var message = tr(player, "materials.supplied", "moved" to result.moved, "remaining" to result.remaining)
                 if (result.storageFull) message = message.append(Component.space()).append(tr(player, "materials.storage-full"))
                 reload(message.color(if (result.remaining > 0) STOCK else COMMIT))
-            }, failure = { reload(it) }, workingKey = "materials.supplying")
+            }, failure = { reload(it) }, workingKey = null)
         }
         present(player, "civs.builder-materials", "materials.title", listOfNotNull(
             body(worker?.let { tint(text.literal(it.name), PEOPLE) } ?: buildingName(player, hut.type, hut.level)),
@@ -1165,7 +1169,8 @@ class CivsUi internal constructor(
                 add(button(player, "materials", "materials.open", COMMIT) { loadBuilderMaterials(player, building.id, workerId) })
             if (request != null) add(requestButton(player, request, "workers.supply-unavailable", "workers.supply-help", give = {
                 perform(player, "civs.worker", "workers.detail-title", { host.giveWorkerRequest(player, workerId, request.material.name) },
-                    success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
+                    success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) },
+                    workingKey = null)
             }, refresh = { showWorker(player, workerId) }))
             add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId) })
             add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId) })
@@ -1409,8 +1414,11 @@ class CivsUi internal constructor(
 
     private fun <T : Any> perform(player: Player, id: String, title: String, action: () -> CompletableFuture<T>,
         success: (T) -> Unit, failure: (Component) -> Unit, cancelPending: (() -> Unit)? = null,
-        workingKey: String = "common.working") {
-        val visit = present(player, id, title, listOf(body(player, workingKey)), emptyList()) ?: return
+        workingKey: String? = "common.working") {
+        // Transfers retain the consumed visit and its table until fresh state can replace it once.
+        val visit = if (workingKey == null) visits[player.uniqueId]?.takeIf { it.screenId == id && current(player, it) }
+            else present(player, id, title, listOf(body(player, workingKey)), emptyList())
+        if (visit == null) return
         visit.cancelPending = cancelPending
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { result, error ->

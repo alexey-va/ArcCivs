@@ -3,7 +3,7 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.47"
+version = "0.1.48"
 description = "Persistent player settlements and working citizens for RusCrafting"
 val arcCorePluginVersion = "0.1.19"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
@@ -31,11 +31,13 @@ dependencies {
     compileOnly("com.github.angeschossen:LandsAPI:6.26.18")
     compileOnly("ru.ruscrafting:trails-api:2.3.20")
     compileOnly("com.github.LoneDev6:api-itemsadder:3.6.1")
+    compileOnly("net.luckperms:api:5.5")
     testImplementation("ru.ruscrafting.arc:arc-core-paper-testing:2.7.54")
     testImplementation("ru.ruscrafting.arc:arc-core-integration-testing:2.7.54")
     testImplementation("ru.ruscrafting.arc:arc-core-paper-api:2.7.54")
     testImplementation("ru.ruscrafting:trails-api:2.3.20")
     testImplementation("com.github.LoneDev6:api-itemsadder:3.6.1")
+    testImplementation("net.luckperms:api:5.5")
     testImplementation("io.kotest:kotest-runner-junit5:6.0.7")
     testImplementation("io.kotest:kotest-assertions-core:6.0.7")
     testImplementation("io.mockk:mockk:1.14.7")
