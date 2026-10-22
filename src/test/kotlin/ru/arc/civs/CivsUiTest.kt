@@ -789,6 +789,7 @@ class CivsUiTest : FunSpec({
                 "sleeping" to "Sleeping",
                 "route-unreachable" to "No accessible route",
                 "waiting-materials" to "Waiting for construction materials",
+                "collecting-supplies" to "Collecting supplies",
                 "placing" to "Placing the next section",
                 "working" to "Working",
                 "injury-pending" to "Injured · saving condition",

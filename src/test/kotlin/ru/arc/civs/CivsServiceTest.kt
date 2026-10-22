@@ -8,10 +8,20 @@ import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
 import io.mockk.verify
+import io.papermc.paper.connection.PlayerGameConnection
+import io.papermc.paper.dialog.DialogResponseView
+import net.kyori.adventure.key.Key
+import net.kyori.adventure.text.Component
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.bukkit.event.inventory.ClickType
+import org.bukkit.event.inventory.InventoryAction
+import org.bukkit.event.inventory.InventoryClickEvent
+import org.bukkit.event.inventory.InventoryCreativeEvent
+import org.bukkit.event.inventory.InventoryType
+import org.bukkit.inventory.ItemStack
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.BlockFace
 import org.bukkit.entity.Player
@@ -25,6 +35,8 @@ import ru.arc.paper.network.BackendTransferResult
 import ru.arc.paper.api.*
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.menu.PaperDialogRuntime
+import ru.arc.paper.menu.PaperDialogScreen
 import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -142,6 +154,236 @@ class CivsServiceTest : FunSpec({
             h.service.giveRequestedTool(player, worker.id).isCompletedExceptionally shouldBe true
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), "IRON_PICKAXE") shouldBe 0
+        }
+    }
+
+    for (viaBuilding in listOf(false, true)) for (material in listOf("TORCH", "LADDER"))
+        test("creative request dialog supplies $material through its durable destination viaBuilding=$viaBuilding") {
+            serviceScenario { h ->
+                val world = CivsWorksiteWorldFixture("service-creative-supply").also(h.paper.server::addWorld)
+                world.loadChunk(0, 0)
+                val player = object : org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "CreativeSupplyOwner") {
+                    override fun closeDialog() = Unit
+                }.also(h.paper.server::addPlayer).also {
+                    it.addAttachment(h.plugin, "arccivs.use", true)
+                    it.gameMode = org.bukkit.GameMode.CREATIVE
+                    it.setLocale(java.util.Locale.US)
+                    it.teleport(Location(world, 10.0, 65.0, 0.0))
+                    it.inventory.clear()
+                }
+                val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY,
+                    schematicId = "civs/minecolonies/nordic/fundamentals/miner1", control = CivPosition(10, 64, 0))
+                world.getBlockAt(10, 64, 0).type = Material.BARREL
+                val barrel = (world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
+                val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1,
+                    items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                        4 -> CivResidentItem("DIAMOND_PICKAXE", 1)
+                        6, 7, 8 -> CivsLogistics.QUARRY_SUPPLIES.entries.elementAt(slot - 6).let { (item, amount) ->
+                            if (item == material) null else CivResidentItem(item, amount.toInt())
+                        }
+                        else -> null
+                    } })
+                val ready = h.city.copy(owner = player.uniqueId, worldId = world.uid,
+                    memberNames = mapOf(player.uniqueId.toString() to player.name),
+                    buildings = listOf(h.city.buildings.first(), quarry), workers = listOf(worker), stock = Stock(),
+                    inventory = CivInventory(CivStorageMode.PHYSICAL))
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+                var journal = CompletableFuture<CivInventoryTransaction>()
+                var receipt: CivInventoryTransaction? = null
+                every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+                h.start()
+                val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                    .get(h.service) as CivsWorksites
+                worksites.pulse(listOf(requireNotNull(h.service.city(player))))
+                val amount = CivsLogistics.QUARRY_SUPPLIES.getValue(material)
+                h.service.workerRequest(player, worker.id) shouldBe CivsBuildingRequest(Material.valueOf(material), amount, true)
+                h.service.buildingRequest(player, quarry.id) shouldBe CivsBuildingRequest(Material.valueOf(material), amount, true)
+                RequestDialog(h, player).use { dialog ->
+                    if (viaBuilding) dialog.ui.openBuilding(player, ready.id, quarry.id)
+                    else dialog.ui.openWorker(player, ready.id, worker.id)
+                    val give = dialog.screen.buttons.single { it.id.value == "give_request" }
+                    give.label.color() shouldBe net.kyori.adventure.text.format.TextColor.color(0x9BD48D)
+                    net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer.plainText().serialize(give.tooltip!!)
+                        .contains(if (viaBuilding) "barrel" else "bag") shouldBe true
+                    var action = dialog.action("give_request")
+                    dialog.click(action)
+                    dialog.click(action)
+                    val rejected = requireNotNull(receipt)
+                    // This known pre-write rejection must release admission without creating either endpoint.
+                    journal.completeExceptionally(CivsRejection("storage-transaction-too-large")); h.tick()
+                    h.saves shouldBe emptyList()
+                    CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), material) shouldBe 0
+                    barrel.contents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                    journal = CompletableFuture()
+                    if (viaBuilding) dialog.ui.openBuilding(player, ready.id, quarry.id)
+                    else dialog.ui.openWorker(player, ready.id, worker.id)
+                    action = dialog.action("give_request")
+                    dialog.click(action)
+                    dialog.click(action)
+                    val tx = requireNotNull(receipt)
+                    (tx.id == rejected.id) shouldBe false
+                    tx.playerDebit shouldBe null
+                    tx.residentTransfer shouldBe null
+                    player.inventory.storageContents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                    CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), material) shouldBe 0
+                    barrel.contents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                    h.saves shouldBe emptyList()
+                    journal.complete(tx); h.tick()
+                    CivsEquipment.plainCount(h.service.city(player)!!.workers.single(), material) shouldBe 0
+                    if (viaBuilding) barrel.contents.filterNotNull().sumOf { if (it.type.name == material) it.amount else 0 } shouldBe amount.toInt()
+                    h.commit()
+                    val supplied = h.service.city(player)!!.workers.single()
+                    CivsEquipment.plainCount(supplied, material) shouldBe if (viaBuilding) 0 else amount.toInt()
+                    if (!viaBuilding) barrel.contents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                    dialog.click(action)
+                    val repeat = if (viaBuilding) h.service.giveBuildingRequest(player, quarry.id, material)
+                        else h.service.giveWorkerRequest(player, worker.id, material)
+                    repeat.isCompletedExceptionally shouldBe true
+                    verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+                    player.inventory.storageContents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                }
+            }
+        }
+
+    for (viaBuilding in listOf(false, true)) for (guard in listOf("full", "survival", "stale"))
+        test("requested supply guard $guard leaves both endpoints and revision intact viaBuilding=$viaBuilding") {
+            serviceScenario { h ->
+                val player = h.paper.addPlayer("SupplyGuardOwner").also {
+                    it.addAttachment(h.plugin, "arccivs.use", true)
+                    it.gameMode = org.bukkit.GameMode.CREATIVE
+                    it.teleport(Location(h.world, 0.0, 65.0, 0.0))
+                    it.inventory.clear()
+                }
+                val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+                h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+                val barrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+                if (guard == "full" && viaBuilding) for (slot in 0 until barrel.size)
+                    barrel.setItem(slot, ItemStack(Material.DIRT, 64))
+                val worker = h.city.workers.first().copy(assignment = hall.id, nextDeliveryAt = 1,
+                    items = List(CivsEquipment.SLOTS) { slot ->
+                        if (guard == "full" && !viaBuilding && slot >= 6) CivResidentItem("DIRT", 64) else null
+                    })
+                val ready = h.city.copy(owner = player.uniqueId,
+                    memberNames = mapOf(player.uniqueId.toString() to player.name),
+                    buildings = listOf(hall, h.city.buildings.last()), workers = listOf(worker), stock = Stock(),
+                    inventory = CivInventory(CivStorageMode.PHYSICAL))
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+                h.start()
+                fun request() = requireNotNull(if (viaBuilding) h.service.buildingRequest(player, hall.id)
+                    else h.service.workerRequest(player, worker.id))
+                val displayed = request()
+                displayed shouldBe CivsBuildingRequest(Material.PAPER, 64, guard != "full" || viaBuilding)
+                when (guard) {
+                    "survival" -> {
+                        player.gameMode = org.bukkit.GameMode.SURVIVAL
+                        request() shouldBe displayed.copy(canGive = false)
+                    }
+                    "stale" -> {
+                        barrel.setItem(0, ItemStack(Material.PAPER, 64))
+                        request() shouldBe CivsBuildingRequest(Material.LEATHER, 64, true)
+                    }
+                }
+                val before = requireNotNull(h.service.city(player))
+                val nativeBefore = barrel.contents.map { it?.clone() }
+                // An already-open dialog passes the material it displayed, not the new request.
+                val issue = if (viaBuilding) h.service.giveBuildingRequest(player, hall.id, displayed.material.name)
+                    else h.service.giveWorkerRequest(player, worker.id, displayed.material.name)
+                if (guard == "full" && viaBuilding) h.await(issue) shouldBe Unit
+                else (shouldThrow<CompletionException> { h.await(issue) }.cause as CivsRejection).reason shouldBe when {
+                    guard == "full" -> "resident-inventory-full"
+                    guard == "survival" && viaBuilding -> "construction-supplies-empty"
+                    else -> "resident-item-missing"
+                }
+                h.service.city(player) shouldBe before
+                h.service.city(player)!!.revision shouldBe before.revision
+                h.service.cityBusy(player) shouldBe false
+                barrel.contents.toList() shouldBe nativeBefore
+                player.inventory.storageContents.filterNotNull().filterNot { it.type.isAir } shouldBe emptyList()
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.save(any()) }
+            }
+        }
+
+    test("creative catalog slot and resident container click retain the exact native item through the journal") {
+        serviceScenario(storageFactory = { CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() } }) { h ->
+            val nativeMenus = mutableListOf<org.bukkit.inventory.Inventory>()
+            val player = object : org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "CreativeNativeOwner") {
+                override fun closeDialog() = Unit
+                override fun openInventory(inventory: org.bukkit.inventory.Inventory): org.bukkit.inventory.InventoryView {
+                    // A custom holder is not a BlockState snapshot. Preserve the actual
+                    // menu instance and every native slot while supplying this missing getter.
+                    val owner = inventory.holder
+                    mockkObject(inventory)
+                    every { inventory.getHolder(false) } returns owner
+                    nativeMenus += inventory
+                    return requireNotNull(super.openInventory(inventory))
+                }
+            }.also(h.paper.server::addPlayer).also {
+                it.addAttachment(h.plugin, "arccivs.use", true)
+                it.gameMode = org.bukkit.GameMode.CREATIVE
+                it.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            }
+            val worker = h.city.workers.first()
+            val ready = h.city.copy(owner = player.uniqueId, memberNames = mapOf(player.uniqueId.toString() to player.name),
+                workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val pickaxe = ItemStack(Material.DIAMOND_PICKAXE).apply { editMeta {
+                it.displayName(Component.text("Кирка шахтёра"))
+                (it as org.bukkit.inventory.meta.Damageable).damage = 17
+            } }
+            // The fresh MockBukkit view has no slot conversion. Its concrete player view
+            // provides Paper's five crafting slots and raw 36 -> native hotbar slot 0 mapping.
+            val crafting = object : org.mockbukkit.mockbukkit.inventory.InventoryMock(player, 5, InventoryType.CRAFTING) {
+                // This personal inventory has the same owner with or without block snapshots.
+                override fun getHolder(useSnapshot: Boolean) = holder
+            }
+            val personalView = org.mockbukkit.mockbukkit.inventory.PlayerInventoryViewMock(player,
+                crafting)
+            player.openInventory(personalView)
+            // Paper handles creative slot packets against inventoryMenu, never the open container menu.
+            val creative = InventoryCreativeEvent(personalView, InventoryType.SlotType.QUICKBAR, 36, pickaxe.clone())
+            h.paper.server.pluginManager.callEvent(creative)
+            creative.isCancelled shouldBe false
+            creative.click shouldBe ClickType.CREATIVE
+            creative.slot shouldBe 0
+            player.itemOnCursor.type.isAir shouldBe true
+            player.inventory.setItem(creative.slot, creative.cursor) // Paper's accepted native-slot write.
+            player.inventory.getItem(0) shouldBe pickaxe
+            try {
+                RequestDialog(h, player).use { dialog ->
+                    dialog.ui.openWorker(player, ready.id, worker.id)
+                    dialog.click(dialog.action("inventory"))
+                    val container = player.openInventory
+                    container.topInventory.size shouldBe CIVS_EQUIPMENT_SIZE
+                    fun click() = InventoryClickEvent(container, InventoryType.SlotType.QUICKBAR,
+                        CIVS_EQUIPMENT_SIZE + 27, ClickType.LEFT, InventoryAction.PICKUP_ALL).also {
+                        h.paper.server.pluginManager.callEvent(it)
+                    }
+                    click().isCancelled shouldBe true
+                    click().isCancelled shouldBe true
+                    val tx = requireNotNull(receipt)
+                    tx.residentTransfer!!.changes.single().before!!.stack() shouldBe pickaxe
+                    player.inventory.getItem(0) shouldBe pickaxe
+                    CivsEquipment.slots(h.service.city(player)!!.workers.single())[4] shouldBe null
+                    val editWhilePending = InventoryCreativeEvent(personalView, InventoryType.SlotType.QUICKBAR, 36,
+                        ItemStack(Material.TORCH, 64))
+                    h.paper.server.pluginManager.callEvent(editWhilePending)
+                    editWhilePending.isCancelled shouldBe true
+                    journal.complete(tx); h.tick(); h.commit()
+                    player.inventory.getItem(0) shouldBe null
+                    player.itemOnCursor.type.isAir shouldBe true
+                    CivsEquipment.slots(h.service.city(player)!!.workers.single())[4]!!.stack() shouldBe pickaxe
+                    container.topInventory.getItem(civsEquipmentViewSlot(4)) shouldBe pickaxe
+                    verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+                }
+            } finally {
+                nativeMenus.forEach { unmockkObject(it) }
+            }
         }
     }
 
@@ -2959,6 +3201,35 @@ class CivsServiceTest : FunSpec({
         }
     }
 })
+
+/** Real Core custom-click dispatch; only native dialog presentation is replaced in MockBukkit. */
+private class RequestDialog(h: ServiceScenario, private val player: Player) : AutoCloseable {
+    private lateinit var registration: Any
+    lateinit var screen: PaperDialogScreen
+        private set
+    private val presenter: (Player, PaperDialogScreen, Any) -> Unit = { _, shown, registered -> screen = shown; registration = registered }
+    private val runtime = PaperDialogRuntime::class.java.declaredConstructors.first { it.parameterCount == 2 }
+        .also { it.isAccessible = true }.newInstance(h.plugin, presenter) as PaperDialogRuntime
+    val ui = CivsUi(h.plugin, h.service, h.tasks, runtime, CivsText.fromYaml(civsLocaleSource()))
+
+    fun action(id: String): String = registration.javaClass.declaredMethods.first { it.name.startsWith("key") }
+        .also { it.isAccessible = true }.invoke(registration, id) as String
+
+    fun click(action: String) {
+        val connection = mockk<PlayerGameConnection> { every { player } returns this@RequestDialog.player }
+        val response = mockk<DialogResponseView> {
+            every { getText(any()) } returns null
+            every { getFloat(any()) } returns null
+        }
+        runtime.onCustomClick(mockk {
+            every { commonConnection } returns connection
+            every { identifier } returns Key.key(action)
+            every { dialogResponseView } returns response
+        })
+    }
+
+    override fun close() { ui.close(); runtime.close() }
+}
 
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,

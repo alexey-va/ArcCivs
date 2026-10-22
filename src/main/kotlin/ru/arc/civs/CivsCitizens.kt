@@ -424,6 +424,7 @@ class CivsCitizens(
         actor.targets.clear()
         actor.sheltering = false
         actor.shelter = null
+        actor.shelterPose = null
         actor.wander = CitizenWander()
         actor.footsteps.reset()
         npc.teleport(destination)
@@ -705,7 +706,7 @@ class CivsCitizens(
         if (actor.sleeping && !sleepStillSafe(actor)) {
             // Changed support/headroom must be handled before work, hunger or another route.
             // A clear but unsupported origin wakes in place and falls on the normal gravity tick.
-            if (wake(actor)) actor.shelter = null
+            if (wake(actor)) { actor.shelter = null; actor.shelterPose = null }
             statuses[actor.workerId] = "sheltering"
             return
         }
@@ -721,6 +722,7 @@ class CivsCitizens(
             cancelRoute(actor)
             actor.sheltering = false
             actor.shelter = null
+            actor.shelterPose = null
             actor.cycle.close()
             actor.cycle = actor.plan.cycle()
             return
@@ -851,6 +853,7 @@ class CivsCitizens(
                 stopCamp(actor, "monster")
                 actor.sheltering = false
                 actor.shelter = null
+                actor.shelterPose = null
                 actor.cycle = actor.plan.cycle()
                 actor.attacker = monster
                 actor.combatDestination = null
@@ -1293,11 +1296,19 @@ class CivsCitizens(
             actor.returningToWarehouse = false
             actor.sheltering = true
         }
+        if (!actor.sleeping && actor.shelter?.let { point ->
+                !citizenStandable(world, point) || actor.shelterPose?.let { !citizenSleepClear(world, it.bounds) } != false ||
+                    !arrived(actor.npc.location, point.location(world)) &&
+                    !CitizenChunks.between(actor.npc.location.blockX, actor.npc.location.blockZ, point.x, point.z).ready(world)
+            } == true) {
+            cancelRoute(actor)
+            actor.shelter = null
+            actor.shelterPose = null
+        }
         if (actor.shelter == null && wanderBudget > 0) {
             wanderBudget--
-            actor.shelter = citizenShelterTarget(city, worker) {
-                citizenStandable(world, it) && citizenSleepPose(world, it.location(world), citizenScale(worker)) != null
-            } ?: citizenShelterTarget(city, worker) { citizenStandable(world, it) }
+            citizenRotateAfterAdmission(actors, actor.workerId)
+            reserveShelter(actor, city, worker, world)
         }
         statuses[actor.workerId] = if (actor.sleeping) "sleeping" else "sheltering"
         val target = actor.shelter ?: return
@@ -1307,21 +1318,33 @@ class CivsCitizens(
             statuses[actor.workerId] = "sheltering"
         }
         if (arrived(actor.npc.location, target.location(world))) {
-            cancelRoute(actor)
             // Arrival has a tolerance; validate the observed feet, not the target's centre.
             val origin = actor.npc.location
-            val pose = citizenSleepPose(world, origin, citizenScale(worker)) ?: return
-            actor.sleepOrigin = origin
-            actor.sleepPose = pose
-            actor.npc.sleepingBed = null
-            actor.npc.teleport(pose.position)
-            actor.npc.headYaw = pose.position.yaw
-            actor.npc.pose = PacketNpcPose.SLEEPING
-            actor.sleeping = true
-            statuses[actor.workerId] = "sleeping"
-            CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
-                "action" to "sleep_requested", "target" to target)
-            return
+            val pose = shelterPose(actor, city, worker, origin, shelterOccupied(actor))
+            if (pose != null) {
+                cancelRoute(actor)
+                actor.sleepOrigin = origin
+                actor.sleepPose = pose
+                actor.shelterPose = pose
+                actor.npc.sleepingBed = null
+                actor.npc.teleport(pose.position)
+                actor.npc.headYaw = pose.position.yaw
+                actor.npc.pose = PacketNpcPose.SLEEPING
+                actor.sleeping = true
+                statuses[actor.workerId] = "sleeping"
+                CivsDiagnostics.event("citizen_sleep", "city" to actor.cityId, "worker" to actor.workerId,
+                    "action" to "sleep_requested", "target" to target)
+                return
+            }
+            // Finish the short walk if only the arrival-tolerance position overlaps.
+            // If the actual endpoint became occupied, release it for bounded admission
+            // on the next pulse instead of retaining a finished route forever.
+            if (actor.route?.motion?.finished == true) {
+                cancelRoute(actor)
+                actor.shelter = null
+                actor.shelterPose = null
+                return
+            }
         }
         val route = actor.route
         if (route == null) { startRoute(actor, world, target, now); return }
@@ -1330,6 +1353,69 @@ class CivsCitizens(
             // Cancelling it here used to restart the same impossible route every pulse.
             recoverNavigation(actor, route.target, now)
         }
+    }
+
+    private fun shelterOccupied(actor: Actor): List<BoundingBox> = buildList {
+        // The existing runtime cap is 48 actors; reservations do not scan the world.
+        for (other in actors.values) {
+            if (other === actor || other.worldId != actor.worldId || !other.npc.isValid) continue
+            add(other.sleepPose?.takeIf { other.sleeping }?.bounds
+                ?: citizenStandingBounds(other.npc.location, other.npc.scale))
+            if (other.sheltering) {
+                other.shelterPose?.let { add(it.bounds) }
+                (other.sleepOrigin ?: other.shelter?.location(other.npc.world))?.let {
+                    add(citizenStandingBounds(it, other.npc.scale))
+                }
+            }
+        }
+    }
+
+    private fun shelterPose(actor: Actor, city: Settlement, worker: CivWorker, feet: Location,
+                            occupied: List<BoundingBox>): CitizenSleepPose? {
+        val home = citizenHomeBuilding(city, worker) ?: return null
+        if (occupied.any(citizenStandingBounds(feet, actor.npc.scale)::overlaps)) return null
+        return citizenSleepPose(actor.npc.world, feet, actor.npc.scale) { body ->
+            body.minX >= home.bounds.min.x && body.maxX <= home.bounds.max.x + 1.0 &&
+                body.minY >= home.bounds.min.y && body.maxY <= home.bounds.max.y + 1.0 &&
+                body.minZ >= home.bounds.min.z && body.maxZ <= home.bounds.max.z + 1.0 && occupied.none(body::overlaps)
+        }
+    }
+
+    private fun reserveShelter(actor: Actor, city: Settlement, worker: CivWorker, world: World,
+                               safe: (CivPosition) -> Boolean = { true }): CivPosition? {
+        val candidates = citizenShelterCandidates(city, worker)
+        if (candidates.isEmpty()) return null
+        val occupied = shelterOccupied(actor)
+        // Preserve a clear existing place in the home before choosing another one.
+        // This also keeps a resident already at home from walking just to lie down.
+        val at = actor.npc.location
+        val current = CivPosition(at.blockX, at.blockY, at.blockZ)
+        if (citizenControlClear(city, current) && safe(current)) {
+            val pose = shelterPose(actor, city, worker, at, occupied)
+            if (pose != null) {
+                actor.shelter = current
+                actor.shelterPose = pose
+                return current
+            }
+        }
+        // Several nearby feet share one search envelope. Retain no native readiness
+        // across pulses, and include the existing-place probe in the 80-check budget.
+        val ready = hashMapOf<CitizenChunks, Boolean>()
+        repeat(minOf(79, candidates.size)) {
+            val index = Math.floorMod(actor.shelterSearchIndex++, candidates.size)
+            val point = candidates[index]
+            val chunks = CitizenChunks.between(at.blockX, at.blockZ, point.x, point.z)
+            if (citizenControlClear(city, point) && ready.getOrPut(chunks) { chunks.ready(world) } &&
+                citizenStandable(world, point) && safe(point)) {
+                val pose = shelterPose(actor, city, worker, point.location(world), occupied)
+                if (pose != null) {
+                    actor.shelter = point
+                    actor.shelterPose = pose
+                    return point
+                }
+            }
+        }
+        return null
     }
 
     private fun startRoute(actor: Actor, world: World, target: CivPosition, now: Long, idleAnchor: CivPosition? = null): Boolean {
@@ -1541,7 +1627,10 @@ class CivsCitizens(
         }
         val storage = storageForTarget(actor, city, authored)
         val point = (when {
-            actor.sheltering -> authored.takeIf(safe) ?: citizenShelterTarget(city, worker, safe)
+            actor.sheltering -> authored.takeIf(safe)?.takeIf { point ->
+                shelterPose(actor, city, worker, point.location(entity.world), shelterOccupied(actor))
+                    ?.also { actor.shelterPose = it } != null
+            } ?: reserveShelter(actor, city, worker, entity.world, safe)
             storage != null -> citizenStorageTarget(city, storage, entity.world, safe)
             else -> citizenRecoveryTarget(city, authored, safe)
         }) ?: return false
@@ -1633,7 +1722,7 @@ class CivsCitizens(
                     // The provider publishes durable state. Reconciliation starts a new fenced cycle, never this callback.
                     actor.cycle.close()
                     actor.workHandoff = actor.plan.worldWork?.takeUnless {
-                        it.status in setOf("waiting-tool", "waiting-materials")
+                        it.status in setOf("waiting-tool", "waiting-materials", "collecting-supplies")
                     }?.let { work -> CitizenWorkHandoff(work.buildingId, worker.completedCycles,
                         actor.npc.location.point(), navigationTick, work.status) }
                     actor.reportedFailure = false
@@ -1672,8 +1761,10 @@ class CivsCitizens(
         val npc = actor.npc
         val origin = actor.sleepOrigin
         val destination = if (wasSleeping && npc.isValid) {
+            val occupied = shelterOccupied(actor)
             fun clear(at: Location) = at.world == npc.world && citizenPacketBodyClear(npc.world, at.point(), false) &&
-                citizenPacketCampfireClear(npc.world, at.point())
+                citizenPacketCampfireClear(npc.world, at.point()) &&
+                occupied.none(citizenStandingBounds(at, npc.scale)::overlaps)
             checkedDestination?.takeIf(::clear) ?: origin?.takeIf(::clear) ?: run {
                 if (recoveryBudget == 0 || origin == null) return false
                 recoveryBudget--
@@ -1695,6 +1786,7 @@ class CivsCitizens(
         actor.sleeping = false
         actor.sleepOrigin = null
         actor.sleepPose = null
+        if (wasSleeping) { actor.shelter = null; actor.shelterPose = null }
         if (!npc.isValid) return true
         npc.sleepingBed = null
         if (destination != null) npc.teleport(destination)
@@ -1811,9 +1903,15 @@ class CivsCitizens(
             .filter { citizenStandable(world, it) }
             .map { it.location(world) }
             .filter { citizenHasViewer(world.uid, it.point(), viewers, viewerRange) }
-            .firstOrNull { location -> actors.values.none { actor ->
-                actor.npc.isValid && actor.worldId == world.uid && actor.npc.location.distanceSquared(location) < 0.8
-            } }
+            .firstOrNull { location ->
+                val body = citizenStandingBounds(location, 1.0)
+                actors.values.none { actor ->
+                    actor.npc.isValid && actor.worldId == world.uid &&
+                        (actor.npc.location.distanceSquared(location) < 0.8 ||
+                            actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
+                            actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
+                }
+            }
     }
 
     private fun arrived(from: Location, to: Location): Boolean {
@@ -1973,6 +2071,8 @@ class CivsCitizens(
         var sleepOrigin: Location? = null
         var sleepPose: CitizenSleepPose? = null
         var shelter: CivPosition? = null
+        var shelterPose: CitizenSleepPose? = null
+        var shelterSearchIndex = 0
         var nextPlayAt = 0L
         var supplyPickup: SupplyPickup? = null
         var supplyFailure: Pair<UUID, String>? = null
@@ -2680,7 +2780,8 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
             floor.asJsonObject.getAsJsonArray("floorCells").map { CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(it)) }
         }
         fun inMine(x: Int, y: Double, z: Int): Boolean = y < bottom.y - .5 &&
-            (x == bottom.x && z == bottom.z || floors.any { abs(x - it.x) <= 1 && abs(z - it.z) <= 1 && y in (it.y.toDouble()..it.y + 4.0) })
+            (x == bottom.x && z == bottom.z || CivsMinePlan.shaftContains(mine, CivPosition(x, kotlin.math.floor(y).toInt(), z)) ||
+                floors.any { abs(x - it.x) <= 1 && abs(z - it.z) <= 1 && y in (it.y.toDouble()..it.y + 4.0) })
         if (abs(from.y - target.y) <= 1.01 ||
             !inMine(from.blockX, from.y, from.blockZ) && !inMine(target.x, target.y.toDouble(), target.z)) continue
         val onShaft = from.blockX == bottom.x && from.blockZ == bottom.z
@@ -2698,9 +2799,14 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
 
 internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)
 
+private fun citizenStandingBounds(feet: Location, scale: Double): BoundingBox = BoundingBox(
+    feet.x - .3 * scale, feet.y, feet.z - .3 * scale,
+    feet.x + .3 * scale, feet.y + 1.8 * scale, feet.z + .3 * scale)
+
 /** Native 1.21.11 sleeping mesh: head toward -X at yaw zero, .9375 model scale.
  * Include outer skin/armour layers and lift the pose above the actual floor. No fake bed metadata. */
-internal fun citizenSleepPose(world: World, feet: Location, scale: Double): CitizenSleepPose? {
+internal fun citizenSleepPose(world: World, feet: Location, scale: Double,
+                             available: (BoundingBox) -> Boolean = { true }): CitizenSleepPose? {
     if (!citizenPacketSupported(world, feet.point()) || !citizenPacketBodyClear(world, feet.point(), false)) return null
     val origin = feet.clone().add(0.0, .32 * scale + .01, 0.0)
     for (yaw in listOf(0f, 90f, 180f, 270f)) {
@@ -2714,7 +2820,7 @@ internal fun citizenSleepPose(world: World, feet: Location, scale: Double): Citi
         } }
         val box = org.bukkit.util.BoundingBox(corners.minOf { it.first }, origin.y - .31 * scale,
             corners.minOf { it.second }, corners.maxOf { it.first }, origin.y + .31 * scale, corners.maxOf { it.second })
-        if (citizenSleepClear(world, box)) return CitizenSleepPose(origin.clone().also { it.yaw = yaw; it.pitch = 0f }, box)
+        if (available(box) && citizenSleepClear(world, box)) return CitizenSleepPose(origin.clone().also { it.yaw = yaw; it.pitch = 0f }, box)
     }
     return null
 }
@@ -2733,16 +2839,27 @@ internal fun citizenSleepClear(world: World, body: org.bukkit.util.BoundingBox):
     return true
 }
 
-internal fun citizenShelterTarget(city: Settlement, worker: CivWorker, safe: (CivPosition) -> Boolean): CivPosition? {
-    val home = citizenHomeBuilding(city, worker) ?: return null
-    val place = city.workers.filter { citizenHomeBuilding(city, it)?.id == home.id }.indexOfFirst { it.id == worker.id }.coerceAtLeast(0)
+internal fun citizenShelterTarget(city: Settlement, worker: CivWorker, safe: (CivPosition) -> Boolean): CivPosition? =
+    citizenShelterCandidates(city, worker).take(80).firstOrNull(safe)
+
+/** Cheap bounded coordinates; the actor admits at most 80 native probes per shelter search pulse. */
+private fun citizenShelterCandidates(city: Settlement, worker: CivWorker): List<CivPosition> {
+    val home = citizenHomeBuilding(city, worker) ?: return emptyList()
     val origin = home.control ?: home.entrance
-    val candidates = sequence {
-        for (dy in listOf(0, 1, -1, 2, -2)) for (r in 1..4) for ((dx, dz) in listOf(r to 0, 0 to r, -r to 0, 0 to -r))
-            yield(CivPosition(origin.x + dx, origin.y + dy, origin.z + dz))
-    }
-    val safePlaces = candidates.filter { home.bounds.contains(it.x, it.y, it.z) && safe(it) }.take(maxOf(place + 1, 1)).toList()
-    return safePlaces.getOrNull(place) ?: safePlaces.lastOrNull()
+    return buildSet {
+        // Keep the established nearby cardinal preference before admitting additional
+        // floor positions; the latter make room for several non-overlapping bodies.
+        for (dy in listOf(0, 1, -1, 2, -2)) for (r in 1..4)
+            for ((dx, dz) in listOf(r to 0, 0 to r, -r to 0, 0 to -r)) {
+                val point = CivPosition(origin.x + dx, origin.y + dy, origin.z + dz)
+                if (home.bounds.contains(point.x, point.y, point.z)) add(point)
+            }
+        for (dy in listOf(0, 1, -1, 2, -2)) for (r in 1..4) for (dx in -r..r) for (dz in -r..r) {
+            if (maxOf(abs(dx), abs(dz)) != r) continue
+            val point = CivPosition(origin.x + dx, origin.y + dy, origin.z + dz)
+            if (home.bounds.contains(point.x, point.y, point.z)) add(point)
+        }
+    }.toList()
 }
 
 private fun citizenHomeBuilding(city: Settlement, worker: CivWorker): CivBuilding? {

@@ -1481,7 +1481,8 @@ class CivsUi internal constructor(
     private fun requestButton(player: Player, request: CivsBuildingRequest, unavailableKey: String, helpKey: String,
         give: () -> Unit, refresh: () -> Unit): PaperDialogButton {
         val tool = requestTool(request)
-        val creativeTool = tool != null && player.gameMode == GameMode.CREATIVE
+        val creative = player.gameMode == GameMode.CREATIVE
+        val creativeTool = tool != null && creative
         val busy = host.cityBusy(player)
         val canGive = request.canGive && !busy
         val color = if (canGive) COMMIT else DANGER
@@ -1490,10 +1491,12 @@ class CivsUi internal constructor(
             !request.canGive -> when {
                 creativeTool -> "workers.tool-request-creative-unavailable"
                 tool != null -> "workers.tool-request-unavailable"
+                creative -> "$unavailableKey-creative"
                 else -> unavailableKey
             }
             creativeTool -> "workers.give-tool-creative-help"
             tool != null -> "workers.give-tool-help"
+            creative -> "$helpKey-creative"
             else -> helpKey
         })
         val action = { if (canGive) give() else refresh() }
@@ -1542,7 +1545,7 @@ class CivsUi internal constructor(
         "world-changed", "protected-terrain", "building-overlap", "outside-city", "protected-area",
         "storage-unavailable", "injury-pending", "closed", "deleting" -> DANGER
         "active", "working", "working-field", "watering", "fertilizing", "felling-tree", "digging-mine", "building", "placing",
-        "delivering", "loading-cargo" -> COMMIT
+        "delivering", "loading-cargo", "collecting-supplies" -> COMMIT
         "to-work", "moving-to-work", "moving-to-storage", "to-store", "moving-to-pickup", "carrying-cargo" -> NAVIGATION
         "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers" -> PERSONAL
         "playing", "wandering", "unassigned", "no-assignment", "no-construction" -> PEOPLE

@@ -642,6 +642,181 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("three residents reserve separate full sleeping bodies and release their places at dawn") {
+        residentRuntime { h ->
+            // Home positions in chunk -1 need the same loaded one-chunk search
+            // margin as a real route from those positions.
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val home = h.city.buildings.single().copy(bounds = CivBox(CivPosition(-4, 64, -4), CivPosition(4, 68, 4)))
+            h.city = h.city.copy(buildings = listOf(home), workers = h.city.workers.map { it.copy(homeId = home.id) } +
+                List(2) { CivWorker(UUID.randomUUID(), "Neighbour$it", null, homeId = home.id) })
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            h.owner.activeCount() shouldBe 3
+            val actors = h.owner.collisionActors().toList()
+            // Check the initial spawn frame before navigation can move a newcomer
+            // out of a sleeper's body and conceal an invalid spawn admission.
+            val alreadySleeping = actors.filter { it.pose == PacketNpcPose.SLEEPING }
+            alreadySleeping.isNotEmpty() shouldBe true
+            for (npc in actors.filter { it.pose != PacketNpcPose.SLEEPING }) {
+                val at = npc.location
+                val half = .3 * npc.scale
+                val body = BoundingBox(at.x - half, at.y, at.z - half,
+                    at.x + half, at.y + 1.8 * npc.scale, at.z + half)
+                for (sleeper in alreadySleeping) withClue("spawn=${npc.location} sleeper=${sleeper.location}") {
+                    body.overlaps(runtimeSleepingBody(sleeper)) shouldBe false
+                }
+            }
+            var slept = false
+            for (tick in 1..400) {
+                h.owner.activateNavigating()
+                if (tick % 20 == 0) h.owner.pulse(2_000 + tick * 50L)
+                if (actors.all { it.pose == PacketNpcPose.SLEEPING }) { slept = true; break }
+            }
+            withClue(actors.joinToString { "${it.uniqueId} ${it.location} ${h.owner.status(it.uniqueId)} ${h.navigationState(it.uniqueId)}" }) {
+                slept shouldBe true
+            }
+            val bodies = actors.map { npc ->
+                val feet = requireNotNull(h.owner.residentFeet(npc.uniqueId))
+                citizenPacketSupported(h.world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+                citizenPacketBodyClear(h.world, CitizenPoint(feet.x, feet.y, feet.z), false) shouldBe true
+                val body = runtimeSleepingBody(npc)
+                citizenSleepClear(h.world, body) shouldBe true
+                home.bounds.contains(feet.blockX, feet.blockY, feet.blockZ) shouldBe true
+                body
+            }
+            for (first in bodies.indices) for (second in first + 1 until bodies.size)
+                bodies[first].overlaps(bodies[second]) shouldBe false
+            actors.map { h.owner.residentFeet(it.uniqueId)?.toVector() }.toSet().size shouldBe 3
+            val grounded = actors.associate { it.uniqueId to requireNotNull(h.owner.residentFeet(it.uniqueId)) }
+            h.world.time = 1_000
+            h.owner.pulse(30_000)
+            for (npc in actors) {
+                npc.pose shouldBe PacketNpcPose.STANDING
+                npc.location.toVector() shouldBe grounded.getValue(npc.uniqueId).toVector()
+            }
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("a sleeping place occupied during travel releases its finished route and chooses another place") {
+        residentRuntime { h ->
+            for (x in -2..2) for (z in -2..1) h.world.loadChunk(x, z)
+            val home = h.city.buildings.single().copy(bounds = CivBox(CivPosition(-4, 64, -4), CivPosition(4, 68, 4)))
+            val unavailable = home.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, control = null,
+                entrance = CivPosition(30, 64, 0), bounds = CivBox(CivPosition(30, 64, 0), CivPosition(30, 64, 0)))
+            val neighbour = CivWorker(UUID.randomUUID(), "Neighbour", null, homeId = unavailable.id)
+            h.city = h.city.copy(buildings = listOf(home, unavailable), workers =
+                h.city.workers.map { it.copy(homeId = home.id) } + neighbour)
+            h.owner.pulse(2_000)
+            val actors = h.owner.collisionActors()
+            val resident = actors.single { it.uniqueId == h.workerId }
+            val visitor = actors.single { it.uniqueId == neighbour.id }
+            resident.teleport(Location(h.world, 12.5, 64.0, .5))
+            visitor.teleport(Location(h.world, 20.5, 64.0, .5))
+            h.world.time = 13_000
+            h.owner.pulse(3_000)
+            val reserved = Location(h.world, 1.5, 64.0, .5)
+            // Another resident occupies the place after its reservation. The real
+            // owner must revalidate the pose even when its route has completed.
+            visitor.teleport(reserved)
+            for (tick in 1..512) {
+                h.owner.activateNavigating()
+                if (resident.location.distanceSquared(reserved) < .000001) break
+            }
+            withClue("location=${resident.location} ${h.navigationState()}") {
+                resident.location.toVector() shouldBe reserved.toVector()
+            }
+            // Let the route owner retire its final waypoint before the arrival pulse.
+            h.owner.activateNavigating()
+            h.owner.pulse(4_000)
+            resident.pose shouldBe PacketNpcPose.STANDING
+            var slept = false
+            for (tick in 1..400) {
+                h.owner.activateNavigating()
+                if (tick % 20 == 0) h.owner.pulse(4_000 + tick * 50L)
+                if (resident.pose == PacketNpcPose.SLEEPING) { slept = true; break }
+            }
+            withClue("location=${resident.location} ${h.navigationState()}") { slept shouldBe true }
+            val at = visitor.location
+            val half = .3 * visitor.scale
+            val occupied = BoundingBox(at.x - half, at.y, at.z - half,
+                at.x + half, at.y + 1.8 * visitor.scale, at.z + half)
+            runtimeSleepingBody(resident).overlaps(occupied) shouldBe false
+            visitor.location.toVector() shouldBe reserved.toVector()
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("eight homes without a sleeping place cannot starve the next resident") {
+        residentRuntime { h ->
+            for (x in -2..3) for (z in -2..1) h.world.loadChunk(x, z)
+            h.city = h.city.copy(workers = h.city.workers +
+                List(8) { CivWorker(UUID.randomUUID(), "Neighbour$it", null) })
+            repeat(4) { h.owner.pulse(2_000 + it * 1_000L) }
+            val actors = h.owner.collisionActors().toList()
+            actors.size shouldBe 9
+            val unavailable = h.city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                entrance = CivPosition(40, 64, 0), control = null,
+                bounds = CivBox(CivPosition(40, 64, 0), CivPosition(40, 64, 0)))
+            val home = unavailable.copy(id = UUID.randomUUID(), entrance = CivPosition(22, 64, 0),
+                bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, 4)))
+            val last = actors.last()
+            h.city = h.city.copy(buildings = h.city.buildings + listOf(unavailable, home),
+                workers = h.city.workers.map { it.copy(homeId = if (it.id == last.uniqueId) home.id else unavailable.id) })
+            actors.dropLast(1).forEachIndexed { index, npc ->
+                npc.teleport(Location(h.world, .5 + index * 2, 64.0, .5))
+            }
+            last.teleport(Location(h.world, 22.5, 64.0, .5))
+            h.world.time = 13_000
+            h.owner.pulse(7_000)
+            last.pose shouldBe PacketNpcPose.STANDING
+            h.owner.pulse(8_000)
+            withClue("status=${h.owner.status(last.uniqueId)} location=${last.location}") {
+                last.pose shouldBe PacketNpcPose.SLEEPING
+            }
+            actors.dropLast(1).all { it.pose == PacketNpcPose.STANDING } shouldBe true
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("one available sleeping place never stacks later residents and is reusable after retirement") {
+        residentRuntime { h ->
+            val home = h.city.buildings.single().copy(bounds = CivBox(CivPosition(-3, 64, -3), CivPosition(3, 65, 3)))
+            h.city = h.city.copy(buildings = listOf(home), workers = h.city.workers.map { it.copy(homeId = home.id) } +
+                List(2) { CivWorker(UUID.randomUUID(), "Neighbour$it", null, homeId = home.id) })
+            h.owner.pulse(2_000)
+            val actors = h.owner.collisionActors().toList()
+            actors.size shouldBe 3
+            val only = Location(h.world, 1.5, 64.0, .5)
+            // A low ceiling leaves one standing/wake cell while the lying body still
+            // fits below it. This supplies exactly one physically valid sleep admission.
+            for (x in -3..3) for (z in -3..3) if (x != 1 || z != 0)
+                h.world.getBlockAt(x, 65, z).type = Material.STONE
+            actors.first { it.uniqueId == h.workerId }.teleport(only)
+            actors.filter { it.uniqueId != h.workerId }.forEachIndexed { index, npc ->
+                npc.teleport(Location(h.world, 7.5 + index * 2, 64.0, .5))
+            }
+            h.world.time = 13_000
+            repeat(8) { h.owner.pulse(3_000 + it * 1_000L) }
+            actors.count { it.pose == PacketNpcPose.SLEEPING } shouldBe 1
+            actors.single { it.pose == PacketNpcPose.SLEEPING }.uniqueId shouldBe h.workerId
+            actors.filter { it.uniqueId != h.workerId }.forEach {
+                it.pose shouldBe PacketNpcPose.STANDING
+                (it.location.x >= 7.5) shouldBe true
+                h.owner.status(it.uniqueId) shouldBe "workers.status.sheltering"
+            }
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId })
+            h.owner.pulse(12_000)
+            val next = h.owner.collisionActors().first()
+            next.teleport(only)
+            repeat(8) { h.owner.pulse(13_000 + it * 1_000L) }
+            next.pose shouldBe PacketNpcPose.SLEEPING
+            h.owner.collisionActors().count { it.pose == PacketNpcPose.SLEEPING } shouldBe 1
+            h.deliveries shouldBe 0
+        }
+    }
+
     test("removing a sleeping resident's floor wakes it at logical feet and normal gravity settles it") {
         residentRuntime { h ->
             val actor = h.owner.collisionActors().single()
@@ -1200,6 +1375,23 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 })
 
+/** Native sleeping model envelope from actual handle fields, not the allocated target. */
+private fun runtimeSleepingBody(npc: PacketPlayerNpc): BoundingBox {
+    val at = npc.location
+    val s = npc.scale
+    return when (npc.bodyYaw) {
+        0f -> BoundingBox(at.x - 1.96 * s, at.y - .31 * s, at.z - .62 * s,
+            at.x + .07 * s, at.y + .31 * s, at.z + .62 * s)
+        90f -> BoundingBox(at.x - .62 * s, at.y - .31 * s, at.z - .07 * s,
+            at.x + .62 * s, at.y + .31 * s, at.z + 1.96 * s)
+        180f -> BoundingBox(at.x - .07 * s, at.y - .31 * s, at.z - .62 * s,
+            at.x + 1.96 * s, at.y + .31 * s, at.z + .62 * s)
+        270f -> BoundingBox(at.x - .62 * s, at.y - .31 * s, at.z - 1.96 * s,
+            at.x + .62 * s, at.y + .31 * s, at.z + .07 * s)
+        else -> error("Unexpected sleeping yaw ${npc.bodyYaw}")
+    }
+}
+
 private fun residentRuntime(block: (ResidentRuntime) -> Unit) {
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open().use { paper ->
@@ -1333,16 +1525,21 @@ private class ResidentRuntime(paper: MockBukkitTestRuntime) {
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
     /** Read-only failure context; runtime behavior never depends on private test access. */
-    fun navigationState(): String = runCatching {
+    fun navigationState(worker: UUID = workerId): String = runCatching {
         fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
             isAccessible = true
             get(target)
         }
-        val actor = (field(owner, "actors") as Map<*, *>)[workerId] ?: return@runCatching "no actor"
+        val actor = (field(owner, "actors") as Map<*, *>)[worker] ?: return@runCatching "no actor"
         val route = field(actor, "route")
         val motion = route?.let { field(it, "motion") as CitizenPacketRoute }
         val queue = field(requireNotNull(field(owner, "navigation")), "searching") as Collection<*>
-        "cycle=${field(actor, "cycle")} queue=${queue.size} nodes=${motion?.nodeCount} " +
+        val shelter = field(actor, "shelter") as? CivPosition
+        val feet = owner.residentFeet(worker)
+        val chunksReady = if (shelter == null || feet == null) null else
+            CitizenChunks.between(feet.blockX, feet.blockZ, shelter.x, shelter.z).ready(world)
+        "cycle=${field(actor, "cycle")} shelter=$shelter shelterChunksReady=$chunksReady sleepPose=${field(actor, "shelterPose")} " +
+            "shelterCursor=${field(actor, "shelterSearchIndex")} queue=${queue.size} nodes=${motion?.nodeCount} " +
             "searching=${motion?.searching} failure=${motion?.failure} remaining=${motion?.remainingNodes}"
     }.getOrElse { "unavailable: ${it.javaClass.simpleName}" }
 

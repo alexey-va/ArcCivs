@@ -113,6 +113,12 @@ class CivsResidentNavigationTest : FunSpec({
             val feet = Location(terrain.world, .5, 64.0, .5)
             val open = requireNotNull(citizenSleepPose(terrain.world, feet, 1.0))
             open.position.yaw shouldBe 0f
+            val neighbour = requireNotNull(citizenSleepPose(terrain.world, feet.clone().add(0.0, 0.0, 1.0), 1.0) {
+                !it.overlaps(open.bounds)
+            })
+            neighbour.position.yaw shouldBe 90f
+            neighbour.bounds.overlaps(open.bounds) shouldBe false
+            citizenSleepPose(terrain.world, feet, 1.0) { !it.overlaps(open.bounds) } shouldBe null
             (open.bounds.minY > feet.y) shouldBe true
             // The native armour head inflates its 8px cube by 1px on every face.
             val helmetRadius = 5.0 / 16.0 * .9375

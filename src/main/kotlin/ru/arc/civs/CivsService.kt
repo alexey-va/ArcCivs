@@ -1099,19 +1099,7 @@ class CivsService(
             rejectIf(request.material.name != material, "resident-item-missing")
             val worker = city.workers.first { it.id == workerId }
             if (CivsEquipment.requestedTool(city, worker)?.name == material) giveRequestedTool(player, workerId)
-            else {
-                var updated: CivWorker? = null
-                inventoryMutation(city.id, { before ->
-                    val latest = workerRequest(player, workerId) ?: throw CivsRejection("resident-item-missing")
-                    rejectIf(latest.material.name != material, "resident-item-missing")
-                    storage.prepareResidentTransfer(before, workerId, player, null, null,
-                        org.bukkit.event.inventory.ClickType.LEFT, requestedSupply = latest.material to latest.amount)
-                        .also { updated = it.worker }.plan
-                }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
-                    before.copy(workers = before.workers.map { if (it.id == workerId) requireNotNull(updated) else it },
-                        inventory = inventory, revision = before.revision + 1)
-                }.thenApply { Unit }
-            }
+            else giveRequestedSupply(player, city, requireNotNull(worker.assignment), material, workerId)
         }
 
     override fun buildingRequest(player: Player, buildingId: UUID): CivsBuildingRequest? {
@@ -1137,7 +1125,8 @@ class CivsService(
             val missing = need - (available[material] ?: 0)
             if (missing <= 0) continue
             val item = Material.matchMaterial(material) ?: continue
-            val canGive = player.inventory.storageContents.any { it?.type == item && it.amount > 0 && it.isSimilar(org.bukkit.inventory.ItemStack(item)) }
+            val canGive = player.gameMode == org.bukkit.GameMode.CREATIVE ||
+                player.inventory.storageContents.any { it?.type == item && it.amount > 0 && it.isSimilar(org.bukkit.inventory.ItemStack(item)) }
             return CivsBuildingRequest(item, missing.coerceAtMost(item.maxStackSize.toLong()), canGive)
         }
         return null
@@ -1151,26 +1140,51 @@ class CivsService(
                 it.assignment == buildingId && CivsEquipment.requestedTool(city, it)?.name == material
             }
             if (worker != null) giveRequestedTool(player, worker.id)
-            else {
-                rejectIf(city.inventory?.mode != CivStorageMode.PHYSICAL, "materials-required")
-                var supplied: CivStorageSupplyPlan? = null
-                inventoryMutation(city.id, { current ->
-                    val latest = buildingRequest(player, buildingId) ?: throw CivsRejection("resident-item-missing")
-                    rejectIf(latest.material.name != material, "resident-item-missing")
-                    val have = storage.buildingAvailable(current, buildingId)[material] ?: 0L
-                    storage.prepareConstructionSupply(current, buildingId, mapOf(material to have + latest.amount), player)
-                        .also { supplied = it }.plan
-                }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
-                    if (requireNotNull(supplied).result.moved == 0L) before
-                    else before.copy(inventory = inventory, revision = before.revision + 1)
-                }.thenApply { saved ->
-                    CivsDiagnostics.event("building_supply_committed", "city" to saved.id, "building" to buildingId,
-                        "player" to player.uniqueId, "material" to material,
-                        "amount" to requireNotNull(supplied).result.moved, "revision" to saved.revision)
-                    Unit
-                }
-            }
+            else giveRequestedSupply(player, city, buildingId, material)
         }
+
+    /** Both request screens fulfil the current deficit through the same durable supply operation. */
+    private fun giveRequestedSupply(player: Player, city: Settlement, buildingId: UUID, material: String,
+        workerId: UUID? = null): CompletableFuture<Unit> {
+        val creative = player.gameMode == org.bukkit.GameMode.CREATIVE
+        var updated: CivWorker? = null
+        var moved = 0L
+        return inventoryMutation(city.id, { before ->
+            rejectIf(!player.isOnline || creative && player.gameMode != org.bukkit.GameMode.CREATIVE, "not-authorized")
+            val request = (if (workerId == null) buildingRequest(player, buildingId) else workerRequest(player, workerId))
+                ?: throw CivsRejection("resident-item-missing")
+            rejectIf(request.material.name != material, "resident-item-missing")
+            if (workerId == null) {
+                rejectIf(before.inventory?.mode != CivStorageMode.PHYSICAL, "materials-required")
+                val have = storage.buildingAvailable(before, buildingId)[material] ?: 0L
+                storage.prepareConstructionSupply(before, buildingId, mapOf(material to have + request.amount),
+                    if (creative) null else player).also { moved = it.result.moved }.plan
+            } else {
+                val worker = before.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                if (creative) {
+                    val (supplied, amounts) = CivsEquipment.grantSupplies(worker, mapOf(material to request.amount))
+                    moved = amounts[material] ?: 0L
+                    rejectIf(moved == 0L, "resident-inventory-full")
+                    updated = supplied
+                    CivStoragePlan(requireNotNull(before.inventory), emptyList())
+                } else storage.prepareResidentTransfer(before, workerId, player, null, null,
+                    org.bukkit.event.inventory.ClickType.LEFT, requestedSupply = request.material to request.amount).also {
+                    updated = it.worker
+                    moved = (CivsEquipment.plainCount(it.worker, material) - CivsEquipment.plainCount(worker, material)).toLong()
+                }.plan
+            }
+        }, sourcePlayer = if (creative) null else player, keepViewersOpen = true) { before, inventory ->
+            if (moved == 0L) before else before.copy(inventory = inventory, revision = before.revision + 1,
+                workers = if (workerId == null) before.workers else before.workers.map {
+                    if (it.id == workerId) requireNotNull(updated) else it
+                })
+        }.thenApply { saved ->
+            CivsDiagnostics.event(if (workerId == null) "building_supply_committed" else "resident_supply_committed",
+                "city" to saved.id, "building" to buildingId, "worker" to workerId, "player" to player.uniqueId,
+                "material" to material, "amount" to moved, "grant" to creative, "revision" to saved.revision)
+            Unit
+        }
+    }
 
     override fun summonWorker(player: Player, buildingId: UUID): CompletableFuture<Unit> =
         cityAction("resident_summon", player, "building" to buildingId) { city ->

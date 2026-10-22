@@ -15,7 +15,9 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
+import java.nio.file.Files
 import java.util.UUID
+import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
@@ -34,6 +36,340 @@ class CivsSpatialWorkReviewTest : FunSpec({
             citizenMineWaypoint(city, world, Location(world, bottom.x + 4.5, 64.0, bottom.z + .5), floor) shouldBe bottom
             citizenMineWaypoint(city, world, Location(world, bottom.x + .5, bottom.y.toDouble(), bottom.z + .5), floor) shouldBe bottom.copy(y = floor.y)
             citizenMineWaypoint(city, world, Location(world, bottom.x + .5, floor.y.toDouble(), bottom.z + .5), bottom.copy(x = bottom.x + 5, y = 64)) shouldBe bottom
+        }
+    }
+
+    test("the live rotated mine reaches its underground shaft through the west staircase") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("mine-side-shaft-legs").also(paper.server::addWorld)
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40), 270)
+                .copy(control = CivPosition(-93, 69, -40))
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "DIAMOND_PICKAXE"))
+            val bottom = CivPosition(-93, 63, -47)
+            val work = CivPosition(-94, 61, -48)
+            for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+            // Corridor sampled from Spawn on 2026-10-22 at 11:46–11:52 UTC. These
+            // are observed feet/support points, not a fabricated ladder to the surface.
+            val stairs = listOf(
+                Triple(-94, 68, -41), Triple(-95, 68, -41), Triple(-96, 68, -41),
+                Triple(-97, 68, -41), Triple(-98, 68, -41), Triple(-99, 67, -40),
+                Triple(-99, 67, -41), Triple(-99, 66, -42), Triple(-100, 65, -43),
+                Triple(-99, 64, -44), Triple(-99, 64, -45), Triple(-98, 64, -45),
+                Triple(-97, 64, -46), Triple(-96, 64, -46), Triple(-95, 64, -47),
+                Triple(-94, 64, -47))
+            val paths = setOf(Triple(-95, 68, -41), Triple(-97, 68, -41),
+                Triple(-99, 67, -41), Triple(-99, 64, -45), Triple(-98, 64, -45))
+            for ((x, y, z) in stairs) {
+                world.getBlockAt(x, y, z).type = if (Triple(x, y, z) in paths) Material.DIRT_PATH else Material.COBBLESTONE
+                if (y == 64) world.getBlockAt(x, 68, z).type = Material.DIRT
+            }
+            for (y in 57..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+            world.getBlockAt(bottom.x, 68, bottom.z).type = Material.DIRT
+            // The reported cave-side stance is supported and clear, but the diagonal
+            // from the ladder crosses its solid backing and the western shaft wall.
+            world.getBlockAt(-94, 60, -48).type = Material.COBBLESTONE
+            world.getBlockAt(-94, 61, -48).type = Material.AIR
+            world.getBlockAt(-94, 62, -48).type = Material.AIR
+            world.getBlockAt(-94, 61, -47).type = Material.COBBLESTONE
+            world.getBlockAt(-93, 61, -48).type = Material.COBBLESTONE
+            CivsMinePlan.shaftContains(mine, work) shouldBe true
+            citizenMineWaypoint(city, world, Location(world, -93.812, 69.0, -40.5), work) shouldBe bottom
+            citizenMineWaypoint(city, world, Location(world, -92.5, 63.0, -46.5), work) shouldBe bottom.copy(y = 61)
+            citizenMineWaypoint(city, world, Location(world, -92.5, 61.0, -46.5), work) shouldBe null
+            val corridor = stairs.mapTo(hashSetOf()) { (x, _, z) -> x to z } + (bottom.x to bottom.z)
+            var at = Location(world, -93.812, 69.0, -40.5)
+            val reached = mutableListOf<Location>()
+            for (end in listOf(bottom, bottom.copy(y = 61))) {
+                val destination = Location(world, end.x + .5, end.y.toDouble(), end.z + .5)
+                val route = CitizenPacketRoute(world, at, destination,
+                    { p -> (p.x to p.z) in corridor && p.y in 61..69 }, { _, _ -> true }, { 2.25 })
+                repeat(20_000) { if (route.searching) route.expand() }
+                withClue("to=$end nodes=${route.nodeCount} failure=${route.failure}") {
+                    route.searching shouldBe false
+                    route.failure shouldBe null
+                }
+                repeat(800) {
+                    route.move(at, .172) { true }?.let { next ->
+                        withClue("from=$at next=$next") { (at.distance(next) <= .172001) shouldBe true }
+                        citizenPacketBodyClear(world, CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                        at = next
+                        reached += next
+                    }
+                }
+                withClue("to=$end actual=$at failure=${route.failure}") { route.finished shouldBe true }
+                at.toVector() shouldBe destination.toVector()
+            }
+            reached.any { it.x < -99.0 && it.y in 65.0..67.0 } shouldBe true
+            citizenPacketStepClear(world, CitizenPoint(-92.5, 61.0, -46.5), CitizenPoint(-93.5, 61.0, -47.5), false) shouldBe false
+        }
+    }
+
+    test("the rotated mine cuts its connected frontier instead of sealing the detached western cave") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-detached-western-cave").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineDetachedCave")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                try {
+                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40), 270)
+                    val worker = spatialWorker(mine, "IRON_PICKAXE")
+                    val city = spatialCity(world.uid, listOf(mine), worker).copy(center = mine.anchor,
+                        mineProgress = mapOf(mine.id.toString() to 214L),
+                        minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, 4, 214)))
+                    for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                    for (y in 57..65) world.getBlockAt(-93, y, -47).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+                    // Observed Spawn geometry, 2026-10-22: both routes into this
+                    // supported cave stance cross an intact wall/backing block.
+                    for (y in 61..62) world.getBlockAt(-94, y, -48).type = Material.AIR
+                    for (y in 60..62) world.getBlockAt(-93, y, -48).type = Material.COBBLESTONE
+                    world.getBlockAt(-94, 60, -48).type = Material.COBBLESTONE
+                    world.getBlockAt(-94, 61, -47).type = Material.COBBLESTONE
+                    // Reconstruct the earlier missing shell; the later live snapshot
+                    // already contained cobblestone here and is not its preimage.
+                    world.getBlockAt(-94, 62, -49).type = Material.AIR
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        repeat(64) { runtime.pulse(listOf(city)) }
+                        val work = requireNotNull(runtime.plan(city, worker))
+                        work.status shouldBe "digging-mine"
+                        work.changes.single().position shouldBe CivPosition(-92, 62, -47)
+                        work.changes.single().after shouldBe "minecraft:air"
+                        work.inputs shouldBe emptyMap()
+                        work.standing.x shouldBe -93
+                        work.standing.z shouldBe -47
+                        citizenStandable(world, work.standing) shouldBe true
+                        runtime.validate(city, work)
+                        world.getBlockAt(-94, 62, -49).type shouldBe Material.AIR
+                    }
+                } finally { tasks.close() }
+            }
+        }
+    }
+
+    for (restart in listOf(false, true)) for (prerequisite in listOf(false, true))
+        for (farFace in if (prerequisite) listOf(false) else listOf(false, true)) {
+        test("an actual shaft cut seals its connected cave with restart $restart prerequisite $prerequisite and far face $farFace") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                    val world = CivsWorksiteWorldFixture("mine-post-cut-$restart-$prerequisite-$farFace").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("MinePostCut")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    val directory = Files.createTempDirectory("arccivs-mine-post-cut-")
+                    try {
+                        val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                        val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                        val key = mine.id.toString()
+                        val index = if (prerequisite) 0 else geometry.steps.indexOfFirst { it.after == null }
+                        val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+                        val target = if (prerequisite) bottom.copy(y = bottom.y - 1)
+                            else CivsWorksiteLayouts.point(mine, geometry.steps[index].point)
+                        val cavity = if (prerequisite) target.copy(z = target.z + 1) else target.copy(x = target.x + 1)
+                        val wall = if (farFace) cavity.copy(x = cavity.x + 1) else cavity.copy(z = cavity.z + 1)
+                        var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                            .copy(minePlans = mapOf(key to CivMinePlanState(2, index.toLong(), if (prerequisite) null else 214L)),
+                                mineProgress = if (prerequisite) null else mapOf(key to 214L))
+                        for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                        for (y in bottom.y - (if (farFace) 3 else 2)..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                            Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+                        world.getBlockAt(target.x, target.y, target.z).type = Material.STONE
+                        if (prerequisite) {
+                            val backing = CivsWorksiteLayouts.point(mine, geometry.steps[index].point)
+                            world.getBlockAt(backing.x, backing.y, backing.z).type = Material.AIR
+                        } else {
+                            // Legacy/already-done cells following this cut must not let
+                            // the volatile skip cursor bypass its newly exposed shell.
+                            geometry.steps.drop(index + 1).takeWhile { it.point.y == geometry.steps[index].point.y }
+                                .filter { it.after == null }.forEach { step ->
+                                    val p = CivsWorksiteLayouts.point(mine, step.point)
+                                    world.getBlockAt(p.x, p.y, p.z).type = Material.AIR
+                                }
+                            world.getBlockAt(cavity.x, cavity.y + 1, cavity.z).type = Material.AIR
+                        }
+                        world.getBlockAt(cavity.x, cavity.y, cavity.z).type = Material.AIR
+                        world.getBlockAt(wall.x, wall.y, wall.z).type = Material.AIR
+                        CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
+                        CivsStorage(plugin) { emptyArray() }.use { storage ->
+                            CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                                fun runtime() = CivsWorksites(plugin, access,
+                                    { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false })
+                                var runtime = runtime()
+                                fun nextWork(): CivWorldWork {
+                                    repeat(96) {
+                                        runtime.pulse(listOf(city))
+                                        runtime.plan(city, city.workers.single())?.let { return it }
+                                    }
+                                    error("post-cut work blocked: ${runtime.idleReason(city, city.workers.single())}")
+                                }
+                                fun commit(work: CivWorldWork) {
+                                    runtime.validate(city, work)
+                                    val id = UUID.randomUUID()
+                                    storage.reserve(city, id)
+                                    val plan = storage.prepareWork(city, mine.id, work.storageInputs(city.workers.single()), work.outputs, work.changes)
+                                    val after = CivsRules.finishWorldWork(city, work, 20_000 + work.cycle * 5_000).copy(inventory = plan.inventoryAfter)
+                                    val receipt = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes,
+                                        worldChanges = plan.worldChanges).validated()
+                                    storage.seal(receipt, keepViewersOpen = true)
+                                    storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                    storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                    city = receipt.after
+                                    storage.unlock(id)
+                                    runtime.invalidate(work.workerId)
+                                }
+                                val cut = nextWork()
+                                cut.status shouldBe "digging-mine"
+                                cut.changes.single().position shouldBe target
+                                cut.changes.single().after shouldBe "minecraft:air"
+                                cut.inputs shouldBe emptyMap()
+                                cut.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                                cut.standing.x shouldBe bottom.x
+                                cut.standing.z shouldBe bottom.z
+                                commit(cut)
+                                var committed = if (prerequisite) index.toLong() else index + 1L
+                                city.minePlans!!.getValue(key).nextStep shouldBe committed
+                                if (restart) {
+                                    CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
+                                    city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
+                                    runtime = runtime()
+                                }
+                                if (farFace) {
+                                    // The far face is hidden behind the intact ladder
+                                    // backing. Only the next ordered lower cut supplies
+                                    // two-block clearance from the central ladder.
+                                    val clearance = nextWork()
+                                    clearance.status shouldBe "digging-mine"
+                                    clearance.changes.single().position shouldBe target.copy(y = target.y - 1)
+                                    clearance.changes.single().after shouldBe "minecraft:air"
+                                    clearance.inputs shouldBe emptyMap()
+                                    clearance.standing.x shouldBe bottom.x
+                                    clearance.standing.z shouldBe bottom.z
+                                    world.getBlockAt(wall.x, wall.y, wall.z).type shouldBe Material.AIR
+                                    commit(clearance)
+                                    committed = requireNotNull(clearance.miningStep)
+                                    if (restart) {
+                                        CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
+                                        city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
+                                        runtime = runtime()
+                                    }
+                                }
+                                val stone = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
+                                val seal = nextWork()
+                                seal.status shouldBe "securing-mine"
+                                seal.changes.single().position shouldBe wall
+                                seal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                                seal.outputs shouldBe emptyMap()
+                                seal.miningStep shouldBe committed
+                                if (farFace) {
+                                    seal.standing shouldBe target.copy(y = target.y - 1)
+                                    citizenPacketStepClear(world,
+                                        CitizenPoint(bottom.x + .5, seal.standing.y.toDouble(), bottom.z + .5),
+                                        CitizenPoint(seal.standing.x + .5, seal.standing.y.toDouble(), seal.standing.z + .5), false) shouldBe true
+                                } else {
+                                    // The head is still solid: use the central ladder,
+                                    // never the supported but inaccessible cave floor.
+                                    seal.standing.x shouldBe bottom.x
+                                    seal.standing.z shouldBe bottom.z
+                                }
+                                citizenStandable(world, seal.standing) shouldBe true
+                                commit(seal)
+                                city.minePlans!!.getValue(key).nextStep shouldBe committed
+                                CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe stone - 1
+                                city.inventory!!.buildingStock(mine.id) shouldBe mapOf("COBBLESTONE" to if (farFace) 2L else 1L)
+                                nextWork().changes.single().position.let { (it != target && it != wall) shouldBe true }
+                            }
+                        }
+                    } finally {
+                        tasks.close()
+                        directory.toFile().deleteRecursively()
+                    }
+                }
+            }
+        }
+    }
+
+    for (skipped in listOf(false, true)) {
+        test("an unreachable shell cannot outlive its lower shaft row with skipped cells $skipped") {
+            failOnUnsupportedMockBukkitOperation {
+                MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                    val world = CivsWorksiteWorldFixture("mine-shell-expiry-$skipped").also(paper.server::addWorld)
+                    val plugin = paper.createSimplePlugin("MineShellExpiry")
+                    val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                    try {
+                        val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                        val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                        val first = geometry.steps.indexOfFirst { it.after == null }
+                        val local = geometry.steps[first].point
+                        val lowerRowEnd = geometry.steps.indexOfLast { it.stage == "shaft" && it.point.y == local.y - 1 } + 1
+                        val progress = if (skipped) first + 1L else lowerRowEnd.toLong()
+                        val worker = spatialWorker(mine, "IRON_PICKAXE")
+                        val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans =
+                            mapOf(mine.id.toString() to CivMinePlanState(2, progress)))
+                        val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+                        val target = CivsWorksiteLayouts.point(mine, local)
+                        val wall = target.copy(x = target.x + 2)
+                        for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                        for (y in bottom.y - 6..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                            Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+                        // Both ordered rows are open, but this deeper cave has no
+                        // floor within any legal work stance. The intact backing
+                        // still hides its far wall from the central ladder.
+                        for (y in target.y - 5..target.y) for ((x, z) in geometry.shaftColumns) {
+                            if (x == geometry.bottom.x && z == geometry.bottom.z ||
+                                x == geometry.backing.x && z == geometry.backing.z) continue
+                            val p = CivsWorksiteLayouts.point(mine, CivPosition(x, y - mine.anchor.y, z))
+                            world.getBlockAt(p.x, p.y, p.z).type = Material.AIR
+                        }
+                        world.getBlockAt(wall.x, wall.y, wall.z).type = Material.AIR
+                        CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            var refused = false
+                            repeat(96) {
+                                if (!refused) {
+                                    runtime.pulse(listOf(city))
+                                    runtime.plan(city, worker) shouldBe null
+                                    refused = runtime.idleReason(city, worker) == "worksite-no-access"
+                                }
+                            }
+                            refused shouldBe true
+                            city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe progress
+                            world.getBlockAt(wall.x, wall.y, wall.z).type shouldBe Material.AIR
+                        }
+                    } finally { tasks.close() }
+                }
+            }
+        }
+    }
+
+    test("a durable final mine step still seals an exposed gallery before reporting completion") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-final-shell").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineFinalShell")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                try {
+                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                    val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val worker = spatialWorker(mine, "IRON_PICKAXE")
+                    val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans =
+                        mapOf(mine.id.toString() to CivMinePlanState(2, geometry.steps.size.toLong())))
+                    val support = CivsWorksiteLayouts.point(mine, geometry.steps.last().point)
+                    val wall = support.copy(x = support.x - 1, y = support.y + 1)
+                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    world.getBlockAt(support.x, support.y, support.z).type = Material.COBBLESTONE
+                    for (y in support.y + 1..support.y + 3) world.getBlockAt(support.x, y, support.z).type = Material.AIR
+                    world.getBlockAt(wall.x, wall.y, wall.z).type = Material.AIR
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        repeat(64) { runtime.pulse(listOf(city)) }
+                        val repair = requireNotNull(runtime.plan(city, worker))
+                        repair.status shouldBe "securing-mine"
+                        repair.changes.single().position shouldBe wall
+                        repair.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        repair.miningStep shouldBe geometry.steps.size.toLong()
+                    }
+                } finally { tasks.close() }
+            }
         }
     }
 
@@ -663,6 +999,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false })
                         runtime.pulse(listOf(city))
                         val pickup = requireNotNull(runtime.plan(city, worker))
+                        pickup.status shouldBe "collecting-supplies"
+                        pickup.durationMillis shouldBe 1_000L
                         pickup.changes shouldBe emptyList()
                         pickup.outputs shouldBe emptyMap()
                         pickup.miningStep shouldBe null
@@ -702,6 +1040,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val plugin = paper.createSimplePlugin("MinePickupFull")
                 val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+                for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 val worker = spatialWorker(mine, "IRON_PICKAXE", supplies = false).let { miner ->
                     CivsEquipment.replace(miner, CivsEquipment.slots(miner).mapIndexed { index, item ->
                         if (index >= CivsEquipment.BAG) CivResidentItem("DIRT", 64) else item

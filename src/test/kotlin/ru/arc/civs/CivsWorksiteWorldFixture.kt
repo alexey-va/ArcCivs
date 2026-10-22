@@ -50,7 +50,7 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
 
             override fun getBoundingBox(): BoundingBox {
                 val height = when {
-                    type == Material.FARMLAND -> 15.0 / 16.0
+                    type == Material.FARMLAND || type == Material.DIRT_PATH -> 15.0 / 16.0
                     // Paper 1.21.11 LadderBlock: full height/width and 3/16 thickness.
                     type == Material.LADDER -> return when (Regex("facing=([a-z]+)").find(blockData.asString)?.groupValues?.get(1)) {
                         "south" -> BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 3.0 / 16.0)
