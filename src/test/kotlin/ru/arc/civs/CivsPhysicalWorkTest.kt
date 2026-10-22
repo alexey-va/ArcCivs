@@ -38,8 +38,11 @@ class CivsPhysicalWorkTest : FunSpec({
             val counts = mutableMapOf<String, Long>()
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                 val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false })
-                runtime.pulse(listOf(city))
-                val till = requireNotNull(runtime.plan(city, worker))
+                // Initial work follows the bounded whole-field scan for mature crops.
+                val till = (1..8).firstNotNullOfOrNull {
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker)
+                } ?: error("Initial farm work blocked: ${runtime.idleReason(city, worker)}")
                 // Giving an item while work is in flight must not let its old tool/bag image overwrite that gift.
                 val equippedDuringWork = worker.copy(inventory = worker.inventory.orEmpty() + ("BREAD" to 1L))
                 val changedCity = city.copy(workers = listOf(equippedDuringWork))
