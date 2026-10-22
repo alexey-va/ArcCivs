@@ -159,7 +159,12 @@ class CivsService(
             resumeCityActions()
             if (ready()) citizens.activateNavigating()
         }
-        tasks.runTimer(5, 5) { if (ready()) worksites.pulse(cities.values) }
+        tasks.runTimer(5, 5) {
+            if (ready()) {
+                worksites.pulse(cities.values)
+                citizens.pulseFieldWork(now())
+            }
+        }
         tasks.runTimer(20, 20) { pulse() }
     }
 

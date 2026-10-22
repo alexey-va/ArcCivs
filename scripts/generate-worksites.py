@@ -75,14 +75,29 @@ def mine(style, level):
     route |= {(d, s) for d in (7, 8) for s in range(-6, 8)}
     route |= {(d, s) for d in range(-1, 2) for s in range(-1, 2)}
     route -= {(0, 0), (-1, 0)}  # uninterrupted ladder and its solid backing column
+    # Complete each branch from its mouth before starting another. Preserve the
+    # old distance-ordered torch positions so upgrades never buy them again.
+    sections = [
+        ("landing", [(-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1)]),
+        ("main", [(d, s) for d in range(2, 13) for s in (0, 1)]),
+        ("left", [(d, s) for s in range(-1, -7, -1) for d in (7, 8)]),
+        ("right", [(d, s) for s in range(2, 8) for d in (7, 8)]),
+    ]
+    ordered = [p for _, cells in sections for p in cells]
+    assert len(ordered) == len(set(ordered)) == len(route) and set(ordered) == route
+    legacy = sorted(sorted(route), key=lambda p: abs(p[0]) + abs(p[1]))
     floors = []
     for index in range(1, level + 1):
         feet_y = y - index * 6
         support = [[x + dx * d - dz * s, feet_y - 1, z + dz * d + dx * s]
-                   for d, s in sorted(route)]
+                   for d, s in ordered]
+        torches = [[x + dx * d - dz * s, feet_y, z + dz * d + dx * s]
+                   for d, s in legacy[::8]]
         floors.append({"index": index, "feetY": feet_y, "height": 3,
-                       "landing": [x + dx, feet_y, z + dz], "floorCells": support})
-    return {"ladderBottom": list(bottom), "ladderFacing": facing,
+                       "landing": [x + dx, feet_y, z + dz], "floorCells": support,
+                       "workSections": [{"name": name, "cells": len(cells)} for name, cells in sections],
+                       "torchCells": torches})
+    return {"planVersion": 2, "ladderBottom": list(bottom), "ladderFacing": facing,
             "firstSubgroundPoint": [x, y - 1, z], "shaftCenter": [center[0], y - 1, center[1]],
             "shaftFootprint": [[x + dx * d - dz * s, z + dz * d + dx * s]
                                for d in range(-1, 2) for s in range(-1, 2)],
@@ -227,9 +242,11 @@ def preview(document, snapshots, output, atelier, identifiers):
                 voxels[x, y, z] = "minecraft:ladder[facing=" + shaft["ladderFacing"] + ",waterlogged=false]"
             for floor in shaft["floors"]:
                 for x, y, z in floor["floorCells"]:
-                    voxels[x, y, z] = "minecraft:stone"
+                    voxels[x, y, z] = "minecraft:cobblestone"
                     for dy in range(1, floor["height"] + 1):
                         voxels.pop((x, y + dy, z), None)
+                for p in floor["torchCells"]:
+                    voxels[tuple(p)] = "minecraft:torch"
         extent = box(list(voxels) + [(0, 0, 0)])
         allowed = {tuple(p) for p in site.get("farm", {}).get("soilCells", [])}
         for i, state in enumerate(source["cells"]):

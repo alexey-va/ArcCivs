@@ -201,6 +201,76 @@ class CivsCitizensTest : FunSpec({
         citizenWorkStatus(plan, cycle.phase) shouldBe null
     }
 
+    test("ready crop care can yield to a ripe harvest without donating its work time or changing a pending receipt") {
+        val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
+        val care = CivWorldWork(UUID.randomUUID(), 0, farm.id, CivPosition(23, 64, 2), emptyList(),
+            durationMillis = 4_000, status = "watering", focus = CivPosition(24, 64, 2))
+        val previous = CitizenPlan(CitizenToken(farm.id, 0, 0, null), farm.control!!, care.standing,
+            BuildingType.FARM, care.durationMillis, null, completeAtWorkplace = true, worldWork = care)
+        val harvest = care.copy(standing = CivPosition(25, 64, 2), durationMillis = 1_500,
+            status = "working-field", focus = CivPosition(26, 64, 2))
+        val next = previous.copy(workplace = harvest.standing, workMillis = harvest.durationMillis, worldWork = harvest)
+        val oldCycle = previous.cycle()
+        oldCycle.start(); oldCycle.arrive(0); oldCycle.work(2_000); oldCycle.work(4_000)
+        oldCycle.phase shouldBe CitizenPhase.READY
+        citizenCurrentPlan(previous, oldCycle.phase) { next } shouldBe next
+        citizenPlansContinue(previous, next) shouldBe false
+        val newCycle = next.cycle()
+        newCycle.start(); newCycle.arrive(4_000); newCycle.work(5_000)
+        newCycle.phase shouldBe CitizenPhase.WORKING
+        newCycle.work(5_500)
+        newCycle.phase shouldBe CitizenPhase.READY
+        val receipt = requireNotNull(oldCycle.beginDelivery(4_000))
+        citizenCurrentPlan(previous, oldCycle.phase) { error("An admitted receipt owns its exact crop changes") } shouldBe previous
+        oldCycle.acceptsCompletion(receipt) shouldBe true
+    }
+
+    test("a nearby committed field handoff stays one activity while a long search or failure remains visible") {
+        val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
+        val at = CitizenPoint(23.5, 64.0, 2.5)
+        val plan = CitizenPlan(CitizenToken(farm.id, 1, 0, null), farm.control!!, null,
+            BuildingType.FARM, 0, "searching-work", completeAtWorkplace = true)
+        val handoff = CitizenWorkHandoff(farm.id, 1, at, 100, "working-field")
+        citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 101) shouldBe "working-field"
+        citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 120) shouldBe "working-field"
+        citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 121) shouldBe null
+        citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, null, 101) shouldBe null
+        citizenWorkActivityStatus(plan, CitizenPhase.PAUSED, at, handoff, 101) shouldBe null
+        citizenWorkActivityStatus(plan.copy(idleReason = "waiting-inputs"), CitizenPhase.IDLE, at, handoff, 101) shouldBe null
+        citizenWorkActivityStatus(plan.copy(token = plan.token.copy(assignmentId = UUID.randomUUID())),
+            CitizenPhase.IDLE, at, handoff, 101) shouldBe null
+        val work = CivWorldWork(UUID.randomUUID(), 1, farm.id, CivPosition(24, 64, 2), emptyList(), status = "working-field")
+        val walking = plan.copy(workplace = work.standing, worldWork = work, idleReason = null)
+        citizenWorkActivityStatus(walking, CitizenPhase.TO_WORK, at, handoff, 150) shouldBe "working-field"
+        citizenWorkActivityStatus(walking, CitizenPhase.TO_WORK, CitizenPoint(.5, 64.0, .5), handoff, 150) shouldBe null
+    }
+
+    test("a committed quarry action spans only its brief nearby discovery gap and matching next activity") {
+        val quarry = building(BuildingType.QUARRY, CivPosition(20, 64, 0))
+        val at = CitizenPoint(23.5, 56.0, 2.5)
+        val plan = CitizenPlan(CitizenToken(quarry.id, 4, 0, null), quarry.control!!, null,
+            BuildingType.QUARRY, 0, "searching-work", completeAtWorkplace = true)
+        for (activity in listOf("digging-mine", "securing-mine")) {
+            val handoff = CitizenWorkHandoff(quarry.id, 4, at, 100, activity)
+            citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 101) shouldBe activity
+            citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 120) shouldBe activity
+            citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at, handoff, 121) shouldBe null
+            citizenWorkActivityStatus(plan, CitizenPhase.IDLE, at.copy(x = at.x + 5), handoff, 101) shouldBe null
+            citizenWorkActivityStatus(plan.copy(token = plan.token.copy(completedCycles = 5)),
+                CitizenPhase.IDLE, at, handoff, 101) shouldBe null
+            citizenWorkActivityStatus(plan, CitizenPhase.PAUSED, at, handoff, 101) shouldBe null
+            for (reason in listOf("waiting-tool", "waiting-materials", "protected", "route-unreachable"))
+                citizenWorkActivityStatus(plan.copy(idleReason = reason), CitizenPhase.IDLE, at, handoff, 101) shouldBe null
+            val work = CivWorldWork(UUID.randomUUID(), 4, quarry.id, CivPosition(24, 56, 2), emptyList(), status = activity)
+            val walking = plan.copy(workplace = work.standing, worldWork = work, idleReason = null)
+            citizenWorkActivityStatus(walking, CitizenPhase.TO_WORK, at, handoff, 101) shouldBe activity
+            citizenWorkActivityStatus(walking, CitizenPhase.TO_WORK, at, null, 101) shouldBe null
+            citizenWorkActivityStatus(walking, CitizenPhase.TO_WORK, at, handoff, 121) shouldBe null
+            citizenWorkActivityStatus(walking.copy(worldWork = work.copy(status = "working-field")),
+                CitizenPhase.TO_WORK, at, handoff, 101) shouldBe null
+        }
+    }
+
     test("children plan play at their persisted home and summon never selects them as workers") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val firstHome = building(BuildingType.HOUSE, CivPosition(10, 64, 0))

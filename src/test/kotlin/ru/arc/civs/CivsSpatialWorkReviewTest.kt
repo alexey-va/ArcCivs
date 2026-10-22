@@ -51,10 +51,10 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 for (y in bottom.y - 1..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
                     Bukkit.createBlockData("minecraft:ladder[facing=${layout["ladderFacing"].asString},waterlogged=false]")
-                // Open the south side, leaving the west-facing ladder's east support intact.
-                // A missing block behind an existing ladder is neither a stable native ladder
-                // arrangement nor a visible placement face from inside its shaft.
-                val opening = bottom.copy(z = bottom.z + 1, y = bottom.y - 1)
+                // The widened south column stays open; seal the cave at the outer
+                // 3x3 perimeter instead of rebuilding the old one-block inner wall.
+                for (y in bottom.y - 1..bottom.y) world.getBlockAt(bottom.x, y, bottom.z + 1).type = Material.AIR
+                val opening = bottom.copy(z = bottom.z + 2, y = bottom.y - 1)
                 world.getBlockAt(opening.x, opening.y, opening.z).type = Material.AIR
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
@@ -66,6 +66,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     work.outputs shouldBe emptyMap()
                     work.durationMillis shouldBe 2_000L
                     (requireNotNull(work.miningStep) <= 3L) shouldBe true
+                    work.miningPlanVersion shouldBe 2
+                    world.getBlockAt(bottom.x, bottom.y - 1, bottom.z + 1).type shouldBe Material.AIR
                     world.getBlockAt(bottom.x, bottom.y - 2, bottom.z).type shouldBe Material.STONE
                 }
                 tasks.close()
@@ -341,9 +343,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val world = CivsWorksiteWorldFixture("full-field-harvest").also(paper.server::addWorld)
                 val plugin = paper.createSimplePlugin("FullFieldHarvest")
                 val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-                val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0)).copy(production = "WHEAT")
+                val farm = spatialBuilding("medievaloak", "farmer", 2, CivPosition(0, 63, 0)).copy(production = "WHEAT")
                 val worker = spatialWorker(farm, "IRON_HOE")
-                val city = spatialCity(world.uid, listOf(farm), worker)
+                var city = spatialCity(world.uid, listOf(farm), worker)
                 val plots = CivsWorksiteLayouts.field(farm)
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 plots.forEach { soil ->
@@ -366,6 +368,20 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     work.changes.single().position shouldBe mature
                     work.outputs["WHEAT"] shouldBe 1L
                     work.outputs["WHEAT_SEEDS"] shouldBe 1L
+                    val coworker = spatialWorker(farm, "IRON_HOE")
+                    city = city.copy(workers = listOf(worker, coworker))
+                    repeat(12) { runtime.pulse(listOf(city)) }
+                    requireNotNull(runtime.plan(city, coworker)).cropCare shouldBe true
+                    // A cached plan loses its reservation when the real worker can no
+                    // longer use it, even while that worker remains an admitted farm job.
+                    val unarmed = CivsEquipment.replace(worker, CivsEquipment.slots(worker).toMutableList().also { it[4] = null })
+                    city = city.copy(workers = listOf(unarmed, coworker))
+                    runtime.plan(city, unarmed) shouldBe null
+                    repeat(2) { runtime.pulse(listOf(city)) }
+                    val replacement = requireNotNull(runtime.plan(city, coworker))
+                    replacement.cropCare shouldBe false
+                    replacement.focus shouldBe mature
+                    runtime.validate(city, replacement)
                 }
                 tasks.close()
             }
@@ -705,14 +721,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         messages.any { "worksite_blocked" in it && "resident-inventory-full" in it } shouldBe true
                         worker.items!!.drop(CivsEquipment.BAG).all { it == CivResidentItem("DIRT", 64) } shouldBe true
                         stock shouldBe CivsLogistics.QUARRY_SUPPLIES
-                        val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
-                        val bottom = CivsWorksiteLayouts.vector(layout["ladderBottom"])
-                        val floors = layout.getAsJsonArray("floors")
-                        val steps = (bottom.y - floors.last().asJsonObject["feetY"].asInt) * 2 + floors.sumOf {
-                            val cells = it.asJsonObject.getAsJsonArray("floorCells").size()
-                            cells * 4 + (cells + 7) / 8
-                        }
-                        city = city.copy(mineProgress = mapOf(mine.id.toString() to steps.toLong()))
+                        val steps = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.size
+                        city = city.copy(minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, steps.toLong())))
                         runtime.invalidate(worker.id)
                         runtime.pulse(listOf(city))
                         runtime.plan(city, worker) shouldBe null
@@ -804,17 +814,17 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         }
                         if (shaftMaterial == Material.STONE) {
                             world.getBlockAt(shaft.x, shaft.y, shaft.z).type = Material.BEDROCK
-                            runtime.pulse(listOf(city))
+                            repeat(12) { runtime.pulse(listOf(city)) }
                             runtime.plan(city, city.workers.single()) shouldBe null
                             runtime.idleReason(city, city.workers.single()) shouldBe "worksite-unbreakable"
                             world.getBlockAt(shaft.x, shaft.y, shaft.z).type shouldBe Material.BEDROCK
                             world.getBlockAt(shaft.x, shaft.y, shaft.z).type = Material.STONE
                             shaftLocked = true
-                            runtime.pulse(listOf(city))
+                            repeat(12) { runtime.pulse(listOf(city)) }
                             runtime.plan(city, city.workers.single()) shouldBe null
                             runtime.idleReason(city, city.workers.single()) shouldBe "worksite-protected"
                             shaftLocked = false
-                            runtime.pulse(listOf(city))
+                            repeat(12) { runtime.pulse(listOf(city)) }
                             val excavation = requireNotNull(runtime.plan(city, city.workers.single()))
                             excavation.changes.single().position shouldBe shaft
                             excavation.changes.single().after shouldBe "minecraft:air"
@@ -829,7 +839,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         val visible = requireNotNull(citizenReachableBlockPoint(world, eye, support))
                         visible.y shouldBe support.y + .001
                         (visible.distance(eye) <= CITIZEN_BLOCK_REACH) shouldBe true
-                        runtime.pulse(listOf(city))
+                        repeat(12) { runtime.pulse(listOf(city)) }
                         val wall = requireNotNull(runtime.plan(city, city.workers.single()))
                         wall.standing shouldBe if (shaftMaterial == Material.STONE) shaft else bottom
                         citizenCanReachBlock(world, Location(world, wall.standing.x + .5, wall.standing.y + 1.62, wall.standing.z + .5), support) shouldBe true
@@ -838,16 +848,16 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         wall.changes.single().after shouldBe "minecraft:cobblestone"
                         wall.inputs shouldBe mapOf("COBBLESTONE" to 1L)
                         wall.outputs shouldBe emptyMap()
-                        wall.status shouldBe "securing-mine"
-                        // The shell repair precedes the authored cursor. The subsequent scan
-                        // skips its now-sound support before committing the ladder at step 2.
-                        wall.miningStep shouldBe 0L
+                        wall.status shouldBe "digging-mine"
+                        // The backing is now an explicit paid V2 shaft step; inner shell
+                        // repair no longer fills the future wide clearance columns.
+                        wall.miningStep shouldBe 1L
                         commit(wall)
                         CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 63
                         CivsEquipment.plainCount(city.workers.single(), "LADDER") shouldBe 64
                         CivsEquipment.plainCount(city.workers.single(), "TORCH") shouldBe 17
 
-                        runtime.pulse(listOf(city))
+                        repeat(12) { runtime.pulse(listOf(city)) }
                         val ladder = requireNotNull(runtime.plan(city, city.workers.single()))
                         ladder.changes.single().position shouldBe shaft
                         ladder.changes.single().after shouldBe "minecraft:ladder[facing=west,waterlogged=false]"
@@ -897,14 +907,19 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
-                val city = spatialCity(world.uid, listOf(mine), worker)
-                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
-                val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
-                val standing = target.copy(x = target.x - 2)
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                // An interior gallery target keeps this reach/occlusion test inside
+                // planned clearance, without asking the new shaft to seal its stance.
+                val local = geometry.floors.first().cells[11].let { it.copy(y = it.y + 3) }
+                val step = geometry.steps.indexOfFirst { it.stage == "gallery" && it.point == local && it.after == null }
+                val city = spatialCity(world.uid, listOf(mine), worker).copy(
+                    minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, step.toLong())))
+                val target = CivsWorksiteLayouts.point(mine, local)
+                val standing = target.copy(x = target.x + 2)
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 for (y in target.y..target.y + 2) world.getBlockAt(standing.x, y, standing.z).type = Material.AIR
                 // A gap permits the ray, but offers no floor for any of the old adjacent probes.
-                for (y in target.y - 4..target.y + 2) world.getBlockAt(target.x - 1, y, target.z).type = Material.AIR
+                for (y in target.y - 4..target.y + 2) world.getBlockAt(target.x + 1, y, target.z).type = Material.AIR
                 for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (dy in listOf(0, 1, -1, -2)) {
                     citizenStandable(world, target.copy(x = target.x + dx, y = target.y + 1 + dy, z = target.z + dz)) shouldBe false
                 }
@@ -945,9 +960,12 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40)).copy(
                     rotation = 270, bounds = CivBox(CivPosition(-102, 63, -50), CivPosition(-86, 82, -33)),
                     entrance = CivPosition(-85, 69, -40), control = CivPosition(-93, 69, -40))
-                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
-                    .copy(radius = 200, mineProgress = mapOf(mine.id.toString() to 147L))
                 val floor = CivPosition(-89, 56, -40)
+                val floorStep = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.indexOfFirst {
+                    it.after == "minecraft:cobblestone" && CivsWorksiteLayouts.point(mine, it.point) == floor
+                }.also { (it >= 0) shouldBe true }.toLong()
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+                    .copy(radius = 200, minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, floorStep)))
                 val lower = floor.copy(y = 57)
                 val upper = floor.copy(y = 58)
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
@@ -995,11 +1013,20 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         first.changes.single().after shouldBe "minecraft:air"
                         first.inputs shouldBe emptyMap()
                         first.outputs shouldBe mapOf("GRAVEL" to 1L)
-                        first.miningStep shouldBe 147L
+                        first.miningStep shouldBe floorStep
+                        // This AIR effect belongs to a COBBLESTONE floor step. A final
+                        // check must use the falling block's actual exposed side.
+                        val wall = lower.copy(z = lower.z - 1)
+                        world.getBlockAt(wall.x, wall.y, wall.z).type shouldBe Material.STONE
+                        world.getBlockAt(wall.x, wall.y, wall.z).type = Material.LAVA
+                        shouldThrow<CivsRejection> { runtime.validate(city, first) }.reason shouldBe "stale-worksite"
+                        city.workers.single().completedCycles shouldBe 0L
+                        world.getBlockAt(lower.x, lower.y, lower.z).type shouldBe Material.GRAVEL
+                        world.getBlockAt(wall.x, wall.y, wall.z).type = Material.STONE
                         citizenCanReachBlock(world, Location(world, first.standing.x + .5, first.standing.y + 1.62,
                             first.standing.z + .5), lower, CITIZEN_MINE_REACH) shouldBe true
                         commit(first)
-                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 147L
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe floorStep
                         // Model the native fall after clearing: the existing upper block
                         // occupies the same lower cell, rather than inventing another item.
                         world.getBlockAt(upper.x, upper.y, upper.z).type = Material.AIR
@@ -1007,23 +1034,23 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         val fallenAgain = nextWork()
                         fallenAgain.changes.single().position shouldBe lower
                         fallenAgain.outputs shouldBe mapOf("GRAVEL" to 1L)
-                        fallenAgain.miningStep shouldBe 147L
+                        fallenAgain.miningStep shouldBe floorStep
                         commit(fallenAgain)
                         received["GRAVEL"] shouldBe 2L
-                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 147L
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe floorStep
                         var floorFinished = false
                         for (attempt in 0 until 8) {
                             val work = nextWork()
                             work.outputs.getOrDefault("GRAVEL", 0) shouldBe 0L
                             val paysFloor = work.changes.single().position == floor
-                            work.miningStep shouldBe if (paysFloor) 148L else 147L
+                            work.miningStep shouldBe if (paysFloor) floorStep + 1 else floorStep
                             if (paysFloor) work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
                             commit(work)
                             if (paysFloor) { floorFinished = true; break }
                         }
                         floorFinished shouldBe true
                         received["GRAVEL"] shouldBe 2L
-                        city.mineProgress!!.getValue(mine.id.toString()) shouldBe 148L
+                        city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe floorStep + 1
                         world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
                         CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe originalStone - 1
                     } finally { tasks.close() }
@@ -1040,9 +1067,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
                 val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
-                val city = spatialCity(world.uid, listOf(mine), worker)
-                val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
-                val target = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["firstSubgroundPoint"]))
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                // An interior gallery target keeps this reach/occlusion test inside
+                // planned clearance, without asking the new shaft to seal its stance.
+                val local = geometry.floors.first().cells[11].let { it.copy(y = it.y + 3) }
+                val step = geometry.steps.indexOfFirst { it.stage == "gallery" && it.point == local && it.after == null }
+                val city = spatialCity(world.uid, listOf(mine), worker).copy(
+                    minePlans = mapOf(mine.id.toString() to CivMinePlanState(2, step.toLong())))
+                val target = CivsWorksiteLayouts.point(mine, local)
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 // Supported outer positions surround a solid, three-block-high enclosure.
                 for (dx in -2..2) for (dz in -2..2) if (maxOf(kotlin.math.abs(dx), kotlin.math.abs(dz)) == 2) {
@@ -1146,19 +1178,37 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     val world = CivsWorksiteWorldFixture("mine-$style").also(paper.server::addWorld)
                     val plugin = paper.createSimplePlugin("SpatialMine")
                     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-                    var mine = spatialBuilding(style, "miner", 1, CivPosition(0, 63, 0))
+                    val rotation = mapOf("nordic" to 0, "medievaloak" to 90, "caledonia" to 180).getValue(style)
+                    var mine = spatialBuilding(style, "miner", 1, CivPosition(0, 63, 0), rotation)
                     var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "NETHERITE_PICKAXE"))
                     val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
                     val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
                     val facing = layout["ladderFacing"].asString
                     // The schematic supplies this upper ladder; untouched stone starts immediately below it.
                     for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
-                        Bukkit.createBlockData("minecraft:ladder[facing=$facing,waterlogged=false]")
+                        Bukkit.createBlockData("minecraft:ladder[facing=$facing,waterlogged=false]").also {
+                            it.rotate(when (rotation) {
+                                90 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
+                                180 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
+                                else -> org.bukkit.block.structure.StructureRotation.NONE
+                            })
+                        }
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                     val control = requireNotNull(mine.control)
                     world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
                     val counts = mutableMapOf("COBBLESTONE" to 1_000L, "LADDER" to 1_000L, "TORCH" to 1_000L)
+                    if (style == "nordic") {
+                        val floor = requireNotNull(CivsMinePlan.forBuilding(mine)).floors.first()
+                        val leftMouth = floor.cells[floor.sections.take(2).sumOf { it.second }]
+                        // A real cave has an empty future left-arm floor. It must be paid
+                        // when that arm starts, never while the main corridor is unfinished.
+                        for (height in 0..3) {
+                            val p = CivsWorksiteLayouts.point(mine, leftMouth.copy(y = leftMouth.y + height))
+                            world.getBlockAt(p.x, p.y, p.z).type = Material.AIR
+                        }
+                    }
                     var actions = 0
+                    var placedTorches = 0L
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false })
                         for (unlocked in 1..3) {
@@ -1170,20 +1220,69 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                     ConstructionPhase.PLACING, CivsRules.cost(BuildingType.QUARRY, unlocked), plannedBuilding = next)
                                 city = CivsRules.completeConstruction(city.copy(construction = order), city.owner, order.id)
                                 city.mineProgress.orEmpty()[mine.id.toString()] shouldBe null
+                                city.minePlans.orEmpty()[mine.id.toString()] shouldBe null
                                 mine = requireNotNull(city.building(mine.id))
                             }
                             val currentLayout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
+                            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                            val shaftColumns = geometry.shaftColumns.mapTo(hashSetOf()) { (x, z) ->
+                                CivsWorksiteLayouts.point(mine, CivPosition(x, 0, z)).let { it.x to it.z }
+                            }
+                            fun assertWideShaft() {
+                                val platforms = geometry.floors.flatMap { it.cells }.toSet()
+                                for (y in geometry.lowest until geometry.bottom.y) for ((x, z) in geometry.shaftColumns) {
+                                    val local = CivPosition(x, y, z)
+                                    val p = CivsWorksiteLayouts.point(mine, local)
+                                    val type = world.getBlockAt(p.x, p.y, p.z).type
+                                    withClue("$style L$unlocked shaft $local=$type, persisted ${city.minePlans}") {
+                                        when {
+                                            x == geometry.bottom.x && z == geometry.bottom.z -> type shouldBe Material.LADDER
+                                            x == geometry.backing.x && z == geometry.backing.z -> type.isOccluding shouldBe true
+                                            local in platforms -> type shouldBe Material.COBBLESTONE
+                                            else -> (type.isAir || type == Material.TORCH) shouldBe true
+                                        }
+                                    }
+                                }
+                            }
+                            val galleryOrder = buildMap<CivPosition, Int> {
+                                for (floor in geometry.floors) {
+                                    var index = 0
+                                    for ((branch, part) in floor.sections.withIndex()) {
+                                        for (support in floor.cells.subList(index, index + part.second)) for (height in 0..3)
+                                            put(CivsWorksiteLayouts.point(mine, support.copy(y = support.y + height)), floor.index * 4 + branch)
+                                        index += part.second
+                                    }
+                                }
+                            }
+                            var lastGallery = -1
+                            var finished = false
                             var emptyPulses = 0
-                            while (actions < 1_000 && emptyPulses < 20) {
+                            while (actions < 1_000 && emptyPulses < geometry.steps.size + 32) {
                                 runtime.pulse(listOf(city))
                                 val worker = city.workers.single()
                                 val work = runtime.plan(city, worker)
-                                if (work == null) { emptyPulses++; continue }
+                                if (work == null) {
+                                    val reason = runtime.idleReason(city, worker)
+                                    if (reason == "mine-complete") { finished = true; break }
+                                    if (reason != "searching-work") break
+                                    emptyPulses++
+                                    continue
+                                }
                                 emptyPulses = 0
                                 withClue("$style action ${actions + 1}, mine step ${work.miningStep}, standing ${work.standing}") {
                                     citizenStandable(world, work.standing) shouldBe true
                                 }
                                 runtime.validate(city, work)
+                                work.changes.singleOrNull()?.position?.takeIf {
+                                    (it.x to it.z) !in shaftColumns
+                                }?.let { point -> galleryOrder[point]?.let { phase ->
+                                    if (lastGallery == -1) assertWideShaft()
+                                    withClue("$style gallery phase $phase after $lastGallery at $point") {
+                                        (phase >= lastGallery) shouldBe true
+                                    }
+                                    lastGallery = phase
+                                } }
+                                if (work.changes.isNotEmpty()) placedTorches += work.inputs.getOrDefault("TORCH", 0)
                                 work.storageInputs(worker).forEach { (key, amount) ->
                                     counts[key] = counts.getValue(key) - amount
                                     (counts.getValue(key) >= 0) shouldBe true
@@ -1195,10 +1294,15 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 runtime.invalidate(worker.id)
                                 actions++
                             }
+                            val committedStep = city.minePlans?.get(mine.id.toString())?.nextStep?.toInt() ?: 0
+                            withClue("$style L$unlocked actions=$actions idle=${runtime.idleReason(city, city.workers.single())} progress=${city.minePlans} step=${geometry.steps.getOrNull(committedStep)}") {
+                                finished shouldBe true
+                            }
+                            assertWideShaft()
                             for (level in currentLayout.getAsJsonArray("floors")) {
                                 for (cell in level.asJsonObject.getAsJsonArray("floorCells")) {
                                     val support = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(cell))
-                                    withClue("$style L$unlocked after $actions actions, persisted ${city.mineProgress}; support $support") {
+                                    withClue("$style L$unlocked after $actions actions, persisted ${city.minePlans}; support $support") {
                                         world.getBlockAt(support.x, support.y, support.z).type shouldBe Material.COBBLESTONE
                                         for (dy in 1..3) {
                                             val type = world.getBlockAt(support.x, support.y + dy, support.z).type
@@ -1208,6 +1312,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 }
                             }
                         }
+                        // Seven fixed lights per floor; upgrades preserve every paid light.
+                        placedTorches shouldBe 21L
                     }
                     tasks.close()
                 }
@@ -1216,14 +1322,16 @@ class CivsSpatialWorkReviewTest : FunSpec({
     }
 })
 
-internal fun spatialBuilding(style: String, role: String, level: Int, anchor: CivPosition): CivBuilding {
+internal fun spatialBuilding(style: String, role: String, level: Int, anchor: CivPosition, rotation: Int = 0): CivBuilding {
     val type = when (role) { "farmer" -> BuildingType.FARM; "lumberjack" -> BuildingType.FORESTER; else -> BuildingType.QUARRY }
     val folder = if (role == "farmer") "agriculture/horticulture" else "fundamentals"
-    val blank = CivBuilding(UUID.randomUUID(), type, level, anchor, 0, "civs/minecolonies/$style/$folder/$role$level",
+    val blank = CivBuilding(UUID.randomUUID(), type, level, anchor, rotation, "civs/minecolonies/$style/$folder/$role$level",
         CivBox(anchor, anchor), anchor.copy(y = anchor.y + 1), BuildingPhase.ACTIVE, control = anchor.copy(y = anchor.y + 1, z = anchor.z - 3))
     val box = CivsWorksiteLayouts.site(blank)!!.getAsJsonObject("schematicBounds")
-    return blank.copy(bounds = CivBox(CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["min"])),
-        CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["max"]))))
+    val a = CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["min"]))
+    val b = CivsWorksiteLayouts.point(blank, CivsWorksiteLayouts.vector(box["max"]))
+    return blank.copy(bounds = CivBox(CivPosition(minOf(a.x, b.x), minOf(a.y, b.y), minOf(a.z, b.z)),
+        CivPosition(maxOf(a.x, b.x), maxOf(a.y, b.y), maxOf(a.z, b.z))))
 }
 
 internal fun spatialWorker(building: CivBuilding, material: String, supplies: Boolean = true) = CivWorker(UUID.randomUUID(), "Рабочий", building.id,

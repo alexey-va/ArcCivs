@@ -23,6 +23,9 @@ internal class CivsResidentNavigation {
                 travelCost: (org.bukkit.block.Block) -> Double): CitizenPacketRoute =
         CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost).also(searching::addLast)
 
+    fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute =
+        route.replan(from, bodies).also(searching::addLast)
+
     fun pulse() {
         val deadline = System.nanoTime() + SEARCH_BUDGET_NANOS
         var remaining = SEARCH_OPERATIONS_PER_TICK
@@ -53,11 +56,33 @@ internal class CitizenPacketRoute(
     private val allowed: (CivPosition) -> Boolean,
     private val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
     private val travelCost: (org.bukkit.block.Block) -> Double,
+    private val avoiding: List<BoundingBox> = emptyList(),
 ) {
     private data class Cell(val x: Int, val y: Double, val z: Int, val climbing: Boolean = false, val initial: Boolean = false) {
         fun point() = CitizenPoint(x + .5, y, z + .5)
     }
     private data class Entry(val cell: Cell, val cost: Double, val score: Double, val order: Int)
+    private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true) {
+        private val length = sqrt(start.distanceSquared(point))
+        private var highWater = 0.0
+
+        private fun projection(at: CitizenPoint): Double = if (length < .000001) 0.0 else
+            (((at.x - start.x) * (point.x - start.x) + (at.y - start.y) * (point.y - start.y) +
+                (at.z - start.z) * (point.z - start.z)) / length).coerceIn(0.0, length)
+
+        fun observe(at: CitizenPoint) { highWater = max(highWater, projection(at)) }
+        fun behindHighWater(at: CitizenPoint): Boolean = projection(at) + .000001 < highWater
+
+        fun walked(from: CitizenPoint, to: CitizenPoint): Double {
+            // A changed observed position can raise the watermark, but only this accepted
+            // walk earns progress. Revisiting a covered part of the segment earns none.
+            observe(from)
+            val projected = projection(to)
+            val earned = (projected - highWater).coerceAtLeast(0.0)
+            highWater = max(highWater, projected)
+            return min(earned, sqrt(from.distanceSquared(to)))
+        }
+    }
     private val start = Cell(from.blockX, from.y, from.blockZ, initial = true)
     private val origin = CitizenPoint(from.x, from.y, from.z)
     private val open = PriorityQueue<Entry>(compareBy<Entry> { it.score }.thenBy { it.order })
@@ -66,7 +91,7 @@ internal class CitizenPacketRoute(
     private val cells = hashMapOf<Triple<Int, Double, Int>, List<Cell>>()
     private val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
     private val weights = hashMapOf<Cell, Double>()
-    private val path = ArrayDeque<Cell>()
+    private val path = ArrayDeque<Waypoint>()
     private var expanding: Entry? = null
     private var edges: Iterator<Cell>? = null
     private var serial = 0
@@ -79,14 +104,26 @@ internal class CitizenPacketRoute(
         private set
     var waitingForCollision = false
         private set
+    var turning = false
+        private set
+    var forwardProgress = 0.0
+        private set
     val navigating: Boolean get() = searching || failure == null && !finished
-    val destination: Location? get() = path.firstOrNull()?.let { Location(world, it.x + .5, it.y, it.z + .5) }
+    val destination: Location? get() = path.firstOrNull()?.point?.let { Location(world, it.x, it.y, it.z) }
     val nodeCount: Int get() = visited
-    val endpoint: CitizenPoint? get() = path.lastOrNull()?.point()
+    val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
+    val remainingNodes: Int get() = path.size
 
     init { open += Entry(start, 0.0, heuristic(start), serial++) }
 
     fun cancel() { searching = false; finished = true; releaseSearch(); path.clear() }
+
+    fun replan(from: Location, bodies: List<BoundingBox>): CitizenPacketRoute =
+        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone))
+
+    private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
+        citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
+            .299, 1.798, .299, avoiding) == null
 
     fun expand() {
         if (!searching) return
@@ -101,7 +138,7 @@ internal class CitizenPacketRoute(
             // A resident can start anywhere inside a path/slab cell after a push or an
             // earlier arrival. Validating from its centre can admit a blocked first corner.
             val from = if (current.cell == start) origin else current.cell.point()
-            if (abs(next.y - current.cell.y) <= 1.01 && stepAllowed(from, next.point()) &&
+            if (abs(next.y - current.cell.y) <= 1.01 && permits(from, next.point()) &&
                 citizenPacketStepClear(world, from, next.point(), allowDoors = true, collision = ::collision)) offer(current, next)
             return
         }
@@ -122,7 +159,19 @@ internal class CitizenPacketRoute(
             }
             // A path within the starting cell still has to reach its real authored endpoint.
             if (reversed.isEmpty()) reversed += Cell(target.blockX, target.y, target.blockZ)
-            path.addAll(reversed)
+            // Replanning after a nudge must not walk back to this cell's centre and
+            // immediately reverse again. Keep that node when it is needed to clear a corner.
+            if (reversed.size > 1 && reversed.first().let { it.x == start.x && it.z == start.z && it.y == origin.y }) {
+                val next = reversed.elementAt(1).point()
+                if (next.y == origin.y && permits(origin, next) &&
+                    citizenPacketStepClear(world, origin, next, true, collision = ::collision)) reversed.removeFirst()
+            }
+            var previous = origin
+            for (cell in reversed) {
+                val point = cell.point()
+                path.addLast(Waypoint(previous, point))
+                previous = point
+            }
             searching = false
             releaseSearch()
             return
@@ -216,21 +265,36 @@ internal class CitizenPacketRoute(
              movementAllowed: (Location, Location) -> Boolean = { _, _ -> true },
              openDoor: (Location) -> Boolean): Location? {
         waitingForCollision = false
+        turning = false
         if (searching || failure != null || finished) return null
+        val observed = CitizenPoint(from.x, from.y, from.z)
+        path.firstOrNull()?.observe(observed)
+        roundCorner(observed)
+        // A large handoff turns in place first. Translating backwards while the body
+        // catches up makes the native humanoid renderer reverse its own body heading.
+        val stride = .215 * speed.coerceIn(.1, 5.0)
+        val heading = heading(from, stride)
+        val pitch = from.pitch + (-from.pitch).coerceIn(-CITIZEN_TURN_PER_TICK, CITIZEN_TURN_PER_TICK)
+        if (heading != null && abs(citizenAngleChange(from.yaw, heading)) > 65f) {
+            turning = true
+            return from.clone().also { it.yaw = citizenTurn(from.yaw, heading, CITIZEN_TURN_PER_TICK); it.pitch = pitch }
+        }
         var point = from.clone()
-        var remaining = .215 * speed.coerceIn(.1, 5.0)
+        var remaining = stride
         var moved = false
+        var earned = 0.0
         var previousDirection: org.bukkit.util.Vector? = null
         // A normal step can cross a cell centre. Spend its remainder in this same tick,
         // never save it for a later tick or accelerate after an obstruction clears.
         for (segment in 0 until 8) {
-            val next = path.firstOrNull()
-            if (next == null) { finished = true; break }
-            val to = Location(world, next.x + .5, next.y, next.z + .5)
+            val entry = path.firstOrNull()
+            if (entry == null) { finished = true; break }
+            val next = entry.point
+            val to = Location(world, next.x, next.y, next.z)
             if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
                 !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
-                !citizenPacketSupported(world, next.point()) ||
-                !travelCost(world.getBlockAt(next.x, citizenSupportY(next.y), next.z)).isFinite() || !openDoor(to)) {
+                !citizenPacketSupported(world, next) ||
+                !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite() || !openDoor(to)) {
                 fail("path-changed"); break
             }
             // Keep vertical and horizontal legs in separate packets: interpolating diagonally
@@ -258,17 +322,18 @@ internal class CitizenPacketRoute(
             val candidate = if (advance == distance) waypoint else point.clone().add(direction.clone().multiply(advance))
             val a = CitizenPoint(point.x, point.y, point.z)
             val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
-            if (!stepAllowed(a, b) || !citizenPacketStepClear(world, a, b, false)) {
+            if (!permits(a, b) || !citizenPacketStepClear(world, a, b, false)) {
                 fail("movement-blocked"); break
             }
             // A client interpolates one straight segment between packets. Adjacent path legs
             // may each be clear while their shortcut clips a corner; stop at that corner then.
             val origin = CitizenPoint(from.x, from.y, from.z)
-            if (moved && (!stepAllowed(origin, b) || !citizenPacketStepClear(world, origin, b, false))) break
+            if (moved && (!permits(origin, b) || !citizenPacketStepClear(world, origin, b, false))) break
             if (!movementAllowed(from, candidate)) {
                 waitingForCollision = true
                 break
             }
+            earned += entry.walked(a, b)
             point = candidate
             moved = true
             remaining -= advance
@@ -278,14 +343,92 @@ internal class CitizenPacketRoute(
             if (remaining < .000001) break
         }
         if (!moved) return null
+        forwardProgress += min(earned, from.distance(point))
         val dx = point.x - from.x
         val dz = point.z - from.z
-        if (dx * dx + dz * dz > .00001) {
-            val wanted = Math.toDegrees(atan2(-dx, dz)).toFloat()
-            point.yaw = citizenTurn(from.yaw, wanted, 24f)
+        if (heading != null || dx * dx + dz * dz > .00001) {
+            val wanted = heading ?: Math.toDegrees(atan2(-dx, dz)).toFloat()
+            point.yaw = citizenTurn(from.yaw, wanted, CITIZEN_TURN_PER_TICK)
         }
-        point.pitch = 0f
+        point.pitch = pitch
         return point
+    }
+
+    /**
+     * Round one flat corner inside its existing cell. The quadratic stays within .15
+     * blocks of the authored legs; each short chord retains live support, protection,
+     * body clearance and surface cost. Stairs, ladders and tight corners keep their nodes.
+     */
+    private fun roundCorner(from: CitizenPoint) {
+        val first = path.firstOrNull()?.takeIf { it.corner } ?: return
+        if (first.behindHighWater(from)) return
+        val corner = first.point
+        val next = path.elementAtOrNull(1)?.point ?: return
+        if (abs(from.y - corner.y) > .0001 || abs(next.y - corner.y) > .0001) return
+        val incoming = org.bukkit.util.Vector(corner.x - from.x, 0.0, corner.z - from.z)
+        val outgoing = org.bukkit.util.Vector(next.x - corner.x, 0.0, next.z - corner.z)
+        val distance = incoming.length()
+        val ahead = outgoing.length()
+        if (distance !in .15.. .45 || ahead < .6) return
+        incoming.multiply(1.0 / distance)
+        outgoing.multiply(1.0 / ahead)
+        val angle = incoming.dot(outgoing)
+        if (angle > .999 || angle < -.01) return
+        val radius = min(.4, ahead * .45)
+        val end = CitizenPoint(corner.x + outgoing.x * radius, corner.y, corner.z + outgoing.z * radius)
+        val rounded = (1..6).map { index ->
+            val t = index / 6.0
+            val a = (1 - t) * (1 - t)
+            val b = 2 * (1 - t) * t
+            val c = t * t
+            CitizenPoint(a * from.x + b * corner.x + c * end.x, corner.y,
+                a * from.z + b * corner.z + c * end.z)
+        }
+        val cost = travelCost(world.getBlockAt(floor(corner.x).toInt(), citizenSupportY(corner.y), floor(corner.z).toInt()))
+        var previous = from
+        for (point in rounded) {
+            for (x in floor(point.x - .299).toInt()..floor(point.x + .299).toInt())
+                for (z in floor(point.z - .299).toInt()..floor(point.z + .299).toInt())
+                    if (!allowed(CivPosition(x, floor(point.y + .001).toInt(), z))) return
+            if (!citizenPacketSupported(world, point) || !permits(previous, point) ||
+                !citizenPacketStepClear(world, previous, point, false) ||
+                travelCost(world.getBlockAt(floor(point.x).toInt(), citizenSupportY(point.y), floor(point.z).toInt())) > cost) return
+            previous = point
+        }
+        previous = from
+        val waypoints = rounded.map { point -> Waypoint(previous, point, false).also { previous = point } }
+        path.removeFirst()
+        for (waypoint in waypoints.asReversed()) path.addFirst(waypoint)
+    }
+
+    /** Anticipate a corner along the validated polyline; never move along this look-ahead chord. */
+    private fun heading(from: Location, stride: Double): Float? {
+        var previous = CitizenPoint(from.x, from.y, from.z)
+        // A right-angle turn takes twelve frames at 8 degrees per frame. Begin its
+        // first half before the corner, including when Trails increases the stride.
+        var remaining = (stride * 6).coerceIn(.65, 2.0)
+        var aim = previous
+        for (waypoint in path) {
+            val next = waypoint.point
+            val changesLevel = abs(next.y - from.y) > .13
+            // Settle or climb in the current column without turning toward its centre.
+            // A step into another column must be faced before lifting off the support.
+            if (changesLevel && floor(next.x).toInt() == from.blockX && floor(next.z).toInt() == from.blockZ) break
+            val dx = next.x - previous.x
+            val dz = next.z - previous.z
+            val distance = sqrt(dx * dx + dz * dz)
+            if (distance > .0001) {
+                val part = min(1.0, remaining / distance)
+                aim = CitizenPoint(previous.x + dx * part, from.y, previous.z + dz * part)
+                remaining -= distance * part
+                if (remaining <= .0001) break
+            }
+            if (changesLevel) break
+            previous = next
+        }
+        val dx = aim.x - from.x
+        val dz = aim.z - from.z
+        return if (dx * dx + dz * dz > .00001) Math.toDegrees(atan2(-dx, dz)).toFloat() else null
     }
 
     private fun fail(reason: String) {
@@ -307,10 +450,16 @@ internal class CitizenPacketRoute(
     }
 }
 
-internal fun citizenTurn(from: Float, to: Float, limit: Float): Float {
-    // Packet handles retain accumulated yaw; reduce it before the positive wrap.
-    val change = (((to - from) % 360f + 540f) % 360f) - 180f
-    return from + change.coerceIn(-limit, limit)
+internal const val CITIZEN_TURN_PER_TICK = 8f
+internal fun citizenAngleChange(from: Float, to: Float): Float = (((to - from) % 360f + 540f) % 360f) - 180f
+internal fun citizenTurn(from: Float, to: Float, limit: Float): Float =
+    from + citizenAngleChange(from, to).coerceIn(-limit, limit)
+
+/** The tick owner applies an authored look once; action callbacks only change its target. */
+internal fun citizenFace(npc: ru.arc.paper.npc.PacketPlayerNpc, yaw: Float, pitch: Float, limit: Float = CITIZEN_TURN_PER_TICK) {
+    npc.bodyYaw = citizenTurn(npc.bodyYaw, yaw, limit)
+    npc.headYaw = citizenTurn(npc.headYaw, yaw, limit)
+    npc.pitch += (pitch - npc.pitch).coerceIn(-limit, limit)
 }
 
 internal data class CitizenCollisionSnapshot(val liquid: Boolean, val door: Boolean,

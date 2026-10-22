@@ -60,6 +60,39 @@ class CivsStoreTest : FreeSpec({
         CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(receipt)
     }
 
+    "legacy mine ordinals and versioned continuation roundtrip without aliasing or accepting unknown geometry" {
+        val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+        val old = spatialCity(UUID.randomUUID(), listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+            .copy(mineProgress = mapOf(mine.id.toString() to 180L))
+        val json = Gson().toJson(old)
+        json.contains("minePlans") shouldBe false
+        CivsRules.validate(Gson().fromJson(json, Settlement::class.java)).minePlans shouldBe null
+        val store = CivsStore(root, directExecutor)
+        store.save(old).join()
+        CivsStore(root, directExecutor).load().join().single() shouldBe old
+
+        val states = mutableMapOf(mine.id.toString() to CivMinePlanState(2, 3, 180))
+        val current = old.copy(revision = old.revision + 1, minePlans = states)
+        val executor = QueuedExecutor()
+        val saving = CivsStore(root, executor).save(current)
+        states.clear()
+        executor.runNext()
+        val saved = saving.join()
+        val reopened = CivsStore(root, directExecutor).load().join().single()
+        reopened shouldBe saved
+        reopened.minePlans shouldBe mapOf(mine.id.toString() to CivMinePlanState(2, 3, 180))
+        reopened.mineProgress shouldBe old.mineProgress
+        val size = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.size.toLong()
+        for (state in listOf(CivMinePlanState(1, 3, 180), CivMinePlanState(3, 3, 180),
+            CivMinePlanState(2, -1, 180), CivMinePlanState(2, size + 1, 180), CivMinePlanState(2, 3, 179))) {
+            shouldThrow<CivsRejection> { CivsRules.validate(reopened.copy(minePlans = mapOf(mine.id.toString() to state))) }
+                .reason shouldBe "invalid-state"
+        }
+        val removed = CivsRules.finishBuildingDeletion(CivsRules.requestDeletion(reopened, reopened.owner, mine.id), reopened.owner)
+        removed.minePlans.orEmpty() shouldBe emptyMap()
+        removed.mineProgress.orEmpty() shouldBe emptyMap()
+    }
+
     "queue session credit and deletion intent roundtrip through the existing city journal without aliasing" {
         val base = settlement()
         val hall = base.buildings.single().copy(phase = BuildingPhase.CONSTRUCTING)

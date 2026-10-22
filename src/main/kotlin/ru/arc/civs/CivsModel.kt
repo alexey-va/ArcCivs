@@ -120,6 +120,9 @@ data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)
 /** Null buildingId retires the whole city. Native control cleanup follows this durable intent. */
 data class CivDeletion(val buildingId: UUID?)
 
+/** V2 physical construction cursor; legacyStep records the untouched pre-cutover ordinal. */
+data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep: Long? = null)
+
 data class Settlement(
     val id: UUID,
     val owner: UUID,
@@ -140,11 +143,12 @@ data class Settlement(
     val pendingControls: List<CivControlPlacement>? = null,
     val constructionQueue: List<UUID>? = null,
     val pendingDeletion: CivDeletion? = null,
-    /** Next shaft/tunnel operation per mine; actual terrain and drops remain in the item journal. */
+    /** Legacy V1 ordinal retained for decoding and cutover audit; V2 never reinterprets it. */
     val mineProgress: Map<String, Long>? = null,
     val families: List<CivFamily>? = null,
     val memberNames: Map<String, String>? = null,
     val corpses: List<CivCorpse>? = null,
+    val minePlans: Map<String, CivMinePlanState>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

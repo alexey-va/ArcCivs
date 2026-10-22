@@ -56,3 +56,72 @@ this is not a claim about total production throughput. Work durations and item
 quantities stay unchanged. Idle walking and combat retain their previous speeds.
 Only real productive footsteps wear paths; leisure remains excluded. Correcting
 accumulated yaw changes the turn direction, with no work reward or item grant.
+
+## 0.1.42: prioritize harvest and remove idle handoffs
+
+Before, per-worker field stripes and an unchanged cached care plan could leave
+ripe wheat behind watering. Completing any action discarded the discovered
+field, and one-second resident admissions delayed arrival and the next action.
+The replacement keeps bounded observations of the complete authored field,
+reserves actual targets across farmers, and selects a live ripe crop before
+care. A short field-only admission handles existing actors every five ticks;
+physical travel, the configured 1.5-second harvest (3 seconds when hungry),
+loaded-chunk checks and the durable item/world receipt still apply.
+
+The observed pre-change 15-minute sample contained ten watering and five
+field-work commits, with 4–72 seconds between commits (median 12). Those logs
+did not record crop ages, so the counts do not establish how many ripe crops
+were available or a measured production multiplier. Native crop yields,
+growth increments, seed debits, hunger, tool wear and internal training per
+accepted harvest remain unchanged. Faster useful work may increase their
+realized rate; that rate and resulting sale income remain unmeasured.
+
+Travel stays at the existing 0.172 blocks/tick before the Trails multiplier.
+Bounded corner smoothing and gradual facing remove unnecessary turns and
+detours without changing work rewards. Direct Vault, tokens and player XP
+remain separately 0→0. Existing SELL and the planned contract transition are
+unchanged; no item-to-currency rate or synthetic resource grant is introduced.
+Source tests, delivered artifacts and observed runtime behavior are separate
+evidence layers.
+
+### Versioned shaft and ordered mine levels
+
+The V2 plan turns the existing preview's 3×3 shaft into actual excavation,
+then completes each level's forward corridor, left arm and right arm in order.
+Relative to the same finished legacy mine, levels 1/2/3 require 21/35/49 extra
+native terrain cells across all three supported styles. A sequential upgrade
+adds 21, then 14, then 14 cells; these are physical volumes, not guaranteed item
+drops. Already empty cells yield nothing. The two-second mining action, native
+drop rules, 53 floor cells per level, six-block ladder depth per level and paid
+support materials are retained. Cave sealing remains conditional on actual
+world geometry and paid cobblestone.
+
+Resident profession training remains one point per accepted physical action,
+capped at 40 per resident and profession. A fully worked mine already reaches
+that cap before and after this change. Preserving completed work also removes
+its former repeat-action training; extra real excavation and cave repairs depend
+on the world. This internal resident skill is separate from player XP.
+
+Retaining the seven authored torch positions per floor avoids deleting and
+repaying old torches during upgrades. Cumulative torch bag debits through
+levels 1/2/3 change from 7/21/42 to 7/14/21 for the authored pattern; stolen or
+missing torches and exposed caves are outside that fixed-pattern calculation.
+The mutually exclusive low/base/high sensitivity assumes target levels 1/2/3,
+1/10/16 owners and 0.1/0.25/1 completed target mine per owner-day. Extra physical
+excavation is 2.1/8.75/49 cells per owner-day and 14.7/612.5/5488 network cells
+per week. Corresponding torch debits change from 0.7/5.25/42 to 0.7/3.5/21 per
+owner-day. These are assumptions, not measured rates or imposed limits.
+
+Vault, tokens and player XP remain separately 0→0. Existing SELL and the planned
+contract transition remain unchanged; neither terrain nor torch units receive
+a guessed currency conversion. The [input](farm-motion-and-mine-plan-assessment.json)
+and [calculator result](farm-motion-and-mine-plan-assessment-result.json) preserve
+the separate units and sensitivity assumptions.
+
+The new plan stores its version and cursor separately from the retained legacy
+ordinal. Old saves are reconciled against loaded world blocks without resetting
+the world or granting skipped-step rewards. Once a mine has started V2, a
+rollback to 0.1.41 or earlier must first pause that quarry: those versions do
+not understand the new cursor and can reseal the widened shaft using their old
+inner-wall plan. Retaining the old ordinal supports audit and decoding; it is
+not permission to run the old mining algorithm on a migrated shaft.

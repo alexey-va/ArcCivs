@@ -285,10 +285,15 @@ real ingredients and outputs. FARM, FORESTER and QUARRY are physical worksites,
 not timed item grants: FARM tills real soil, plants and waits for mature crops
 before harvesting native drops (1.5 seconds per action). No new bread-baking jobs
 are created; a legacy BREAD selection resolves to wheat harvesting.
-When no actionable field job is found in the bounded plot slice, FARM tends an
+When a complete bounded field pass finds no harvest or field preparation job, FARM tends an
 unripe crop for four seconds. Watering maintains soil moisture and advances only
 age 3 to 4; optional fertilizer consumes one real bone meal at age 5 to reach 6.
-Care requires an actual soil or growth change, and an entire bounded field pass prioritizes harvesting over care. Exposed rain suppresses manual watering, including its free age checkpoint; covered plots may still need care. Native age checkpoints
+Care requires an actual soil or growth change. Each farmer indexes the whole field in
+16-cell slices, including while walking or working, and retains known targets across
+receipts. Harvest outranks care, selects a nearby known ripe crop, and reserves its
+target against other farmers; new maturity can replace unfinished care without
+reusing its work timer. Each selected target is rechecked live before the existing
+receipt validation. Exposed rain suppresses manual watering, including its free age checkpoint; covered plots may still need care. Native age checkpoints
 bound each growth-cycle bonus without a separate timer or restart catch-up.
 Temporary city saves pause work admission without deleting residents' scan cursors,
 partial field passes or valid targets. An incomplete field search holds the farmer
@@ -305,6 +310,20 @@ QUARRY advances an authored real shaft across multiple floors. Before excavation
 the miner needs a pickaxe and carried ladders, torches and cobblestone. If any
 supply runs out, one storage receipt tops the bag up to 16 ladders, 8 torches and
 32 cobblestone before work resumes; it does not alter blocks or mining progress.
+Mine plan V2 first completes the 3×3 shaft around its continuous ladder and backing,
+preserving the paid landing platforms. Its outer shell is secured before widening;
+the old inner walls and gallery ceilings never refill the shaft. One rung ahead
+provides a visible working stance, but each landing's seven platforms and first
+light are completed before extending the ladder below that floor. It then finishes
+each floor's main corridor, left arm and right arm in that order. Fixed torch
+positions survive continuation and upgrades. Each mine's nullable `minePlans`
+entry stores version 2, its next operation and the legacy cutover ordinal. A legacy
+`mineProgress` value remains unchanged for audit: V2 inspects the real world from
+its own start, skips satisfied cells and commits the new cursor only with the first
+physical item/world receipt. Unknown versions and out-of-plan cursors fail closed.
+Deletion removes both maps; an upgrade resets both cursors and reuses satisfied
+native work. This is forward migration: a pre-V2 runtime does not understand the
+widened geometry and must not resume quarry work against it after a rollback.
 Mining secures exposed floor, walls, ceiling and lighting with paid carried supplies
 before advancing, and harvests native drops one block per 2-second action. The three
 worksites therefore do not mint resources on a timer. The miner can reach visible

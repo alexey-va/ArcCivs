@@ -1,0 +1,223 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.42: finite mine geometry and preserved supplies",
+  "assumptions": [
+    "Source assessment before implementing the V2 mine plan. Low/base/high are mutually exclusive target levels L1/L2/L3, with 1/10/16 city owners and 0.1/0.25/1 newly completed target-level mine per owner-day. These are sensitivity assumptions, not observed activity or imposed caps.",
+    "Extra native terrain to excavate relative to the same fully finished legacy mine is 21/35/49 unique cells for L1/L2/L3. Sequential V2 widening adds 21 then14 then14 cells; do not add21+35+49 for one mine. terrain_block is a physical volume unit, not a guaranteed item drop or monetary reward.",
+    "A complete L1/L2/L3 progression paid7/21/42 torches under legacy upgrade replay, versus7/14/21 under V2, preserving the same seven authored torch positions per floor. Positive item flow quantities record required bag debits, not mint. Missing or stolen torches and exposed-cave sealing are world-dependent and excluded from the fixed pattern calculation.",
+    "Native block/drop probabilities, the two-second mining action (ideal ceiling1800 actions/hour excluding movement/supplies), floor geometry53 cells/level and ladder depth6 blocks/level remain unchanged. No reward for already-air cells, no free material, no offline catch-up. Foreign containers and modification protection remain checked.",
+    "Farm harvest priority, bounded discovery retention and 5-tick handoffs restore useful work at unchanged1.5/3second physical harvest duration. Realized crop growth/harvest throughput and sale income are unknown, not assumed zero or assigned a guessed multiplier.",
+    "Resident profession training remains one point per accepted physical action, capped at40 per resident/profession; a fully worked mine reaches40 before and after. Retained completed work avoids repeat-action training; extra native excavation and conditional cave repairs depend on the world. This internal skill is separate from player XP.",
+    "Vault, tokens and player XP remain separately0->0. Current EconomyShopGUI SELL and the future contract transition are unchanged; no item-to-currency conversion or redemption flow is introduced."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "terrain_block": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "extra_native_excavation_L1",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Incremental unique physical cells versus the same finished legacy L1 mine; finite native terrain, not synthetic loot.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.1",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "21",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.1",
+              "0",
+              "0"
+            ]
+          }
+        },
+        {
+          "id": "extra_native_excavation_L2",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Incremental unique physical cells versus the same finished legacy L2 mine; finite native terrain, not synthetic loot.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0.25",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "35",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0.25",
+              "0"
+            ]
+          }
+        },
+        {
+          "id": "extra_native_excavation_L3",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Incremental unique physical cells versus the same finished legacy L3 mine; finite native terrain, not synthetic loot.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "1"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "49",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "1"
+            ]
+          }
+        }
+      ]
+    },
+    "item_native_torch_debit": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "cumulative_torch_placements_L1",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Cumulative authored torch bag debits through target L1; existing torch locations are retained instead of removed and repaid.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "7",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.1",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "7",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0.1",
+              "0",
+              "0"
+            ]
+          }
+        },
+        {
+          "id": "cumulative_torch_placements_L2",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Cumulative authored torch bag debits through target L2; existing torch locations are retained instead of removed and repaid.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "21",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0.25",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "14",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0.25",
+              "0"
+            ]
+          }
+        },
+        {
+          "id": "cumulative_torch_placements_L3",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsWorksites.kt:mine; scripts/generate-worksites.py:mine",
+          "basis": "Cumulative authored torch bag debits through target L3; existing torch locations are retained instead of removed and repaid.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "42",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "1"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "21",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "1"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

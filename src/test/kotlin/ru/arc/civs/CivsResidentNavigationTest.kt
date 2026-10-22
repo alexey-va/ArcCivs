@@ -99,7 +99,7 @@ class CivsResidentNavigationTest : FunSpec({
         MockBukkitTestRuntime.open().use {
             for (diagonal in listOf(false, true)) for (speed in listOf(.55, 1.0, 1.3)) {
                 val terrain = ResidentRouteTerrain()
-                var at = Location(terrain.world, .5, 64.0, .5)
+                var at = Location(terrain.world, .5, 64.0, .5, if (diagonal) -45f else -90f, 0f)
                 val route = CitizenPacketRoute(terrain.world, at,
                     Location(terrain.world, 20.5, 64.0, if (diagonal) 20.5 else .5),
                     { p -> p.x in 0..20 && p.z in 0..20 && p.y == 64 }, { _, _ -> true }, { 1.0 })
@@ -120,7 +120,7 @@ class CivsResidentNavigationTest : FunSpec({
     test("speed changes collision waits and cancellation never bank movement for a later tick") {
         MockBukkitTestRuntime.open().use {
             val terrain = ResidentRouteTerrain()
-            var at = Location(terrain.world, .5, 64.0, .5)
+            var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
             val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 20.5, 64.0, .5),
                 { p -> p.x in 0..20 && p.z == 0 && p.y == 64 }, { _, _ -> true }, { 1.0 })
             repeat(20_000) { if (route.searching) route.expand() }
@@ -196,7 +196,7 @@ class CivsResidentNavigationTest : FunSpec({
             repeat(2_000) { if (second.searching) second.expand() }
             val next = requireNotNull(second.destination)
             changed.blocks[CivPosition(next.blockX, 64, next.blockZ)] = Material.STONE
-            second.move(Location(changed.world, .5, 64.0, .5), 1.0) { true } shouldBe null
+            second.move(Location(changed.world, .5, 64.0, .5, -90f, 0f), 1.0) { true } shouldBe null
             second.failure shouldBe "movement-blocked"
         }
     }
@@ -370,7 +370,7 @@ class CivsResidentNavigationTest : FunSpec({
             val route = terrain.route()
             repeat(2_000) { if (route.searching) route.expand() }
             val waypoint = requireNotNull(route.destination)
-            var at = Location(terrain.world, .5, 64.0, .5)
+            var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
             repeat(10) {
                 route.move(at, 1.0, { _, _ -> false }) { true } shouldBe null
                 route.destination shouldBe waypoint
@@ -551,9 +551,13 @@ class CivsResidentNavigationTest : FunSpec({
                 val waypoint = requireNotNull(route.destination)
                 (waypoint.z < at.z) shouldBe true
                 // A small observed nudge makes the next actual leg -179 / +179 degrees.
+                // Anticipation can aim farther along that leg, but must still cross
+                // the accumulated +/-540 boundary in the short, matching direction.
                 at.x -= sign * kotlin.math.tan(Math.toRadians(1.0)) * (at.z - waypoint.z)
                 val first = requireNotNull(route.move(at, 1.0) { true })
-                (kotlin.math.abs(first.yaw - sign * 541f) < .001f) shouldBe true
+                withClue("sign=$sign from=${at.yaw} next=${first.yaw}") {
+                    ((first.yaw - at.yaw) * sign in 1f..2.001f) shouldBe true
+                }
                 (kotlin.math.abs(at.distance(first) - .215) < .000001) shouldBe true
                 var turned = kotlin.math.abs(first.yaw - at.yaw)
                 at = first
@@ -569,6 +573,271 @@ class CivsResidentNavigationTest : FunSpec({
                 at.x shouldBe .5
                 at.z shouldBe .5
                 (turned <= 3.001f) shouldBe true
+            }
+        }
+    }
+
+    test("a flat path corner is rounded within its corridor without stopping accelerating or crossing its walls") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            fun corridor(x: Int, z: Int) = x in 0..5 && z == 0 || x == 5 && z in 0..5
+            for (x in -1..6) for (z in -1..6) {
+                if (corridor(x, z)) terrain.blocks[CivPosition(x, 63, z)] = Material.DIRT_PATH
+                else for (y in 64..65) terrain.blocks[CivPosition(x, y, z)] = Material.STONE
+            }
+            var at = Location(terrain.world, .5, 63.9375, .5, -90f, 0f)
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 5.5, 63.9375, 5.5),
+                { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
+            repeat(20_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            var rounded = false
+            var turns = 0f
+            repeat(160) { tick ->
+                val progress = route.forwardProgress
+                route.move(at, .8 * 1.25) { true }?.let { next ->
+                    val delta = kotlin.math.abs(citizenAngleChange(at.yaw, next.yaw))
+                    (delta <= CITIZEN_TURN_PER_TICK + .001) shouldBe true
+                    turns += delta
+                    (at.distance(next) <= .215001) shouldBe true
+                    (route.forwardProgress - progress <= at.distance(next) + .000001) shouldBe true
+                    citizenPacketStepClear(terrain.world, CitizenPoint(at.x, at.y, at.z),
+                        CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                    citizenPacketSupported(terrain.world, CitizenPoint(next.x, next.y, next.z)) shouldBe true
+                    terrain.world.getBlockAt(next.blockX, citizenSupportY(next.y), next.blockZ).type shouldBe Material.DIRT_PATH
+                    val departure = minOf(kotlin.math.abs(next.z - .5), kotlin.math.abs(next.x - 5.5))
+                    (departure <= .151) shouldBe true
+                    if (departure > .015) rounded = true
+                    if (at.x > 4.8 && at.z < 1.2) withClue("tick=$tick from=$at next=$next turning=${route.turning}") {
+                        (at.distance(next) > .15) shouldBe true
+                    }
+                    at = next
+                }
+            }
+            rounded shouldBe true
+            route.failure shouldBe null
+            route.finished shouldBe true
+            (turns < 110f) shouldBe true
+            at.x shouldBe 5.5
+            at.z shouldBe 5.5
+        }
+    }
+
+    test("nudges and repeated walking over the same ordered segment cannot earn recovery progress") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 8.5, 64.0, .5),
+                { it.x in -3..8 && it.z == 0 && it.y == 64 }, { _, _ -> true }, { 1.0 })
+            repeat(3_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            repeat(3) { at = requireNotNull(route.move(at, 1.0) { true }) }
+            (route.forwardProgress > .64) shouldBe true
+            val highWater = at.clone()
+            val earned = route.forwardProgress
+            for (distance in listOf(.5, 1.0, 2.0)) {
+                at = highWater.clone().subtract(distance, 0.0, 0.0)
+                repeat(16) {
+                    val remaining = highWater.x - at.x
+                    if (remaining > .000001) at = requireNotNull(route.move(at, minOf(.215, remaining) / .215) { true })
+                }
+                (at.distance(highWater) < .000001) shouldBe true
+                withClue("back-and-forth distance=$distance progress=${route.forwardProgress}") {
+                    (kotlin.math.abs(route.forwardProgress - earned) < .000001) shouldBe true
+                }
+            }
+            // A forward nudge raises the watermark without counting as accepted walking.
+            val nudged = at.clone().add(.25, 0.0, 0.0)
+            route.move(nudged, 1.0, { _, _ -> false }) { true } shouldBe null
+            route.forwardProgress shouldBe earned
+            repeat(2) {
+                val remaining = nudged.x - at.x
+                at = requireNotNull(route.move(at, minOf(.215, remaining) / .215) { true })
+            }
+            (kotlin.math.abs(route.forwardProgress - earned) < .000001) shouldBe true
+            at = requireNotNull(route.move(at, .1 / .215) { true })
+            (kotlin.math.abs(route.forwardProgress - earned - .1) < .000001) shouldBe true
+
+            // Neither a newly planned path nor a different observed origin contributes credit.
+            for (origin in listOf(at, at.clone().add(2.0, 0.0, 0.0))) {
+                val replanned = route.replan(origin, emptyList())
+                repeat(3_000) { if (replanned.searching) replanned.expand() }
+                replanned.failure shouldBe null
+                replanned.forwardProgress shouldBe 0.0
+                replanned.move(origin, 1.0, { _, _ -> false }) { true }
+                replanned.forwardProgress shouldBe 0.0
+            }
+        }
+    }
+
+    test("a validated detour earns forward path progress while initially walking away from the final goal") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            fun corridor(x: Int, z: Int) = x in 0..4 && z in listOf(0, 2) || x == 4 && z in 0..2
+            for (x in -1..5) for (z in -1..3) if (!corridor(x, z))
+                for (y in 64..65) terrain.blocks[CivPosition(x, y, z)] = Material.STONE
+            var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+            val goal = Location(terrain.world, .5, 64.0, 2.5)
+            val initialDistance = at.distance(goal)
+            val route = CitizenPacketRoute(terrain.world, at, goal,
+                { corridor(it.x, it.z) && it.y == 64 }, { _, _ -> true }, { 1.0 })
+            repeat(20_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            repeat(3) { at = requireNotNull(route.move(at, 1.0) { true }) }
+            (at.distance(goal) > initialDistance) shouldBe true
+            (route.forwardProgress > .64) shouldBe true
+            repeat(160) { route.move(at, 1.0) { true }?.let { next ->
+                (at.distance(next) <= .215001) shouldBe true
+                (kotlin.math.abs(citizenAngleChange(at.yaw, next.yaw)) <= CITIZEN_TURN_PER_TICK + .001) shouldBe true
+                citizenPacketStepClear(terrain.world, CitizenPoint(at.x, at.y, at.z),
+                    CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                at = next
+            } }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            (at.distance(goal) < .000001) shouldBe true
+            (route.forwardProgress > 9.0) shouldBe true
+        }
+    }
+
+    test("an opposite-facing resident turns on its support before rising onto the next step") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            for (x in 1..3) terrain.blocks[CivPosition(x, 64, 0)] = Material.STONE
+            var at = Location(terrain.world, .5, 64.0, .5, 90f, 0f)
+            val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 3.5, 65.0, .5),
+                { it.x in 0..3 && it.z == 0 && it.y in 64..65 }, { _, _ -> true }, { 1.0 })
+            repeat(3_000) { if (route.searching) route.expand() }
+            route.failure shouldBe null
+            var stationaryTurns = 0
+            var advanced = false
+            repeat(80) {
+                route.move(at, 1.0) { true }?.let { next ->
+                    (kotlin.math.abs(citizenAngleChange(at.yaw, next.yaw)) <= CITIZEN_TURN_PER_TICK + .001) shouldBe true
+                    if (!advanced && next.distanceSquared(at) > .000001) {
+                        (kotlin.math.abs(citizenAngleChange(at.yaw, -90f)) <= 65f) shouldBe true
+                        advanced = true
+                    } else if (!advanced) {
+                        citizenPacketSupported(terrain.world, CitizenPoint(next.x, next.y, next.z)) shouldBe true
+                        next.y shouldBe 64.0
+                        stationaryTurns++
+                    }
+                    citizenPacketStepClear(terrain.world, CitizenPoint(at.x, at.y, at.z),
+                        CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                    at = next
+                }
+            }
+            stationaryTurns shouldBe 15
+            advanced shouldBe true
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.x shouldBe 3.5
+            at.y shouldBe 65.0
+        }
+    }
+
+    test("work facing route corners and a nudged replan share bounded packet-shaped body and head frames") {
+        MockBukkitTestRuntime.open().use {
+            for (sign in listOf(1, -1)) {
+                val terrain = ResidentRouteTerrain()
+                fun corridor(x: Int, z: Int) = x == 0 && z in 0..5 || z == 0 && x in 0..5
+                for (x in -1..6) for (z in -1..6) {
+                    if (corridor(x, z)) terrain.blocks[CivPosition(x, 63, z)] = Material.DIRT_PATH
+                    else for (y in 64..65) terrain.blocks[CivPosition(x, y, z)] = Material.STONE
+                }
+                var position = Location(terrain.world, .5, 63.9375, 5.5, sign * 539f, 0f)
+                var body = position.yaw
+                var head = body
+                var pitch = 0f
+                val npc = mockk<PacketPlayerNpc> {
+                    every { location } answers { position.clone().also { it.yaw = body; it.pitch = pitch } }
+                    every { bodyYaw } answers { body }
+                    every { headYaw } answers { head }
+                    every { this@mockk.pitch } answers { pitch }
+                    every { bodyYaw = any() } answers { body = firstArg() }
+                    every { headYaw = any() } answers { head = firstArg() }
+                    every { this@mockk.pitch = any() } answers { pitch = firstArg() }
+                    every { teleport(any()) } answers { position = firstArg<Location>().clone(); body = position.yaw; pitch = position.pitch }
+                }
+                fun quantized(yaw: Float) = kotlin.math.floor(yaw * 256.0 / 360.0).toInt().toByte() * 360f / 256f
+                var previousBody = body
+                var previousHead = head
+                var previousPitch = pitch
+                var total = 0f
+                fun frame() {
+                    val change = kotlin.math.abs(citizenAngleChange(previousBody, body))
+                    (change <= CITIZEN_TURN_PER_TICK + .001) shouldBe true
+                    (kotlin.math.abs(citizenAngleChange(quantized(previousBody), quantized(body))) <= 9.5f) shouldBe true
+                    (kotlin.math.abs(citizenAngleChange(quantized(previousHead), quantized(head))) <= 9.5f) shouldBe true
+                    (kotlin.math.abs(pitch - previousPitch) <= CITIZEN_TURN_PER_TICK + .001) shouldBe true
+                    (kotlin.math.abs(quantized(pitch) - quantized(previousPitch)) <= 9.5f) shouldBe true
+                    total += change
+                    previousBody = body
+                    previousHead = head
+                    previousPitch = pitch
+                }
+                repeat(6) { citizenFace(npc, -sign * 179f, 48f); frame() }
+                var route = CitizenPacketRoute(terrain.world, npc.location, Location(terrain.world, 5.5, 63.9375, .5),
+                    { corridor(it.x, it.z) && it.y in 63..64 }, { _, _ -> true }, { 1.0 })
+                repeat(20_000) { if (route.searching) route.expand() }
+                var replanned = false
+                repeat(180) {
+                    val before = npc.location
+                    route.move(before, .8 * 1.25) { true }?.let { next ->
+                        npc.teleport(next)
+                        npc.headYaw = next.yaw
+                        (before.distance(npc.location) <= .215001) shouldBe true
+                    }
+                    frame()
+                    if (!replanned && npc.location.z < 3.4) {
+                        val pushed = npc.location.add(.05, 0.0, 0.0)
+                        npc.teleport(pushed)
+                        route = route.replan(npc.location, emptyList()).also { route.cancel() }
+                        repeat(20_000) { if (route.searching) route.expand() }
+                        route.failure shouldBe null
+                        replanned = true
+                    }
+                }
+                replanned shouldBe true
+                route.finished shouldBe true
+                route.failure shouldBe null
+                pitch shouldBe 0f
+                repeat(24) { citizenFace(npc, 180f, 20f); frame() }
+                (total < 210f) shouldBe true
+                (kotlin.math.abs(citizenAngleChange(body, 180f)) < .001) shouldBe true
+            }
+        }
+    }
+
+    test("bounded collision replans detour around a person and preserve a narrow waiting route when no detour exists") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val person = BoundingBox(1.9, 64.0, .2, 2.5, 65.8, .8)
+            for (narrow in listOf(false, true)) {
+                var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+                val route = CitizenPacketRoute(terrain.world, at, Location(terrain.world, 5.5, 64.0, .5),
+                    { it.x in 0..5 && it.y == 64 && if (narrow) it.z == 0 else it.z in -2..2 },
+                    { _, _ -> true }, { 1.0 })
+                repeat(20_000) { if (route.searching) route.expand() }
+                val detour = route.replan(at, listOf(person))
+                repeat(20_000) { if (detour.searching) detour.expand() }
+                if (narrow) {
+                    detour.failure shouldBe "no-path"
+                    route.navigating shouldBe true
+                    repeat(80) { route.move(at, 1.0) { true }?.let { at = it } }
+                    route.finished shouldBe true
+                } else {
+                    detour.failure shouldBe null
+                    var avoided = false
+                    repeat(100) { detour.move(at, 1.0) { true }?.let { next ->
+                        citizenSlideBody(at.toVector(), next.toVector(), .299, 1.798, .299, listOf(person)) shouldBe null
+                        if (kotlin.math.abs(next.z - .5) > .8) avoided = true
+                        at = next
+                    } }
+                    detour.finished shouldBe true
+                    avoided shouldBe true
+                }
+                at.x shouldBe 5.5
+                at.z shouldBe .5
             }
         }
     }

@@ -253,6 +253,7 @@ object CivsRules {
         }
         val next = city.copy(buildings = city.buildings.filterNot { it.id == buildingId },
             mineProgress = city.mineProgress?.minus(buildingId.toString()),
+            minePlans = city.minePlans?.minus(buildingId.toString()),
             workers = city.workers.map { it.copy(assignment = it.assignment?.takeUnless { id -> id == buildingId },
                 homeId = it.homeId?.takeUnless { id -> id == buildingId }) },
             families = city.families?.filterNot { it.homeId == buildingId },
@@ -526,7 +527,9 @@ object CivsRules {
         return changed(city, city.copy(radius = city.radius + growth,
             buildings = city.buildings.map { if (it.id == finished.id) finished else it }, construction = null,
             mineProgress = if (finished.type == BuildingType.QUARRY && finished.level > previous.level)
-                city.mineProgress.orEmpty() - finished.id.toString() else city.mineProgress))
+                city.mineProgress.orEmpty() - finished.id.toString() else city.mineProgress,
+            minePlans = if (finished.type == BuildingType.QUARRY && finished.level > previous.level)
+                city.minePlans.orEmpty() - finished.id.toString() else city.minePlans))
     }
 
     /** Called only for an observed completed worker trip; elapsed time alone never earns resources. */
@@ -596,10 +599,21 @@ object CivsRules {
         val supplied = if (work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
         val progressed = supplied.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
         val updated = if (work.changes.isEmpty() || work.cropCare) progressed else CivsResidents.trained(progressed, building.type)
-        val progress = work.miningStep?.let { next ->
+        check(work.miningPlanVersion == null || work.miningPlanVersion == CivsMinePlan.VERSION && work.miningStep != null,
+            "stale-worksite")
+        val progress = work.miningStep?.takeIf { work.miningPlanVersion == null }?.let { next ->
             city.mineProgress.orEmpty() + (building.id.toString() to next)
         } ?: city.mineProgress
-        return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it }, mineProgress = progress))
+        val plans = work.miningStep?.takeIf { work.miningPlanVersion == CivsMinePlan.VERSION }?.let { next ->
+            val key = building.id.toString()
+            val previous = city.minePlans?.get(key)
+            check(building.type == BuildingType.QUARRY && work.changes.isNotEmpty() &&
+                next in (previous?.nextStep ?: 0)..100_000L, "stale-worksite")
+            city.minePlans.orEmpty() + (key to CivMinePlanState(CivsMinePlan.VERSION, next,
+                previous?.legacyStep ?: city.mineProgress?.get(key)))
+        } ?: city.minePlans
+        return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
+            mineProgress = progress, minePlans = plans))
     }
 
     /** Fail closed at the storage boundary, including missing/null fields from reflection-based JSON decoders. */
@@ -669,6 +683,14 @@ object CivsRules {
             CivsCorpses.validate(city)
             city.mineProgress?.let { progress -> snapshot(progress.size <= MAX_BUILDINGS && progress.all { (id, step) ->
                 java.util.UUID.fromString(id).toString() == id && step in 0..100_000 }) }
+            city.minePlans?.let { plans -> snapshot(plans.size <= MAX_BUILDINGS && plans.all { (id, plan) ->
+                val buildingId = java.util.UUID.fromString(id)
+                val building = city.building(buildingId)
+                val size = building?.takeIf { it.type == BuildingType.QUARRY }?.let(CivsMinePlan::forBuilding)?.steps?.size
+                buildingId.toString() == id && size != null && present(plan) &&
+                    plan.version == CivsMinePlan.VERSION && plan.nextStep in 0..size.toLong() &&
+                    plan.legacyStep == city.mineProgress?.get(id)
+            }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }
             snapshot(shipments.distinct().size == shipments.size)
             city.immigration?.let { snapshot(it.remaining in 0..CivsPopulation.IMMIGRANT_POPULATION && it.nextArrivalAt >= city.createdAt) }

@@ -416,6 +416,7 @@ class CivsStore(
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
         constructionQueue = city.constructionQueue?.toList(),
         mineProgress = city.mineProgress?.toMap(),
+        minePlans = city.minePlans?.toMap(),
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {

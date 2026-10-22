@@ -38,8 +38,8 @@ ID. Each site has `schematicId`, `schematicSha256`, `family`, `type`, `level`,
 | --- | --- |
 | `farm` | `soilCells` are blocks to till; crops occupy the block above. `irrigationCells` are water source positions. `irrigationExisting` distinguishes authored water from a new source requiring one WATER_BUCKET and returning one BUCKET. `workEntry` and optional `alternateEntry` are feet positions. `gateCells` identifies authored L3 gates. Optional `preservedCenter` is an inclusive box excluded from tilling/planting/harvest. |
 | `forester` | `workEntry` is the hut entrance. `searchBounds` is only a finite search envelope. Runtime must intersect it with the city and exclude all buildings, fields, mine access and any protected/user-owned material. It does not authorize cutting every log inside it. |
-| `mine` | `ladderBottom` and `ladderFacing` identify the existing shaft access in every level. `firstSubgroundPoint` is the first ladder cell below the schematic. `shaftCenter` records the original visible hole center. `shaftFootprint` contains local `[x,z]` pairs for a 3×3 continuation around the ladder. `floors` has one entry per unlocked mining floor. |
-| `mine.floors[]` | `index` is one-based; `feetY` is the walker's feet block layer; `height` is three blocks of clearance. `landing` is the feet position immediately in front of the ladder. `floorCells` are **support blocks**, not targets to remove. Clear only their `y+1..y+height` positions after runtime validation. Ladder and solid backing columns are excluded from these support cells and remain continuous. |
+| `mine` | `planVersion: 2` identifies the explicit continuation order. `ladderBottom` and `ladderFacing` identify the existing shaft access in every level. `firstSubgroundPoint` is the first ladder cell below the schematic. `shaftCenter` records the original visible hole center. `shaftFootprint` contains local `[x,z]` pairs for the real 3×3 continuation around the ladder. `floors` has one entry per unlocked mining floor. |
+| `mine.floors[]` | `index` is one-based; `feetY` is the walker's feet block layer; `height` is three blocks of clearance. `landing` is the feet position immediately in front of the ladder. `floorCells` are ordered **support blocks**, not targets to remove. `workSections` partitions that order into landing, complete main corridor, complete left arm, complete right arm. Clear only `y+1..y+height` after runtime validation. `torchCells` preserves the seven historical light positions. Ladder and solid backing columns are excluded from floor supports and remain continuous. |
 
 Fields and the existing ladder connection are identical across each family's
 three building levels. Mining unlocks one, two or three floors, six blocks apart.
@@ -48,6 +48,11 @@ twelve blocks from the ladder, one two-block-wide crosscut extending six blocks
 to each side, and a small landing. All new excavation is below the lowest
 schematic layer. This bounded shape is an ArcCivs design decision, not a claim
 that it reproduces every MineColonies mining rule.
+The complete vertical shaft, its landing platforms and lights precede gallery
+excavation. The preview and runtime use the same shaft footprint, cobblestone
+platforms and fixed torch coordinates. Existing completed cells are reused;
+the plan does not remove paid lights to scan a new level. Outer cave sealing is
+conditional on native terrain and uses ordinary paid, protected work receipts.
 
 ## Farm and access anchors
 
