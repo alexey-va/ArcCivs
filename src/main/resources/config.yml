@@ -1,6 +1,9 @@
 locale: ru
 force-language: ru
 use-client-locale: false
+presentation:
+  # Enable only with the matching server resource pack; empty keeps native text.
+  font: ''
 # Required per backend. Fill this and the shared MySQL tuple before enabling.
 server-id: ''
 mysql:

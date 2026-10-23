@@ -44,6 +44,7 @@ class CivsUi internal constructor(
     private val roots = mutableMapOf<UUID, String>()
     private var closed = false
     private val equipment = CivsEquipmentMenu(plugin, tasks, text)
+    private val presentation = CivsDialogPresentation(plugin.config.getString("presentation.font", "").orEmpty().trim())
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
@@ -292,7 +293,7 @@ class CivsUi internal constructor(
         val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
         present(player, "civs.overview", "city.title", listOfNotNull(
             body(tint(tr(player, "city.intro", "name" to city.name), LAND)),
-            card(listOf(
+            presentation.callout(Component.join(Component.newline(), listOf(
                 tr(player, "city.summary-land", "level" to tint(text.literal(city.level()), PERSONAL),
                     "radius" to tint(tr(player, "city.radius", "radius" to city.radius), NAVIGATION)),
                 tr(player, "city.summary-residents", "population" to tint(tr(player, "common.fraction", "value" to city.workers.size,
@@ -301,9 +302,9 @@ class CivsUi internal constructor(
                     "limit" to CivsRules.MAX_BUILDINGS), LAND), "activity" to tint(tr(player, if (sleep) "city.sleeping" else "city.active"),
                     if (sleep) PERSONAL else COMMIT)),
                 detail(player, "label.construction", constructionText(player, city)),
-            )),
+            ))),
             construction?.failure?.let { body(text.reason(player, it)) },
-            body(tint(nextStep(player, city), STOCK)), busyBody(player), feedback?.let(::body),
+            presentation.divider(), presentation.paragraph(tint(nextStep(player, city), STOCK)), busyBody(player), feedback?.let(::body),
             hall?.takeIf { canUpgrade(city, it) }?.let { upgradeTable(player, city, it) },
         ), buildList {
             add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
@@ -322,9 +323,12 @@ class CivsUi internal constructor(
 
     private fun showGuide(player: Player) {
         city(player) ?: return
-        present(player, "civs.guide", "guide.title", listOf(
-            body(player, "city.boundary-help"), body(player, "city.sleep-rule"), body(player, "buildings.site-help"),
-            body(player, "guide.population-help"), body(player, "guide.storage-help"),
+        present(player, "civs.guide", "guide.title", listOfNotNull(
+            presentation.paragraph(tr(player, "city.boundary-help")),
+            presentation.paragraph(tr(player, "city.sleep-rule")), presentation.divider(),
+            presentation.callout(tr(player, "buildings.site-help")),
+            presentation.paragraph(tr(player, "guide.population-help")),
+            presentation.paragraph(tr(player, "guide.storage-help")),
         ), emptyList(), reopen = { showGuide(player) })
     }
 
@@ -614,9 +618,11 @@ class CivsUi internal constructor(
         val queued = city.constructionQueue.orEmpty()
         val current = page.coerceIn(0, lastPage(queued.size))
         present(player, "civs.queue", "queue.title", listOfNotNull(
-            city.construction?.let { card(listOf(tr(player, "queue.active").color(LAND), constructionText(player, city))) }
-                ?: body(player, "queue.no-active"),
-            body(tr(player, if (queued.isEmpty()) "queue.empty" else "queue.waiting", "count" to queued.size)),
+            city.construction?.let { presentation.callout(Component.join(Component.newline(),
+                listOf(tr(player, "queue.active").color(LAND), constructionText(player, city)))) }
+                ?: presentation.paragraph(tr(player, "queue.no-active")),
+            presentation.divider(),
+            presentation.paragraph(tr(player, if (queued.isEmpty()) "queue.empty" else "queue.waiting", "count" to queued.size)),
         ), buildList {
             city.construction?.let { order ->
                 add(button(player, "active", "queue.active-open", LAND) { showBuilding(player, order.buildingId) })

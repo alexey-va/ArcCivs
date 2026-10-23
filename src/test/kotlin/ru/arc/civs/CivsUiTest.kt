@@ -52,6 +52,48 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("dialogue library keeps overview facts and actions with explicit font opt in and native fallback") {
+        for (locale in listOf("ru", "en")) {
+            for (font in listOf("", "arc:dialog_ui")) withUi(realHistory = true, decorationFont = font) { h ->
+                h.player.setLocale(Locale.forLanguageTag(locale))
+                h.city = settlement(h.player)
+                h.open()
+                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "upgrade", "hall_inventory", "guide")
+                h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
+                val suffix = if (font.isEmpty()) "plain-$locale" else locale
+                fun export(name: String) = System.getenv("CIVS_UI_PREVIEW_OUT")?.let { directory ->
+                    exportUiScreen(directory, "dialog-$name-$suffix", h.screen, listOf(640, 360))
+                }
+                export("overview")
+                h.city = h.city!!.copy(name = "Александровское поселение 123456")
+                h.open()
+                export("overview-long")
+                h.click("guide")
+                h.screen.id shouldBe "civs.guide"
+                h.screen.buttons.isEmpty() shouldBe true
+                h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
+                export("guide")
+                val base = settlement(h.player)
+                val active = base.buildings.last()
+                val queued = active.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, phase = BuildingPhase.SITE)
+                h.city = base.copy(buildings = base.buildings + queued,
+                    construction = CivConstruction(UUID.randomUUID(), active.id, 1, 475, 40, ConstructionPhase.CONSTRUCTING,
+                        Stock(), materials = mapOf("COBBLESTONE" to 19L), payment = CivConstructionPayment()),
+                    constructionQueue = listOf(queued.id))
+                every { h.host.buildingStatus(any()) } answers {
+                    "building-status.${if (firstArg<UUID>() == active.id) "working" else "queued"}"
+                }
+                h.ui.openBuilding(h.player, base.id, queued.id)
+                h.click("queue")
+                h.screen.id shouldBe "civs.queue"
+                h.body() shouldContain "40/475"
+                h.screen.buttons.map { it.id.value } shouldBe listOf("active", "queue_0")
+                h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
+                export("queue")
+            }
+        }
+    }
+
     test("source callbacks record accepted and ignored clicks with a stable visit id") {
         withUi { h ->
             val events = mutableListOf<Pair<String, Map<String, Any?>>>()
@@ -2584,13 +2626,13 @@ class CivsUiTest : FunSpec({
     }
 })
 
-private fun withUi(realHistory: Boolean = false, action: (UiHarness) -> Unit) = MockBukkitTestRuntime.open().use { paper ->
-    val harness = UiHarness(paper, realHistory)
+private fun withUi(realHistory: Boolean = false, decorationFont: String = "", action: (UiHarness) -> Unit) = MockBukkitTestRuntime.open().use { paper ->
+    val harness = UiHarness(paper, realHistory, decorationFont)
     try { action(harness) } finally { harness.ui.close(); harness.tasks.close() }
 }
 
-private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistory: Boolean) {
-    val plugin = paper.createSimplePlugin("CivsUiTest")
+private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistory: Boolean, decorationFont: String = "") {
+    val plugin = paper.createSimplePlugin("CivsUiTest").also { it.config.set("presentation.font", decorationFont) }
     val player = spyk(paper.addPlayer("Mayor")).apply { setLocale(Locale.US) }
     val host = mockk<CivsUiHost>(relaxed = true)
     val runtime: PaperDialogRuntime
@@ -2817,6 +2859,7 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
 
 private fun uiSourceHashes(): Map<String, String> = listOf(
     "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
+    "src/main/kotlin/ru/arc/civs/CivsDialogPresentation.kt", "src/main/resources/config.yml",
     "src/main/resources/materials/ru.json", "src/main/resources/materials/en.json",
 ).associateWith { source ->
     MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(source))).joinToString("") { "%02x".format(it) }
