@@ -106,6 +106,8 @@ data class CivConstruction(
     val workCredit: Int? = null,
     val blocksRequired: Int? = null,
     val blocksPlaced: Int? = null,
+    /** Reachable earthwork front, then the prepared entrance until completion; null uses the authored workplace. */
+    val preparationWorkplace: CivPosition? = null,
 )
 
 data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)
@@ -191,6 +193,15 @@ data class BuildingOffer(val type: BuildingType, val level: Int, val schematicId
 
 /** World coordinates; before and after are immutable canonical Bukkit block-data strings. */
 data class CivPlanBlock(val position: CivPosition, val before: String, val after: String)
+/** Journaled earthworks precede the authored schematic; route positions are standing coordinates. */
+data class CivTerraformPlan(
+    val bounds: CivBox,
+    val blocks: List<CivPlanBlock>,
+    val route: List<CivPosition>,
+    val groundY: Int,
+    val cutCount: Int,
+    val fillCount: Int,
+)
 data class CivPlacementPlan(
     val id: UUID,
     val cityId: UUID,
@@ -198,4 +209,5 @@ data class CivPlacementPlan(
     val building: CivBuilding,
     val blocks: List<CivPlanBlock>,
     val capturedSha256: String? = null,
+    val terrain: CivTerraformPlan? = null,
 )

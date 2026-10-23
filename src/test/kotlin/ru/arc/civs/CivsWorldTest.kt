@@ -639,6 +639,382 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("terrain capture keeps exact originals and schematic before states use the terrain overlay") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:dirt", "minecraft:air")
+            val proposed = worldTerraformPlan(s, listOf(cell), building)
+            val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+            s.cities.clear(); s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.DIRT
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(0, 64, "minecraft:stone")), proposed.terrain)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            plan.terrain!!.blocks shouldBe listOf(cell)
+            plan.blocks.single().before shouldBe "minecraft:air"
+            plan.blocks.single().after shouldBe "minecraft:stone"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+
+            s.world.getBlockAt(0, 64, 0).type = Material.COARSE_DIRT
+            val stale = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(0, 64, "minecraft:stone")), proposed.terrain)
+            s.scheduler.tick()
+            failureReason(stale) shouldBe "world-changed"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.COARSE_DIRT
+        }
+    }
+
+    test("a terrain batch changes one block per tick and replay counts already applied cells without repeating them") {
+        worldScenario { s ->
+            val cells = listOf(
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt"),
+                CivPlanBlock(CivPosition(1, 64, 0), "minecraft:air", "minecraft:stone"),
+            )
+            val plan = worldTerraformPlan(s, cells, worldBuilding(worldBox(0, 1)))
+            val city = worldTerraformCity(s, plan)
+            val placed = mutableListOf<CivPlanBlock>()
+            val apply = s.subject.applyTerraform(plan, city.owner, cells, 0, { true }, placed::add)
+            s.scheduler.tick()
+            placed shouldBe cells.take(1)
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+            apply.isDone shouldBe false
+            s.scheduler.tick()
+            completed(apply) shouldBe Unit
+            placed shouldBe cells
+
+            val replayed = mutableListOf<CivPlanBlock>()
+            val replay = s.subject.applyTerraform(plan, city.owner, cells, 0, { true }, replayed::add)
+            s.scheduler.tick()
+            completed(replay) shouldBe Unit
+            replayed shouldBe cells
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.STONE
+        }
+    }
+
+    test("terrain restart accepts a completed prefix but preserves a later manual natural edit") {
+        worldScenario { s ->
+            val cells = listOf(
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt"),
+                CivPlanBlock(CivPosition(1, 64, 0), "minecraft:air", "minecraft:stone"),
+            )
+            val plan = worldTerraformPlan(s, cells, worldBuilding(worldBox(0, 1)))
+            val city = worldTerraformCity(s, plan)
+            s.world.getBlockAt(0, 64, 0).type = Material.DIRT
+            s.world.getBlockAt(1, 64, 0).type = Material.COARSE_DIRT
+            val placed = mutableListOf<CivPlanBlock>()
+            val apply = s.subject.applyTerraform(plan, city.owner, cells, 0, { true }, placed::add)
+            s.scheduler.tick()
+            failureReason(apply) shouldBe "world-changed"
+            placed shouldBe cells.take(1)
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.COARSE_DIRT
+        }
+    }
+
+    test("terrain work waits for worker authorization and cancellation fences the unfinished suffix") {
+        worldScenario { s ->
+            val cells = (0..1).map { CivPlanBlock(CivPosition(it, 64, 0), "minecraft:air", "minecraft:dirt") }
+            val plan = worldTerraformPlan(s, cells, worldBuilding(worldBox(0, 1)))
+            val city = worldTerraformCity(s, plan)
+            var ready = false
+            val placed = mutableListOf<CivPlanBlock>()
+            val apply = s.subject.applyTerraform(plan, city.owner, cells, 0, { ready }, placed::add)
+            s.scheduler.tick(2)
+            placed shouldBe emptyList()
+            apply.isDone shouldBe false
+            ready = true
+            s.scheduler.tick()
+            placed shouldBe cells.take(1)
+            apply.cancel(false) shouldBe true
+            s.scheduler.tick(2)
+            placed shouldBe cells.take(1)
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    for ((material, reason) in listOf(Material.CHEST to "protected-terrain", Material.WATER to "autonomy-terrain",
+        Material.BEDROCK to "protected-terrain", Material.OAK_PLANKS to "autonomy-terrain")) {
+        test("terrain writes preserve protected $material even when its before image matches") {
+            worldScenario { s ->
+                val block = s.world.getBlockAt(0, 64, 0).also { it.type = material }
+                val cell = CivPlanBlock(CivPosition(0, 64, 0), block.blockData.asString, "minecraft:air")
+                val plan = worldTerraformPlan(s, listOf(cell))
+                val city = worldTerraformCity(s, plan)
+                val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                s.scheduler.tick()
+                failureReason(apply) shouldBe reason
+                block.type shouldBe material
+            }
+        }
+    }
+
+    test("terrain writes preserve a filled container and recheck Lands immediately before changing a block") {
+        worldScenario { s ->
+            val block = s.world.getBlockAt(0, 64, 0).also { it.type = Material.CHEST }
+            (block.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 2))
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), block.blockData.asString, "minecraft:air")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val filled = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(filled) shouldBe "container-not-empty"
+            (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+
+            block.type = Material.AIR
+            val dry = cell.copy(before = "minecraft:air", after = "minecraft:dirt")
+            val protectedPlan = plan.copy(terrain = plan.terrain!!.copy(blocks = listOf(dry), cutCount = 0, fillCount = 1))
+            val lands = s.paper.createSimplePlugin("Lands")
+            val denied = s.subject.applyTerraform(protectedPlan, city.owner, listOf(dry), 0, {
+                s.paper.server.pluginManager.disablePlugin(lands); true
+            }, {})
+            s.scheduler.tick()
+            failureReason(denied) shouldBe "lands-denied"
+            block.type shouldBe Material.AIR
+        }
+    }
+
+    test("a terrain batch cannot escape the city or cover a foreign control outside its footprint") {
+        worldScenario { s ->
+            val outside = CivPlanBlock(CivPosition(3, 64, 0), "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(outside))
+            val city = worldTerraformCity(s, plan).copy(radius = 1)
+            s.cities.clear(); s.cities += city
+            val escaped = s.subject.applyTerraform(plan, city.owner, listOf(outside), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(escaped) shouldBe "outside-city"
+            s.world.getBlockAt(3, 64, 0).type shouldBe Material.AIR
+
+            val control = CivPosition(2, 64, 0)
+            val neighbour = worldBuilding(worldBox(10, 10)).copy(type = BuildingType.HOUSE,
+                phase = BuildingPhase.ACTIVE, control = control)
+            s.cities.clear(); s.cities += city.copy(radius = 100, buildings = city.buildings + neighbour)
+            val guarded = outside.copy(position = control)
+            val controlPlan = plan.copy(terrain = plan.terrain!!.copy(blocks = listOf(guarded)))
+            val covered = s.subject.applyTerraform(controlPlan, city.owner, listOf(guarded), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(covered) shouldBe "building-overlap"
+            s.world.getBlockAt(control.x, control.y, control.z).type shouldBe Material.AIR
+        }
+    }
+
+    test("route standing cells use future fill and the source support remains unchanged") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(2, 2)).copy(entrance = CivPosition(1, 65, 0))
+            s.world.getBlockAt(0, 63, 0).type = Material.STONE
+            val cell = CivPlanBlock(CivPosition(1, 64, 0), "minecraft:air", "minecraft:dirt")
+            val route = listOf(CivPosition(0, 64, 0), building.entrance)
+            val proposed = worldTerraformPlan(s, listOf(cell), building).let {
+                it.copy(terrain = it.terrain!!.copy(route = route))
+            }
+            val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+            s.cities.clear(); s.cities += city
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(2, 64, "minecraft:stone")), proposed.terrain)
+            s.scheduler.tick()
+            completed(capture).terrain!!.route shouldBe route
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+
+            val changedSource = CivPlanBlock(CivPosition(0, 63, 0), "minecraft:stone", "minecraft:dirt")
+            val unsafe = proposed.terrain!!.copy(bounds = CivBox(CivPosition(0, 63, 0), CivPosition(1, 65, 0)),
+                blocks = listOf(changedSource, cell), fillCount = 2)
+            val rejected = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(2, 64, "minecraft:stone")), unsafe)
+            s.scheduler.tick()
+            failureReason(rejected) shouldBe "autonomy-no-path"
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.STONE
+        }
+    }
+
+    test("terrain capture refuses a route jump and a mismatched ledger batch before any mutation") {
+        worldScenario { s ->
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val jumped = plan.terrain!!.copy(route = listOf(CivPosition(-3, 64, 0), plan.building.entrance))
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, plan.building,
+                worldCells(plan.building), jumped, city.buildings.single())
+            failureReason(capture) shouldBe "autonomy-no-path"
+            val foreign = cell.copy(position = CivPosition(1, 64, 0))
+            val applied = s.subject.applyTerraform(plan, city.owner, listOf(foreign), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(applied) shouldBe "invalid-plan"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("height field spans the shared tick budget and leaves unavailable chunks unloaded") {
+        worldScenario { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), radius = 32, autonomy = CivAutonomy())
+            s.cities += city
+            s.world.isChunkLoaded(2, 0) shouldBe false
+            val field = s.subject.autonomousHeightField(city, building)
+            s.scheduler.tick()
+            field.isDone shouldBe false
+            s.scheduler.tick(3)
+            completed(field).columns.size shouldBe 65 * 65
+            completed(field).at(32, 0)!!.loaded shouldBe false
+            s.world.isChunkLoaded(2, 0) shouldBe false
+        }
+    }
+
+    test("height field resolves soil below a bounded natural canopy but refuses bare logs") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), radius = 1, autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.OAK_LOG
+            s.world.getBlockAt(0, 65, 0).type = Material.OAK_LOG
+            s.world.getBlockAt(0, 66, 0).blockData = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            s.world.getBlockAt(1, 64, 0).type = Material.OAK_LOG
+            val field = s.subject.autonomousHeightField(city, building)
+            s.scheduler.tick()
+            val surface = completed(field)
+            surface.at(0, 0)!!.groundY shouldBe 63
+            surface.at(0, 0)!!.topY shouldBe 66
+            surface.at(0, 0)!!.natural shouldBe true
+            surface.at(1, 0)!!.natural shouldBe false
+            s.world.getBlockAt(0, 66, 0).type shouldBe Material.OAK_LEAVES
+        }
+    }
+
+    test("terrain materialization receives detached bounded cells and native completion waits for the owning tick") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 65, 0).type = Material.DIRT
+            val draft = CivTerraformDraft(building, listOf(
+                CivTerraformColumn(-1, 0, 63, 63, 63, preserve = true),
+                CivTerraformColumn(0, 0, 64, 63, 65),
+            ), listOf(building.entrance), 64)
+            val work = mutableListOf<Runnable>()
+            val captured = s.subject.captureTerraform(city, draft, java.util.concurrent.Executor(work::add))
+            s.scheduler.tick()
+            captured.isDone shouldBe false
+            work.size shouldBe 1
+            CompletableFuture.runAsync { work.single().run() }.join()
+            captured.isDone shouldBe false
+            s.scheduler.tick()
+            completed(captured).blocks shouldBe listOf(
+                CivPlanBlock(CivPosition(0, 65, 0), "minecraft:dirt", "minecraft:air"),
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:coarse_dirt"),
+            )
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("tree restart uses the original removed canopy proof and preserves a changed pending log") {
+        worldScenario(collisionWorld = true) { s ->
+            val leaves = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]").asString
+            val log = Bukkit.createBlockData("minecraft:oak_log[axis=y]").asString
+            val cells = listOf(
+                CivPlanBlock(CivPosition(0, 66, 0), leaves, "minecraft:air"),
+                CivPlanBlock(CivPosition(0, 65, 0), log, "minecraft:air"),
+                CivPlanBlock(CivPosition(0, 64, 0), log, "minecraft:air"),
+            )
+            val plan = worldTerraformPlan(s, cells)
+            val city = worldTerraformCity(s, plan)
+            s.world.getBlockAt(0, 65, 0).type = Material.OAK_LOG
+            s.world.getBlockAt(0, 64, 0).type = Material.OAK_LOG
+            val placed = mutableListOf<CivPlanBlock>()
+            // The completed leaf prefix is absent from both the native world and the resumed batch.
+            val resumed = s.subject.applyTerraform(plan, city.owner, cells.subList(1, 3), 1, { true }, placed::add)
+            s.scheduler.tick()
+            placed shouldBe cells.subList(1, 2)
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(0, 64, 0).type = Material.BIRCH_LOG
+            s.scheduler.tick()
+            failureReason(resumed) shouldBe "world-changed"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.BIRCH_LOG
+
+            s.world.getBlockAt(0, 64, 0).type = Material.OAK_LOG
+            val remaining = s.subject.applyTerraform(plan, city.owner, cells.takeLast(1), 2, { true }, {})
+            s.scheduler.tick()
+            completed(remaining) shouldBe Unit
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("a raised terrace replaces a short tree bottom up using its later original canopy proof") {
+        worldScenario(collisionWorld = true) { s ->
+            val log = Bukkit.createBlockData("minecraft:oak_log[axis=y]").asString
+            val leaves = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]").asString
+            val cells = listOf(
+                CivPlanBlock(CivPosition(0, 64, 0), log, "minecraft:dirt"),
+                CivPlanBlock(CivPosition(0, 65, 0), log, "minecraft:dirt"),
+                CivPlanBlock(CivPosition(0, 66, 0), leaves, "minecraft:coarse_dirt"),
+            )
+            val plan = worldTerraformPlan(s, cells)
+            val city = worldTerraformCity(s, plan)
+            s.world.getBlockAt(0, 64, 0).type = Material.OAK_LOG
+            s.world.getBlockAt(0, 65, 0).type = Material.OAK_LOG
+            s.world.getBlockAt(0, 66, 0).blockData = Bukkit.createBlockData(leaves)
+            val placed = mutableListOf<CivPlanBlock>()
+            val apply = s.subject.applyTerraform(plan, city.owner, cells, 0, { true }, placed::add)
+            s.scheduler.tick(3)
+            completed(apply) shouldBe Unit
+            placed shouldBe cells
+            (64..66).map { s.world.getBlockAt(0, it, 0).type } shouldBe listOf(Material.DIRT, Material.DIRT, Material.COARSE_DIRT)
+        }
+    }
+
+    test("natural leaf distance drift is recaptured and applied but material persistent and wet edits stay protected") {
+        worldScenario(collisionWorld = true) { s ->
+            val point = CivPosition(0, 65, 0)
+            val original = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]").asString
+            val changed = Bukkit.createBlockData("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]")
+            val cell = CivPlanBlock(point, original, "minecraft:air")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val block = s.world.getBlockAt(point.x, point.y, point.z)
+            block.blockData = changed
+            val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            completed(apply) shouldBe Unit
+            block.type shouldBe Material.AIR
+
+            for ((data, reason) in listOf(
+                "minecraft:birch_leaves[distance=7,persistent=false,waterlogged=false]" to "world-changed",
+                "minecraft:oak_leaves[distance=7,persistent=true,waterlogged=false]" to "autonomy-terrain",
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=true]" to "autonomy-terrain",
+            )) {
+                block.blockData = Bukkit.createBlockData(data)
+                val guarded = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                s.scheduler.tick()
+                failureReason(guarded) shouldBe reason
+                block.blockData.asString shouldBe Bukkit.createBlockData(data).asString
+            }
+
+            s.cities.clear(); s.cities += city.copy(buildings = emptyList(), construction = null)
+            block.blockData = changed
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, plan.building,
+                listOf(worldCell(0, 64, "minecraft:stone")), plan.terrain)
+            s.scheduler.tick()
+            completed(capture).terrain!!.blocks.single().before shouldBe changed.asString
+        }
+    }
+
+    test("bare logs and persistent leaves cannot be cleared as natural trees") {
+        for (data in listOf("minecraft:oak_log[axis=y]",
+            "minecraft:oak_leaves[distance=1,persistent=true,waterlogged=false]")) worldScenario { s ->
+            val block = s.world.getBlockAt(0, 64, 0)
+            block.blockData = Bukkit.createBlockData(data)
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), block.blockData.asString, "minecraft:air")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(apply) shouldBe "autonomy-terrain"
+            block.blockData.asString shouldBe Bukkit.createBlockData(data).asString
+        }
+    }
+
     test("close cancels pending work and no future request can restart it") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 0))
@@ -652,8 +1028,10 @@ class CivsWorldTest : FunSpec({
     }
 })
 
-private class WorldScenario(val paper: MockBukkitTestRuntime, nanoTime: () -> Long = { 0L }) : AutoCloseable {
-    val world = paper.addSimpleWorld("civs-world")
+private class WorldScenario(val paper: MockBukkitTestRuntime, collisionWorld: Boolean = false,
+    nanoTime: () -> Long = { 0L }) : AutoCloseable {
+    val world = if (collisionWorld) CivsWorksiteWorldFixture("civs-world").also(paper.server::addWorld)
+        else paper.addSimpleWorld("civs-world")
     val cities = mutableListOf<Settlement>()
     val scheduler = TestTaskScheduler()
     private val tasks = LifecycleTaskScope(scheduler, true)
@@ -665,8 +1043,8 @@ private class WorldScenario(val paper: MockBukkitTestRuntime, nanoTime: () -> Lo
     override fun close() { subject.close(); tasks.close() }
 }
 
-private fun worldScenario(action: (WorldScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
-    MockBukkitTestRuntime.open().use { paper -> WorldScenario(paper).use(action) }
+private fun worldScenario(collisionWorld: Boolean = false, action: (WorldScenario) -> Unit) = failOnUnsupportedMockBukkitOperation {
+    MockBukkitTestRuntime.open().use { paper -> WorldScenario(paper, collisionWorld).use(action) }
 }
 
 private fun worldBox(minX: Int, maxX: Int) = CivBox(CivPosition(minX, 64, 0), CivPosition(maxX, 64, 0))
@@ -677,6 +1055,23 @@ private fun worldCity(worldId: UUID, building: CivBuilding) = Settlement(UUID.ra
 private fun worldCell(x: Int, y: Int, data: String) = ArcSchematicBlock(ArcSchematicPoint(x, y, 0), data,
     data == "minecraft:air", data == "minecraft:barrier")
 private fun worldCells(building: CivBuilding) = (building.bounds.min.x..building.bounds.max.x).map { worldCell(it, 64, "minecraft:air") }
+private fun worldTerraformPlan(s: WorldScenario, cells: List<CivPlanBlock>,
+    building: CivBuilding = worldBuilding(worldBox(0, 0))): CivPlacementPlan {
+    val positions = cells.map { it.position } + building.entrance
+    val bounds = CivBox(CivPosition(positions.minOf { it.x }, positions.minOf { it.y }, positions.minOf { it.z }),
+        CivPosition(positions.maxOf { it.x }, positions.maxOf { it.y }, positions.maxOf { it.z }))
+    val terrain = CivTerraformPlan(bounds, cells, listOf(building.entrance), building.anchor.y,
+        cells.count { it.after == "minecraft:air" }, cells.count { it.after != "minecraft:air" })
+    return CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+        listOf(CivPlanBlock(building.bounds.min, "minecraft:air", "minecraft:stone")), terrain = terrain)
+}
+private fun worldTerraformCity(s: WorldScenario, plan: CivPlacementPlan): Settlement {
+    val city = worldCity(s.world.uid, plan.building.copy(phase = BuildingPhase.SITE)).copy(id = plan.cityId,
+        autonomy = CivAutonomy(), construction = CivConstruction(plan.id, plan.building.id, 1, 1, 0,
+            ConstructionPhase.PLACING, Stock(), plannedBuilding = plan.building))
+    s.cities += city
+    return city
+}
 private fun <T> completed(future: CompletableFuture<T>): T { future.isDone shouldBe true; return future.join() }
 private fun rejection(future: CompletableFuture<*>): CivsRejection {
     future.isDone shouldBe true

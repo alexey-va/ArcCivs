@@ -111,4 +111,33 @@ class CivsMaterialsTest : FunSpec({
         batches.flatMap { batch -> cells.filter { it.position.y == batch.minimum.y && it.position.z == batch.minimum.z && it.position.x in batch.minimum.x..batch.maximum.x } }
             .let { CivsMaterials.required(plan.copy(blocks = it)) } shouldBe CivsMaterials.required(plan)
     }
+
+    test("terraform prefix preserves cut fill ordering and resumes before the same authored building rows") {
+        val building = CivBuilding(java.util.UUID.randomUUID(), BuildingType.BUILDER_HUT, 1,
+            CivPosition(12, 64, 0), 0, "test", CivBox(CivPosition(12, 63, 0), CivPosition(15, 68, 2)),
+            CivPosition(12, 64, -1), BuildingPhase.CONSTRUCTING)
+        val terrainCells = listOf(
+            CivPlanBlock(CivPosition(5, 66, 0), "minecraft:dirt", "minecraft:air"),
+            CivPlanBlock(CivPosition(5, 65, 0), "minecraft:dirt", "minecraft:air"),
+            CivPlanBlock(CivPosition(6, 62, 0), "minecraft:air", "minecraft:cobblestone"),
+            CivPlanBlock(CivPosition(6, 63, 0), "minecraft:air", "minecraft:cobblestone"))
+        val route = (0..12).map { CivPosition(it, 64, 0) }
+        val plan = CivPlacementPlan(java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), java.util.UUID.randomUUID(),
+            building, listOf(CivPlanBlock(CivPosition(12, 64, 0), "minecraft:air", "minecraft:oak_planks")),
+            terrain = CivTerraformPlan(CivBox(CivPosition(5, 62, 0), CivPosition(6, 66, 0)), terrainCells, route, 63, 2, 2))
+        val prefix = civsTerraformBatches(plan)
+        prefix.flatMap { civsBatchBlocks(plan, it) } shouldBe terrainCells
+        prefix.map { it.workplace } shouldBe listOf(route[2], route[3])
+        val order = CivConstruction(plan.id, building.id, 1, prefix.size + 1, 1, ConstructionPhase.PLACING, Stock(),
+            plannedBuilding = building, batches = CivConstructionBatches(prefix.size + 1, 16, true))
+        val batches = civsConstructionBatches(plan, order)
+        batches.take(prefix.size) shouldBe prefix
+        civsBatchBlocks(plan, batches[order.workDone]) shouldBe terrainCells.drop(2)
+        batches.last().terrainStart shouldBe null
+        batches.last().workplace shouldBe route.last()
+        civsBatchBlocks(plan, batches.last()) shouldBe plan.blocks
+        // The village pays its existing abstract building price once, not an invented item bill for earthworks.
+        CivsMaterials.required(plan) shouldBe mapOf("OAK_PLANKS" to 1L)
+        civsConstructionBatches(plan.copy(terrain = null), order).all { it.terrainStart == null } shouldBe true
+    }
 })

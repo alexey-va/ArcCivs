@@ -53,6 +53,7 @@ internal class CivsChunkLoading(
     private val wanted = linkedMapOf<PaperChunkKey, Int>()
     private val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
     private val ready = hashSetOf<PaperChunkKey>()
+    private val observedLevels = mutableMapOf<PaperChunkKey, Pair<Long, Chunk.LoadLevel?>>()
     private val pending = mutableMapOf<PaperChunkKey, Long>()
     private val replies = ConcurrentLinkedQueue<Load>()
     private val retryAt = mutableMapOf<PaperChunkKey, Long>()
@@ -95,6 +96,7 @@ internal class CivsChunkLoading(
                 "leasedChunks" to state?.chunks?.count(leases::containsKey),
                 "pendingChunks" to state?.chunks?.count(pending::containsKey))
         } + mapOf("source" to "owner-cache", "freshWorldRead" to false, "closed" to closed, "failed" to failed,
+            "requiredLoadLevel" to Chunk.LoadLevel.ENTITY_TICKING,
             "generation" to generation, "maximumChunks" to maximumChunks,
             "wantedChunks" to keys.count(wanted::containsKey), "leasedChunks" to keys.count(leases::containsKey),
             "readyChunks" to keys.count(ready::contains), "pendingChunks" to keys.count(pending::containsKey),
@@ -102,6 +104,7 @@ internal class CivsChunkLoading(
             "releaseFailures" to keys.count(releaseFailures::contains),
             "chunks" to sample(keys) { key -> mapOf("world" to key.worldId.toString(), "x" to key.x, "z" to key.z,
                 "wantedBy" to wanted[key], "leased" to (key in leases), "readyLastPulse" to (key in ready),
+                "loadLevelLastPulse" to observedLevels[key]?.second, "loadLevelObservedAtMillis" to observedLevels[key]?.first,
                 "pendingGeneration" to pending[key], "retryInMillis" to retryAt[key]?.let { (it - now).coerceAtLeast(0) },
                 "releaseFailed" to (key in releaseFailures)) },
             "permissions" to permissions.debug(owners))
@@ -179,7 +182,9 @@ internal class CivsChunkLoading(
             if (nanoTime() >= deadline) return@repeat
             val key = retained[Math.floorMod(readinessCursor++, retained.size)]
             val world = plugin.server.getWorld(key.worldId)
-            if (key in wanted && world != null && citizenChunkReady(world, key.x, key.z)) ready += key
+            val level = world?.let { citizenChunkLoadLevel(it, key.x, key.z) }
+            observedLevels[key] = clock() to level
+            if (key in wanted && level == Chunk.LoadLevel.ENTITY_TICKING) ready += key
             else ready -= key
         }
         cities.forEach { (id, state) ->
@@ -204,14 +209,14 @@ internal class CivsChunkLoading(
         val city = cities.remove(id) ?: return
         city.chunks.forEach { key ->
             val count = wanted.getValue(key) - 1
-            if (count == 0) { wanted.remove(key); ready -= key } else wanted[key] = count
+            if (count == 0) { wanted.remove(key); ready -= key; observedLevels.remove(key) } else wanted[key] = count
         }
         status(id, "released")
     }
 
     private fun release(key: PaperChunkKey) {
         if (key in releaseFailures) return
-        try { leases.remove(key)?.close(); ready -= key }
+        try { leases.remove(key)?.close(); ready -= key; observedLevels.remove(key) }
         catch (failure: Exception) {
             releaseFailures += key
             plugin.logger.log(Level.SEVERE, "ArcCivs settlement chunk release failed for $key; /civs reload retries cleanup", failure)
@@ -223,7 +228,7 @@ internal class CivsChunkLoading(
         maximumChunks = limit
         generation++
         permissions.reset()
-        cities.clear(); wanted.clear(); ready.clear(); retryAt.clear(); statuses.clear()
+        cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); retryAt.clear(); statuses.clear()
         failed = runCatching { registry.close() }.onFailure {
             plugin.logger.log(Level.SEVERE, "ArcCivs settlement chunk cleanup failed; background activity remains stopped", it)
         }.isFailure
@@ -258,7 +263,7 @@ internal class CivsChunkLoading(
         closed = true
         HandlerList.unregisterAll(this)
         permissions.close()
-        cities.clear(); wanted.clear(); ready.clear(); replies.clear()
+        cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); replies.clear()
         registry.close()
         leases.clear()
     }

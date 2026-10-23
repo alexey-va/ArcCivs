@@ -111,8 +111,7 @@ class CivsTerrainDebugTest : FunSpec({
             missing[3] shouldBe null
             missing[4] shouldBe false
             verify(exactly = 495) { observed.getBlockAt(any<Int>(), any<Int>(), any<Int>()) }
-            verify(exactly = 0) { observed.getChunkAt(any<Int>(), any<Int>()) }
-            verify(exactly = 0) { observed.getChunkAt(any<Int>(), any<Int>(), any<Boolean>()) }
+            verify(exactly = 0) { observed.getChunkAt(any<Int>(), any<Int>(), true) }
             verify(exactly = 0) { observed.loadChunk(any<Int>(), any<Int>()) }
             verify(exactly = 0) { observed.loadChunk(any<Int>(), any<Int>(), any<Boolean>()) }
         }
@@ -130,6 +129,30 @@ class CivsTerrainDebugTest : FunSpec({
                 snapshot["voxel_count"] shouldBe 486
                 snapshot["size"] shouldBe listOf(9, 6, 9)
             }
+        }
+    }
+
+    test("an absent bootstrap resident captures its depot without inventing an actual position") {
+        terrainFixture { world, city, worker ->
+            val point = CivPosition(8, 64, 8)
+            val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }.copy(phase = BuildingPhase.SITE,
+                control = point, entrance = point)
+            val absent = worker.copy(assignment = null, cargo = null)
+            val bootstrap = city.copy(buildings = listOf(hall), workers = listOf(absent), inventory = null,
+                autonomy = CivAutonomy())
+            val loaded = world.loadedChunks.map { it.x to it.z }.toSet()
+
+            val snapshot = CivsTerrainDebug.capture(bootstrap, absent, null, null, 42_000)
+
+            snapshot["error"] shouldBe null
+            snapshot["actual"] shouldBe null
+            snapshot["focus_origin"] shouldBe "planned-spawn"
+            snapshot["capture_center"] shouldBe point
+            snapshot["voxel_count"] shouldBe 891
+            val chunk = (snapshot["chunks"] as List<*>).single() as Map<*, *>
+            chunk["loaded"] shouldBe true
+            chunk["load_level"] shouldBe org.bukkit.Chunk.LoadLevel.ENTITY_TICKING
+            world.loadedChunks.map { it.x to it.z }.toSet() shouldBe loaded
         }
     }
 })

@@ -66,3 +66,11 @@ Vault separately reported minted 67,928,741.37, burned 2,440,753.22 and mint/bur
 - `CivsResidents.kt:17-22` doubles a hungry worker’s work interval; `CivsCitizens.kt:967-971` sends workers to shelter at night. `CivsService.kt:2918-2923` keeps the population active-minute transition separate from producer deliveries.
 
 The draft was evaluated with the canonical balance evaluator. Its output is [autonomous-economy-assessment-result.json](autonomous-economy-assessment-result.json). The item flows are gross ceilings; the result is not an ending-stock forecast, measured production rate, player inventory grant, or currency valuation.
+
+## Terrain preparation update, 0.1.64
+
+Before this change the fixed building price could be reserved only on almost flat ground. After it, that same price covers a bounded cut/fill foundation and a graded connection to the village. Starting stock remains 96 wood / 96 stone / 24 food; the complete level-2 profile remains 840 wood / 500 stone / 28 food. Producer rates, stock caps, recruitment and hunger costs are unchanged. There is no additional or repeated charge when earthworks resume after a restart.
+
+Earthworks materialize actual foundation blocks and clear terrain without block drops, inventory credits, XP or currency rewards. Each building preparation allows at most 32,768 changed cells and a 24-block vertical change per column; this is a finite world-materialization allowance within the existing administrator-created mode. As with authored building blocks, an administrator who can mine the protected village can recover placed materials; that privileged extraction is not a modeled ordinary-player income source. No resource-to-currency conversion is introduced. Vault delta: 0; premium-token delta: 0; player-XP delta: 0. Personal settlement construction and the SELL-to-contract transition remain unchanged.
+
+The existing gross-production sensitivity and ledger observation above remain applicable because this change alters placement feasibility and observed builder work, not production quantities or payout rates. Persistence and service tests verify that the terrain prefix resumes without crediting items or charging the building again.

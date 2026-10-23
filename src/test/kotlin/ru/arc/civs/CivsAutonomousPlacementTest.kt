@@ -43,10 +43,11 @@ class CivsAutonomousPlacementTest : FunSpec({
         spatialScenario { s ->
             val future = s.planner.search(s.city, BuildingType.HOUSE, 1, UUID.randomUUID())
             s.finish(future)
-            val selected = future.join()
+            val design = future.join()
+            val selected = design.blueprint
             selected.building.anchor.y shouldBe 64
             val capture = s.worldAccess.captureAutonomousSite(s.city.id, s.city.owner, s.city.worldId,
-                selected.building, selected.cells)
+                selected.building, selected.cells, design.terrain)
             s.finish(capture)
             capture.join().building shouldBe selected.building
             val point = selected.building.control!!
@@ -56,6 +57,62 @@ class CivsAutonomousPlacementTest : FunSpec({
                 s.world.getBlockAt(p.x, p.y, p.z).type shouldBe if (p.y == 64) Material.GRASS_BLOCK else Material.AIR
             }
             s.planner.debug()["jobs"] shouldBe 0
+        }
+    }
+
+    test("preparing an existing site preserves its pinned geometry and refreshes changed terrain") {
+        spatialScenario { s ->
+            val blueprint = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 90, 1)
+            val site = blueprint.building.copy(phase = BuildingPhase.SITE)
+            s.city = s.city.copy(autonomy = CivAutonomy(), buildings = s.city.buildings + site)
+            val control = site.control!!
+            s.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            val changed = site.bounds.min.copy(y = 65)
+            val mound = s.world.getBlockAt(changed.x, changed.y, changed.z)
+            mound.type = Material.DIRT
+            s.world.getBlockAt(changed.x, 66, changed.z).type = Material.GRASS_BLOCK
+            val original = mound.blockData.asString
+
+            val first = s.planner.prepareExisting(s.city, blueprint)
+            s.finish(first)
+            val oldTerrain = first.join().terrain!!
+            oldTerrain.blocks.single { it.position == changed }.before shouldBe original
+
+            mound.type = Material.STONE
+            val current = mound.blockData.asString
+            val added = changed.copy(y = 67)
+            val addedBlock = s.world.getBlockAt(added.x, added.y, added.z)
+            addedBlock.type = Material.GRASS_BLOCK
+            oldTerrain.blocks.any { it.position == added } shouldBe false
+            val stale = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
+                blueprint.building, blueprint.cells, site, oldTerrain)
+            s.finish(stale)
+            spatialFailure(stale) shouldBe "world-changed"
+
+            val refreshed = s.planner.prepareExisting(s.city, blueprint)
+            s.finish(refreshed)
+            val design = refreshed.join()
+            design.blueprint.building.anchor shouldBe site.anchor
+            design.blueprint.building.rotation shouldBe site.rotation
+            design.blueprint.building.control shouldBe site.control
+            design.blueprint.building.entrance shouldBe site.entrance
+            design.blueprint.building.bounds shouldBe site.bounds
+            val terrain = design.terrain!!
+            terrain.groundY shouldBe site.anchor.y
+            terrain.blocks.single { it.position == changed }.before shouldBe current
+            terrain.blocks.single { it.position == changed }.after shouldBe "minecraft:air"
+            terrain.blocks.single { it.position == added }.before shouldBe addedBlock.blockData.asString
+            terrain.blocks.any { it.position == control } shouldBe false
+            oldTerrain.blocks.single { it.position == changed }.before shouldBe original
+
+            val captured = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
+                design.blueprint.building, design.blueprint.cells, site, terrain)
+            s.finish(captured)
+            captured.join().terrain shouldBe terrain
+            s.city.building(site.id) shouldBe site
+            s.world.getBlockAt(control.x, control.y, control.z).type shouldBe Material.BARREL
+            mound.type shouldBe Material.STONE
+            addedBlock.type shouldBe Material.GRASS_BLOCK
         }
     }
 

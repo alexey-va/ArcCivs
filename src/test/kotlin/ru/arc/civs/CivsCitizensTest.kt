@@ -906,7 +906,7 @@ class CivsCitizensTest : FunSpec({
         city.revision shouldBe 4L
     }
 
-    test("route and spawn failures get only two timed automatic retries") {
+    test("route failures get only two timed automatic retries") {
         val retry = CitizenRetry()
         retry.ready(0) shouldBe true
         retry.fail(100)
@@ -918,6 +918,33 @@ class CivsCitizensTest : FunSpec({
         retry.fail(20_100)
         retry.exhausted shouldBe true
         retry.ready(Long.MAX_VALUE) shouldBe false
+    }
+
+    test("spawn retry exhaustion permits a slow native reevaluation without changing the plan") {
+        val retry = CitizenRetry(exhaustedCooldownMillis = 60_000)
+        retry.fail(100)
+        retry.fail(5_100)
+        retry.fail(20_100)
+        retry.exhausted shouldBe true
+        retry.nextAttemptAt shouldBe 80_100L
+        retry.ready(80_099) shouldBe false
+        retry.ready(80_100) shouldBe true
+        retry.fail(80_100)
+        retry.nextAttemptAt shouldBe 140_100L
+        retry.ready(140_099) shouldBe false
+        retry.ready(140_100) shouldBe true
+    }
+
+    test("spawn candidates retain the original floor before bounded nearby heights") {
+        val origin = CivPosition(-408, 81, -505)
+        val candidates = citizenSpawnCandidates(origin, 0).toList()
+        candidates.size shouldBe CITIZEN_SPAWN_CANDIDATE_LIMIT
+        candidates.distinct().size shouldBe CITIZEN_SPAWN_CANDIDATE_LIMIT
+        candidates.first() shouldBe origin
+        candidates.chunked(13).map { floor -> floor.map { it.y }.distinct().single() } shouldBe
+            listOf(81, 82, 80, 83, 79, 84, 78, 85, 77)
+        candidates.all { kotlin.math.abs(it.x - origin.x) <= 2 && kotlin.math.abs(it.z - origin.z) <= 2 } shouldBe true
+        citizenSpawnCandidates(origin, 1).first() shouldBe origin.copy(x = origin.x + 1)
     }
 
     test("builder captures construction identity and the site's real barrel with entrance fallback only when absent") {

@@ -60,6 +60,51 @@ class CivsStoreTest : FreeSpec({
         reopened[second.id] shouldBe second
     }
 
+    "terrain prefix and construction front survive restart without aliasing captured work" {
+        val initial = settlement()
+        val base = initial.copy(autonomy = CivAutonomy(), inventory = null,
+            buildings = initial.buildings.map { it.copy(phase = BuildingPhase.CONSTRUCTING) })
+        val blocks = mutableListOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air"),
+            CivPlanBlock(CivPosition(6, 63, 0), "minecraft:air", "minecraft:cobblestone"))
+        val route = mutableListOf(CivPosition(3, 64, 0), CivPosition(4, 64, 0), CivPosition(5, 64, 0))
+        val plan = placementPlan(base).copy(terrain = CivTerraformPlan(
+            CivBox(CivPosition(5, 63, 0), CivPosition(6, 64, 0)), blocks, route, 63, 1, 1))
+        val order = CivConstruction(plan.id, plan.building.id, 1, 3, 1, ConstructionPhase.PLACING,
+            CivsAutonomy.cost(plan.building.type, 1),
+            plannedBuilding = plan.building, batches = CivConstructionBatches(3, 16, true), workCredit = 2,
+            materials = mapOf("STONE" to 1L),
+            preparationWorkplace = route.first(), blocksRequired = 3, blocksPlaced = 1)
+        val city = CivsRules.validate(base.copy(construction = order))
+        val executor = QueuedExecutor()
+        val store = CivsStore(root, executor)
+        val saving = store.savePlan(plan)
+        val expected = plan.copy(terrain = plan.terrain!!.copy(blocks = blocks.toList(), route = route.toList()))
+        blocks.clear(); route.clear()
+        executor.runNext()
+        saving.join() shouldBe expected
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadPlan(plan.id).join() shouldBe expected
+        reopened.save(city).join()
+        CivsStore(root, directExecutor).load().join().single() shouldBe city
+        placementPlan(base).terrain shouldBe null
+    }
+
+    "terrain journal rejects duplicate cells discontinuous routes and control destruction" {
+        val base = settlement()
+        val plain = placementPlan(base)
+        val cell = CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air")
+        val terrain = CivTerraformPlan(CivBox(cell.position, cell.position), listOf(cell),
+            listOf(CivPosition(3, 64, 0), CivPosition(4, 64, 0)), 63, 1, 0)
+        val store = CivsStore(root, directExecutor)
+        for (invalid in listOf(terrain.copy(blocks = listOf(cell, cell)),
+            terrain.copy(route = listOf(CivPosition(3, 64, 0), CivPosition(5, 64, 0))),
+            terrain.copy(route = listOf(CivPosition(3, 64, 0), CivPosition(4, 66, 0))))) {
+            shouldThrow<CompletionException> { store.savePlan(plain.copy(terrain = invalid)).join() }
+        }
+        shouldThrow<CompletionException> { store.savePlan(plain.copy(building = plain.building.copy(control = cell.position),
+            terrain = terrain)).join() }
+    }
+
     "autonomous founding reserves are separate from personal deletion history" {
         val owner = UUID.randomUUID()
         fun village() = settlement(owner = owner).copy(inventory = null,

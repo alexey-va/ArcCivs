@@ -62,9 +62,16 @@ class CivsChunkLoadingTest : FunSpec({
             }
             h.added.size shouldBe 16
             h.runtime.active(city.id) shouldBe false
+            val waitingDebug = h.runtime.debug(city.id)
+            waitingDebug["requiredLoadLevel"] shouldBe Chunk.LoadLevel.ENTITY_TICKING
+            val observed = ((waitingDebug["chunks"] as Map<*, *>)["entries"] as List<*>).first() as Map<*, *>
+            observed["loadLevelLastPulse"] shouldBe Chunk.LoadLevel.TICKING
             h.level = Chunk.LoadLevel.ENTITY_TICKING
             h.pulse()
             h.runtime.active(city.id) shouldBe true
+            val activeDebug = h.runtime.debug(city.id)
+            val ticking = ((activeDebug["chunks"] as Map<*, *>)["entries"] as List<*>).first() as Map<*, *>
+            ticking["loadLevelLastPulse"] shouldBe Chunk.LoadLevel.ENTITY_TICKING
             h.allowed = false
             h.now += 15_000
             h.pulse(); h.pulse()

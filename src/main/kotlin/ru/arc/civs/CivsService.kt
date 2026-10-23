@@ -60,7 +60,8 @@ class CivsService(
     )
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>,
                                   val containersChanged: Boolean, val physicsCells: List<CivPlanBlock>,
-                                  val expectedCells: Map<CivPosition, CivPlanBlock>) {
+                                  val expectedCells: Map<CivPosition, CivPlanBlock>,
+                                  val batch: CivBuildBatch? = null, val nextWorkplace: CivPosition? = null) {
         var repairing = false
         var feedbackFailed = false
     }
@@ -96,6 +97,7 @@ class CivsService(
     private val memberNamesPending = mutableSetOf<UUID>()
     private var recoveredMemberNames = emptyMap<UUID, String>()
     private val operations = mutableMapOf<UUID, ArcSchematicOperation>()
+    private val terraformOperations = mutableMapOf<UUID, CompletableFuture<Unit>>()
     private var initialized = false
     private var closed = false
     private var citizenDrain = CompletableFuture.completedFuture<Void>(null)
@@ -176,7 +178,8 @@ class CivsService(
         residentSupplySource = ::residentSupplySource, prepareSupplies = { c, w, b -> prepareResidentSupplies(c, w, b) },
         craftPlan = ::craftPlan, craftDelivery = ::deliverCraft,
         craftSupplies = { c, w, b, job -> prepareResidentSupplies(c, w, b, job) },
-        constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position })).also(onCitizensCreated)
+        constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position },
+        constructionWorkplace = { cityId, orderId -> cities[cityId]?.construction?.takeIf { it.id == orderId }?.preparationWorkplace })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork, ::captureSupply, ::validateSupply, supplyExecutor, clock)
     private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
@@ -319,13 +322,16 @@ class CivsService(
                 val order = city.construction
                 mapOf("city" to city.id, "revision" to city.revision, "busy" to (city.id in busy),
                     "unhealthy" to (city.id in unhealthy), "placing" to (city.id in placing),
-                    "operation_pending" to (city.id in operations), "native_run" to placementRuns[city.id],
+                    "operation_pending" to (city.id in operations || city.id in terraformOperations),
+                    "terrain_batch" to (placementAccess[city.id]?.batch?.terrainStart != null),
+                    "native_run" to placementRuns[city.id],
                     "focus" to constructionFocus[city.id]?.position,
                     "supply_need" to constructionSupplyNeeds[city.id]?.materials?.entries?.take(8)?.associate { it.toPair() },
                     "queue_total" to city.constructionQueue.orEmpty().size, "queue" to city.constructionQueue.orEmpty().take(8),
                     "order" to order?.let { mapOf("id" to it.id, "building" to it.buildingId, "phase" to it.phase,
                         "done" to it.workDone, "required" to it.workRequired, "credit" to it.workCredit,
                         "blocks_placed" to it.blocksPlaced, "blocks_required" to it.blocksRequired,
+                        "preparation_workplace" to it.preparationWorkplace,
                         "failure" to it.failure, "reserved_batch" to it.payment?.reservedBatch,
                         "awaiting" to it.payment?.awaiting?.entries?.take(8)?.associate { row -> row.toPair() }) })
             }
@@ -1157,7 +1163,12 @@ class CivsService(
                 CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, target.anchor) }, executor).whenCompleteSync(tasks) cellsReady@ { cells, cellsFailure ->
                     if (cellsFailure != null) return@cellsReady finishReservation(city.id, actor, result, cellsFailure)
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
-                    world.capture(city.id, city.owner, city.worldId, target, requireNotNull(cells), building)
+                    val terrain = if (city.autonomy != null && building.phase == BuildingPhase.SITE)
+                        autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
+                            requireNotNull(cells), emptyList(), bytes)).thenApply { it.terrain }
+                    else CompletableFuture.completedFuture(sitePlan.terrain)
+                    terrain.thenCompose { preparation -> world.capture(city.id, city.owner, city.worldId,
+                        target, requireNotNull(cells), building, preparation) }
                         .whenCompleteSync(tasks) capturedReady@ { captured, captureFailure ->
                             if (captureFailure != null) return@capturedReady finishReservation(city.id, actor, result, captureFailure)
                             runCatching {
@@ -1192,15 +1203,18 @@ class CivsService(
                 areasOverlap(city.center, city.radius + 32, it.center, it.radius) }, "city-overlap")
         }
         rejectIf(city.pendingControls.orEmpty().any { it.buildingId == building.id }, "city-busy")
-        val approach = prepareControl(city.id, city.worldId, city.owner, building).takeIf { !it.approach.isNullOrEmpty() }
+        val approach = if (plan.terrain != null) null else prepareControl(city.id, city.worldId, city.owner, building).takeIf { !it.approach.isNullOrEmpty() }
         val result = tracked<Settlement>()
         CompletableFuture.supplyAsync({
             val materials = CivsMaterials.required(plan)
-            val batches = CivConstructionBatches(civsMaterialBatches(plan, atomicPairs = true).size, 16, atomicPairs = true)
+            val terrainBatches = civsTerraformBatches(plan)
+            val batches = CivConstructionBatches(terrainBatches.size + civsMaterialBatches(plan, atomicPairs = true).size, 16, atomicPairs = true)
             CivConstruction(plan.id, building.id, building.level, batches.total, 0,
                 ConstructionPhase.CONSTRUCTING, if (city.autonomy != null) CivsAutonomy.cost(building.type, building.level) else Stock(),
                 plannedBuilding = building, batches = batches, materials = materials,
-                payment = if (city.autonomy != null) null else CivConstructionPayment(), blocksRequired = plan.blocks.count { it.before != it.after }, blocksPlaced = 0)
+                payment = if (city.autonomy != null) null else CivConstructionPayment(),
+                blocksRequired = plan.blocks.count { it.before != it.after } + plan.terrain?.blocks.orEmpty().count { it.before != it.after },
+                blocksPlaced = 0, preparationWorkplace = terrainBatches.firstOrNull()?.workplace ?: plan.terrain?.route?.last())
         }, executor).thenCompose { order ->
             store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenApply { order }
         }.whenCompleteSync(tasks) { preparedOrder, failure ->
@@ -2631,7 +2645,7 @@ class CivsService(
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
             previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion) {
             cities[city.id] = city
-            if (civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
+            if (city.autonomy == null && civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
             return CompletableFuture.completedFuture(Unit)
         }
         val expected = geometryGeneration
@@ -2646,7 +2660,7 @@ class CivsService(
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
                 if (city == null) { supply.remove(cityId); supplyObservations.remove(cityId) }
-                else supply.request(cityId)
+                else if (city.autonomy == null) supply.request(cityId)
                 protection.publish(requireNotNull(prepared))
                 geometryGeneration++
             }.onSuccess { result.complete(Unit) }.onFailure(result::completeExceptionally)
@@ -2770,7 +2784,8 @@ class CivsService(
             mapOf("x" to point.x.toString(), "y" to point.y.toString(), "z" to point.z.toString()))
     }
 
-    private fun prepareControl(cityId: UUID, worldId: UUID, owner: UUID, building: CivBuilding): CivControlPlacement {
+    private fun prepareControl(cityId: UUID, worldId: UUID, owner: UUID, building: CivBuilding,
+        prepareApproach: Boolean = true): CivControlPlacement {
         val point = building.control ?: throw CivsRejection("control-missing")
         val target = plugin.server.getWorld(worldId) ?: throw CivsRejection("world-unavailable")
         rejectIf(point.y !in target.minHeight until target.maxHeight, "outside-world")
@@ -2778,7 +2793,7 @@ class CivsService(
         val block = target.getBlockAt(point.x, point.y, point.z)
         rejectIf(block.type != Material.BARREL && (block.type == Material.BEDROCK || block.state is org.bukkit.block.TileState), "control-obstructed")
         rejectIf(!world.canModify(owner, block, Material.BARREL), "lands-denied")
-        val approach = (-1..1).mapNotNull { dy ->
+        val approach = (if (prepareApproach) (-1..1).toList() else emptyList()).mapNotNull { dy ->
             val position = building.entrance.copy(y = Math.addExact(building.entrance.y, dy))
             // Old non-curated layouts may use an approach inside their paste; never rewrite captured design cells.
             if (position == point || building.bounds.contains(position.x, position.y, position.z)) return@mapNotNull null
@@ -3041,7 +3056,7 @@ class CivsService(
         val prepared = runCatching {
             if (existing == null) autonomousPlacement.search(city, goal.type, goal.targetLevel, UUID.randomUUID())
             else blueprints.prepare(city.style, existing.type, goal.targetLevel, existing.id, city.worldId,
-                existing.anchor, existing.rotation / 90, existing.rotation, existing.entrance)
+                existing.anchor, existing.rotation / 90, existing.rotation, existing.entrance).thenApply { CivAutonomousDesign(it, null) }
         }.getOrElse { CompletableFuture.failedFuture(it) }
         prepared.whenCompleteSync(tasks) { blueprint, failure ->
             if (autonomyRequests[city.id] != request) return@whenCompleteSync
@@ -3077,29 +3092,33 @@ class CivsService(
     }
 
     private fun autonomyFailed(cityId: UUID, goal: CivAutonomyGoal, failure: Throwable) {
-        val reason = CivsDiagnostics.rejection(failure)?.reason ?: "placement-failed"
+        val rejection = CivsDiagnostics.rejection(failure)
+        val reason = rejection?.reason ?: "placement-failed"
         autonomyRetryAt[cityId] = now() + if (reason in setOf("world-busy", "city-busy", "stale-development")) 5_000 else 30_000
         val next = CivsAutonomyView("blocked", goal.type, goal.targetLevel, reason)
         if (autonomyProgress.put(cityId, next) != next) CivsDiagnostics.event("autonomous_goal_blocked",
-            "city" to cityId, "type" to goal.type, "level" to goal.targetLevel, "reason" to reason)
+            "city" to cityId, "type" to goal.type, "level" to goal.targetLevel, "reason" to reason,
+            "details" to rejection?.values)
         if (reason !in setOf("world-busy", "city-busy", "stale-development", "chunks-unloaded", "chunk-unloaded")) {
             val warnAt = autonomyWarnAt.getOrPut(cityId) { now() + 60_000 }
             if (now() >= warnAt) {
                 autonomyWarnAt[cityId] = now() + 60_000
                 plugin.logger.warning(CivsDiagnostics.line("autonomous_development_stalled", "city" to cityId,
                     "type" to goal.type, "level" to goal.targetLevel, "reason" to reason,
+                    "details" to rejection?.values,
                     "placement" to autonomousPlacement.debug(cityId)))
             }
         }
         if (CivsDiagnostics.rejection(failure) == null) log("develop autonomous settlement $cityId", failure)
     }
 
-    private fun commitAutonomousDesign(city: Settlement, blueprint: CivBlueprint): CompletableFuture<Unit> {
+    private fun commitAutonomousDesign(city: Settlement, design: CivAutonomousDesign): CompletableFuture<Unit> {
+        val blueprint = design.blueprint
         val previous = city.building(blueprint.building.id)
         val result = tracked<Unit>()
         busy += city.id
         val capture = runCatching {
-            if (previous == null) world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells)
+            if (previous == null) world.captureAutonomousSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, design.terrain)
             else world.captureSite(city.id, city.owner, city.worldId, blueprint.building, blueprint.cells, previous)
         }
             .getOrElse { busy -= city.id; return CompletableFuture.failedFuture(it) }
@@ -3107,7 +3126,8 @@ class CivsService(
             if (captureFailure != null) { busy -= city.id; result.completeExceptionally(captureFailure); return@whenCompleteSync }
             runCatching {
                 rejectIf(!ready() || cities[city.id] != city || city.autonomy?.paused != false, "stale-development")
-                val control = if (previous == null) prepareControl(city.id, city.worldId, city.owner, blueprint.building) else null
+                val control = if (previous == null) prepareControl(city.id, city.worldId, city.owner, blueprint.building,
+                    prepareApproach = design.terrain == null) else null
                 val placed = if (previous == null) CivsRules.placeSite(city, city.owner, blueprint.building) else city
                 val queued = CivsRules.enqueue(placed, city.owner, blueprint.building.id)
                 val next = CivsRules.validate(queued.copy(revision = city.revision + 1,
@@ -3222,32 +3242,32 @@ class CivsService(
             blueprints.recover(plan).thenApplyAsync({ snapshot ->
                 require(plan.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS) { "Invalid construction plan size" }
                 val palette = mutableMapOf<String, Material>()
-                val materials = plan.blocks.associate { cell ->
+                val batches = order.batches?.let { civsConstructionBatches(plan, order) }
+                val batch = order.batches?.let { config ->
+                    requireNotNull(batches)
+                    require(batches.size == config.total && order.workDone in batches.indices)
+                    batches[order.workDone]
+                }
+                val cells = civsBatchBlocks(plan, batch)
+                val materials = cells.associate { cell ->
                     val name = cell.after.substringBefore('[')
                     cell.position to palette.getOrPut(name) {
                         Material.matchMaterial(name)?.takeIf { it.isBlock } ?: throw CivsRejection("invalid-plan")
                     }
                 }
-                val batch = order.batches?.let { config ->
-                    val batches = civsConstructionBatches(plan, order)
-                    require(batches.size == config.total && order.workDone in batches.indices)
-                    batches[order.workDone]
-                }
-                val cells = if (batch == null) plan.blocks else plan.blocks.filter {
-                    it.position.x in batch.minimum.x..batch.maximum.x && it.position.y in batch.minimum.y..batch.maximum.y &&
-                        it.position.z in batch.minimum.z..batch.maximum.z
-                }
                 val containerTypes = setOf("minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel")
                 val containersChanged = cells.any { it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes }
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y && p.z in batch.minimum.z..batch.maximum.z
-                }, containersChanged, cells.filter { it.before != it.after }, cells.associateBy(CivPlanBlock::position)), batch, plan.copy(blocks = cells))
+                }, containersChanged, cells.filter { it.before != it.after }, cells.associateBy(CivPlanBlock::position),
+                    batch, batches?.getOrNull(order.workDone + 1)?.workplace), batch, plan.copy(blocks = cells))
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
             if (failure != null) return@whenCompleteSync placementFailed(city.id, order.id, failure)
             val (plan, snapshot, access, batch, batchPlan) = requireNotNull(recovered)
-            val validation = if (batchPlan.blocks.isEmpty()) CompletableFuture.completedFuture(Unit) else world.revalidate(batchPlan, city.owner)
+            val validation = if (batch?.terrainStart != null || batchPlan.blocks.isEmpty()) CompletableFuture.completedFuture(Unit)
+                else world.revalidate(batchPlan, city.owner)
             validation.whenCompleteSync(tasks) { _, validationFailure ->
                 if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)
@@ -3279,6 +3299,11 @@ class CivsService(
                                                 "order" to order.id, "batch" to order.workDone, "materials" to required)
                                         }
                                 }.onFailure { placementFailed(city.id, order.id, it) }
+                                return@whenCompleteSync
+                            }
+                            if (batch?.terrainStart != null) {
+                                runCatching { pasteTerraform(city, order, plan, snapshot, access, batchPlan.blocks, run) }
+                                    .onFailure { placementFailed(city.id, order.id, it) }
                                 return@whenCompleteSync
                             }
                             blueprints.pasteParts(snapshot, plan.building, batch).whenCompleteSync(tasks) { parts, cropFailure ->
@@ -3338,40 +3363,79 @@ class CivsService(
                     placementFailed(cityId, orderId, failure ?: CivsRejection("placement-cancelled"))
                 } else if (partIndex + 1 < parts.size) {
                     pasteCaptured(cityId, order, plan, parts, fullSnapshot, access, partIndex + 1)
-                } else runCatching {
-                    afterCityAvailable(cityId) {
-                        rejectIf(placementAccess[cityId] !== access, "stale-construction")
-                        mutate(cityId) { current ->
-                            rejectIf(current.construction?.id != orderId || current.construction.workDone != order.workDone, "stale-construction")
-                            if (order.batches == null) CivsRules.completeConstruction(current, current.owner, orderId)
-                            else CivsRules.completeBatch(current, current.owner, orderId).let { completed ->
-                                val remaining = completed.construction
-                                if (remaining == null || remaining.blocksRequired == null) completed
-                                else {
-                                    val batch = civsConstructionBatches(plan, order)[order.workDone]
-                                    val placed = plan.blocks.count { it.before != it.after && it.position.let { p ->
-                                        p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y &&
-                                            p.z in batch.minimum.z..batch.maximum.z } }
-                                    completed.copy(construction = remaining.copy(blocksPlaced = (order.blocksPlaced ?: 0) + placed))
-                                }
-                            }
-                        }
-                    }.whenCompleteSync(tasks) { saved, commitFailure ->
-                        if (commitFailure != null) placementFailed(cityId, orderId, commitFailure)
-                        else {
-                            CivsDiagnostics.event("construction_batch_committed", "city" to cityId, "order" to orderId,
-                                "completed" to (order.workDone + 1), "total" to order.workRequired)
-                            if (access.containersChanged) saved?.let { storage.refreshBuilding(it, plan.building) }
-                            if (saved?.construction == null) repairCommitted(cityId, plan, fullSnapshot)
-                            else {
-                                releasePlacement(cityId)
-                                // Include recovered no-ops written before a failed attempt; the durable batch owns them.
-                                physics.enqueue(plan.worldId, access.physicsCells)
-                                tasks.runLater(1) { pulseConstruction() }
-                            }
-                        }
+                } else completePlacementBatch(cityId, order, plan, fullSnapshot, access)
+            }
+        }.onFailure { placementFailed(cityId, orderId, it) }
+    }
+
+    private fun pasteTerraform(city: Settlement, order: CivConstruction, plan: CivPlacementPlan,
+        snapshot: ArcSchematicSnapshot, access: PlacementAccess, cells: List<CivPlanBlock>, run: UUID) {
+        placementAccess[city.id] = access
+        CivsDiagnostics.event("terraform_batch_started", "city" to city.id, "order" to order.id,
+            "batch" to order.workDone, "cells" to cells.size, "workplace" to order.preparationWorkplace)
+        var lastPlacedTick = Int.MIN_VALUE
+        val operation = world.applyTerraform(plan, city.owner, cells, requireNotNull(access.batch?.terrainStart), {
+            ready() && placementRuns[city.id] == run && placementAccess[city.id] === access &&
+                cities[city.id]?.autonomy?.paused == false &&
+                cities[city.id]?.construction?.let { it.id == order.id && it.workDone == order.workDone } == true &&
+                (lastPlacedTick == Int.MIN_VALUE || Bukkit.getCurrentTick() - lastPlacedTick >= 1) &&
+                citizens.constructionReady(city.id, order.id)
+        }, { cell ->
+            lastPlacedTick = Bukkit.getCurrentTick()
+            constructionFocus[city.id] = ConstructionFocus(order.id, cell.position, lastPlacedTick)
+            constructionCosmetic(access, order.id, cell.position) {
+                citizens.constructionPlaced(city.id, order.id, cell.position,
+                    Material.matchMaterial(cell.after.substringBefore('[')) ?: Material.AIR)
+            }
+        })
+        terraformOperations[city.id] = operation
+        operation.whenCompleteSync(tasks) { _, failure ->
+            if (placementRuns[city.id] != run || placementAccess[city.id] !== access) return@whenCompleteSync
+            terraformOperations.remove(city.id)
+            if (failure != null) placementFailed(city.id, order.id, failure)
+            else {
+                CivsDiagnostics.event("terraform_batch_applied", "city" to city.id, "order" to order.id,
+                    "batch" to order.workDone, "cells" to cells.size, "workplace" to order.preparationWorkplace)
+                completePlacementBatch(city.id, order, plan, snapshot, access)
+            }
+        }
+    }
+
+    private fun completePlacementBatch(cityId: UUID, order: CivConstruction, plan: CivPlacementPlan,
+        snapshot: ArcSchematicSnapshot, access: PlacementAccess) {
+        val orderId = order.id
+        // The prefix and its next reachable work front are committed together; restart never restarts the terrace.
+        val completedCells = access.physicsCells.size
+        runCatching {
+            afterCityAvailable(cityId) {
+                rejectIf(placementAccess[cityId] !== access, "stale-construction")
+                mutate(cityId) { current ->
+                    rejectIf(current.construction?.id != orderId || current.construction.workDone != order.workDone,
+                        "stale-construction")
+                    if (order.batches == null) CivsRules.completeConstruction(current, current.owner, orderId)
+                    else CivsRules.completeBatch(current, current.owner, orderId).let { completed ->
+                        completed.construction?.let { remaining -> completed.copy(construction = remaining.copy(
+                            preparationWorkplace = access.nextWorkplace,
+                            blocksPlaced = remaining.blocksRequired?.let { (order.blocksPlaced ?: 0) + completedCells }))
+                        } ?: completed
                     }
-                }.onFailure { placementFailed(cityId, orderId, it) }
+                }
+            }.whenCompleteSync(tasks) { saved, failure ->
+                if (failure != null) placementFailed(cityId, orderId, failure)
+                else {
+                    CivsDiagnostics.event("construction_batch_committed", "city" to cityId, "order" to orderId,
+                        "completed" to (order.workDone + 1), "total" to order.workRequired,
+                        "terrain" to (access.batch?.terrainStart != null), "blocks" to completedCells)
+                    if (access.containersChanged) saved?.let { storage.refreshBuilding(it, plan.building) }
+                    if (saved?.construction == null) repairCommitted(cityId, plan, snapshot)
+                    else {
+                        releasePlacement(cityId)
+                        // Native neighbour updates can move sand or alter leaf states in later terrain batches.
+                        // Earthworks own the full ordered cut/fill prefix; schematic physics remains unchanged.
+                        if (access.batch?.terrainStart == null) physics.enqueue(plan.worldId, access.physicsCells)
+                        tasks.runLater(1) { pulseConstruction() }
+                    }
+                }
             }
         }.onFailure { placementFailed(cityId, orderId, it) }
     }
@@ -3385,16 +3449,17 @@ class CivsService(
         if (cell.isAir || cell.isBarrier || material.isAir) return
         // A paired native placement is one gesture and one sound; retain the final accepted focus for the next pulse.
         if (previous?.orderId == orderId && previous.tick == Bukkit.getCurrentTick()) return
-        fun cosmetic(action: () -> Unit) {
-            runCatching(action).onFailure { failure ->
-                if (!access.feedbackFailed) {
-                    access.feedbackFailed = true
-                    log("present construction block $orderId at $point", failure)
-                }
+        constructionCosmetic(access, orderId, point) { citizens.constructionPlaced(cityId, orderId, point, material) }
+        constructionCosmetic(access, orderId, point) { world.constructionFeedback(access.plan.worldId, cell) }
+    }
+
+    private fun constructionCosmetic(access: PlacementAccess, orderId: UUID, point: CivPosition, action: () -> Unit) {
+        runCatching(action).onFailure { failure ->
+            if (!access.feedbackFailed) {
+                access.feedbackFailed = true
+                log("present construction block $orderId at $point", failure)
             }
         }
-        cosmetic { citizens.constructionPlaced(cityId, orderId, point, material) }
-        cosmetic { world.constructionFeedback(access.plan.worldId, cell) }
     }
 
     private fun repairCommitted(cityId: UUID, plan: CivPlacementPlan, snapshot: ArcSchematicSnapshot) {
@@ -3430,6 +3495,7 @@ class CivsService(
     private fun releasePlacement(cityId: UUID) {
         placementRuns.remove(cityId)
         operations.remove(cityId)
+        terraformOperations.remove(cityId)?.cancel(false)
         placementAccess.remove(cityId)
         placing -= cityId
     }
@@ -3585,6 +3651,8 @@ class CivsService(
         placing.clear()
         operations.values.toList().forEach { it.cancel() }
         operations.clear()
+        terraformOperations.values.toList().forEach { it.cancel(false) }
+        terraformOperations.clear()
         citizenDrain = runCatching { citizens.closeAsync() }
             .getOrElse { CompletableFuture.failedFuture(it) }
         runCatching { chunkLoading.close() }.onFailure { log("release settlement chunks", it) }

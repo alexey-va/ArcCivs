@@ -179,6 +179,93 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("an unassigned bootstrap resident finds ground below its depot without spawning on the control") {
+        residentRuntime { h ->
+            h.viewing = false
+            h.owner.pulse(1_001)
+            val control = CivPosition(0, 68, 0)
+            h.city = h.city.copy(autonomy = CivAutonomy(), buildings = h.city.buildings.map {
+                it.copy(phase = BuildingPhase.SITE, control = control)
+            })
+            h.world.getBlockAt(0, 67, 0).type = Material.STONE
+            h.world.getBlockAt(0, 68, 0).type = Material.BARREL
+            val chunks = h.world.loadedChunks.map { it.x to it.z }.toSet()
+            h.viewing = true
+
+            h.owner.pulse(2_000)
+
+            h.owner.activeCount() shouldBe 1
+            val feet = requireNotNull(h.owner.residentFeet(h.workerId))
+            feet.y shouldBe 64.0
+            citizenStandable(h.world, CivPosition(feet.blockX, feet.blockY, feet.blockZ)) shouldBe true
+            citizenControlClear(h.city, CivPosition(feet.blockX, feet.blockY, feet.blockZ)) shouldBe true
+            h.world.loadedChunks.map { it.x to it.z }.toSet() shouldBe chunks
+        }
+    }
+
+    test("absent residents expose bounded spawn evidence and recover after exhausted retries when terrain changes") {
+        residentRuntime { h ->
+            h.viewing = false
+            h.owner.pulse(1_001)
+            h.city = h.city.copy(autonomy = CivAutonomy(), buildings = h.city.buildings.map {
+                it.copy(phase = BuildingPhase.SITE, control = CivPosition(0, 64, 0))
+            })
+            for (x in -2..2) for (z in -2..2) for (y in 60..69) h.world.getBlockAt(x, y, z).type = Material.STONE
+            h.viewing = true
+            h.owner.pulse(2_000)
+            h.owner.pulse(7_000)
+            h.owner.pulse(22_000)
+
+            h.owner.activeCount() shouldBe 0
+            val debug = h.owner.debug(h.city.id, h.workerId)
+            debug["total"] shouldBe 0
+            val admission = debug["admission"] as Map<*, *>
+            admission["total"] shouldBe 1
+            val row = (admission["entries"] as List<*>).single() as Map<*, *>
+            row["reason"] shouldBe "no-safe-spawn"
+            row["origin"] shouldBe CivPosition(0, 64, 0)
+            row["retry_attempts"] shouldBe 3
+            row["retry_exhausted"] shouldBe true
+            row["next_retry_at_ms"] shouldBe 82_000L
+            (row["origin_chunk"] as Map<*, *>)["load_level"] shouldBe org.bukkit.Chunk.LoadLevel.ENTITY_TICKING
+            val search = row["spawn"] as Map<*, *>
+            search["inspected"] shouldBe CITIZEN_SPAWN_CANDIDATE_LIMIT
+            (search["samples"] as List<*>).size shouldBe 16
+            search["truncated"] shouldBe true
+
+            for (x in -2..2) for (z in -2..2) for (y in 64..69) h.world.getBlockAt(x, y, z).type = Material.AIR
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            h.owner.pulse(81_999)
+            h.owner.activeCount() shouldBe 0
+            h.owner.pulse(82_000)
+            h.owner.activeCount() shouldBe 1
+            val recovered = h.owner.debug(h.city.id, h.workerId)["admission"] as Map<*, *>
+            recovered["total"] shouldBe 0
+        }
+    }
+
+    test("many absent residents share two bounded spawn attempts per pulse") {
+        residentRuntime { h ->
+            h.viewing = false
+            h.owner.pulse(1_001)
+            h.city = h.city.copy(autonomy = CivAutonomy(), workers = List(5) { ordinal ->
+                h.city.workers.single().copy(id = if (ordinal == 0) h.workerId else UUID.randomUUID(), name = "Resident$ordinal")
+            }, buildings = h.city.buildings.map { it.copy(phase = BuildingPhase.SITE, control = CivPosition(0, 64, 0)) })
+            for (x in -2..2) for (z in -2..2) for (y in 60..69) h.world.getBlockAt(x, y, z).type = Material.STONE
+            h.viewing = true
+
+            h.owner.pulse(2_000)
+
+            val admission = h.owner.debug(h.city.id, null)["admission"] as Map<*, *>
+            admission["total"] shouldBe 5
+            val rows = (admission["entries"] as List<*>).map { it as Map<*, *> }
+            rows.count { it["spawn"] != null } shouldBe 2
+            rows.sumOf { ((it["spawn"] as? Map<*, *>)?.get("inspected") as? Int) ?: 0 } shouldBe
+                2 * CITIZEN_SPAWN_CANDIDATE_LIMIT
+            rows.count { it["reason"] == "spawn-budget" } shouldBe 3
+        }
+    }
+
     for ((farmerCount, ripensDuringCare) in listOf(1 to false, 2 to false, 1 to true))
         test("$farmerCount farmers harvest three nearby crops without rescanning between receipts (ripens during care: $ripensDuringCare)") {
         failOnUnsupportedMockBukkitOperation {
@@ -728,6 +815,39 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.status(h.workerId) shouldBe "workers.status.working"
             h.supplyRequests shouldBe 1
             h.deliveries shouldBe 0
+        }
+    }
+
+    test("an autonomous earthwork workplace changes the builder destination but still requires real arrival") {
+        residentRuntime { h ->
+            val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
+            val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.PLACING,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), workCredit = 1)
+            h.constructionWorkplace = CivPosition(22, 64, 0)
+            for (z in -1..1) h.world.loadChunk(2, z)
+            h.city = h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                buildings = listOf(h.city.buildings.first(), hut, target), construction = order)
+
+            h.owner.pulse(2_000)
+
+            val row = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
+            val plan = row["plan"] as Map<*, *>
+            plan["workplace"] shouldBe h.constructionWorkplace
+            plan["storage"] shouldBe h.city.buildings.first().entrance
+            h.owner.constructionReady(h.city.id, order.id) shouldBe false
+            (shouldThrow<CivsRejection> { h.owner.requireConstructionArrival(h.city.id, h.workerId, order.id) }).reason shouldBe
+                "route-unreachable"
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 22.5, 64.0, .5))
+            h.owner.pulse(3_000)
+            h.owner.pulse(5_000)
+            h.owner.constructionReady(h.city.id, order.id) shouldBe true
+            h.constructionWorkplace = CivPosition(26, 64, 0)
+            // Persistence can advance the front between resident pulses; the stale actor must not authorize it.
+            h.owner.constructionReady(h.city.id, order.id) shouldBe false
         }
     }
 
@@ -2182,6 +2302,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val steps = mutableListOf<Pair<Location, Location>>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
+    var constructionWorkplace: CivPosition? = null
     var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
     val pendingUnload = CompletableFuture<Settlement>()
@@ -2284,7 +2405,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)
-            })
+            }, constructionWorkplace = { _, _ -> constructionWorkplace })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }

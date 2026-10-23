@@ -91,6 +91,7 @@ class CivsCitizens(
         CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },
     private val craftSupplies: (UUID, UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },
+    private val constructionWorkplace: (UUID, UUID) -> CivPosition? = { _, _ -> null },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
@@ -102,6 +103,7 @@ class CivsCitizens(
     private var actors = linkedMapOf<UUID, Actor>()
     private var statuses = mutableMapOf<UUID, String>()
     private var spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
+    private val admissions = mutableMapOf<UUID, CitizenAdmission>()
     @Volatile private var completions = ConcurrentLinkedQueue<Completion>()
     private val closed = AtomicBoolean()
     private var retirement: CompletableFuture<Void>? = null
@@ -194,6 +196,7 @@ class CivsCitizens(
         voices.retain(workers.keys)
         statuses.keys.retainAll(workers.keys)
         spawnRetries.keys.retainAll(workers.keys)
+        admissions.keys.retainAll(workers.keys - actors.keys)
         val viewers = viewers()
 
         for (actor in actors.values.toList()) {
@@ -237,6 +240,9 @@ class CivsCitizens(
         }
 
         var budget = citizenSpawnBudget(0, maxActive)
+        workers.values.filter { it.second.id !in actors && it.second.id in pendingHarm }.forEach { (city, worker) ->
+            recordAdmission(city, worker, null, null, "injury-pending", nowMillis)
+        }
         val candidates = workers.values.filter { it.second.id !in actors && it.second.id !in pendingHarm }
             .map { (city, worker) -> Triple(city, worker, plan(city, worker)) }
             .sortedByDescending { (city, _, plan) -> plan != null &&
@@ -255,28 +261,45 @@ class CivsCitizens(
             if (reason != null) {
                 statuses[workerId] = reason
                 if (reason == "sleeping") spawnRetries.remove(workerId)
+                recordAdmission(city, worker, plan, world, reason, nowMillis)
                 continue
             }
             if (budget == 0) {
                 statuses[workerId] = "waiting"
+                recordAdmission(city, worker, plan, world, "spawn-budget", nowMillis)
                 continue
             }
-            val retry = spawnRetries[workerId]?.takeIf { it.first == plan }?.second ?: CitizenRetry()
-            if (!retry.ready(nowMillis)) continue
+            val retry = spawnRetries[workerId]?.takeIf { it.first == plan }?.second
+                ?: CitizenRetry(exhaustedCooldownMillis = 60_000)
+            if (!retry.ready(nowMillis)) {
+                recordAdmission(city, worker, plan, world, "spawn-retry-cooldown", nowMillis, retry)
+                continue
+            }
             if (actors.size >= maxActive && visible) actors.values.firstOrNull { actor ->
                 actor.workerId !in pendingHarm && actor.supplyPickup == null &&
                     actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
                     !citizenHasViewer(actor.worldId, actor.npc.location.point(), viewers, viewerRange)
             }?.let { remove(it, "capacity") }
-            if (actors.size >= maxActive) { statuses[workerId] = "capacity"; continue }
+            if (actors.size >= maxActive) {
+                statuses[workerId] = "capacity"
+                recordAdmission(city, worker, plan, world, "capacity", nowMillis, retry)
+                continue
+            }
             budget-- // Failed spawns consume the same per-pulse budget as successful spawns.
             var npc: PacketPlayerNpc? = null
             try {
-                val point = spawnPoint(city.id, requireNotNull(world), requireNotNull(plan).spawnOrigin, city.workers.indexOf(worker), viewers)
+                val search = spawnPoint(city, requireNotNull(world), requireNotNull(plan).spawnOrigin,
+                    city.workers.indexOf(worker), viewers, nowMillis)
+                val point = search.point?.location(world)
                 if (point == null) {
                     retry.fail(nowMillis)
                     spawnRetries[workerId] = plan to retry
                     statuses[workerId] = "route-unreachable"
+                    recordAdmission(city, worker, plan, world, "no-safe-spawn", nowMillis, retry, search)
+                    if (retry.attempts == 1 || retry.attempts == 3) plugin.logger.warning(CivsDiagnostics.line(
+                        "citizen_spawn_blocked", "city" to city.id, "worker" to workerId, "origin" to plan.spawnOrigin,
+                        "attempt" to retry.attempts, "retry_at" to retry.nextAttemptAt,
+                        "candidates" to search.inspected, "rejections" to search.rejections))
                     continue
                 }
                 val skin = citizenSkin(skins, worker)
@@ -288,6 +311,7 @@ class CivsCitizens(
                 actors[workerId] = actor
                 syncResident(npc, worker, plan)
                 spawnRetries.remove(workerId)
+                admissions.remove(workerId)
                 update(actor, city, world, nowMillis)
                 if (actors[workerId] === actor) CivsDiagnostics.event("citizen_spawn", "city" to city.id,
                     "worker" to workerId, "type" to "PACKET_PLAYER",
@@ -299,6 +323,7 @@ class CivsCitizens(
                 retry.fail(nowMillis)
                 spawnRetries[workerId] = requireNotNull(plan) to retry
                 statuses[workerId] = "unavailable"
+                recordAdmission(city, worker, plan, world, "spawn-failed", nowMillis, retry)
                 if (retry.attempts == 1 || retry.exhausted) plugin.logger.log(Level.WARNING,
                     "ArcCivs NPC spawn failed city=${city.id} worker=$workerId attempt=${retry.attempts}", error)
             }
@@ -428,10 +453,22 @@ class CivsCitizens(
     internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         checkMainThread()
         val selected = actors.values.filter { (cityId == null || it.cityId == cityId) && (workerId == null || it.workerId == workerId) }
+        val absent = admissions.values.filter { (cityId == null || it.cityId == cityId) && (workerId == null || it.workerId == workerId) }
         val now = navigationClock()
         return linkedMapOf("closed" to closed.get(), "maximum_active" to maxActive, "viewer_range" to viewerRange,
             "navigation_tick" to navigationTick,
             "cadence_ms" to navigationCadenceMillis, "planner_global" to navigation.debug(),
+            "admission" to mapOf("source" to "last-resident-pulse", "total" to absent.size,
+                "truncated" to (absent.size > 8), "entries" to absent.take(8).map { admission -> mapOf(
+                    "city" to admission.cityId, "worker" to admission.workerId, "reason" to admission.reason,
+                    "observed_at_ms" to admission.at, "origin" to admission.plan?.spawnOrigin,
+                    "origin_chunk" to admission.chunk, "required_load_level" to Chunk.LoadLevel.ENTITY_TICKING,
+                    "retry_attempts" to admission.retry?.attempts, "retry_exhausted" to admission.retry?.exhausted,
+                    "next_retry_at_ms" to admission.retry?.nextAttemptAt,
+                    "spawn" to admission.spawn?.let { search -> mapOf("observed_at_ms" to search.at,
+                        "candidate_limit" to CITIZEN_SPAWN_CANDIDATE_LIMIT, "inspected" to search.inspected,
+                        "rejections" to search.rejections, "sample_limit" to CITIZEN_SPAWN_SAMPLE_LIMIT,
+                        "truncated" to (search.inspected > search.samples.size), "samples" to search.samples) }) }),
             "total" to selected.size, "truncated" to (selected.size > 8), "entries" to selected.take(8).map { actor ->
                 val valid = actor.npc.isValid
                 val position = if (valid) actor.npc.location else null
@@ -688,6 +725,11 @@ class CivsCitizens(
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
         var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
         if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
+        if (city.autonomy != null && base.type == BuildingType.BUILDER_HUT) {
+            base.token.constructionId?.let { orderId ->
+                constructionWorkplace(city.id, orderId)?.let { base = base.copy(workplace = it) }
+            }
+        }
         if (city.autonomy == null && base.type == BuildingType.SAWMILL && base.idleReason == null) {
             val job = craftPlan(city, worker)
             base = if (job == null) base.copy(idleReason = "waiting-orders")
@@ -1373,8 +1415,10 @@ class CivsCitizens(
     /** Cosmetic equipment is never inserted into the resident's durable inventory. */
     internal fun constructionPlaced(cityId: UUID, orderId: UUID, position: CivPosition, material: Material) {
         checkMainThread()
-        if (closed.get() || material.isAir) return
+        if (closed.get()) return
         val city = cityProvider().firstOrNull { it.id == cityId } ?: return
+        paths.invalidateBlock(city.worldId, position)
+        if (material.isAir) return
         for (actor in actors.values.sortedBy { it.workerId }) {
             val player = constructionBuilder(actor, city, orderId) ?: continue
             actor.npc.setEquipment(EquipmentSlot.HAND, ItemStack(citizenPlacementItem(material) ?: Material.AIR))
@@ -1389,6 +1433,11 @@ class CivsCitizens(
         val order = city.construction ?: return null
         val resident = city.workers.firstOrNull { it.id == actor.workerId } ?: return null
         val assignment = resident.assignment?.let(city::building) ?: return null
+        if (city.autonomy != null) {
+            val currentWorkplace = constructionWorkplace(city.id, orderId) ?: citizenPlan(city, resident)?.workplace
+            // A saved terrain batch may advance before the next resident pulse updates its actor.
+            if (actor.plan.workplace != currentWorkplace) return null
+        }
         if (actor.cityId != city.id || order.id != orderId || resident.assignment != actor.plan.token.assignmentId ||
             !CivsRules.isBuilder(city, assignment) || !CivsRules.builderCanWork(city, assignment) ||
             requirePlacement && order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING) ||
@@ -2318,23 +2367,52 @@ class CivsCitizens(
         }
     }
 
-    private fun spawnPoint(cityId: UUID, world: World, storage: CivPosition, ordinal: Int, viewers: List<CitizenViewer>): Location? {
-        val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1,
-            1 to -1, -1 to -1, 2 to 0, -2 to 0, 0 to 2, 0 to -2)
-        return offsets.indices.asSequence().map { offsets[(it + ordinal) % offsets.size] }
-            .map { (x, z) -> CivPosition(storage.x + x, storage.y, storage.z + z) }
-            .filter { citizenStandable(world, it) }
-            .map { it.location(world) }
-            .filter { activeAt(cityId, world.uid, it.point(), viewers) }
-            .firstOrNull { location ->
-                val body = citizenStandingBounds(location, 1.0)
-                actors.values.none { actor ->
-                    actor.npc.isValid && actor.worldId == world.uid &&
-                        (actor.npc.location.distanceSquared(location) < 0.8 ||
-                            actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
-                            actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
+    private fun recordAdmission(city: Settlement, worker: CivWorker, plan: CitizenPlan?, world: World?,
+                                reason: String, at: Long, retry: CitizenRetry? = null, spawn: CitizenSpawnSearch? = null) {
+        val previous = admissions[worker.id]?.takeIf { it.plan == plan }
+        val origin = plan?.spawnOrigin
+        val level = if (world == null || origin == null) null else citizenChunkLoadLevel(world, origin.x shr 4, origin.z shr 4)
+        admissions[worker.id] = CitizenAdmission(city.id, worker.id, plan, reason, at,
+            origin?.let { mapOf("world" to city.worldId, "x" to (it.x shr 4), "z" to (it.z shr 4),
+                "loaded" to (level != null), "load_level" to level) },
+            retry ?: spawnRetries[worker.id]?.takeIf { it.first == plan }?.second, spawn ?: previous?.spawn)
+    }
+
+    private fun spawnPoint(city: Settlement, world: World, storage: CivPosition, ordinal: Int,
+                           viewers: List<CitizenViewer>, at: Long): CitizenSpawnSearch {
+        val samples = mutableListOf<CitizenSpawnSample>()
+        val rejections = linkedMapOf<String, Int>()
+        var inspected = 0
+        // Two admissions per pulse give at most 234 candidate checks across all cities.
+        for (point in citizenSpawnCandidates(storage, ordinal)) {
+            inspected++
+            val location = point.location(world)
+            val reason = when {
+                !city.contains(point.x, point.z) -> "outside-city"
+                !citizenControlClear(city, point) -> "control-obstructed"
+                !citizenStandable(world, point) -> "not-standable"
+                !activeAt(city.id, world.uid, point.point(), viewers) -> "sleeping"
+                else -> {
+                    val body = citizenStandingBounds(location, 1.0)
+                    if (actors.values.any { actor ->
+                        actor.npc.isValid && actor.worldId == world.uid &&
+                            (actor.npc.location.distanceSquared(location) < 0.8 ||
+                                actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
+                                actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
+                    }) "occupied" else null
                 }
             }
+            if (samples.size < CITIZEN_SPAWN_SAMPLE_LIMIT || reason == null) {
+                val level = citizenChunkLoadLevel(world, point.x shr 4, point.z shr 4)
+                val blocks = if (level != null && point.y > world.minHeight && point.y + 1 < world.maxHeight)
+                    listOf(-1, 0, 1).map { world.getBlockAt(point.x, point.y + it, point.z).type.name } else null
+                val sample = CitizenSpawnSample(point, reason ?: "accepted", level, blocks?.get(0), blocks?.get(1), blocks?.get(2))
+                if (samples.size == CITIZEN_SPAWN_SAMPLE_LIMIT) samples[samples.lastIndex] = sample else samples += sample
+            }
+            if (reason == null) return CitizenSpawnSearch(point, at, inspected, rejections, samples)
+            rejections[reason] = (rejections[reason] ?: 0) + 1
+        }
+        return CitizenSpawnSearch(null, at, inspected, rejections, samples)
     }
 
     private fun arrived(from: Location, to: Location): Boolean {
@@ -2446,6 +2524,7 @@ class CivsCitizens(
         supplyCompletions.clear()
         pendingHarm.clear()
         spawnRetries.clear()
+        admissions.clear()
         statuses.clear()
         val packetRetirement = try { packets.closeAsync() }
             catch (error: Throwable) { CompletableFuture.failedFuture<Void>(error) }
@@ -2643,6 +2722,23 @@ internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<
     viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
 
+internal const val CITIZEN_SPAWN_CANDIDATE_LIMIT = 13 * 9
+private const val CITIZEN_SPAWN_SAMPLE_LIMIT = 16
+
+/** Preserve the nearest floor first, then inspect only four blocks above and below it. */
+internal fun citizenSpawnCandidates(origin: CivPosition, ordinal: Int): Sequence<CivPosition> = sequence {
+    val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1,
+        1 to -1, -1 to -1, 2 to 0, -2 to 0, 0 to 2, 0 to -2)
+    for (dy in listOf(0, 1, -1, 2, -2, 3, -3, 4, -4)) for (index in offsets.indices) {
+        val (dx, dz) = offsets[Math.floorMod(index + ordinal, offsets.size)]
+        val x = origin.x.toLong() + dx
+        val y = origin.y.toLong() + dy
+        val z = origin.z.toLong() + dz
+        if (x in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() && y in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() &&
+            z in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) yield(CivPosition(x.toInt(), y.toInt(), z.toInt()))
+    }
+}
+
 /** Failed native target checks consume an admission too, so they must not monopolize the next pulse. */
 internal fun <T> citizenRotateAfterAdmission(actors: MutableMap<UUID, T>, workerId: UUID) {
     val actor = actors.remove(workerId) ?: return
@@ -2664,6 +2760,12 @@ internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, 
 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
     val shipmentId: UUID? = null, val craftJobId: UUID? = null)
+private data class CitizenAdmission(val cityId: UUID, val workerId: UUID, val plan: CitizenPlan?, val reason: String,
+    val at: Long, val chunk: Map<String, Any?>?, val retry: CitizenRetry?, val spawn: CitizenSpawnSearch?)
+private data class CitizenSpawnSample(val point: CivPosition, val reason: String, val loadLevel: Chunk.LoadLevel?,
+    val support: String?, val feet: String?, val head: String?)
+private data class CitizenSpawnSearch(val point: CivPosition?, val at: Long, val inspected: Int,
+    val rejections: Map<String, Int>, val samples: List<CitizenSpawnSample>)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false) {
@@ -3211,21 +3313,26 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
     }
 }
 
-internal class CitizenRetry {
+internal class CitizenRetry(private val exhaustedCooldownMillis: Long? = null) {
     var attempts = 0
         private set
     private var retryAt = 0L
     val exhausted: Boolean get() = attempts >= 3
-    fun ready(now: Long): Boolean = !exhausted && now >= retryAt
+    val nextAttemptAt: Long? get() = retryAt.takeIf { !exhausted || exhaustedCooldownMillis != null }
+    fun ready(now: Long): Boolean = nextAttemptAt?.let { now >= it } == true
     fun fail(now: Long) {
         attempts++
-        retryAt = now + if (attempts == 1) 5_000 else 15_000
+        retryAt = now + if (exhausted && exhaustedCooldownMillis != null) exhaustedCooldownMillis
+            else if (attempts == 1) 5_000 else 15_000
     }
 }
 
 /** Server-thread only. The false overload and load-level getter never load or retain a chunk on Paper. */
 internal fun citizenChunkReady(world: World, x: Int, z: Int): Boolean =
-    world.isChunkLoaded(x, z) && world.getChunkAt(x, z, false).loadLevel == Chunk.LoadLevel.ENTITY_TICKING
+    citizenChunkLoadLevel(world, x, z) == Chunk.LoadLevel.ENTITY_TICKING
+
+internal fun citizenChunkLoadLevel(world: World, x: Int, z: Int): Chunk.LoadLevel? =
+    if (world.isChunkLoaded(x, z)) world.getChunkAt(x, z, false).loadLevel else null
 
 private fun CitizenPlan.chunksReady(world: World): Boolean = workplace?.let {
     CitizenChunks.between(storage.x, storage.z, it.x, it.z).ready(world)

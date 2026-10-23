@@ -138,7 +138,9 @@ class CivsStore(
     }
 
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
-        val snapshot = plan.copy(blocks = plan.blocks.toList())
+        val snapshot = plan.copy(blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
+            it.copy(blocks = it.blocks.toList(), route = it.route.toList())
+        })
         return submit {
             validatePlan(snapshot)
             val trustedRoot = trustedRoot()
@@ -452,6 +454,28 @@ class CivsStore(
             require(coordinates.add(position)) { "Placement plan contains duplicate coordinates" }
             require(validBoundedText(block.before, MAX_BLOCK_STATE_CHARS)) { "Plan before-state is invalid" }
             require(validBoundedText(block.after, MAX_BLOCK_STATE_CHARS)) { "Plan after-state is invalid" }
+        }
+        plan.terrain?.let { terrain ->
+            require(terrain.blocks.size <= MAX_PLAN_BLOCKS && terrain.blocks.size + plan.blocks.size <= MAX_PLAN_BLOCKS)
+            require(terrain.route.isNotEmpty() && terrain.route.size <= 4096)
+            require(terrain.cutCount >= 0 && terrain.fillCount >= 0 &&
+                terrain.cutCount.toLong() + terrain.fillCount <= terrain.blocks.size)
+            requireSafePosition(terrain.bounds.min); requireSafePosition(terrain.bounds.max)
+            require(terrain.bounds.min.x <= terrain.bounds.max.x && terrain.bounds.min.y <= terrain.bounds.max.y &&
+                terrain.bounds.min.z <= terrain.bounds.max.z)
+            require(terrain.groundY in -4095..4095)
+            val terrainCoordinates = hashSetOf<CivPosition>()
+            terrain.blocks.forEach { cell ->
+                requireSafePosition(cell.position)
+                require(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z))
+                require(cell.position != building.control && terrainCoordinates.add(cell.position))
+                require(validBoundedText(cell.before, MAX_BLOCK_STATE_CHARS) && validBoundedText(cell.after, MAX_BLOCK_STATE_CHARS))
+            }
+            terrain.route.forEach(::requireSafePosition)
+            terrain.route.zipWithNext().forEach { (a, b) ->
+                require(kotlin.math.abs(a.x.toLong() - b.x) + kotlin.math.abs(a.z.toLong() - b.z) == 1L &&
+                    kotlin.math.abs(a.y.toLong() - b.y) <= 1) { "Terraform route is discontinuous" }
+            }
         }
     }
 

@@ -3700,6 +3700,62 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    for (resumedBatch in 0..1) test("autonomous earthworks resume batch $resumedBatch with actual worker admission and durable next front") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true)
+            val old = requireNotNull(placement.city.construction)
+            val building = requireNotNull(old.plannedBuilding)
+            val cells = listOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air"),
+                CivPlanBlock(CivPosition(7, 63, 0), "minecraft:air", "minecraft:cobblestone"))
+            val route = (0..12).map { CivPosition(it, 64, 0) }
+            val plan = CivPlacementPlan(old.id, h.city.id, h.world.uid, building, listOf(
+                CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:stone"),
+                CivPlanBlock(CivPosition(16, 64, 0), "minecraft:air", "minecraft:oak_planks")), "b".repeat(64),
+                CivTerraformPlan(CivBox(CivPosition(5, 63, 0), CivPosition(7, 64, 0)), cells, route, 63, 1, 1))
+            val prefix = civsTerraformBatches(plan)
+            val order = old.copy(phase = ConstructionPhase.PLACING, payment = null,
+                cost = CivsAutonomy.cost(building.type, old.targetLevel),
+                batches = CivConstructionBatches(4, 16, true), workRequired = 4, workDone = resumedBatch, workCredit = 2,
+                blocksRequired = 4, blocksPlaced = resumedBatch, preparationWorkplace = prefix[resumedBatch].workplace)
+            val village = CivsRules.validate(placement.city.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = Stock(40, 30, 20), construction = order))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+            val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
+            every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+            var gate: (() -> Boolean)? = null
+            val applied = CompletableFuture<Unit>()
+            var placed: ((CivPlanBlock) -> Unit)? = null
+            every { h.citizens.constructionPlaced(village.id, order.id, any(), any()) } throws IllegalStateException("cosmetic packet failure")
+            every { h.worldAdapter.applyTerraform(plan, h.owner, any(), resumedBatch, any(), any()) } answers {
+                arg<List<CivPlanBlock>>(2) shouldBe listOf(cells[resumedBatch])
+                gate = arg(4)
+                placed = arg(5)
+                applied
+            }
+            every { h.citizens.constructionReady(village.id, order.id) } returns false
+            h.start()
+            verify(exactly = 1) { h.worldAdapter.applyTerraform(plan, h.owner, any(), resumedBatch, any(), any()) }
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            requireNotNull(gate).invoke() shouldBe false
+            every { h.citizens.constructionReady(village.id, order.id) } returns true
+            requireNotNull(gate).invoke() shouldBe true
+            h.saves.size shouldBe 0
+            // A gesture/packet failure after a native write must not pause the paid earthwork order.
+            requireNotNull(placed).invoke(cells[resumedBatch])
+            applied.complete(Unit); h.tick()
+            val saved = h.saves.single().first
+            saved.construction!!.workDone shouldBe resumedBatch + 1
+            saved.construction!!.preparationWorkplace shouldBe (prefix.getOrNull(resumedBatch + 1)?.workplace ?: route.last())
+            saved.construction!!.blocksPlaced shouldBe resumedBatch + 1
+            saved.stock shouldBe village.stock
+            h.service.settlements().single().construction!!.workDone shouldBe resumedBatch
+            // Persist before publishing; closing here simulates a restart at this durable boundary.
+            h.saves.single().second.complete(saved)
+            h.service.close()
+        }
+    }
+
     test("a player container filled after preflight keeps its items at the exact native write boundary") {
         // WorldEdit clears container contents before setBlock, even for the same target material.
         listOf(Material.OAK_PLANKS, Material.CHEST).forEach { target ->

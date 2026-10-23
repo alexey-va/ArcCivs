@@ -45,7 +45,39 @@ data class CivInventory(
 /** Fixed deterministic layer tiles; a completed NPC trip authorizes exactly one tile. */
 data class CivConstructionBatches(val total: Int, val size: Int = 64, val atomicPairs: Boolean? = null)
 
-internal data class CivBuildBatch(val minimum: CivPosition, val maximum: CivPosition)
+internal data class CivBuildBatch(val minimum: CivPosition, val maximum: CivPosition,
+    val terrainStart: Int? = null, val terrainCount: Int = 0, val workplace: CivPosition? = null)
+
+/** Preserve the planner's safe cut/fill order and finish each approach segment before advancing. */
+internal fun civsTerraformBatches(plan: CivPlacementPlan, size: Int = 16): List<CivBuildBatch> {
+    val terrain = plan.terrain ?: return emptyList()
+    require(size in 1..16 && terrain.route.isNotEmpty())
+    val result = mutableListOf<CivBuildBatch>()
+    terrain.blocks.forEachIndexed { index, cell ->
+        val p = cell.position
+        val routeIndex = terrain.route.indices.minBy { i ->
+            val r = terrain.route[i]
+            kotlin.math.abs(r.x.toLong() - p.x) + kotlin.math.abs(r.z.toLong() - p.z)
+        }
+        val standing = terrain.route[(routeIndex - 3).coerceAtLeast(0)]
+        val previous = result.lastOrNull()
+        if (previous != null && previous.terrainCount < size && previous.workplace == standing) {
+            result[result.lastIndex] = previous.copy(
+                minimum = CivPosition(minOf(previous.minimum.x, p.x), minOf(previous.minimum.y, p.y), minOf(previous.minimum.z, p.z)),
+                maximum = CivPosition(maxOf(previous.maximum.x, p.x), maxOf(previous.maximum.y, p.y), maxOf(previous.maximum.z, p.z)),
+                terrainCount = previous.terrainCount + 1)
+        } else result += CivBuildBatch(p, p, index, 1, standing)
+    }
+    return result
+}
+
+internal fun civsBatchBlocks(plan: CivPlacementPlan, batch: CivBuildBatch?): List<CivPlanBlock> =
+    if (batch?.terrainStart != null) requireNotNull(plan.terrain).blocks.subList(batch.terrainStart,
+        batch.terrainStart + batch.terrainCount)
+    else if (batch == null) plan.blocks else plan.blocks.filter { cell -> cell.position.let {
+        it.x in batch.minimum.x..batch.maximum.x && it.y in batch.minimum.y..batch.maximum.y &&
+            it.z in batch.minimum.z..batch.maximum.z
+    } }
 
 internal fun civsBuildBatches(bounds: CivBox, size: Int = 256): List<CivBuildBatch> {
     require(size in 1..256)
@@ -112,9 +144,12 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicP
 }
 
 internal fun civsConstructionBatches(plan: CivPlacementPlan, order: CivConstruction): List<CivBuildBatch> =
-    if (order.payment != null || order.batches?.atomicPairs == true)
+    civsTerraformBatches(plan) + (if (order.payment != null || order.batches?.atomicPairs == true)
         civsMaterialBatches(plan, requireNotNull(order.batches).size, order.batches.atomicPairs == true)
-    else civsBuildBatches(plan, requireNotNull(order.batches).size)
+    else civsBuildBatches(plan, requireNotNull(order.batches).size)).map { batch ->
+        // An authored control can be upstairs until its staircase exists. Keep the proven outside entrance.
+        if (plan.terrain == null) batch else batch.copy(workplace = plan.terrain.route.last())
+    }
 
 /** Only native two-cell blocks; trapdoors and ordinary bisected-looking states remain single blocks. */
 internal fun civsPairedPosition(p: CivPosition, state: String): CivPosition? {

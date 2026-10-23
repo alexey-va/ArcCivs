@@ -703,6 +703,9 @@ object CivsRules {
                 snapshot(target.type == BuildingType.TOWN_HALL || target.level <= city.level())
                 snapshot(founding || target.type != BuildingType.TOWN_HALL || target.level > 1 || order.batches != null)
                 snapshot(validConstructionPrice(city, order, target))
+                order.preparationWorkplace?.let { point ->
+                    snapshot(city.autonomy != null && city.contains(point.x, point.z) && point.y in -4095..4095)
+                }
                 snapshot((order.blocksRequired == null) == (order.blocksPlaced == null))
                 order.blocksRequired?.let { total -> snapshot(total in 0..CivsStore.MAX_PLAN_BLOCKS && order.blocksPlaced!! in 0..total) }
                 order.workCredit?.let { credit -> snapshot((order.payment != null || city.autonomy != null && order.batches != null) &&
