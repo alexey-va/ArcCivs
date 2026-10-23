@@ -1546,10 +1546,7 @@ class CivsService(
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
             } else if (city.autonomy != null) {
                 rejectIf(constructionId != null || city.autonomy.paused, "stale-delivery")
-                val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-                val depot = citizenPlan(city, worker)?.storage?.let { point -> city.buildings.firstOrNull { it.control == point } }
-                    ?: throw CivsRejection("storage-unavailable")
-                citizens.requireStorageArrival(cityId, workerId, depot.id)
+                citizens.requireAutonomousDelivery(cityId, workerId, CitizenToken(assignment, cycle, nextAt, null))
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }.thenApply { saved ->
                     CivsDiagnostics.event("autonomous_resource_delivered", "city" to cityId, "worker" to workerId,
                         "cycle" to cycle, "resource" to CivsRules.resource(building.type),

@@ -685,7 +685,7 @@ class CivsWorld(
         if (block.type.isAir) return
         if (block.isLiquid || block.state is TileState ||
             block.type !in AUTONOMOUS_PLANTS &&
-            !(block.type in AUTONOMOUS_SOIL && block.y <= ground + 1 || block.type in AUTONOMOUS_ROCK && block.y <= ground))
+            !(block.type in AUTONOMOUS_SOIL && block.y <= ground + 1 || block.type in TERRAFORM_GROUND && block.y <= ground))
             throw CivsRejection("autonomy-terrain", mapOf("block" to block.type.name,
                 "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString()))
     }

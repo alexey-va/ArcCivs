@@ -228,6 +228,35 @@ class CivsCitizensTest : FunSpec({
         cycle.phase shouldBe CitizenPhase.READY
     }
 
+    test("autonomous producers use prepared entrances while personal producers retain their barrels") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(
+            phase = BuildingPhase.SITE, control = CivPosition(15, 67, -1))
+        for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)) {
+            val factory = building(type, CivPosition(20, 64, 0)).copy(control = CivPosition(24, 67, -1))
+            val worker = CivWorker(UUID.randomUUID(), "Producer", factory.id, nextDeliveryAt = 60_000)
+            val village = city(listOf(hall, factory), worker, null).copy(autonomy = CivAutonomy())
+            val plan = requireNotNull(citizenPlan(village, worker))
+            plan.storage shouldBe hall.entrance
+            plan.workplace shouldBe factory.entrance
+            plan.autonomousWork shouldBe factory
+            plan.completeAtWorkplace shouldBe false
+            val cycle = plan.cycle()
+            reachWork(cycle)
+            repeat(60) { cycle.work((it + 1) * 1_000L) }
+            cycle.phase shouldBe CitizenPhase.RETURNING
+            cycle.beginDelivery(60_000) shouldBe null
+            cycle.arrive(61_000)
+            (cycle.beginDelivery(61_000) != null) shouldBe true
+
+            val personal = requireNotNull(citizenPlan(village.copy(autonomy = null,
+                inventory = CivInventory(CivStorageMode.PHYSICAL)), worker))
+            personal.storage shouldBe factory.control
+            personal.workplace shouldBe factory.control
+            personal.autonomousWork shouldBe null
+            personal.completeAtWorkplace shouldBe true
+        }
+    }
+
     test("item builders start at their own hut even when the hall is nearer the construction") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val hut = building(BuildingType.BUILDER_HUT, CivPosition(24, 64, 0))

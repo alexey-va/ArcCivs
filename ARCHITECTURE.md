@@ -25,6 +25,12 @@ world work and exact inputs, but retain the normal NPC journey, work duration,
 depot arrival check and unique cycle receipt before stock is credited. No elapsed
 time, teleport recovery or forecast alone credits a delivery. This is deliberately
 abstract resource production, not evidence of actual crop/ore harvesting.
+Autonomous producers walk between the completed workplace entrance and the depot
+entrance, including a founding SITE hall whose authored barrel is above unfinished
+ground. The final receipt rechecks the observed production building, cycle, mode,
+world, delivery phase and safe native endpoint after waiting for another city save.
+An unrelated stock revision does not invalidate a journey. Physical-item settlements
+retain their barrel reach and inventory receipt requirements.
 
 The service submits the selected SITE or upgrade through the existing captured
 schematic store, pending control receipt, queue, builder work credit and batch
@@ -65,6 +71,9 @@ Lands denial remain hard boundaries. An unsupported deep void or disconnected
 protected region can still refuse a candidate. New sites and upgrade expansion
 cells reject non-natural blocks; filled containers remain protected inside an
 owned upgrade footprint too.
+Final schematic capture uses the same natural-ground whitelist below its anchor,
+including sand and gravel exposed beneath the prepared terrace; it does not permit
+those materials above the site's ground limit or bypass liquids and tile entities.
 
 `CivPlacementPlan.terrain` stores exact before/after earthwork cells separately
 from the original schematic snapshot. Its deterministic builder batches precede

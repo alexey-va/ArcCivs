@@ -851,6 +851,86 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY))
+    test("autonomous $type walks a complete production trip beside a floating hall SITE barrel") {
+        residentRuntime { h ->
+            val producer = h.assignFarm().copy(type = type, production = null,
+                bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)),
+                control = CivPosition(22, 67, -2))
+            h.world.getBlockAt(20, 64, 0).type = Material.AIR
+            val hall = h.city.buildings.first().copy(phase = BuildingPhase.SITE,
+                bounds = CivBox(CivPosition(-2, 64, -4), CivPosition(2, 68, -1)),
+                control = CivPosition(0, 67, -2))
+            for (building in listOf(hall, producer)) building.control!!.let {
+                h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
+            }
+            h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                buildings = listOf(hall, producer)))
+            val token = requireNotNull(citizenPlan(h.city, h.city.workers.single())).token
+            h.onDelivery = { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, it) }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            val actor = h.owner.collisionActors().single()
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            var walked = 0.0
+            var furthestX = actor.location.x
+            for (tick in 1..2_400) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                val step = before.distance(actor.location)
+                (step <= .215001) shouldBe true
+                walked += step
+                furthestX = maxOf(furthestX, actor.location.x)
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} walked=$walked ${h.navigationState()}") {
+                h.deliveries shouldBe 1
+                (walked > 35) shouldBe true
+                (furthestX > 19) shouldBe true
+                citizenNearEndpoint(CitizenPoint(actor.location.x, actor.location.y, actor.location.z), hall.entrance) shouldBe true
+            }
+            h.city.workers.single().completedCycles shouldBe 0L
+            h.city.stock shouldBe Stock()
+            h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token)
+            val accepted = h.city
+            val staleCities = listOf(
+                accepted.copy(buildings = listOf(hall, producer.copy(level = 2))),
+                accepted.copy(buildings = listOf(hall.copy(entrance = hall.entrance.copy(x = 1)), producer)),
+                accepted.copy(workers = accepted.workers.map { it.copy(assignment = null) }),
+                accepted.copy(autonomy = CivAutonomy(paused = true)),
+                accepted.copy(worldId = UUID.randomUUID()),
+            )
+            for (stale in staleCities) {
+                h.city = stale
+                shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            }
+            h.city = accepted
+            shouldThrow<CivsRejection> {
+                h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token.copy(completedCycles = 1))
+            }
+            h.world.getBlockAt(hall.entrance.x, 63, hall.entrance.z).type = Material.AIR
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            h.world.getBlockAt(hall.entrance.x, 63, hall.entrance.z).type = Material.STONE
+            h.city = accepted.copy(autonomy = null)
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            shouldThrow<CivsRejection> { h.owner.requireStorageArrival(h.city.id, h.workerId, hall.id) }
+            h.city = accepted
+            h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token)
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            h.city = CivsRules.deliver(h.city, h.city.owner, h.workerId, producer.id,
+                token.completedCycles, token.nextDeliveryAt, requireNotNull(h.navigationNow))
+            h.pendingDelivery.complete(h.city)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
+            h.city.workers.single().completedCycles shouldBe 1L
+            h.city.stock[CivsRules.resource(type)!!] shouldBe CivsRules.deliveryAmount(producer)
+            h.deliveries shouldBe 1
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            h.workPlans shouldBe 0
+        }
+    }
+
     for (carried in listOf(false, true)) test("a builder renews exhausted work credit at the site when supplied carried=$carried") {
         residentRuntime { h ->
             val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
@@ -2284,6 +2364,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val pendingNavigationWorkers: Int get() = navigationWorkers.size
     var hits = 0
     var deliveries = 0
+    var onDelivery: ((CitizenToken) -> Unit)? = null
     var unloads = 0
     var supplyRequests = 0
     var workReady = true
@@ -2368,8 +2449,9 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
         owner = CivsCitizens(plugin, { if (viewing) listOf(city) + otherCities else emptyList() },
-            { _, _, _, _, _, _, _ ->
-                check(work != null) { "idle resident cannot deliver" }
+            { _, _, assignment, cycle, nextAt, order, _ ->
+                if (onDelivery != null) onDelivery!!.invoke(CitizenToken(assignment, cycle, nextAt, order))
+                else check(work != null) { "idle resident cannot deliver" }
                 deliveries++
                 pendingDelivery
             },

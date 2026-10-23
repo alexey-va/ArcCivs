@@ -48,7 +48,7 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
-    test("autonomous production requires depot arrival and a durable unique trip receipt without physical inventory") {
+    test("autonomous production requires entrance arrival and a durable unique trip receipt without physical inventory") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
             val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
@@ -63,10 +63,11 @@ class CivsServiceTest : FunSpec({
                 .also { it.isAccessible = true }
             fun complete() = deliver.invoke(h.service, village.id, worker.id, forester.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
-            every { h.citizens.requireStorageArrival(village.id, worker.id, hall.id) } throws CivsRejection("route-unreachable")
+            val token = CitizenToken(forester.id, worker.completedCycles, worker.nextDeliveryAt, null)
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
             h.saves shouldBe emptyList()
-            every { h.citizens.requireStorageArrival(village.id, worker.id, hall.id) } returns Unit
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns Unit
             val delivered = complete()
             delivered.isDone shouldBe false
             h.service.settlements().single().stock shouldBe village.stock
@@ -79,7 +80,40 @@ class CivsServiceTest : FunSpec({
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "stale-delivery"
             h.saves.size shouldBe 1
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
-            verify(exactly = 0) { h.citizens.requireStorageArrival(village.id, worker.id, forester.id) }
+            verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
+        }
+    }
+
+    test("autonomous delivery rechecks observed arrival after waiting for another city revision") {
+        serviceScenario { h ->
+            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
+                control = CivPosition(10, 67, 0))
+            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1)
+            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(h.city.buildings.first(), forester),
+                workers = listOf(worker))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start()
+            val mutate = CivsService::class.java.declaredMethods.single { it.name == "mutate" }.also { it.isAccessible = true }
+            val unrelated: (Settlement) -> Settlement = { it.copy(stock = it.stock.copy(stone = it.stock.stone + 1),
+                revision = it.revision + 1) }
+            val pending = mutate.invoke(h.service, village.id, false, unrelated) as CompletableFuture<*>
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            val token = CitizenToken(forester.id, worker.completedCycles, worker.nextDeliveryAt, null)
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns Unit
+            val queued = deliver.invoke(h.service, village.id, worker.id, forester.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            queued.isDone shouldBe false
+            verify(exactly = 0) { h.citizens.requireAutonomousDelivery(any(), any(), any()) }
+            // The resident leaves the endpoint while the unrelated revision is still being persisted.
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
+            h.commit(); pending.join()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { queued.join() })?.reason shouldBe "route-unreachable"
+            verify(exactly = 1) { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) }
+            h.saves.size shouldBe 1
+            h.service.settlements().single().stock shouldBe village.stock.copy(stone = village.stock.stone + 1)
+            h.service.settlements().single().workers.single().completedCycles shouldBe 0L
         }
     }
 

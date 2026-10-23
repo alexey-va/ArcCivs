@@ -665,6 +665,49 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    for ((data, y, allowed) in listOf(
+        Triple("minecraft:gravel", 63, true),
+        Triple("minecraft:sand", 63, true),
+        Triple("minecraft:red_sand", 63, true),
+        Triple("minecraft:gravel", 65, false),
+        Triple("minecraft:sand", 65, false),
+        Triple("minecraft:red_sand", 65, false),
+        Triple("minecraft:bedrock", 63, false),
+        Triple("minecraft:chest", 63, false),
+        Triple("minecraft:oak_planks", 63, false),
+        Triple("minecraft:cobblestone", 63, false),
+        Triple("minecraft:water", 63, false),
+        Triple("minecraft:lava", 63, false),
+        Triple("minecraft:mangrove_roots[waterlogged=true]", 63, false),
+    )) test("prepared autonomous capture ${if (allowed) "accepts" else "rejects"} $data at y=$y outside its terrain overlay") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 63, 0), CivPosition(0, 65, 0)))
+            val prepared = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:dirt", "minecraft:air")
+            val proposed = worldTerraformPlan(s, listOf(prepared), building)
+            val city = worldTerraformCity(s, proposed).copy(buildings = emptyList(), construction = null)
+            s.cities.clear(); s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.DIRT
+            val target = s.world.getBlockAt(0, y, 0).also { it.blockData = Bukkit.createBlockData(data) }
+            val original = target.blockData.asString
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+                listOf(worldCell(0, 63, "minecraft:stone"), worldCell(0, 64, "minecraft:air"),
+                    worldCell(0, 65, "minecraft:air")), proposed.terrain)
+            s.scheduler.tick()
+            if (allowed) {
+                val plan = completed(capture)
+                plan.terrain!!.blocks shouldBe listOf(prepared)
+                plan.blocks.single { it.position == CivPosition(0, y, 0) }.before shouldBe original
+                plan.blocks.single { it.position == prepared.position }.before shouldBe "minecraft:air"
+            } else {
+                val failure = rejection(capture)
+                failure.reason shouldBe "autonomy-terrain"
+                failure.values shouldBe mapOf("block" to target.type.name, "x" to "0", "y" to y.toString(), "z" to "0")
+            }
+            target.blockData.asString shouldBe original
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+        }
+    }
+
     test("a terrain batch changes one block per tick and replay counts already applied cells without repeating them") {
         worldScenario { s ->
             val cells = listOf(

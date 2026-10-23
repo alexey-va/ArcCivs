@@ -586,6 +586,25 @@ class CivsCitizens(
             !citizenCanReachBlock(entity, control)) throw CivsRejection("route-unreachable")
     }
 
+    /** Abstract production uses the prepared entrances; item receipts still require their real barrel. */
+    internal fun requireAutonomousDelivery(cityId: UUID, workerId: UUID, token: CitizenToken) {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid }
+            ?: throw CivsRejection("route-unreachable")
+        val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        val current = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
+        val observed = actor.plan
+        if (city.autonomy?.paused != false || city.inventory != null || city.pendingDeletion != null ||
+            current.token != token || observed.token != token || observed.autonomousWork == null ||
+            observed.autonomousWork != current.autonomousWork || observed.workplace != current.workplace ||
+            observed.storage != current.storage || current.idleReason != null)
+            throw CivsRejection("stale-delivery")
+        if (closed.get() || actor.sheltering || actor.workerId in pendingHarm ||
+            actor.cycle.phase != CitizenPhase.DELIVERING || actor.npc.world.uid != city.worldId ||
+            !arrivedAt(actor, city, actor.npc.world, current.storage)) throw CivsRejection("route-unreachable")
+    }
+
     /** Only observed, safe producers can offer a fixed meeting point; no item is reserved here. */
     internal fun courierSources(cityId: UUID, courierId: UUID): Map<UUID, CivPosition> {
         checkMainThread()
@@ -2026,13 +2045,18 @@ class CivsCitizens(
 
     private fun storageForTarget(actor: Actor, city: Settlement, target: CivPosition): CivBuilding? {
         val work = actor.plan.worldWork
-        return if (target == actor.plan.workplace && actor.plan.courier?.cargo?.sourceWorkerId != null) null
+        return if (actor.plan.autonomousWork != null && (target == actor.plan.workplace || target == actor.plan.storage)) null
+        else if (target == actor.plan.workplace && actor.plan.courier?.cargo?.sourceWorkerId != null) null
         else if (target == actor.plan.workplace && work != null && citizenWorkFocus(work) == null)
             city.building(work.buildingId)?.takeIf { it.control != null }
         else citizenControlBuilding(city, target)
     }
 
     private fun arrivedAt(actor: Actor, city: Settlement, world: World, target: CivPosition): Boolean {
+        if (actor.plan.autonomousWork != null && (target == actor.plan.workplace || target == actor.plan.storage))
+            return citizenStandable(world, target) && citizenControlClear(city, target) &&
+                citizenPacketBodyClear(world, actor.npc.location.point(), false) &&
+                arrived(actor.npc.location, target.location(world))
         actor.plan.courier?.takeIf { !it.carrying && it.cargo.sourceWorkerId != null && target == actor.plan.workplace }?.let { plan ->
             val source = actors[plan.cargo.sourceWorkerId] ?: return false
             return citizenNearEndpoint(source.npc.location.point(), plan.cargo.sourceEntrance) && courierMeetsSource(actor, source, plan.cargo)
@@ -2768,7 +2792,8 @@ private data class CitizenSpawnSearch(val point: CivPosition?, val at: Long, val
     val rejections: Map<String, Int>, val samples: List<CitizenSpawnSample>)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
-    val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false) {
+    val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false,
+    val autonomousWork: CivBuilding? = null) {
     val spawnOrigin: CivPosition get() = if (courier?.cargo?.sourceWorkerId != null) storage else courier?.cargo?.sourceEntrance ?: storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
         worldWork != null || type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
@@ -2834,15 +2859,18 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
     }
     if (worker.cargo != null) return null
     val assigned = worker.assignment?.let(city::building)
+    val autonomous = city.autonomy != null && city.inventory == null
     val workType = assigned?.let { CivsRules.effectiveWorkType(city, it) }
     val builder = workType == BuildingType.BUILDER_HUT
     val order = city.construction.takeIf { builder }
     val workBuilding = order?.buildingId?.let(city::building) ?: order?.plannedBuilding
     val workplace = if (builder) workBuilding?.control ?: order?.plannedBuilding?.entrance ?: workBuilding?.entrance
-        else assigned?.control
+        else if (autonomous) assigned?.entrance else assigned?.control
     val depot = city.buildings.filter(CivsRules::isDepot)
-        .minByOrNull { (it.control ?: it.entrance).point().distanceSquared((workplace ?: city.center).point()) }
+        .minByOrNull { (if (autonomous) it.entrance else it.control ?: it.entrance).point()
+            .distanceSquared((workplace ?: city.center).point()) }
     val storage = when {
+        autonomous -> depot?.entrance ?: return null
         // Physical builders take supplies from their assigned hut or their own bag.
         // The construction target and a nearby town hall are never their depot.
         city.inventory != null && assigned != null -> assigned.control ?: assigned.entrance
@@ -2858,7 +2886,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         builder && order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting-materials"
         builder && order?.phase == ConstructionPhase.PAUSED -> "construction-paused"
         builder && order?.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING) -> "placing"
-        builder && city.inventory == null && depot?.control == null && depot?.phase == BuildingPhase.ACTIVE -> "storage-unavailable"
+        builder && !autonomous && city.inventory == null && depot?.control == null && depot?.phase == BuildingPhase.ACTIVE -> "storage-unavailable"
         !builder && !CivsRules.productionAvailable(city, assigned) -> "building-unavailable"
         workplace == null -> "building-unavailable"
         else -> null
@@ -2866,7 +2894,8 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
     return CitizenPlan(CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, order?.id),
         storage, workplace, workType,
         if (builder && (order?.payment != null || city.autonomy != null)) CivsRules.BUILDER_SESSION_INTERVAL else workType?.let(CivsRules::deliveryInterval) ?: 0,
-        reason, builder || city.inventory != null)
+        reason, builder || city.inventory != null,
+        autonomousWork = assigned?.takeIf { autonomous && CivsRules.resource(it.type) != null })
 }
 
 internal fun citizenControlBuilding(city: Settlement, point: CivPosition): CivBuilding? =
