@@ -49,6 +49,7 @@ class CivsNetworkStoreTest : FreeSpec({
                 statement.executeUpdate("DELETE FROM arc_civs_member")
                 statement.executeUpdate("DELETE FROM arc_civs_city")
                 statement.executeUpdate("DELETE FROM arc_civs_deleted")
+                statement.executeUpdate("DELETE FROM arc_civs_autonomous_deleted")
             }
         }
     }
@@ -60,6 +61,75 @@ class CivsNetworkStoreTest : FreeSpec({
 
     afterSpec {
         mysql?.close()
+    }
+
+    "personal membership and multiple autonomous villages share a real administrator without competing" {
+        val personal = settlement()
+        fun village() = settlement(owner = personal.owner).copy(inventory = null,
+            stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        val local = village()
+        val foreign = village()
+        spawn.save(local).await() shouldBe local
+        survival.save(foreign).await() shouldBe foreign
+        spawn.lookup(personal.owner).await() shouldBe null
+        spawn.save(personal).await() shouldBe personal
+        spawn.lookup(personal.owner).await()?.city shouldBe personal
+        survival.lookup(personal.owner).await()?.city shouldBe personal
+        spawn.loadOwned(emptyList()).await().shouldContainExactlyInAnyOrder(local, personal)
+        survival.loadOwned(emptyList()).await() shouldBe listOf(foreign)
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_city") shouldBe 3
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_member") shouldBe 1
+        failure { spawn.save(local.copy(autonomy = null, revision = 1)).await() }.shouldBeInstanceOf<IllegalStateException>()
+        failure { spawn.save(personal.copy(autonomy = CivAutonomy(), inventory = null,
+            stock = CivsRules.STARTING_STOCK, revision = 1)).await() }.shouldBeInstanceOf<IllegalStateException>()
+    }
+
+    "autonomous tombstones do not consume personal founding reserves and preserve their own identity fence" {
+        val removed = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        spawn.save(removed).await()
+        spawn.delete(removed).await()
+        requireNotNull(mysql).endpoint.connect().use { connection ->
+            // This is the unchanged 0.1.60 backend query, without knowledge of autonomous mode.
+            connection.prepareStatement("SELECT 1 FROM arc_civs_deleted WHERE owner_id = ? LIMIT 1").use { statement ->
+                statement.setString(1, removed.owner.toString())
+                statement.executeQuery().use { rows -> rows.next() shouldBe false }
+            }
+        }
+        tableCount(requireNotNull(mysql).endpoint, "arc_civs_autonomous_deleted") shouldBe 1
+        failure { spawn.save(removed.copy(autonomy = null)).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+        val personal = settlement(owner = removed.owner)
+        spawn.save(personal).await() shouldBe personal
+        spawn.delete(personal).await()
+        failure { spawn.save(personal.copy(inventory = null, stock = CivsRules.STARTING_STOCK,
+            autonomy = CivAutonomy())).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+        val next = settlement(owner = removed.owner).copy(inventory = null,
+            stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        spawn.save(next).await().stock shouldBe CivsRules.STARTING_STOCK
+        spawn.lookup(removed.owner).await() shouldBe null
+        failure { spawn.save(removed).await() }.shouldBeInstanceOf<CivsRejection>().reason shouldBe "city-deleted"
+        requireNotNull(mysql).endpoint.connect().use { connection ->
+            connection.prepareStatement("SELECT 1 FROM arc_civs_deleted WHERE owner_id = ? LIMIT 1").use { statement ->
+                statement.setString(1, removed.owner.toString())
+                statement.executeQuery().use { rows -> rows.next() shouldBe true }
+            }
+        }
+        val recreated = spawn.save(settlement(owner = removed.owner)).await()
+        recreated.inventory!!.materials shouldBe emptyMap()
+    }
+
+    "a UUID present in both deletion histories is rejected instead of choosing one mode" {
+        val removed = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        spawn.save(removed).await()
+        spawn.delete(removed).await()
+        requireNotNull(mysql).endpoint.connect().use { connection ->
+            connection.prepareStatement("""INSERT INTO arc_civs_deleted(city_id, owner_id, server_id, revision, deleted_at_ms)
+                SELECT city_id, owner_id, server_id, revision, deleted_at_ms FROM arc_civs_autonomous_deleted WHERE city_id = ?""").use { statement ->
+                statement.setString(1, removed.id.toString())
+                statement.executeUpdate() shouldBe 1
+            }
+        }
+        failure { spawn.save(removed).await() }.shouldBeInstanceOf<IllegalStateException>().message.orEmpty() shouldContain "both deletion histories"
+        failure { spawn.delete(removed).await() }.shouldBeInstanceOf<IllegalStateException>()
     }
 
     "two backends concurrently founding for one owner commit exactly one city" {

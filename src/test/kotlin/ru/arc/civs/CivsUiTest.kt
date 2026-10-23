@@ -122,6 +122,211 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("autonomous villages use their own admin context alongside a personal settlement") {
+        withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            val personal = settlement(h.player).copy(name = "Личный город")
+            h.city = personal
+            var village = autonomousSettlement(h.player, "Ольховка")
+            every { h.host.settlements() } answers { listOf(personal, village) }
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("resources", BuildingType.WAREHOUSE, 2,
+                missing = Stock(12, 4))
+            every { h.host.setAutonomousPaused(h.player, village.id, any()) } answers {
+                village = village.copy(autonomy = village.autonomy!!.copy(paused = thirdArg()))
+                CompletableFuture.completedFuture(Unit)
+            }
+            fun export(name: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "autonomy-$name-ru", h.screen) } }
+
+            h.ui.openAutonomous(h.player)
+            h.screen.id shouldBe "civs.autonomous"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("village_0", "create")
+            h.screen.buttons.map { plainText(it.label) }.joinToString().contains(personal.name) shouldBe false
+            export("list")
+            h.click("village_0")
+            h.screen.id shouldBe "civs.autonomous-city"
+            h.body() shouldContain village.name
+            h.body() shouldContain "Склад · ур. 2"
+            h.body() shouldContain "Древесина: 48"
+            h.body() shouldContain "Камень: 32"
+            h.body() shouldContain "Припасы: 16"
+            h.body() shouldContain "Древесина: 12"
+            h.body().contains(personal.name) shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "pause", "refresh", "villages")
+            export("resources")
+            h.click("buildings")
+            h.screen.id shouldBe "civs.autonomous-buildings"
+            materialTableCells(h.screen).drop(1).size shouldBe 7
+            h.screen.buttons.isEmpty() shouldBe true
+            export("buildings")
+            h.click("history"); h.click("workers")
+            h.screen.id shouldBe "civs.autonomous-workers"
+            village.workers.forEach { h.body() shouldContain it.name }
+            h.screen.buttons.isEmpty() shouldBe true
+            export("workers")
+            h.click("history"); h.click("pause"); h.paper.performTicks(2)
+            h.body() shouldContain "Развитие приостановлено"
+            plainText(h.screen.buttons.single { it.id.value == "pause" }.label) shouldContain "Продолжить развитие"
+            export("paused")
+            h.click("pause"); h.paper.performTicks(2)
+            h.body() shouldContain "Жители собирают ресурсы"
+            h.city shouldBe personal
+            verify(exactly = 1) { h.host.setAutonomousPaused(h.player, village.id, true) }
+            verify(exactly = 1) { h.host.setAutonomousPaused(h.player, village.id, false) }
+            verify(exactly = 0) { h.host.beginFoundingSelection(any(), any(), any()); h.host.assign(any(), any(), any()) }
+        }
+    }
+
+    test("autonomous creation reuses ground selection while its preview omits personal material shopping") {
+        withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            h.city = settlement(h.player)
+            every { h.host.beginAutonomousSelection(h.player, "Новая деревня", "medieval-oak") } answers {
+                h.selection = CivsSelectionView(UUID.randomUUID(), h.player.world.uid, BuildingType.TOWN_HALL,
+                    System.currentTimeMillis() + 120_000, false)
+                CompletableFuture.completedFuture(Unit)
+            }
+            fun export(name: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "autonomy-$name-ru", h.screen) } }
+            h.ui.openAutonomous(h.player)
+            h.body() shouldContain "Автономных деревень пока нет"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("create")
+            export("empty")
+            h.click("create"); h.screen.id shouldBe "civs.autonomous-styles"; export("styles")
+            h.click("style_0"); h.screen.id shouldBe "civs.autonomous-name"; export("name")
+            h.click("prepare", mapOf("city_name" to " "))
+            h.screen.id shouldBe "civs.autonomous-name"
+            h.body() shouldContain "Укажите непустое название"
+            h.click("prepare", mapOf("city_name" to "Новая деревня")); h.paper.performTicks(2)
+            h.ui.showingDialog(h.player) shouldBe false
+            verify(exactly = 1) { h.host.beginAutonomousSelection(h.player, "Новая деревня", "medieval-oak") }
+            verify(exactly = 0) { h.host.beginFoundingSelection(any(), any(), any()) }
+
+            h.preview = preview().copy(autonomous = true, cityName = "Новая деревня", materials = materialEstimate())
+            h.ui.openAutonomous(h.player)
+            h.screen.id shouldBe "civs.preview"
+            h.body() shouldContain "первая ратуша автономной деревни"
+            h.body() shouldContain "общие ресурсы деревни"
+            h.body().contains("Булыжник") shouldBe false
+            h.body().contains("2 000 003") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("placement", "villages")
+            export("preview")
+            h.click("villages")
+            h.screen.id shouldBe "civs.autonomous"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("create")
+        }
+    }
+
+    test("autonomous creation and pause controls recheck revoked administrator permission") {
+        withUi { h ->
+            val village = autonomousSettlement(h.player, "Protected village")
+            every { h.host.settlements() } returns listOf(village)
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("planning", BuildingType.HOUSE, 2)
+            var admin = false
+            every { h.player.hasPermission("arccivs.admin") } answers { admin }
+            h.ui.openAutonomous(h.player, village.id)
+            h.screen.id shouldBe "civs.autonomous-denied"
+            h.body().contains(village.name) shouldBe false
+            h.screen.buttons.isEmpty() shouldBe true
+            admin = true
+            h.ui.openAutonomous(h.player); h.click("create"); h.click("style_0")
+            admin = false
+            h.click("prepare", mapOf("city_name" to "No permission"))
+            h.screen.id shouldBe "civs.autonomous-denied"
+            admin = true
+            h.ui.openAutonomous(h.player, village.id)
+            val stale = h.screen
+            admin = false
+            h.click("pause")
+            h.screen.id shouldBe "civs.autonomous-denied"
+            h.click("pause", screen = stale)
+            verify(exactly = 0) {
+                h.host.beginAutonomousSelection(any(), any(), any())
+                h.host.setAutonomousPaused(any(), any(), any())
+            }
+        }
+    }
+
+    test("autonomous construction keeps its guarded retry action separate from the village pause") {
+        withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            var admin = true
+            every { h.player.hasPermission("arccivs.admin") } answers { admin }
+            val base = autonomousSettlement(h.player, "Стройка у реки")
+            var village = base.copy(construction = CivConstruction(UUID.randomUUID(), base.buildings.first().id, 2, 475, 40,
+                ConstructionPhase.PAUSED, Stock(), failure = "autonomy-no-path"))
+            every { h.host.settlements() } answers { listOf(village) }
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("blocked", BuildingType.BUILDER_HUT, 2, "autonomy-no-path")
+            every { h.host.retryConstruction(h.player, village.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openAutonomous(h.player, village.id)
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "retry", "pause", "refresh", "villages")
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "autonomy-construction-paused-ru", h.screen) }
+            h.click("retry"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.retryConstruction(h.player, village.id) }
+            h.screen.id shouldBe "civs.autonomous-city"
+            village = village.copy(autonomy = CivAutonomy(paused = true))
+            h.ui.openAutonomous(h.player, village.id)
+            h.screen.buttons.map { it.id.value } shouldNotContain "retry"
+            village = village.copy(autonomy = CivAutonomy())
+            h.ui.openAutonomous(h.player, village.id)
+            admin = false
+            h.click("retry")
+            h.screen.id shouldBe "civs.autonomous-denied"
+            verify(exactly = 1) { h.host.retryConstruction(h.player, village.id) }
+        }
+    }
+
+    test("autonomous planner states and paginated rosters render in both locales and native fallback") {
+        listOf("ru", "en").forEach { language ->
+            listOf("", "arc:dialog_ui").forEach { font ->
+                withUi(realHistory = true, decorationFont = font) { h ->
+                    h.player.setLocale(Locale.forLanguageTag(language))
+                    every { h.player.hasPermission("arccivs.admin") } returns true
+                    h.city = settlement(h.player).copy(name = "Personal")
+                    val base = autonomousSettlement(h.player, "Александровская деревня 123456")
+                    var village = base
+                    var status = CivsAutonomyView("searching", BuildingType.FORESTER, 2)
+                    every { h.host.settlements() } answers { listOf(h.city!!, village) }
+                    every { h.host.autonomyStatus(any()) } answers { status }
+                    fun export(name: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                        exportUiScreen(it, "autonomy-$name${if (font.isEmpty()) "-plain" else ""}-$language", h.screen)
+                    } }
+                    for (stage in listOf("planning", "searching", "queued", "building", "resources", "blocked", "unhealthy", "paused", "complete", "future-stage")) {
+                        village = when (stage) {
+                            "complete" -> base.copy(buildings = base.buildings.map { it.copy(level = 2) })
+                            "paused" -> base.copy(autonomy = CivAutonomy(paused = true))
+                            else -> base
+                        }
+                        status = if (stage == "complete" || stage == "future-stage") CivsAutonomyView(stage) else
+                            CivsAutonomyView(stage, BuildingType.FORESTER, 2,
+                                reason = "autonomy-no-path".takeIf { stage == "blocked" }, missing = if (stage == "resources") Stock(64, 32, 8) else Stock())
+                        h.ui.openAutonomous(h.player, village.id)
+                        h.screen.id shouldBe "civs.autonomous-city"
+                        h.body().contains("Personal") shouldBe false
+                        h.body().contains("future-stage") shouldBe false
+                        h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "pause", "refresh", "villages")
+                        export(stage)
+                    }
+                    village = base.copy(workers = emptyList(), buildings = emptyList())
+                    h.ui.openAutonomous(h.player, village.id); h.click("workers"); export("workers-empty")
+                    h.screen.buttons.isEmpty() shouldBe true
+                    h.click("history"); h.click("buildings"); export("buildings-empty")
+                    h.screen.buttons.isEmpty() shouldBe true
+                    village = base.copy(workers = List(10) { index -> base.workers.first().copy(id = UUID.randomUUID(), name = "Resident $index") })
+                    h.ui.openAutonomous(h.player, village.id); h.click("workers"); h.click("next"); export("workers-page-2")
+                    h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
+                    every { h.host.settlements() } returns listOf(h.city!!) + List(10) { index -> base.copy(id = UUID.randomUUID(), name = "Village $index") }
+                    h.ui.openAutonomous(h.player); h.click("next"); export("list-page-2")
+                    h.screen.buttons.map { it.id.value } shouldBe listOf("village_0", "village_1", "create", "previous")
+                    every { h.host.settlements() } returns listOf(h.city!!)
+                    h.ui.openAutonomous(h.player, base.id); export("removed")
+                    h.body().contains(base.name) shouldBe false
+                    h.screen.buttons.map { it.id.value } shouldBe listOf("return")
+                }
+            }
+        }
+    }
+
     test("source callbacks record accepted and ignored clicks with a stable visit id") {
         withUi { h ->
             val events = mutableListOf<Pair<String, Map<String, Any?>>>()
@@ -2948,6 +3153,15 @@ private fun builderMaterialEstimate() = mapOf("CHISELED_BOOKSHELF" to 2L, "COBBL
     "CRAFTING_TABLE" to 1L, "DIRT" to 161L, "GRAVEL" to 47L, "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 83L,
     "SPRUCE_FENCE_GATE" to 1L, "SPRUCE_LOG" to 142L, "SPRUCE_PLANKS" to 182L, "SPRUCE_SLAB" to 4L,
     "SPRUCE_STAIRS" to 233L, "TORCH" to 34L)
+
+private fun autonomousSettlement(player: Player, name: String): Settlement {
+    val base = settlement(player)
+    val buildings = CivsAutonomy.profile.map { type ->
+        (base.buildings.firstOrNull { it.type == type } ?: base.buildings.first()).copy(id = UUID.randomUUID(), type = type, level = 1)
+    }
+    return base.copy(name = name, inventory = null, autonomy = CivAutonomy(), stock = Stock(48, 32, 16), buildings = buildings,
+        workers = base.workers.mapIndexed { index, worker -> worker.copy(name = "Житель ${index + 1}", assignment = buildings[index].id) })
+}
 
 private fun settlement(player: Player): Settlement {
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,

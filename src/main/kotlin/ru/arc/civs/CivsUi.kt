@@ -95,6 +95,23 @@ class CivsUi internal constructor(
 
     fun showingDialog(player: Player): Boolean = player.uniqueId in visits
 
+    /** Administrative village flow is independent of the player's personal settlement. */
+    fun openAutonomous(player: Player, cityId: UUID? = null) {
+        if (closed || !player.isOnline) return
+        equipment.dismiss(player)
+        host.cancelSelection(player, "menu-reopened")
+        runtime.beginFlow(player)
+        roots[player.uniqueId] = if (cityId == null) "civs.autonomous" else "civs.autonomous-city"
+        if (!isAdmin(player)) {
+            autonomyDenied(player)
+        } else if (cityId != null) {
+            showAutonomousCity(player, cityId)
+        } else if (host.preview(player)?.autonomous == true) {
+            roots[player.uniqueId] = "civs.preview"
+            showPreview(player)
+        } else showAutonomous(player)
+    }
+
     /** Forms and details yield to the world instead of reopening a placement modal. */
     fun resumePlacement(player: Player) {
         visits.remove(player.uniqueId)
@@ -217,38 +234,46 @@ class CivsUi internal constructor(
         ), reopen = { showRemote(player) })
     }
 
-    private fun showStyles(player: Player, page: Int = 0) {
+    private fun showStyles(player: Player, page: Int = 0, autonomous: Boolean = false) {
+        if (autonomous && !isAdmin(player)) return autonomyDenied(player)
         val styles = host.styles()
         val current = page.coerceIn(0, lastPage(styles.size))
-        present(player, "civs.styles", "founding.style-title", listOf(body(player, "founding.style-help")),
+        present(player, if (autonomous) "civs.autonomous-styles" else "civs.styles",
+            if (autonomous) "autonomy.style-title" else "founding.style-title",
+            listOf(body(player, if (autonomous) "autonomy.style-help" else "founding.style-help")),
             buildList {
                 styles.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, style ->
-                    add(valueButton(player, "style_$index", "common.choice", text.style(player, style)) { showName(player, style) })
+                    add(valueButton(player, "style_$index", "common.choice", text.style(player, style)) { showName(player, style, autonomous = autonomous) })
                 }
-                pages(player, current, styles.size) { showStyles(player, it) }
-            }, reopen = { showStyles(player, current) })
+                pages(player, current, styles.size) { showStyles(player, it, autonomous) }
+            }, reopen = { showStyles(player, current, autonomous) })
     }
 
-    private fun showName(player: Player, style: String, initial: String = "", error: Component? = null) {
+    private fun showName(player: Player, style: String, initial: String = "", error: Component? = null, autonomous: Boolean = false) {
+        if (autonomous && !isAdmin(player)) return autonomyDenied(player)
         var draft = initial
-        present(player, "civs.name", "founding.name-title",
+        present(player, if (autonomous) "civs.autonomous-name" else "civs.name",
+            if (autonomous) "autonomy.name-title" else "founding.name-title",
             buildList {
                 if (error != null) {
                     add(body(tr(player, "founding.prepare-failed").color(DANGER)))
                     add(body(error))
-                } else add(body(player, "founding.name-help"))
+                } else add(body(player, if (autonomous) "autonomy.name-help" else "founding.name-help"))
                 add(body(detail(player, "label.style", text.style(player, style))))
             },
             listOf(button(player, "prepare", if (error == null) "founding.prepare" else "founding.retry", COMMIT, appearance = Action.START) { context ->
                 val name = context.text(NAME)?.trim().orEmpty()
                 draft = name
-                if (name.isBlank()) showName(player, style, name, text.reason(player, "invalid-name"))
-                else beginSelection(player, { host.beginFoundingSelection(player, name, style) }) {
-                    showName(player, style, name, it)
+                if (autonomous && !isAdmin(player)) autonomyDenied(player)
+                else if (name.isBlank()) showName(player, style, name, text.reason(player, "invalid-name"), autonomous)
+                else beginSelection(player, {
+                    if (autonomous) host.beginAutonomousSelection(player, name, style) else host.beginFoundingSelection(player, name, style)
+                }) {
+                    showName(player, style, name, it, autonomous)
                 }
             }),
             inputs = listOf(PaperDialogTextInput(NAME, tr(player, "founding.name-label"), initial = initial.take(32), width = 320, maxLength = 32)),
-            reopen = { showName(player, style, draft) },
+            reopen = { showName(player, style, draft, autonomous = autonomous) },
         )
     }
 
@@ -259,10 +284,11 @@ class CivsUi internal constructor(
             else notice(player, "civs.preview", "preview.title", error) { showEntry(player) }
             return
         }
-        val materials = preview.materials.toSortedMap().entries.toList()
+        if (preview.autonomous && !isAdmin(player)) return autonomyDenied(player)
+        val materials = if (preview.autonomous) emptyList() else preview.materials.toSortedMap().entries.toList()
         val current = page.coerceIn(0, lastPage(materials.size))
         present(player, "civs.preview", "preview.title", listOfNotNull(
-            body(player, if (preview.movable) "preview.site-help" else "preview.upgrade-help"),
+            body(player, if (preview.autonomous) "autonomy.preview-help" else if (preview.movable) "preview.site-help" else "preview.upgrade-help"),
             facts(player, listOf(
                 tr(player, "label.building") to buildingName(player, preview.type, preview.level),
                 tr(player, "label.city") to text.literal(preview.cityName),
@@ -275,10 +301,13 @@ class CivsUi internal constructor(
                 materialName(player, material) to tr(player, "materials.up-to", "amount" to count)
             }) else null,
             if (materials.isNotEmpty()) body(player, "materials.estimate-help") else null,
+            if (preview.autonomous) body(player, "autonomy.resources-help") else null,
             body(player, "preview.protected"), error?.let(::body),
         ), buildList {
             add(button(player, "placement", "panel.return", NAVIGATION) { resumePlacement(player) })
-            if (host.city(player)?.canManage(player.uniqueId) == true) {
+            if (preview.autonomous) {
+                add(button(player, "villages", "autonomy.open", PERSONAL) { showAutonomous(player) })
+            } else if (host.city(player)?.canManage(player.uniqueId) == true) {
                 add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             }
             pages(player, current, materials.size) { showPreview(player, error, it) }
@@ -1415,6 +1444,135 @@ class CivsUi internal constructor(
         }) else emptyList(), reopen = { showMember(player, member) })
     }
 
+    private fun autonomyDenied(player: Player) {
+        runtime.beginFlow(player)
+        roots[player.uniqueId] = "civs.autonomous-denied"
+        present(player, "civs.autonomous-denied", "autonomy.title", listOf(body(text.reason(player, "not-authorized"))),
+            emptyList(), reopen = { autonomyDenied(player) })
+    }
+
+    private fun autonomyStage(player: Player, status: CivsAutonomyView): Component {
+        val key = "autonomy.stage.${status.stage}"
+        return tr(player, key.takeIf { it in text.keys("ru") } ?: "autonomy.stage.unavailable")
+            .color(when (status.stage) {
+                "blocked", "unhealthy" -> DANGER
+                "paused", "resources" -> STOCK
+                "complete" -> COMMIT
+                else -> NAVIGATION
+            })
+    }
+
+    private fun autonomousCity(player: Player, cityId: UUID): Settlement? {
+        if (!isAdmin(player)) {
+            autonomyDenied(player)
+            return null
+        }
+        val city = host.settlements().firstOrNull { it.id == cityId && it.autonomy != null }
+        if (city == null) notice(player, "civs.autonomous-city", "autonomy.detail-title", tr(player, "autonomy.not-found")) {
+            showAutonomous(player)
+        }
+        return city
+    }
+
+    private fun showAutonomous(player: Player, page: Int = 0) {
+        if (!isAdmin(player)) return autonomyDenied(player)
+        val villages = if (host.ready()) host.settlements().filter { it.autonomy != null }.sortedBy { it.name } else emptyList()
+        val current = page.coerceIn(0, lastPage(villages.size))
+        present(player, "civs.autonomous", "autonomy.title", listOfNotNull(
+            body(player, "autonomy.help"),
+            if (!host.ready()) body(player, "common.starting") else if (villages.isEmpty()) body(player, "autonomy.empty") else
+                body(tr(player, "autonomy.count", "count" to villages.size)),
+            if (!host.foundingAllowed()) body(player, "network.view-only") else null,
+            if (host.ready() && host.styles().isEmpty()) body(player, "founding.unavailable") else null,
+        ), buildList {
+            villages.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, city ->
+                val status = host.autonomyStatus(city.id) ?: CivsAutonomyView(if (city.autonomy?.paused == true) "paused" else "unavailable")
+                add(valueButton(player, "village_$index", "common.destination", text.literal(city.name), LAND,
+                    autonomyStage(player, status)) { showAutonomousCity(player, city.id) })
+            }
+            if (host.ready() && host.foundingAllowed() && host.styles().isNotEmpty())
+                add(button(player, "create", "autonomy.create", COMMIT, appearance = Action.FOUND) {
+                    showStyles(player, autonomous = true)
+                })
+            pages(player, current, villages.size) { showAutonomous(player, it) }
+        }, reopen = { showAutonomous(player, current) })
+    }
+
+    private fun showAutonomousCity(player: Player, cityId: UUID, feedback: Component? = null) {
+        val city = autonomousCity(player, cityId) ?: return
+        val paused = city.autonomy!!.paused
+        val status = if (paused) CivsAutonomyView("paused") else host.autonomyStatus(city.id) ?: CivsAutonomyView("unavailable")
+        val target = status.target?.let { type -> status.level?.let { buildingName(player, type, it) } ?: text.building(player, type) }
+        val missing = Resource.entries.filter { status.missing[it] > 0 }
+        val completed = CivsAutonomy.profile.count { type -> city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= 2 } }
+        present(player, "civs.autonomous-city", "autonomy.detail-title", listOfNotNull(
+            body(tint(text.literal(city.name), LAND)),
+            presentation.callout(Component.join(Component.newline(), buildList {
+                add(autonomyStage(player, status))
+                target?.let { add(tr(player, "autonomy.goal", "target" to it)) }
+                add(tr(player, "autonomy.progress", "count" to completed, "total" to CivsAutonomy.profile.size))
+            })),
+            status.reason?.let { body(text.reason(player, it)) },
+            if (missing.isNotEmpty()) presentation.paragraph(tint(tr(player, "autonomy.missing", "resources" to
+                Component.join(Component.text(" · "), missing.map { resource ->
+                    tr(player, "common.detail", "label" to text.resource(player, resource), "value" to status.missing[resource])
+                })), STOCK)) else null,
+            facts(player, Resource.entries.map { text.resource(player, it) to tint(text.literal(city.stock[it]), STOCK) }),
+            body(tr(player, "autonomy.population", "buildings" to city.buildings.size, "workers" to city.workers.size,
+                "assigned" to city.workers.count { it.assignment != null })),
+            body(player, if (paused) "autonomy.paused-help" else "autonomy.resources-help"), feedback?.let(::body),
+        ), buildList {
+            add(button(player, "buildings", "buildings.open", LAND) { showAutonomousBuildings(player, city.id) })
+            add(button(player, "workers", "workers.open", PEOPLE) { showAutonomousWorkers(player, city.id) })
+            if (!paused && city.construction?.phase == ConstructionPhase.PAUSED)
+                add(button(player, "retry", "admin.retry", COMMIT, appearance = Action.START) {
+                    if (!isAdmin(player)) autonomyDenied(player)
+                    else perform(player, "civs.autonomous-city", "autonomy.detail-title", { host.retryConstruction(player, city.id) },
+                        success = { showAutonomousCity(player, city.id) }, failure = { showAutonomousCity(player, city.id, it) })
+                })
+            add(button(player, "pause", if (paused) "autonomy.resume" else "autonomy.pause", if (paused) COMMIT else STOCK,
+                appearance = if (paused) Action.START else null) {
+                if (!isAdmin(player)) autonomyDenied(player)
+                else perform(player, "civs.autonomous-city", "autonomy.detail-title",
+                    { host.setAutonomousPaused(player, city.id, !paused) },
+                    success = { showAutonomousCity(player, city.id) }, failure = { showAutonomousCity(player, city.id, it) })
+            })
+            add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showAutonomousCity(player, city.id) })
+            add(button(player, "villages", "autonomy.open", PERSONAL) { showAutonomous(player) })
+        }, reopen = { showAutonomousCity(player, city.id) })
+    }
+
+    private fun showAutonomousBuildings(player: Player, cityId: UUID, page: Int = 0) {
+        val city = autonomousCity(player, cityId) ?: return
+        val current = page.coerceIn(0, lastPage(city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE))
+        val buildings = city.buildings.drop(current * BUILDING_OVERVIEW_PAGE_SIZE).take(BUILDING_OVERVIEW_PAGE_SIZE)
+        present(player, "civs.autonomous-buildings", "buildings.title", listOfNotNull(
+            body(tint(text.literal(city.name), LAND)), body(player, "autonomy.buildings-help"),
+            if (buildings.isEmpty()) body(player, "autonomy.buildings-empty") else DialogTables.body(buildings.map { building -> listOf(
+                tint(text.building(player, building.type), buildingColor(building.type)), tint(text.literal(building.level), PERSONAL),
+                buildingSummaryStatus(player, city, building), tint(text.literal(city.workers.count { it.assignment == building.id }), PEOPLE),
+            ) }, listOf("building", "level", "state", "workers").map { tr(player, "buildings.column-$it") },
+                DialogTables.Frame.RARE, 400, listOf(5, 1, 5, 3)),
+        ), buildList {
+            pages(player, current, city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE) { showAutonomousBuildings(player, city.id, it) }
+        }, reopen = { showAutonomousBuildings(player, city.id, current) })
+    }
+
+    private fun showAutonomousWorkers(player: Player, cityId: UUID, page: Int = 0) {
+        val city = autonomousCity(player, cityId) ?: return
+        val current = page.coerceIn(0, lastPage(city.workers.size))
+        val workers = city.workers.drop(current * PAGE_SIZE).take(PAGE_SIZE)
+        present(player, "civs.autonomous-workers", "workers.title", listOfNotNull(
+            body(tint(text.literal(city.name), LAND)), body(player, "autonomy.workers-help"),
+            if (workers.isEmpty()) body(player, "autonomy.workers-empty") else presentation.paragraph(
+                Component.join(Component.newline(), workers.map { worker ->
+                    tr(player, "common.detail", "label" to tint(text.literal(worker.name), PEOPLE), "value" to workerStatus(player, worker))
+                })),
+        ), buildList {
+            pages(player, current, city.workers.size) { showAutonomousWorkers(player, city.id, it) }
+        }, reopen = { showAutonomousWorkers(player, city.id, current) })
+    }
+
     private fun showAdmin(player: Player, page: Int = 0, error: Component? = null) {
         if (!isAdmin(player)) return showEntry(player)
         val cities = host.settlements().sortedBy { it.name }
@@ -1425,6 +1583,7 @@ class CivsUi internal constructor(
             tr(player, "label.active-npcs") to tr(player, "common.fraction", "value" to host.activeNpcCount(),
                 "limit" to plugin.config.getInt("maximum-active-npcs", 48)),
         ), frame = DialogTables.Frame.RARE), error?.let(::body)), buildList {
+            add(button(player, "autonomous", "autonomy.open", LAND, appearance = Action.FOUND) { showAutonomous(player) })
             cities.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, city ->
                 add(valueButton(player, "city_$index", "common.destination", text.literal(city.name)) { showAdminCity(player, city.id) })
             }
@@ -1436,6 +1595,7 @@ class CivsUi internal constructor(
     private fun showAdminCity(player: Player, cityId: UUID, error: Component? = null) {
         if (!isAdmin(player)) return showEntry(player)
         val city = host.settlements().firstOrNull { it.id == cityId } ?: return showAdmin(player)
+        if (city.autonomy != null) return showAutonomousCity(player, cityId, error)
         present(player, "civs.admin-city", "admin.city-title", listOfNotNull(
             body(text.literal(city.name)), table(listOf(
                 tr(player, "label.owner") to playerName(city, city.owner),

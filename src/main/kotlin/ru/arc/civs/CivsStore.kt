@@ -54,16 +54,18 @@ class CivsStore(
             val index = ensureCityIndex(trustedRoot)
             val deleted = requireNotNull(deletedCityIndex)
             if (proposed.id in deleted) throw CivsRejection("city-deleted")
-            val snapshot = if (proposed.revision == 0L && deleted.values.any { it.owner == proposed.owner })
+            val snapshot = if (proposed.autonomy == null && proposed.revision == 0L &&
+                deleted.values.any { it.owner == proposed.owner && !it.autonomous })
                 proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
             val sameCity = index[snapshot.id]
             require(sameCity == null || sameCity.owner == snapshot.owner) { "City id cannot be reassigned to another owner" }
+            require(sameCity == null || sameCity.autonomous == (snapshot.autonomy != null)) { "City autonomy cannot change" }
             val otherParticipants = HashSet<UUID>()
-            index.filterKeys { it != snapshot.id }.values.forEach { existing ->
+            index.filterKeys { it != snapshot.id }.values.filterNot { it.autonomous }.forEach { existing ->
                 otherParticipants.add(existing.owner)
                 otherParticipants.addAll(existing.members)
             }
-            require((snapshot.members + snapshot.owner).none(otherParticipants::contains)) {
+            require(CivsMembership.participants(snapshot).none(otherParticipants::contains)) {
                 "Player already belongs to another settlement"
             }
             require(sameCity != null || index.size < maximumCities) { "Settlement capacity is full" }
@@ -125,7 +127,7 @@ class CivsStore(
                 } else if (saved != null && saved.owner != city.owner) throw CivsRejection("owner-required")
                 require(deleted.size < MAX_DELETED_CITIES) { "City deletion history exceeds its limit" }
                 deletedCityStore(trustedRoot, city.id).write(DeletedCityDocument(SCHEMA_VERSION,
-                    CivsDeletedCity(city.id, city.owner, home, city.revision, System.currentTimeMillis())))
+                    CivsDeletedCity(city.id, city.owner, home, city.revision, System.currentTimeMillis(), city.autonomy != null)))
             }
             cityStore(trustedRoot, city.id).deleteIfExists()
         } finally {
@@ -248,7 +250,7 @@ class CivsStore(
             requireNotNull(cityIndex)
         }
 
-    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision)
+    private fun indexEntry(city: Settlement) = CityIndex(city.owner, city.members.toSet(), city.revision, city.autonomy != null)
 
     private fun loadCities(trustedRoot: Path, deleted: Set<UUID>): List<Settlement> {
         val directory = trustedRoot.resolve("cities")
@@ -276,7 +278,7 @@ class CivsStore(
             val city = requireNotNull(record.city)
             require(city.id == id) { "City id does not match its filename" }
             require(ids.add(city.id)) { "Duplicate city id" }
-            require(participants.add(city.owner) && city.members.all(participants::add)) {
+            require(CivsMembership.participants(city).all(participants::add)) {
                 "Player belongs to multiple settlements"
             }
             city
@@ -496,7 +498,7 @@ class CivsStore(
     private data class DeletedCityDocument(val schemaVersion: Int, val deleted: CivsDeletedCity?)
     private data class PlanDocument(val schemaVersion: Int, val plan: CivPlacementPlan?)
     private data class InventoryTransactionDocument(val schemaVersion: Int, val transaction: CivInventoryTransaction?)
-    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long)
+    private data class CityIndex(val owner: UUID, val members: Set<UUID>, val revision: Long, val autonomous: Boolean)
 
     internal companion object {
         const val SCHEMA_VERSION = 1

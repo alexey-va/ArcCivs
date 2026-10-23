@@ -77,6 +77,15 @@ class CivsCommand(
         }
         when {
             args.isEmpty() -> ui.open(player)
+            args.firstOrNull() == "autonomous" && player.hasPermission("arccivs.admin") -> {
+                if (args.size == 1) ui.openAutonomous(player)
+                else if (args.size >= 3) host.beginAutonomousSelection(player, args.drop(2).joinToString(" "), args[1])
+                    .whenCompleteSync(tasks) { _, failure ->
+                        if (!player.isOnline) return@whenCompleteSync
+                        if (failure != null) player.sendMessage(text.failure(player, failure)) else ui.resumePlacement(player)
+                    }
+                else player.sendMessage(text.info(player, "autonomy.command-help"))
+            }
             args.contentEquals(arrayOf("preview")) -> host.movePreview(player).whenCompleteSync(tasks) { _, failure ->
                 if (!player.isOnline) return@whenCompleteSync
                 if (failure != null) player.sendMessage(text.failure(player, failure)) else ui.resumePlacement(player)
@@ -99,8 +108,10 @@ class CivsCommand(
             if (!use) return emptyList()
             if (admin && args.size == 2 && args[0] == "debug")
                 return (listOf("all") + CivsDebug.systems).filter { it.startsWith(args[1], true) }
+            if (admin && args.size == 2 && args[0] == "autonomous")
+                return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
-            return (listOf("preview") + if (admin) listOf("status", "debug", "reload") else emptyList()).filter { it.startsWith(args[0], true) }
+            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous") else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         internal fun statusLine(host: CivsUiHost, city: Settlement?): String {

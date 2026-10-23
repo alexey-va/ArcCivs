@@ -7,6 +7,53 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
+## Autonomous village variation
+
+`Settlement.autonomy != null` is a separate immutable mode, created only by an
+administrator. Its real owner remains the protection and chunk permission actor;
+it has no personal membership index entries, so the owner can retain a personal
+city. Both local and SQL stores fence owner/mode changes. SQL migration 3 keeps
+autonomous deletion receipts in a separate table so older backends cannot consume
+a player's personal one-time founding reserve after an autonomous deletion. Do not downgrade a backend that has
+created autonomous snapshots to a version without this mode.
+
+`CivsAutonomy` chooses one goal from a finite seven-building profile ending at
+level two. It uses aggregate `Stock` and always has `inventory == null`; migration
+to native item stores excludes this mode. Complete schematic details are covered
+by a one-time wood/stone/food price at `reserveBuild`. Producers bypass natural
+world work and exact inputs, but retain the normal NPC journey, work duration,
+depot arrival check and unique cycle receipt before stock is credited. No elapsed
+time, teleport recovery or forecast alone credits a delivery. This is deliberately
+abstract resource production, not evidence of actual crop/ore harvesting.
+
+The service submits the selected SITE or upgrade through the existing captured
+schematic store, pending control receipt, queue, builder work credit and batch
+placement journal. There is one admitted decision per city; callbacks recheck
+the current mode, goal, pause, activity and construction state. Pausing stops new
+decisions, producer receipts, active population minutes and native paste progress;
+it preserves accepted orders and their paid stock. Food and post-seed recruitment
+consume abstract food in the same durable city revision. No offline catch-up is
+performed, and ordinary health/death and global NPC/chunk limits still apply.
+
+`CivsAutonomousPlacement` tries at most 64 centre-facing candidates, reserves
+future building bounds, field space and entrances, and admits at most two searches.
+Native geometry reads share `CivsWorld`'s existing bounded scan queue. Detached
+collision snapshots use the existing navigation A* off-thread. Surface scanning
+has a 32,768-column limit and accepts open supported ground with at most one block
+of slope; no new chunks are generated. New sites and upgrade expansion cells
+reject non-natural blocks. Accepted own upgrade footprints can be remodelled;
+filled containers are always protected, and autonomous batch revalidation rejects
+new changes that match neither captured before nor after images.
+
+`civs debug autonomy [city UUID]` reads cached goal, stock, retry and placement
+progress without starting work. `autonomous_goal_selected`,
+`autonomous_goal_queued`, `autonomous_resource_delivered` and bounded
+`autonomous_development_stalled` WARNs expose actual accepted transitions.
+The earlier [design proposal](docs/autonomous-settlement-design.md) is historical;
+its player-supplied exact-item economy is not this implemented variation.
+
+## Shared settlement runtime
+
 Owners with `arccivs.testing` can persist three per-settlement testing switches in
 the management menu. Chunk loading defaults on for legacy cities and still requires
 `arccivs.chunkload`; immortality and automatic construction supplies default off.

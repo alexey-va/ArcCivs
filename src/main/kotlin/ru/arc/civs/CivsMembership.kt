@@ -4,6 +4,10 @@ import java.util.UUID
 
 /** Names are presentation metadata; UUIDs remain the only authority for membership. */
 internal object CivsMembership {
+    /** An administrator may own several villages alongside their personal city. */
+    fun participants(city: Settlement): Set<UUID> =
+        if (city.autonomy == null) city.members + city.owner else emptySet()
+
     fun remember(city: Settlement, known: Map<UUID, String>): Settlement {
         val participants = (city.members + city.owner).associateBy(UUID::toString)
         val names = city.memberNames.orEmpty().filterKeys { it in participants }.toMutableMap()

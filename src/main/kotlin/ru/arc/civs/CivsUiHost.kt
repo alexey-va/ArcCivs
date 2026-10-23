@@ -28,7 +28,11 @@ data class CivsPreviewView(
     val busy: Boolean,
     val materials: Map<String, Long> = emptyMap(),
     val control: CivPosition = anchor,
+    val autonomous: Boolean = false,
 )
+
+data class CivsAutonomyView(val stage: String, val target: BuildingType? = null, val level: Int? = null,
+    val reason: String? = null, val missing: Stock = Stock())
 
 /** A derived request, fulfilled by one native inventory transfer rather than a separate quest store. */
 data class CivsToolRequest(val material: org.bukkit.Material, val canGive: Boolean)
@@ -75,6 +79,11 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 
 /** Main-thread UI port. Every mutation validates authority in its owning service. */
 interface CivsUiHost {
+    fun beginAutonomousSelection(player: Player, name: String, style: String): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
+    fun autonomyStatus(cityId: UUID): CivsAutonomyView? = null
+    fun setAutonomousPaused(player: Player, cityId: UUID, paused: Boolean): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean = false
     fun setSettlementSetting(player: Player, setting: CivSettlementSetting, enabled: Boolean): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))

@@ -174,6 +174,8 @@ data class Settlement(
     val corpses: List<CivCorpse>? = null,
     val minePlans: Map<String, CivMinePlanState>? = null,
     val settings: CivSettlementSettings? = null,
+    /** Null retains the player-city contract of every existing snapshot. */
+    val autonomy: CivAutonomy? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

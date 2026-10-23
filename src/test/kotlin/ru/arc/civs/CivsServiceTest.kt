@@ -48,6 +48,89 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("autonomous production requires depot arrival and a durable unique trip receipt without physical inventory") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
+                control = CivPosition(10, 64, 0))
+            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1)
+            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(hall, forester),
+                workers = listOf(worker))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start()
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            fun complete() = deliver.invoke(h.service, village.id, worker.id, forester.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            every { h.citizens.requireStorageArrival(village.id, worker.id, hall.id) } throws CivsRejection("route-unreachable")
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
+            h.saves shouldBe emptyList()
+            every { h.citizens.requireStorageArrival(village.id, worker.id, hall.id) } returns Unit
+            val delivered = complete()
+            delivered.isDone shouldBe false
+            h.service.settlements().single().stock shouldBe village.stock
+            h.commit(); delivered.join()
+            val saved = h.service.settlements().single()
+            saved.stock shouldBe village.stock.copy(wood = village.stock.wood + CivsRules.deliveryAmount(forester))
+            saved.workers.single().completedCycles shouldBe 1L
+            saved.inventory shouldBe null
+            saved.workers.single().items shouldBe null
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "stale-delivery"
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.citizens.requireStorageArrival(village.id, worker.id, forester.id) }
+        }
+    }
+
+    test("autonomous towns do not hide or migrate the administrator personal settlement on load") {
+        serviceScenario { h ->
+            val personal = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            val autonomous = h.city.copy(id = UUID.randomUUID(), name = "Independent village", workers = emptyList(),
+                autonomy = CivAutonomy(paused = true))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(autonomous, personal))
+            h.start()
+            h.service.city(h.player)?.id shouldBe personal.id
+            h.service.settlements().single { it.id == autonomous.id }.inventory shouldBe null
+            h.service.autonomyStatus(autonomous.id)?.stage shouldBe "paused"
+            h.saves shouldBe emptyList()
+            h.service.refreshCity(h.player).let { lookup -> h.tick(); lookup.join() }
+            h.service.ready() shouldBe true
+        }
+    }
+
+    test("admin can start autonomous placement while retaining a personal town and cannot bypass revoked admin permission") {
+        serviceScenario { h ->
+            h.start()
+            h.service.beginAutonomousSelection(h.player, "Free Village", "nordic").join()
+            h.service.selection(h.player)?.type shouldBe BuildingType.TOWN_HALL
+            h.service.city(h.player)?.id shouldBe h.city.id
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            val denied = h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0)))
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { denied.join() })?.reason shouldBe "not-authorized"
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    test("autonomous pause is durable separately from the administrators personal town and rechecks permission") {
+        serviceScenario { h ->
+            val personal = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            val autonomous = h.city.copy(id = UUID.randomUUID(), workers = emptyList(), autonomy = CivAutonomy())
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(personal, autonomous))
+            h.start()
+            val pause = h.service.setAutonomousPaused(h.player, autonomous.id, true)
+            h.commit(); pause.join()
+            h.service.city(h.player)?.id shouldBe personal.id
+            h.service.settlements().single { it.id == autonomous.id }.autonomy?.paused shouldBe true
+            h.service.settlements().single { it.id == autonomous.id }.stock shouldBe autonomous.stock
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            val resume = h.service.setAutonomousPaused(h.player, autonomous.id, false)
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { resume.join() })?.reason shouldBe "not-authorized"
+            h.saves.size shouldBe 1
+        }
+    }
+
     test("warehouse maintenance completes exceptionally when a delayed schematic outlives its building") {
         serviceScenario { h ->
             val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE,
@@ -1467,6 +1550,26 @@ class CivsServiceTest : FunSpec({
             h.saves.size shouldBe 1
             verify(exactly = 0) { storage.prepareConstructionDebitBackground(any(), any(), any()) }
             verify(exactly = 0) { storage.prepareDebit(any(), any()); h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("autonomous pending control installs for an ordinary visitor while its creator is offline") {
+        serviceScenario { h ->
+            val viewer = h.paper.addPlayer("VillageVisitor")
+            viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
+            val point = CivPosition(1, 65, 1)
+            val hall = h.city.buildings.first().copy(control = point)
+            val receipt = CivControlPlacement(hall.id, point, "minecraft:air")
+            val village = h.city.copy(autonomy = CivAutonomy(), workers = emptyList(),
+                buildings = listOf(hall) + h.city.buildings.drop(1), pendingControls = listOf(receipt))
+            village.canManage(viewer.uniqueId) shouldBe false
+            h.paper.server.getPlayer(village.owner) shouldBe null
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start(); h.paper.performTicks(20)
+            h.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.BARREL
+            h.saves.single().first.pendingControls shouldBe emptyList()
+            h.commit()
+            h.service.settlements().single().pendingControls shouldBe emptyList()
         }
     }
 
@@ -3569,6 +3672,31 @@ class CivsServiceTest : FunSpec({
             h.world.getBlockAt(16, 64, 0).type shouldBe Material.AIR
             protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
             h.service.health().activeLeases shouldBe 0
+        }
+    }
+
+    test("autonomous construction preserves a foreign block placed during its delayed begin save") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true)
+            val order = requireNotNull(placement.city.construction)
+            val village = CivsRules.validate(placement.city.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = Stock(40, 30, 20), construction = order.copy(payment = null,
+                    batches = order.batches!!.copy(atomicPairs = true),
+                    cost = CivsAutonomy.cost(requireNotNull(order.plannedBuilding).type, order.targetLevel))))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start()
+            h.saves.single().first.construction!!.phase shouldBe ConstructionPhase.PLACING
+            val block = h.world.getBlockAt(15, 64, 0)
+            block.type = Material.BRICKS
+            h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            block.type shouldBe Material.BRICKS
+            block.type = Material.AIR
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            block.type = Material.STONE
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            h.service.settlements().single().stock shouldBe village.stock
         }
     }
 

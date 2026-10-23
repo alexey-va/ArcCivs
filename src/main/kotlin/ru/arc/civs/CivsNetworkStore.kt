@@ -18,6 +18,7 @@ data class CivsNetworkCity(val server: BackendServerId, val city: Settlement, va
 /** A deleted UUID is never reusable; owner history also fences the one-time founding reserve. */
 internal data class CivsDeletedCity(
     val cityId: UUID, val owner: UUID, val server: String?, val revision: Long, val deletedAt: Long,
+    val autonomous: Boolean = false,
 ) {
     fun validated(): CivsDeletedCity = apply {
         requireNotNull(cityId); requireNotNull(owner)
@@ -27,6 +28,7 @@ internal data class CivsDeletedCity(
 
     fun verify(city: Settlement, home: String?) {
         if (owner != city.owner) throw CivsRejection("owner-required")
+        if (autonomous != (city.autonomy != null)) throw CivsRejection("stale-city")
         if (server != home) throw CivsRejection("remote-city", mapOf("server" to server.orEmpty()))
         if (cityId != city.id || revision != city.revision) throw CivsRejection("stale-city")
     }
@@ -57,7 +59,8 @@ class CivsNetworkStore internal constructor(
                 val imported = tombstone.copy(server = server.value)
                 val existing = findDeleted(connection, imported.cityId)
                 if (existing != null) {
-                    check(existing.owner == imported.owner && existing.server == imported.server && existing.revision == imported.revision) {
+                    check(existing.owner == imported.owner && existing.server == imported.server && existing.revision == imported.revision &&
+                        existing.autonomous == imported.autonomous) {
                         "Legacy deletion conflicts with canonical deletion history"
                     }
                 } else {
@@ -70,7 +73,8 @@ class CivsNetworkStore internal constructor(
                 if (findDeleted(connection, city.id) != null) return@forEach
                 val existing = findCity(connection, city.id)
                 if (existing == null) save(connection, city, importing = true)
-                else check(existing.server == server && existing.city.owner == city.owner) {
+                else check(existing.server == server && existing.city.owner == city.owner &&
+                    (existing.city.autonomy != null) == (city.autonomy != null)) {
                     "Legacy city ${city.id} conflicts with the network home or owner; originals were preserved"
                 }
             }
@@ -91,7 +95,7 @@ class CivsNetworkStore internal constructor(
             connection.prepareStatement("SELECT c.* FROM arc_civs_city c JOIN arc_civs_member m ON m.city_id = c.city_id WHERE m.player_id = ?").use { statement ->
                 statement.setString(1, playerId.toString())
                 statement.executeQuery().use { rows -> if (rows.next()) readCity(rows).also {
-                    check(it.city.canManage(playerId)) { "Network membership and snapshot disagree" }
+                    check(it.city.autonomy == null && it.city.canManage(playerId)) { "Network membership and snapshot disagree" }
                 } else null }
             }
         }
@@ -133,7 +137,8 @@ class CivsNetworkStore internal constructor(
                     it.setString(3, snapshot.owner.toString()); it.setLong(4, snapshot.revision)
                     check(it.executeUpdate() == 1) { "Home/revision fence rejected settlement deletion" }
                 }
-                insertDeleted(connection, CivsDeletedCity(snapshot.id, snapshot.owner, server.value, snapshot.revision, System.currentTimeMillis()))
+                insertDeleted(connection, CivsDeletedCity(snapshot.id, snapshot.owner, server.value, snapshot.revision,
+                    System.currentTimeMillis(), snapshot.autonomy != null))
                 Unit
             }
         }
@@ -146,9 +151,10 @@ class CivsNetworkStore internal constructor(
         if (previous != null) {
             check(previous.server == server) { "Only the home server may change settlement ${proposed.id}" }
             check(previous.city.owner == proposed.owner) { "City owner cannot change" }
+            check((previous.city.autonomy != null) == (proposed.autonomy != null)) { "City autonomy cannot change" }
             if (previous.city == proposed) return previous.city
         }
-        val city = if (!importing && proposed.revision == 0L && hasDeletedOwner(connection, proposed.owner))
+        val city = if (!importing && proposed.autonomy == null && proposed.revision == 0L && hasDeletedOwner(connection, proposed.owner))
             proposed.copy(stock = Stock(), inventory = proposed.inventory?.copy(materials = emptyMap())) else proposed
         val json = gson.toJson(city)
         require(json.toByteArray(Charsets.UTF_8).size <= CivsStore.MAX_CITY_BYTES) { "City snapshot exceeds 256 KiB" }
@@ -168,7 +174,7 @@ class CivsNetworkStore internal constructor(
             }
             if (count >= maximumCities) throw CivsRejection("settlement-limit")
         }
-        val participants = (city.members + city.owner).sortedBy(UUID::toString)
+        val participants = CivsMembership.participants(city).sortedBy(UUID::toString)
         connection.prepareStatement("SELECT city_id FROM arc_civs_member WHERE player_id = ?").use { statement ->
             participants.forEach { player ->
                 statement.setString(1, player.toString())
@@ -211,18 +217,27 @@ class CivsNetworkStore internal constructor(
             it.executeQuery().use(ResultSet::next)
         }
 
-    private fun findDeleted(connection: Connection, id: UUID): CivsDeletedCity? =
-        connection.prepareStatement("SELECT * FROM arc_civs_deleted WHERE city_id = ?").use { statement ->
-            statement.setString(1, id.toString())
-            statement.executeQuery().use { rows -> if (rows.next()) CivsDeletedCity(
-                UUID.fromString(rows.getString("city_id")), UUID.fromString(rows.getString("owner_id")),
-                BackendServerId.of(rows.getString("server_id")).value, rows.getLong("revision"), rows.getLong("deleted_at_ms"),
-            ).validated() else null }
+    private fun findDeleted(connection: Connection, id: UUID): CivsDeletedCity? {
+        val matches = listOf(false, true).mapNotNull { autonomous ->
+            connection.prepareStatement("SELECT * FROM ${deletionTable(autonomous)} WHERE city_id = ?").use { statement ->
+                statement.setString(1, id.toString())
+                statement.executeQuery().use { rows -> if (rows.next()) CivsDeletedCity(
+                    UUID.fromString(rows.getString("city_id")), UUID.fromString(rows.getString("owner_id")),
+                    BackendServerId.of(rows.getString("server_id")).value, rows.getLong("revision"), rows.getLong("deleted_at_ms"),
+                    autonomous,
+                ).validated() else null }
+            }
         }
+        check(matches.size <= 1) { "City $id appears in both deletion histories" }
+        return matches.singleOrNull()
+    }
+
+    private fun deletionTable(autonomous: Boolean): String =
+        if (autonomous) "arc_civs_autonomous_deleted" else "arc_civs_deleted"
 
     private fun insertDeleted(connection: Connection, deleted: CivsDeletedCity) {
         deleted.validated()
-        connection.prepareStatement("INSERT INTO arc_civs_deleted(city_id, owner_id, server_id, revision, deleted_at_ms) VALUES (?, ?, ?, ?, ?)").use {
+        connection.prepareStatement("INSERT INTO ${deletionTable(deleted.autonomous)}(city_id, owner_id, server_id, revision, deleted_at_ms) VALUES (?, ?, ?, ?, ?)").use {
             it.setString(1, deleted.cityId.toString()); it.setString(2, deleted.owner.toString()); it.setString(3, requireNotNull(deleted.server))
             it.setLong(4, deleted.revision); it.setLong(5, deleted.deletedAt)
             check(it.executeUpdate() == 1)
@@ -267,7 +282,7 @@ class CivsNetworkStore internal constructor(
                 "outcome" to if (failure == null) if (operation == "save" || operation == "delete") "committed" else "read" else if (CivsDiagnostics.rejection(failure) != null) "rejected" else "failed",
                 "owner_server" to if (value is CivsNetworkCity) value.server.value else server.value,
                 "result_city" to committed?.id, "result_revision" to committed?.revision,
-                "participants" to committed?.let { it.members.size + 1 },
+                "participants" to committed?.let { CivsMembership.participants(it).size },
                 "wood" to committed?.stock?.wood, "stone" to committed?.stock?.stone, "food" to committed?.stock?.food,
                 "home_rows" to (value as? List<*>)?.size,
                 "reason" to CivsDiagnostics.rejection(failure)?.reason, "cause" to CivsDiagnostics.cause(failure)?.javaClass?.simpleName,
@@ -296,7 +311,7 @@ class CivsNetworkStore internal constructor(
         internal fun create(server: BackendServerId, maximumCities: Int, runtime: CompletableFuture<SqlRuntime>): CivsNetworkStore {
             require(maximumCities > 0)
             val initialized = runtime.thenCompose { sql ->
-                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION, DELETION_MIGRATION)); sql }
+                sql.executor.submit { MySqlMigrator(sql.dataSource, "arc_civs").migrate(listOf(MIGRATION, DELETION_MIGRATION, AUTONOMY_MIGRATION)); sql }
                     .handle { result, failure ->
                         if (failure == null) CompletableFuture.completedFuture(result)
                         else sql.executor.closeAsync().thenCompose {
@@ -332,6 +347,16 @@ class CivsNetworkStore internal constructor(
                 server_id VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
                 revision BIGINT NOT NULL, deleted_at_ms BIGINT NOT NULL,
                 INDEX arc_civs_deleted_owner(owner_id)
+            ) ENGINE=InnoDB""".trimIndent(),
+        ))
+
+        private val AUTONOMY_MIGRATION = SqlMigration(3, "Separate autonomous village founding history", listOf(
+            """CREATE TABLE IF NOT EXISTS arc_civs_autonomous_deleted (
+                city_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL PRIMARY KEY,
+                owner_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                server_id VARCHAR(32) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+                revision BIGINT NOT NULL, deleted_at_ms BIGINT NOT NULL,
+                INDEX arc_civs_autonomous_deleted_owner(owner_id)
             ) ENGINE=InnoDB""".trimIndent(),
         ))
     }

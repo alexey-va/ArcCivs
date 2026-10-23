@@ -3,9 +3,9 @@
   "title": "ArcCivs autonomous settlement finite stock and generic production",
   "assumptions": [
     "Before the admin-created autonomous settlement mode is absent; after includes only autonomous settlements. Existing personal settlements are unchanged.",
-    "Low/base/high are 1/10/500 autonomous cities under one administrator, with an assumed 0.25/1/4 hours per day for the network production pool. These are sensitivity assumptions, not measured sessions. participants=[1,1,1] therefore counts one admin in each case; city scaling is already in item-flow event counts.",
+    "Low/base/high are 1/10/500 autonomous cities on one home backend under one administrator, with an assumed 0.25/1/4 hours per day for that backend's production pool. These are one-backend sensitivity assumptions, not measured sessions. participants=[1,1,1] therefore counts one admin in each case; city scaling is already in item-flow event counts. The scenarios do not aggregate or multiply across other home backends.",
     "All assessed cities use the completed level-2 profile. Each city has two worker slots at each of Forester, Quarry and Farm, for six producers; level-2 delivery is 8 wood or 6 stone/food per completed producer trip. Level 1 is 4/3/3.",
-    "The low case has two active producer workers per resource for 15 minutes (30 deliveries/resource/day). Base/high assume the shared global cap is fully allocated to production: up to 48 active NPCs, evenly split as 16 producers/resource; for 60/240 minutes this is 960/3840 deliveries/resource/day. Personal-settlement NPC use reduces autonomous headroom. The 48 limit is concurrency, not a measured per-day total.",
+    "The low case has two active producer workers per resource for 15 minutes (30 deliveries/resource/day). Base/high assume this home backend's 48 active-NPC cap is fully allocated to production, evenly split as 16 producers/resource; for 60/240 minutes this is 960/3840 deliveries/resource/day. Personal-settlement NPC use on the same home backend reduces autonomous headroom; other backends have separate limits. The 48 limit is per-home-backend concurrency, not a measured per-day total.",
     "Delivery quantities are gross, theoretical upper bounds at one completed delivery per worker per 60 seconds. The autonomous branch requires real storage arrival; path/travel, night shelter, hunger work slowdown, unavailable chunks/depot, and the 640-per-resource stock capacity reduce or stop realized deliveries. Item flows are not net stock accumulation.",
     "Each new autonomous city receives one-time abstract non-transferable stock: 96 wood, 96 stone, 24 food. This lifecycle amount is listed separately because the evaluator models recurring per-player-day events.",
     "Construction reserves and consumes the exact finite stock cost once per building/upgrade. Costs and full-profile totals are included separately; no construction cadence is assumed as a daily burn. Five initial immigrant admissions are a separate free budget; later recruitment costs 12 food, at most one resident per two active minutes, subject to room and food.",
@@ -134,7 +134,7 @@
           "id": "autonomous_wood_delivery",
           "kind": "item",
           "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
-          "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the network event counts are capped by the shared 48 active-NPC sensitivity.",
+          "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity.",
           "before": {
             "enabled": false,
             "amount_per_event": {
@@ -169,7 +169,7 @@
           "id": "autonomous_stone_delivery",
           "kind": "item",
           "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
-          "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the network event counts are capped by the shared 48 active-NPC sensitivity.",
+          "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity.",
           "before": {
             "enabled": false,
             "amount_per_event": {
@@ -204,7 +204,7 @@
           "id": "autonomous_food_delivery",
           "kind": "item",
           "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
-          "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the network event counts are capped by the shared 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow.",
+          "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow.",
           "before": {
             "enabled": false,
             "amount_per_event": {
@@ -239,7 +239,7 @@
       "scenario": "low",
       "cities": 1,
       "participants": 1,
-      "assumed_network_pool_active_hours_per_day": 0.25,
+      "assumed_home_backend_pool_active_hours_per_day": 0.25,
       "active_producers_per_resource": 2,
       "delivery_events_per_resource_per_owner_day": 30
     },
@@ -247,7 +247,7 @@
       "scenario": "base",
       "cities": 10,
       "participants": 1,
-      "assumed_network_pool_active_hours_per_day": 1,
+      "assumed_home_backend_pool_active_hours_per_day": 1,
       "active_producers_per_resource": 16,
       "delivery_events_per_resource_per_owner_day": 960
     },
@@ -255,7 +255,7 @@
       "scenario": "high",
       "cities": 500,
       "participants": 1,
-      "assumed_network_pool_active_hours_per_day": 4,
+      "assumed_home_backend_pool_active_hours_per_day": 4,
       "active_producers_per_resource": 16,
       "delivery_events_per_resource_per_owner_day": 3840
     }
@@ -376,10 +376,10 @@
     ],
     "note": "Town Hall level 1 is captured as the founding site and then constructed; its 32/24/4 cost is included. CivsRules.cost applies targetLevel squared, so the level-2 target cost is four times the level-1 base, not merely the incremental difference."
   },
-  "network_constraints": {
-    "configured_maximum_settlements_total": 500,
-    "configured_maximum_active_npcs": 48,
-    "active_npc_pool_shared_with_personal_settlements": true,
+  "home_backend_constraints": {
+    "configured_maximum_settlements_per_home_backend": 500,
+    "configured_maximum_active_npcs_per_home_backend": 48,
+    "active_npc_pool_shared_with_personal_settlements_on_same_home_backend": true,
     "level_1_city_population_limit": 5,
     "level_2_city_population_limit": 8,
     "level_1_auto_staffed_jobs": [
@@ -402,8 +402,8 @@
       "stone": 544,
       "food": 616
     },
-    "maximum_autonomous_cities_if_one_personal_city_also_exists": 499,
-    "high_500_city_sensitivity_note": "500 total city slots is the configured ceiling; a 500-autonomous-city sensitivity assumes no additional personal city. With one personal settlement, at most 499 autonomous cities fit."
+    "maximum_autonomous_cities_if_one_personal_city_on_same_home_backend": 499,
+    "high_500_city_sensitivity_note": "500 city slots is the configured ceiling per home backend. The one-backend 500-autonomous-city sensitivity assumes no additional personal city on that same backend. With one personal settlement on the same backend, at most 499 autonomous cities fit there; settlements on other backends use separate capacity."
   },
   "unmodeled_conditional_flows": [
     {
@@ -452,17 +452,27 @@
     {
       "file": "src/main/kotlin/ru/arc/civs/CivsSettings.kt",
       "lines": "28-35",
-      "fact": "Configured total settlement ceiling 500 and active NPC ceiling 48."
+      "fact": "Backend-local configured ceilings are 500 total settlements and 48 active NPCs."
     },
     {
       "file": "src/main/kotlin/ru/arc/civs/CivsCitizens.kt",
       "lines": "2644-2644",
-      "fact": "Active NPC spawn budget is bounded by the configured maximum, itself at most 48."
+      "fact": "The backend-local active NPC spawn budget is bounded by that backend configuration, itself at most 48."
+    },
+    {
+      "file": "README.md",
+      "lines": "407-407,456-460",
+      "fact": "The default active NPC cap is a server-local limit; maximum-settlements remains a one-server ceiling."
+    },
+    {
+      "file": "ARCHITECTURE.md",
+      "lines": "202-206",
+      "fact": "maximum-settlements is per home backend, not network-wide."
     },
     {
       "file": "src/main/kotlin/ru/arc/civs/CivsService.kt",
       "lines": "3499-3500",
-      "fact": "Founding checks total existing plus pending cities against configured maximumCities."
+      "fact": "Founding checks the home backend's existing plus pending city total against configured maximumCities."
     },
     {
       "file": "src/main/kotlin/ru/arc/civs/CivsService.kt",

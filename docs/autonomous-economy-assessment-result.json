@@ -2,9 +2,9 @@
   "title": "ArcCivs autonomous settlement finite stock and generic production",
   "assumptions": [
     "Before the admin-created autonomous settlement mode is absent; after includes only autonomous settlements. Existing personal settlements are unchanged.",
-    "Low/base/high are 1/10/500 autonomous cities under one administrator, with an assumed 0.25/1/4 hours per day for the network production pool. These are sensitivity assumptions, not measured sessions. participants=[1,1,1] therefore counts one admin in each case; city scaling is already in item-flow event counts.",
+    "Low/base/high are 1/10/500 autonomous cities on one home backend under one administrator, with an assumed 0.25/1/4 hours per day for that backend's production pool. These are one-backend sensitivity assumptions, not measured sessions. participants=[1,1,1] therefore counts one admin in each case; city scaling is already in item-flow event counts. The scenarios do not aggregate or multiply across other home backends.",
     "All assessed cities use the completed level-2 profile. Each city has two worker slots at each of Forester, Quarry and Farm, for six producers; level-2 delivery is 8 wood or 6 stone/food per completed producer trip. Level 1 is 4/3/3.",
-    "The low case has two active producer workers per resource for 15 minutes (30 deliveries/resource/day). Base/high assume the shared global cap is fully allocated to production: up to 48 active NPCs, evenly split as 16 producers/resource; for 60/240 minutes this is 960/3840 deliveries/resource/day. Personal-settlement NPC use reduces autonomous headroom. The 48 limit is concurrency, not a measured per-day total.",
+    "The low case has two active producer workers per resource for 15 minutes (30 deliveries/resource/day). Base/high assume this home backend's 48 active-NPC cap is fully allocated to production, evenly split as 16 producers/resource; for 60/240 minutes this is 960/3840 deliveries/resource/day. Personal-settlement NPC use on the same home backend reduces autonomous headroom; other backends have separate limits. The 48 limit is per-home-backend concurrency, not a measured per-day total.",
     "Delivery quantities are gross, theoretical upper bounds at one completed delivery per worker per 60 seconds. The autonomous branch requires real storage arrival; path/travel, night shelter, hunger work slowdown, unavailable chunks/depot, and the 640-per-resource stock capacity reduce or stop realized deliveries. Item flows are not net stock accumulation.",
     "Each new autonomous city receives one-time abstract non-transferable stock: 96 wood, 96 stone, 24 food. This lifecycle amount is listed separately because the evaluator models recurring per-player-day events.",
     "Construction reserves and consumes the exact finite stock cost once per building/upgrade. Costs and full-profile totals are included separately; no construction cadence is assumed as a daily burn. Five initial immigrant admissions are a separate free budget; later recruitment costs 12 food, at most one resident per two active minutes, subject to room and food.",
@@ -998,7 +998,7 @@
               "0",
               "0"
             ],
-            "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the network event counts are capped by the shared 48 active-NPC sensitivity."
+            "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity."
           }
         ]
       },
@@ -1135,7 +1135,7 @@
               "53760",
               "215040"
             ],
-            "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the network event counts are capped by the shared 48 active-NPC sensitivity."
+            "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity."
           }
         ]
       },
@@ -1279,7 +1279,7 @@
               "0",
               "0"
             ],
-            "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the network event counts are capped by the shared 48 active-NPC sensitivity."
+            "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity."
           }
         ]
       },
@@ -1416,7 +1416,7 @@
               "40320",
               "161280"
             ],
-            "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the network event counts are capped by the shared 48 active-NPC sensitivity."
+            "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity."
           }
         ]
       },
@@ -1560,7 +1560,7 @@
               "0",
               "0"
             ],
-            "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the network event counts are capped by the shared 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow."
+            "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow."
           }
         ]
       },
@@ -1697,7 +1697,7 @@
               "40320",
               "161280"
             ],
-            "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the network event counts are capped by the shared 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow."
+            "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the one-home-backend event counts are capped by that backend's 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow."
           }
         ]
       },

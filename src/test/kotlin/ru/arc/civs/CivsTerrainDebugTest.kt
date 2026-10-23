@@ -14,7 +14,7 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsTerrainDebugTest : FunSpec({
-    test("explicit terrain requires exact valid filters and all remains nine cached systems") {
+    test("explicit terrain requires exact valid filters and all includes autonomous state without native terrain capture") {
         val city = UUID.randomUUID().toString()
         val worker = UUID.randomUUID().toString()
         val cases = listOf(
@@ -32,7 +32,8 @@ class CivsTerrainDebugTest : FunSpec({
         val requested = mutableListOf<String>()
         CivsDebug.lines(listOf("all", city, worker)) { system, _, _ -> requested += system; emptyMap() }
         requested shouldBe CivsDebug.systems
-        requested.size shouldBe 9
+        requested.size shouldBe 10
+        ("autonomy" in requested) shouldBe true
         ("terrain" in requested) shouldBe false
         CivsDebug.lines(listOf("terrain", city, worker)) { system, cityId, workerId ->
             system shouldBe "terrain"

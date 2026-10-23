@@ -687,13 +687,14 @@ class CivsCitizens(
 
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
         var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
-        if (base.type == BuildingType.SAWMILL && base.idleReason == null) {
+        if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
+        if (city.autonomy == null && base.type == BuildingType.SAWMILL && base.idleReason == null) {
             val job = craftPlan(city, worker)
             base = if (job == null) base.copy(idleReason = "waiting-orders")
                 else base.copy(token = base.token.copy(craftJobId = job.id))
         }
         val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
-        val planned = if (admitted.courier != null || admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
+        val planned = if (city.autonomy != null || admitted.courier != null || admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
             val work = workPlan(city, worker)
             if (work == null) base.copy(idleReason = workIdleReason(city, worker)) else base.copy(
                 workplace = work.standing, workMillis = work.durationMillis, completeAtWorkplace = true, worldWork = work)
@@ -2762,7 +2763,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
     }
     return CitizenPlan(CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, order?.id),
         storage, workplace, workType,
-        if (builder && order?.payment != null) CivsRules.BUILDER_SESSION_INTERVAL else workType?.let(CivsRules::deliveryInterval) ?: 0,
+        if (builder && (order?.payment != null || city.autonomy != null)) CivsRules.BUILDER_SESSION_INTERVAL else workType?.let(CivsRules::deliveryInterval) ?: 0,
         reason, builder || city.inventory != null)
 }
 

@@ -3,6 +3,7 @@ package ru.arc.civs
 import me.angeschossen.lands.api.LandsIntegration
 import me.angeschossen.lands.api.flags.type.Flags
 import org.bukkit.Bukkit
+import org.bukkit.HeightMap
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.Particle
@@ -17,6 +18,7 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.Executor
 
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
@@ -52,6 +54,25 @@ class CivsWorld(
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true)
     }
+
+    /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
+    fun captureAutonomousSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+        cells: List<ArcSchematicBlock>, previous: CivBuilding? = null): CompletableFuture<CivPlacementPlan> = admit {
+        requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
+        Capture(cityId, owner, worldId, building, cells.toList(), previous,
+            allowControlPlacement = true, strictAutonomous = true)
+    }
+
+    internal fun autonomousSurface(city: Settlement, envelope: CivBuilding): CompletableFuture<Int> = admit {
+        AutonomousSurface(city, envelope)
+    }
+
+    internal fun validateAutonomousSite(city: Settlement, envelope: CivBuilding): CompletableFuture<Unit> = admit {
+        AutonomousTerrain(city, envelope)
+    }
+
+    internal fun autonomousRoute(city: Settlement, envelope: CivBuilding, from: CivPosition,
+        executor: Executor): CompletableFuture<Unit> = admit { AutonomousRoute(city, envelope, from, executor) }
 
     internal fun repairWarehouse(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
         requireCivs(cells.size in 1..512 && cells.map { it.position }.distinct().size == cells.size, "invalid-plan")
@@ -125,11 +146,11 @@ class CivsWorld(
         scans.forEach { scan -> scan.guarded { scan.validateContext() } }
         var remaining = CELLS_PER_TICK
         // Keep the next participant across ticks even when one expensive cell exhausts the time budget.
-        while (remaining > 0 && scans.any { !it.future.isDone }) {
+        while (remaining > 0 && scans.any { !it.future.isDone && it.ready() }) {
             if (remaining < CELLS_PER_TICK && nanoTime() - started >= NANOS_PER_TICK) break
             val scan = scans[nextScan.mod(scans.size)]
             nextScan = (nextScan + 1).mod(scans.size)
-            if (scan.future.isDone) continue
+            if (scan.future.isDone || !scan.ready()) continue
             scan.guarded { scan.step() }
             remaining--
         }
@@ -190,6 +211,7 @@ class CivsWorld(
 
         abstract fun validateIdentity(city: Settlement?)
         abstract fun step()
+        open fun ready(): Boolean = true
 
         protected fun read(position: CivPosition): Block {
             requireCivs(position.y in world.minHeight until world.maxHeight, "outside-world")
@@ -249,6 +271,137 @@ class CivsWorld(
         }
     }
 
+    private inner class AutonomousSurface(city: Settlement, envelope: CivBuilding) :
+        Scan<Int>(city.id, city.owner, city.worldId, envelope) {
+        private val width = building.bounds.max.x - building.bounds.min.x + 1
+        private val area = width * (building.bounds.max.z - building.bounds.min.z + 1)
+        private var low = Int.MAX_VALUE
+        private var high = Int.MIN_VALUE
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == null, "stale-building")
+        }
+        override fun step() {
+            if (index == area) return finish(low)
+            val x = building.bounds.min.x + index % width
+            val z = building.bounds.min.z + index / width
+            index++
+            requireCivs(world.isChunkLoaded(x shr 4, z shr 4), "chunks-unloaded")
+            // Heightmap and one block read are a fixed native unit, never a downward unbounded scan.
+            val y = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING_NO_LEAVES)
+            val surface = read(CivPosition(x, y, z))
+            if (surface.type !in AUTONOMOUS_SOIL || surface.isLiquid) rejectAt("autonomy-terrain", surface)
+            low = minOf(low, y); high = maxOf(high, y)
+            requireCivs(high - low <= 1, "autonomy-slope")
+        }
+    }
+
+    private inner class AutonomousTerrain(city: Settlement, envelope: CivBuilding) :
+        Scan<Unit>(city.id, city.owner, city.worldId, envelope) {
+        private val width = building.bounds.max.x - building.bounds.min.x + 1
+        private val depth = building.bounds.max.z - building.bounds.min.z + 1
+        private val area = width * depth
+        private val volume = civsBoxVolume(building.bounds).toInt()
+        private val approach = CivsAutonomousGeometry.approach(building)
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == null, "stale-building")
+        }
+        override fun step() {
+            val cursor = index++
+            if (cursor < area) {
+                val block = read(CivPosition(building.bounds.min.x + cursor % width, building.bounds.min.y - 1,
+                    building.bounds.min.z + cursor / width))
+                if (!block.type.isSolid || block.isLiquid || block.collisionShape.boundingBoxes.none { it.maxY >= 1.0 })
+                    rejectAt("autonomy-terrain", block)
+                return
+            }
+            val cell = cursor - area
+            if (cell < volume) {
+                val block = read(CivPosition(building.bounds.min.x + cell % width,
+                    building.bounds.min.y + cell / area, building.bounds.min.z + cell / width % depth))
+                checkAutonomousTerrain(block, building.anchor.y)
+                if (!canModify(owner, block)) rejectAt("lands-denied", block)
+                return
+            }
+            val entry = cell - volume
+            if (entry >= approach.size * 3) return finish(Unit)
+            val p = approach[entry / 3]
+            val offset = entry % 3 - 1
+            val block = read(p.copy(y = p.y + offset))
+            if (offset == -1) {
+                if (!block.type.isSolid || block.isLiquid || block.collisionShape.boundingBoxes.none { it.maxY >= 1.0 })
+                    rejectAt("autonomy-terrain", block)
+            } else if (!block.type.isAir && block.type !in AUTONOMOUS_PLANTS) rejectAt("autonomy-terrain", block)
+        }
+    }
+
+    /** Same detached A* and collision capture as resident movement, sharing the world scan budget. */
+    private inner class AutonomousRoute(private val citySnapshot: Settlement, envelope: CivBuilding,
+        private val from: CivPosition, private val executor: Executor) :
+        Scan<Unit>(citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, envelope) {
+        private var route: CitizenPacketRoute? = null
+        private var search: CitizenNavigationSearch? = null
+        private var searching: CompletableFuture<CitizenSearchResult>? = null
+        private var capture: CitizenNavigationCapture? = null
+        private val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
+        private val obstacles = citySnapshot.buildings.map { CivsAutonomousGeometry.futureBounds(citySnapshot, it) } + building.bounds
+
+        init { future.whenComplete { _, _ -> search?.cancel() } }
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city.pendingDeletion == null && city.building(building.id) == null, "stale-building")
+        }
+        override fun ready(): Boolean = searching?.isDone != false
+        override fun step() {
+            index++
+            if (route == null) {
+                val endpoint = building.entrance
+                val path = CitizenPacketRoute(world, Location(world, from.x + .5, from.y.toDouble(), from.z + .5),
+                    Location(world, endpoint.x + .5, endpoint.y.toDouble(), endpoint.z + .5),
+                    { p -> citySnapshot.contains(p.x, p.z) && obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) } &&
+                        citySnapshot.buildings.none { CivsWorksiteLayouts.isField(it, p.x, p.z) } },
+                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 })
+                route = path
+                search = path.newSearch()
+                dispatch(emptyList())
+                return
+            }
+            searching?.let { pending ->
+                if (!pending.isDone) return
+                searching = null
+                val result = pending.join() // Observed complete; no gameplay-thread waiting.
+                result.failure?.let {
+                    throw CivsRejection(when (it) {
+                        "chunk-unloaded" -> "chunks-unloaded"
+                        "search-budget" -> "autonomy-search-budget"
+                        else -> "autonomy-no-path"
+                    })
+                }
+                if (result.path != null) return finish(Unit)
+                capture = CitizenNavigationCapture(requireNotNull(route), result.probes, terrain)
+            }
+            val cursor = capture ?: return
+            val complete = try { cursor.step() } catch (_: CitizenNavigationCaptureLimit) {
+                throw CivsRejection("autonomy-search-budget")
+            }
+            if (complete) {
+                capture = null
+                dispatch(cursor.result)
+            }
+        }
+        private fun dispatch(captured: List<CitizenSearchCapture>) {
+            val solver = requireNotNull(search)
+            searching = CompletableFuture.supplyAsync({ solver.advance(captured) }, executor)
+        }
+    }
+
+    private fun checkAutonomousTerrain(block: Block, ground: Int) {
+        if (block.type.isAir) return
+        if (block.isLiquid || block.state is TileState ||
+            block.type !in AUTONOMOUS_PLANTS &&
+            !(block.type in AUTONOMOUS_SOIL && block.y <= ground + 1 || block.type in AUTONOMOUS_ROCK && block.y <= ground))
+            throw CivsRejection("autonomy-terrain", mapOf("block" to block.type.name,
+                "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString()))
+    }
+
     private inner class WarehouseRepair(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         private val cells: List<CivPlanBlock>) : Scan<Map<String, Int>>(cityId, owner, worldId, building) {
         private val counts = linkedMapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "occupied" to 0, "denied" to 0)
@@ -281,18 +434,24 @@ class CivsWorld(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         private val cells: List<ArcSchematicBlock>, private val previous: CivBuilding?,
         private val allowControlPlacement: Boolean = false,
+        private var strictAutonomous: Boolean = false,
     ) : Scan<CivPlacementPlan>(cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
 
         init { requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan") }
 
         override fun checkControl(block: Block) {
+            // Only an already accepted building owns this marker; an unrelated barrel is terrain.
+            if (strictAutonomous && (previous == null || previous.control != building.control))
+                checkAutonomousTerrain(block, building.anchor.y)
             if (!allowControlPlacement || block.type == Material.BARREL) return super.checkControl(block)
+            if (strictAutonomous) checkAutonomousTerrain(block, building.anchor.y)
             if (block.type == Material.BEDROCK || block.state is TileState) rejectAt("control-obstructed", block)
             if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
         }
 
         override fun validateIdentity(city: Settlement?) {
+            if (city?.autonomy != null) strictAutonomous = true
             requireCivs(city?.building(building.id) == previous, "invalid-building")
             if (previous != null) requireCivs(previous.id == building.id && previous.type == building.type &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
@@ -324,6 +483,9 @@ class CivsWorld(
                 return
             }
             val state = if (block.type.isAir) null else block.state
+            if (strictAutonomous && (previous?.phase != BuildingPhase.ACTIVE ||
+                    !previous.bounds.contains(position.x, position.y, position.z)))
+                checkAutonomousTerrain(block, building.anchor.y)
             if (block.type == Material.BEDROCK || previous?.bounds?.contains(position.x, position.y, position.z) != true &&
                 state is TileState) rejectAt("protected-terrain", block)
             // Never replace a player's inventory, including chests installed while a SITE was waiting.
@@ -339,10 +501,12 @@ class CivsWorld(
 
     private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID) :
         Scan<Unit>(plan.cityId, owner, plan.worldId, plan.building) {
+        private var autonomous = false
         init {
             requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
         }
         override fun validateIdentity(city: Settlement?) {
+            autonomous = city?.autonomy != null
             val current = city?.building(building.id)
             requireCivs(current == null || current == building || current.type == building.type &&
                 current.entrance == building.entrance && current.rotation == building.rotation &&
@@ -362,6 +526,8 @@ class CivsWorld(
             val cell = plan.blocks[index++]
             checkCell(cell.position)
             val block = read(cell.position)
+            if (autonomous && block.blockData.asString != cell.before && block.blockData.asString != cell.after)
+                rejectAt("autonomy-terrain", block)
             if (block.type == Material.BEDROCK) rejectAt("protected-terrain", block)
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             // Players may clear or remodel a cell before this one-pass construction batch reaches it.
@@ -375,6 +541,16 @@ class CivsWorld(
         const val CELLS_PER_TICK = 2048
         const val NANOS_PER_TICK = 2_000_000L
         const val MAX_SCANS = 4
+        private val AUTONOMOUS_SOIL = setOf(Material.GRASS_BLOCK, Material.DIRT, Material.COARSE_DIRT,
+            Material.ROOTED_DIRT, Material.PODZOL, Material.MYCELIUM, Material.MOSS_BLOCK, Material.CLAY)
+        private val AUTONOMOUS_ROCK = setOf(Material.STONE, Material.DEEPSLATE, Material.GRANITE,
+            Material.DIORITE, Material.ANDESITE, Material.TUFF)
+        private val AUTONOMOUS_PLANTS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN,
+            Material.LARGE_FERN, Material.DEAD_BUSH, Material.SNOW, Material.MOSS_CARPET, Material.DANDELION,
+            Material.POPPY, Material.BLUE_ORCHID, Material.ALLIUM, Material.AZURE_BLUET, Material.RED_TULIP,
+            Material.ORANGE_TULIP, Material.WHITE_TULIP, Material.PINK_TULIP, Material.OXEYE_DAISY,
+            Material.CORNFLOWER, Material.LILY_OF_THE_VALLEY, Material.SUNFLOWER, Material.LILAC,
+            Material.ROSE_BUSH, Material.PEONY)
     }
 }
 

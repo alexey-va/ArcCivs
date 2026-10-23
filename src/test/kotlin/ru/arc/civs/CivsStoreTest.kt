@@ -39,6 +39,49 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe false
     }
 
+    "one administrator retains a personal city and several autonomous villages across reload" {
+        val personal = settlement()
+        fun village() = settlement(owner = personal.owner).copy(inventory = null,
+            stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        val first = village()
+        val second = village()
+        CivsStore(root, directExecutor).use { store ->
+            listOf(first, personal, second).forEach { store.save(it).join() shouldBe it }
+            store.save(first.copy(autonomy = CivAutonomy(true, 1), revision = 1)).join()
+            shouldThrow<CompletionException> { store.save(second.copy(autonomy = null, revision = 1)).join() }
+            shouldThrow<CompletionException> { store.save(personal.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = CivsRules.STARTING_STOCK, revision = 1)).join() }
+            shouldThrow<CompletionException> { store.save(settlement(owner = personal.owner)).join() }
+        }
+        val reopened = CivsStore(root, directExecutor).load().join().associateBy { it.id }
+        reopened.size shouldBe 3
+        reopened[personal.id] shouldBe personal
+        reopened[first.id]!!.autonomy shouldBe CivAutonomy(true, 1)
+        reopened[second.id] shouldBe second
+    }
+
+    "autonomous founding reserves are separate from personal deletion history" {
+        val owner = UUID.randomUUID()
+        fun village() = settlement(owner = owner).copy(inventory = null,
+            stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        val removedVillage = village()
+        val first = CivsStore(root, directExecutor)
+        first.save(removedVillage).join()
+        first.delete(removedVillage).join()
+        val personal = settlement(owner = owner)
+        first.save(personal).join() shouldBe personal
+        first.delete(personal).join()
+        val nextVillage = village()
+        val reopened = CivsStore(root, directExecutor)
+        reopened.save(nextVillage).join().stock shouldBe CivsRules.STARTING_STOCK
+        reopened.load().join() shouldBe listOf(nextVillage)
+        shouldThrow<CompletionException> { reopened.save(removedVillage).join() }.cause.let {
+            (it as CivsRejection).reason shouldBe "city-deleted"
+        }
+        val recreatedPersonal = reopened.save(settlement(owner = owner)).join()
+        recreatedPersonal.inventory!!.materials shouldBe emptyMap()
+    }
+
     "legacy bread farms reload without rewriting history and select crop harvesting" {
         val base = settlement()
         val hall = base.buildings.single()

@@ -14,6 +14,27 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("autonomous placement is admin-only and preserves the whole village name") {
+        val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val host = mockk<CivsUiHost>(relaxed = true)
+        val ui = mockk<CivsUi>(relaxed = true)
+        every { host.beginAutonomousSelection(any(), any(), any()) } returns java.util.concurrent.CompletableFuture<Unit>()
+        val router = CivsCommand(host, ui, mockk(relaxed = true), mockk(relaxed = true))
+        val command = mockk<Command>()
+        router.onCommand(player, command, "civs", arrayOf("autonomous"))
+        verify(exactly = 1) { ui.openAutonomous(player, null) }
+        router.onCommand(player, command, "civs", arrayOf("autonomous", "nordic", "Free", "Village"))
+        verify(exactly = 1) { host.beginAutonomousSelection(player, "Free Village", "nordic") }
+        every { player.hasPermission("arccivs.admin") } returns false
+        router.onCommand(player, command, "civs", arrayOf("autonomous"))
+        router.onCommand(player, command, "civs", arrayOf("autonomous", "nordic", "Other"))
+        verify(exactly = 1) { ui.openAutonomous(player, null) }
+        verify(exactly = 1) { host.beginAutonomousSelection(any(), any(), any()) }
+        CivsCommand.completions(true, false, arrayOf("aut")) shouldBe emptyList()
+        CivsCommand.completions(true, true, arrayOf("aut")) shouldBe listOf("autonomous")
+        CivsCommand.completions(true, true, arrayOf("autonomous", "n")) shouldBe listOf("nordic")
+    }
+
     test("warehouse maintenance accepts only console administrators and exact city building UUIDs") {
         val calls = mutableListOf<Pair<UUID, UUID>>()
         val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), repairWarehouse = { city, building ->
@@ -119,8 +140,8 @@ class CivsCommandTest : FunSpec({
         }
     }
 
-    test("all debug emits one parseable console line for each of the nine supported systems") {
-        val systems = listOf("overview", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
+    test("all debug emits one parseable console line for each of the ten supported systems") {
+        val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
         val city = UUID.randomUUID()
         val worker = UUID.randomUUID()
         val messages = mutableListOf<String>()
@@ -137,7 +158,7 @@ class CivsCommandTest : FunSpec({
         router.onCommand(sender, mockk(), "civs", arrayOf("debug", "all", city.toString(), worker.toString())) shouldBe true
         CivsDebug.systems shouldBe systems
         requests shouldBe systems.map { Triple(it, city, worker) }
-        messages.size shouldBe 9
+        messages.size shouldBe 10
         messages.map { line ->
             line.startsWith("ARCCIVS_DEBUG ") shouldBe true
             line.contains('\n') shouldBe false
@@ -202,7 +223,7 @@ class CivsCommandTest : FunSpec({
         CivsCommand.completions(true, false, arrayOf("debug")) shouldBe emptyList()
         CivsCommand.completions(true, true, arrayOf("debug", "Wo")) shouldBe listOf("worksites")
         CivsCommand.completions(true, true, arrayOf("debug", "all", "")) shouldBe emptyList()
-        val systems = listOf("all", "overview", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
+        val systems = listOf("all", "overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
         val router = CivsCommand(mockk(), mockk(), mockk(), mockk())
         for ((use, admin) in listOf(false to true, true to false, true to true)) {
             val sender = mockk<CommandSender> {

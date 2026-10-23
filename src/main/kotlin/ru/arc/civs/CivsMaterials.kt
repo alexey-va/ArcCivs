@@ -112,8 +112,9 @@ internal fun civsMaterialBatches(plan: CivPlacementPlan, size: Int = 16, atomicP
 }
 
 internal fun civsConstructionBatches(plan: CivPlacementPlan, order: CivConstruction): List<CivBuildBatch> =
-    if (order.payment == null) civsBuildBatches(plan, requireNotNull(order.batches).size)
-    else civsMaterialBatches(plan, requireNotNull(order.batches).size, order.batches.atomicPairs == true)
+    if (order.payment != null || order.batches?.atomicPairs == true)
+        civsMaterialBatches(plan, requireNotNull(order.batches).size, order.batches.atomicPairs == true)
+    else civsBuildBatches(plan, requireNotNull(order.batches).size)
 
 /** Only native two-cell blocks; trapdoors and ordinary bisected-looking states remain single blocks. */
 internal fun civsPairedPosition(p: CivPosition, state: String): CivPosition? {
