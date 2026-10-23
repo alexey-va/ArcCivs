@@ -231,7 +231,21 @@ worker slots at levels one/two/three, as existing production buildings already d
 Ordinary hall workers are scribes: one observed 60-second work session at the
 workplace converts three plain PAPER and one LEATHER into one BOOK. Inputs,
 output, cycle token and internal profession point commit in the same receipt.
-SAWMILL converts one matching log into four planks; BLACKSMITH crafts one plain
+SAWMILL accepts finite orders from unpaid active construction and operating
+supply demand. The existing city-wide async supply snapshot allocates one
+native-sized recipe batch per carpenter, including real intermediate batches.
+Level one unlocks structural woodwork, level two containers and equipment,
+and level three advanced workstations. Generic native ingredient tags accept
+mixed supported wood species. Each accepted batch has an independent job ID,
+frozen exact inputs/output and recipe version; actor pickup and completion
+callbacks revalidate that identity after city waits. Courier cargo, carried
+ingredients, other accepted batches and exact output slots are reserved once.
+Workshop-bound durable ingredients remain available to planning while physical
+readiness still requires actual receipt into the barrel and resident bag.
+The job intent is transient; existing durable inventory receipts retain exact
+resident/cycle/tool changes and native output slots for recovery. Stripping
+consumes the carried log and real axe durability in that same receipt. An
+upgrading workshop pauses its own production. BLACKSMITH crafts one plain
 iron tool with its ordinary ingot/stick recipe; STONEMASON converts four STONE
 into four STONE_BRICKS; LIBRARY converts BOOK, FEATHER and INK_SAC into one
 WRITABLE_BOOK. All use 60-second observed work, fixed per-cycle

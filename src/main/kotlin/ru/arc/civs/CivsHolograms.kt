@@ -16,7 +16,6 @@ import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.display.PacketTextDisplay
 import ru.arc.paper.display.PaperPacketDisplays
-import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CompletableFuture
@@ -171,7 +170,6 @@ internal const val CIVS_NPC_TEXT_GAP = .20
 internal const val CIVS_NPC_TEXT_OFFSET = 1.8 + CIVS_NPC_TEXT_GAP
 
 internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): Component {
-    fun number(value: Double): String = String.format(Locale.ROOT, "%.1f", value).trimEnd('0').trimEnd('.')
     val action = if (npc.status.removePrefix("workers.status.") == "waiting-tool") {
         when (npc.profession) {
             "farmer", "forester", "miner" -> text.render("hologram.tool-${npc.profession}")
@@ -188,8 +186,6 @@ internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): 
             "name" to Component.text(npc.name, TextColor.color(0xF3EFE5)),
             "profession" to profession.color(TextColor.color(0xE1C58D)),
             "action" to action.color(TextColor.color(0xCDC7BC)),
-            "health" to text.render("hologram.health", values = arrayOf("health" to number(npc.health),
-                "max" to number(npc.maxHealth), "hunger" to npc.hunger))
-                .color(TextColor.color(0xDC9B8D)),
+            "health" to text.residentVitals(null, npc.health, npc.maxHealth, npc.hunger),
         ))
 }

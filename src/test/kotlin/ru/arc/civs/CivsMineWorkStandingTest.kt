@@ -5,10 +5,12 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.structure.StructureRotation
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
+import java.util.UUID
 
 class CivsMineWorkStandingTest : FunSpec({
     test("mine standing space contains its shaft and galleries but never the reported outside cave or paid shell") {
@@ -111,6 +113,112 @@ class CivsMineWorkStandingTest : FunSpec({
                         runtime.validate(city, second)
                         world.getBlockAt(light.x, light.y, light.z).type shouldBe Material.AIR
                         CivsEquipment.plainCount(worker, "TORCH") shouldBe 8L
+                    }
+                } finally { tasks.close() }
+            }
+        }
+    }
+
+    test("a missing transfer footing is paid from the old ladder at step 29 before sealing the cave and cutting stone") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-transfer-footing").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineTransferFooting")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                try {
+                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40), 270)
+                    val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val worker = CivsEquipment.collectSupplies(spatialWorker(mine, "IRON_PICKAXE"),
+                        mapOf("COBBLESTONE" to 2L, "COAL" to 4L, "GRANITE" to 2L))
+                    var city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
+                        minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, 29)))
+                    for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                    for (step in geometry.steps.take(29)) {
+                        val point = CivsWorksiteLayouts.point(mine, step.point)
+                        world.getBlockAt(point.x, point.y, point.z).blockData =
+                            Bukkit.createBlockData(step.after ?: "minecraft:air").also {
+                                if (step.after != null) it.rotate(StructureRotation.COUNTERCLOCKWISE_90)
+                            }
+                    }
+                    for (y in 57..65) world.getBlockAt(-93, y, -47).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+                    world.getBlockAt(-93, 61, -46).type = Material.AIR // Current canonical step is already open.
+                    // These five body/support columns reproduce the native probes. The
+                    // future extension still contains stone, while the near bridge is open.
+                    for ((feet, material) in listOf(
+                        CivPosition(-97, 61, -48) to Material.AIR,
+                        CivPosition(-97, 61, -47) to Material.STONE,
+                        CivPosition(-96, 61, -47) to Material.STONE,
+                        CivPosition(-94, 61, -47) to Material.AIR,
+                        CivPosition(-97, 61, -49) to Material.AIR,
+                    )) {
+                        world.getBlockAt(feet.x, feet.y - 1, feet.z).type = Material.AIR
+                        world.getBlockAt(feet.x, feet.y, feet.z).type = material
+                        world.getBlockAt(feet.x, feet.y + 1, feet.z).type = Material.AIR
+                    }
+                    val footing = CivPosition(-94, 60, -47)
+                    val wall = CivPosition(-97, 61, -49)
+                    (CivsMinePlan.localPoint(mine, footing) in geometry.transferFloor) shouldBe true
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        CivsStorage(plugin) { emptyArray() }.use { storage ->
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            val first = nextMineWork(runtime, city, city.workers.single())
+                            first.focus shouldBe footing
+                            first.status shouldBe "securing-mine"
+                            first.miningStep shouldBe 29L
+                            first.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                            first.outputs shouldBe emptyMap()
+                            // A floor target at y=60 must approach the old, usable ladder,
+                            // not the future ladder at (-96,61,-47), whose feet are stone.
+                            first.standing.x shouldBe -93
+                            first.standing.z shouldBe -47
+                            world.getBlockAt(footing.x, footing.y, footing.z).type shouldBe Material.AIR
+                            CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe 34L
+                            var next = first
+                            var cut = false
+                            for (action in 0 until 16) {
+                                val currentWorker = city.workers.single()
+                                val excavating = next.changes.any { cell ->
+                                    Bukkit.createBlockData(cell.after).material.isAir &&
+                                        !Bukkit.createBlockData(cell.before).material.isAir
+                                }
+                                CivsMinePlan.workStandingAllowed(mine, next.standing) shouldBe true
+                                citizenStandable(world, next.standing) shouldBe true
+                                runtime.validate(city, next)
+                                if (excavating) {
+                                    // The optional bridge cannot waive the required cave shell.
+                                    world.getBlockAt(wall.x, wall.y, wall.z).type shouldBe Material.COBBLESTONE
+                                    cut = true
+                                    break
+                                }
+                                next.status shouldBe "securing-mine"
+                                next.miningStep shouldBe 29L
+                                next.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                                next.outputs shouldBe emptyMap()
+                                val before = CivsEquipment.plainCount(currentWorker, "COBBLESTONE")
+                                val id = UUID.randomUUID()
+                                storage.reserve(city, id)
+                                val native = storage.prepareWork(city, mine.id, next.storageInputs(currentWorker), emptyMap(), next.changes)
+                                val after = CivsRules.finishWorldWork(city, next, 100_000 + action * 3_000L)
+                                    .copy(inventory = native.inventoryAfter)
+                                val receipt = CivInventoryTransaction(id, city.id, city.revision, after, native.changes,
+                                    worldChanges = native.worldChanges).validated()
+                                storage.seal(receipt, keepViewersOpen = true)
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                city = receipt.after
+                                storage.unlock(id)
+                                CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe before - 1
+                                city.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe 29L
+                                world.getBlockAt(footing.x, footing.y, footing.z).type shouldBe Material.COBBLESTONE
+                                runtime.invalidate(currentWorker.id)
+                                next = nextMineWork(runtime, city, city.workers.single())
+                            }
+                            cut shouldBe true
+                            // The two obstructing future ladder cells were not cleared as a
+                            // side effect of selecting or placing the prerequisite supports.
+                            world.getBlockAt(-96, 61, -47).type shouldBe Material.STONE
+                            world.getBlockAt(-97, 61, -47).type shouldBe Material.STONE
+                        }
                     }
                 } finally { tasks.close() }
             }

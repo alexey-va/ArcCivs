@@ -7,6 +7,7 @@ import io.mockk.mockk
 import io.mockk.verify
 import org.bukkit.Chunk
 import org.bukkit.Material
+import org.bukkit.Location
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.BlockState
@@ -16,6 +17,34 @@ import java.util.UUID
 import java.util.function.Predicate
 
 class CivsCampfiresTest : FunSpec({
+    test("fireplace seats need a clear view on their actual side of walls and floors") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("campfire-visibility").also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            val fire = CivPosition(4, 64, 4)
+            world.getBlockAt(fire.x, fire.y, fire.z).type = Material.CAMPFIRE
+            val outside = CivPosition(6, 64, 4)
+            val inside = CivPosition(2, 64, 4)
+            citizenCampfireVisible(world, outside, fire) shouldBe true
+            // The front of the fireplace remains open; its rear wall separates the exterior seat.
+            for (y in 64..66) world.getBlockAt(5, y, 4).type = Material.STONE
+            citizenCampfireVisible(world, outside, fire) shouldBe false
+            citizenCampfireVisible(world, inside, fire) shouldBe true
+            citizenCampfireVisible(world, Location(world, 6.1, 65.62, 4.5), fire) shouldBe false
+            // Recheck existing visits: a newly placed wall must stop a previously valid seat.
+            world.getBlockAt(3, 65, 4).type = Material.STONE
+            citizenCampfireVisible(world, inside, fire) shouldBe false
+            world.getBlockAt(3, 65, 4).type = Material.AIR
+            citizenCampfireVisible(world, inside, fire) shouldBe true
+            world.getBlockAt(4, 65, 4).type = Material.STONE
+            citizenCampfireVisible(world, CivPosition(3, 66, 4), fire) shouldBe false
+            val before = world.rayTraces
+            citizenCampfireVisible(world, CivPosition(14, 64, 4), CivPosition(16, 64, 4)) shouldBe false
+            world.rayTraces shouldBe before // An unloaded target is rejected without a native ray or a chunk load.
+            world.isChunkLoaded(1, 0) shouldBe false
+        }
+    }
+
     test("social visits use idle time or an evening boundary and never interrupt work cargo or sleep") {
         val plan = CitizenPlan(CitizenToken(null, 0, 0, null), CivPosition(0, 64, 0), null, null, 0, "unassigned")
         citizenCampEligible(plan, CitizenPhase.IDLE, 6_000) shouldBe true

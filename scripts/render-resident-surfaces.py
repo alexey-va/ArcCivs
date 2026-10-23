@@ -381,6 +381,7 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--client", type=Path, required=True)
     parser.add_argument("--fonts", type=Path, required=True)
+    parser.add_argument("--resource-pack", type=Path, help="Exact pack for font-image glyphs used by the exported components")
     parser.add_argument("--surface-renderer", type=Path, required=True)
     parser.add_argument("--only", help="Render one inventory first for representative inspection")
     parser.add_argument("--cart-grounding", type=Path, help="Measured model export with exact ItemDisplay context/base faces")
@@ -389,6 +390,15 @@ def main():
     surfaces = module("resident_surface_assets", args.surface_renderer)
     core = surfaces.CORE
     glyphs, advances = core.load_font_glyphs(args.client, faithful32=None, raster_scale=2, font_assets=args.fonts)
+    if args.resource_pack:
+        used = set("".join(json.dumps(json.loads(path.read_text()), ensure_ascii=False) for path in args.fixtures.glob("*.json")))
+        with ZipFile(args.resource_pack) as pack, ZipFile(args.client) as client:
+            providers = core.resolve_providers(pack, fallback_archives=(client,))
+        images = {character for provider in providers if provider.get("type") == "bitmap"
+                  for row in provider.get("chars", []) for character in row}
+        for character in used & images:
+            provider = core.load_provider_glyph(args.resource_pack, ord(character), raster_scale=2, bitmap_fallbacks=(args.client,))
+            glyphs[ord(character)], advances[ord(character)] = provider.sprite, provider.advance
     stack = SimpleNamespace(glyphs=glyphs, advances=advances, raster_scale=2)
     report = []
 
@@ -517,6 +527,7 @@ def main():
         "evidence": "Compiled presenter fixture plus offline Minecraft texture/font rendering",
         "sourceSha256": {path.name: digest(path) for path in sources},
         "rendererSha256": digest(__file__), "clientSha256": digest(args.client), "fontsSha256": digest(args.fonts),
+        "resourcePackSha256": digest(args.resource_pack) if args.resource_pack else None,
         "limitations": ["No native-client packet, input, lighting or culling acceptance",
                         "Inventory icons use canonical texture previews, not the native 3D item renderer; shield uses its actual board UV as a flat preview",
                         "Player reference mannequin is a vanilla skin with simplified UVs, not the production NPC skin",

@@ -536,6 +536,7 @@ object CivsRules {
     fun deliver(
         city: Settlement, actor: UUID, workerId: UUID, assignmentId: UUID,
         expectedCompletedCycles: Long, expectedNextDeliveryAt: Long, now: Long, outputHandled: Boolean = false,
+        craftJob: CivCraftJob? = null, equipmentAfter: List<CivResidentItem?>? = null,
     ): Settlement {
         authorized(city, actor)
         check(now >= 0, "invalid-time")
@@ -547,6 +548,10 @@ object CivsRules {
             worker.nextDeliveryAt == expectedNextDeliveryAt, "stale-delivery")
         check(now >= worker.nextDeliveryAt, "delivery-too-early")
         val building = city.building(assignmentId) ?: reject("building-not-found")
+        if (craftJob != null) check(CivsCarpentry.valid(city, worker, craftJob), "stale-delivery")
+        check(equipmentAfter == null || craftJob?.let(CivsCarpentry::recipe)?.stripping == true, "invalid-delivery")
+        check(craftJob?.let(CivsCarpentry::recipe)?.stripping != true || equipmentAfter != null, "invalid-delivery")
+        val productionInputs = craftJob?.inputs ?: CivsProduction.inputs(building)
         var stock = city.stock
         var construction = city.construction
         if (isBuilder(city, building)) {
@@ -576,13 +581,14 @@ object CivsRules {
                 stock = stock.with(resource, add(stock[resource], amount))
             } else {
                 check(outputHandled, "materials-required")
-                check(CivsEquipment.inputsReady(worker, CivsProduction.inputs(building), emptyMap()), "materials-missing")
+                check(CivsEquipment.inputsReady(worker, productionInputs, emptyMap()), "materials-missing")
             }
         }
         val interval = CivsResidents.workDuration(worker,
             if (isBuilder(city, building) && construction?.payment != null) BUILDER_SESSION_INTERVAL else deliveryInterval(city, building))
+        val equipped = equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
         val supplied = if (!isBuilder(city, building) && city.inventory != null && outputHandled)
-            CivsEquipment.consumeInputs(worker, CivsProduction.inputs(building)) else worker
+            CivsEquipment.consumeInputs(equipped, productionInputs) else equipped
         val updated = CivsResidents.trained(supplied.copy(completedCycles = add(worker.completedCycles, 1),
             nextDeliveryAt = add(now, interval)), effectiveWorkType(city, building))
         return changed(city, city.copy(stock = stock, construction = construction,

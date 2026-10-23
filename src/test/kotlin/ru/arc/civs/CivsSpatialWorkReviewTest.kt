@@ -807,7 +807,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
-    test("farm reports growth only after a complete empty scan and retains a real missing-seed reason") {
+    test("farm reports growth after a complete scan and keeps its confirmed idle reason through city writes") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open().use { paper ->
                 val world = CivsWorksiteWorldFixture("complete-field-search").also(paper.server::addWorld)
@@ -824,8 +824,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
                 }
                 CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
                     repeat(4) {
                         runtime.pulse(listOf(city))
                         runtime.plan(city, worker) shouldBe null
@@ -833,6 +834,15 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     }
                     runtime.pulse(listOf(city))
                     runtime.idleReason(city, worker) shouldBe "waiting-growth"
+                    repeat(12) {
+                        paused = true
+                        runtime.pulse(listOf(city))
+                        runtime.idleReason(city, worker) shouldBe "waiting-growth"
+                        runtime.plan(city, worker) shouldBe null
+                        paused = false
+                        runtime.pulse(listOf(city))
+                        runtime.idleReason(city, worker) shouldBe "waiting-growth"
+                    }
                     val empty = plots.first().let { it.copy(y = it.y + 1) }
                     world.getBlockAt(empty.x, empty.y, empty.z).type = Material.AIR
                     runtime.invalidate(worker.id)
@@ -840,6 +850,16 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     runtime.plan(city, worker) shouldBe null
                     runtime.idleReason(city, worker) shouldBe "waiting-seeds"
                     runtime.requirement(city, worker) shouldBe ("WHEAT_SEEDS" to 64L)
+                    paused = true
+                    runtime.idleReason(city, worker) shouldBe "waiting-seeds"
+                    paused = false
+                    val ripe = plots[1].let { it.copy(y = it.y + 1) }
+                    world.getBlockAt(ripe.x, ripe.y, ripe.z).blockData =
+                        (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+                    repeat(8) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    val harvest = requireNotNull(runtime.plan(city, worker))
+                    harvest.status shouldBe "working-field"
+                    harvest.focus shouldBe ripe
                 }
                 tasks.close()
             }

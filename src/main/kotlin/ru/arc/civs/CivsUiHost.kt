@@ -98,7 +98,7 @@ interface CivsUiHost {
     fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit>
     fun selectGround(player: Player, selectionId: UUID, target: CivsGroundTarget): CompletableFuture<Unit>
     fun cancelSelection(player: Player, reason: String)
-    fun prepareUpgrade(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun upgradeBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun rotatePreview(player: Player, degrees: Int = 90): CompletableFuture<Unit>
     fun movePreview(player: Player): CompletableFuture<Unit>
     fun movePreview(player: Player, target: CivsGroundTarget): CompletableFuture<Unit>
@@ -150,5 +150,6 @@ interface CivsUiHost {
     fun registerContainer(player: Player): CompletableFuture<Unit>
     fun unregisterContainer(player: Player, position: CivPosition): CompletableFuture<Unit>
     fun setProduction(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
+    fun carpentry(player: Player, buildingId: UUID): CivCarpentryView? = null
     fun reload(player: Player): CompletableFuture<Unit>
 }

@@ -601,7 +601,7 @@ class CivsResidentsRuntimeTest : FunSpec({
 
     test("a processor collects supplies only at its barrel and cannot start work before the receipt") {
         residentRuntime { h ->
-            val mill = h.assignFarm().copy(type = BuildingType.SAWMILL, production = null)
+            val mill = h.assignFarm().copy(type = BuildingType.BLACKSMITH, production = null)
             h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == mill.id) mill else it })
             h.workReady = false
             val actor = h.owner.collisionActors().single()

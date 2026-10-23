@@ -1,0 +1,159 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.52 demand-driven carpentry",
+  "assumptions": [
+    "Low/base/high are sensitivity assumptions: 1/5/10 owners, one supplied carpenter per owner, 0.25/1/4 active hours per day, not observed sessions.",
+    "The unchanged 60000 ms production interval bounds one carpenter to 60 recipe batches per active hour; walking, hunger, night, storage, demand and receipts reduce this.",
+    "The item scenario is an upper envelope with unlimited actual plank demand. Real demand-driven production stops when demand is satisfied.",
+    "One real native recipe is consumed per batch. Missing external inputs, locked recipes and full output prevent completion.",
+    "Current SELL is active; future SELL removal and contract transition are distinct, unchanged scenarios. No item-to-currency exchange is assumed."
+  ],
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "carpentry_direct_vault",
+          "kind": "mint",
+          "source": "CivsRules production and inventory receipts",
+          "basis": "No Vault API, price or payout is introduced",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "carpentry_direct_tokens",
+          "kind": "mint",
+          "source": "CivsRules production and inventory receipts",
+          "basis": "No premium token grant or charge",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "carpentry_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsRules production and inventory receipts",
+          "basis": "No Minecraft player XP grant; resident profession skill remains a separate capped statistic",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "plank_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "native_log_to_planks",
+          "kind": "item",
+          "source": "CivsMaterials legacy recipe and CivsCarpentry native catalog",
+          "basis": "4 planks per consumed matching log, same 60 s session, supplied one-carpenter upper envelope",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

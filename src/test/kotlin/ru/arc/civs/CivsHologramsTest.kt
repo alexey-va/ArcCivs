@@ -8,6 +8,9 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.TextComponent
+import net.kyori.adventure.text.format.TextColor
+import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
 import org.bukkit.Location
 import org.bukkit.entity.Display
@@ -101,8 +104,15 @@ class CivsHologramsTest : FunSpec({
             val label = civsNpcHologramText(text, npc)
             plainText(label) shouldContain "Василий\n"
             plainText(label) shouldContain "\nФермер\n"
-            plainText(label) shouldContain "\n♥ 18.5/20 · Сытость 20/20"
-            plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "Сытость 6/20"
+            plainText(label) shouldContain "\n\uE322 18.5/20   🍖 20/20"
+            plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "🍖 6/20"
+            fun components(value: Component): List<Component> = listOf(value) + value.children().flatMap(::components)
+            val icons = components(label).filterIsInstance<TextComponent>().filter { it.content() in setOf("\uE322", "🍖") }
+            icons.size shouldBe 2
+            icons.forEach {
+                it.color() shouldBe TextColor.color(0xFFFFFF)
+                it.font() shouldBe Key.key("minecraft:default")
+            }
             plainText(civsNpcHologramText(text, npc.copy(child = true, status = "playing"))) shouldContain
                 "\nРебёнок\nИграет\n"
             plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-tool"))) shouldContain "Нужна мотыга"
@@ -130,6 +140,9 @@ class CivsHologramsTest : FunSpec({
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET,
                         "viewRangeBlocks" to 64,
                         "background" to listOf(28, 24, 19, 105)),
+                    "hungry" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
+                        npc.copy(health = 6.0, hunger = 3, status = "eating"))), "scale" to CIVS_NPC_TEXT_SCALE,
+                        "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
                     "courier" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
                         npc.copy(profession = "courier", status = "carrying-cargo"))), "scale" to CIVS_NPC_TEXT_SCALE,
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),

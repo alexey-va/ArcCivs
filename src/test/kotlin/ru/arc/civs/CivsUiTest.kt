@@ -477,7 +477,8 @@ class CivsUiTest : FunSpec({
                 inventory = mapOf("BREAD" to 2L, "IRON_SHOVEL" to 1L, "IRON_CHESTPLATE" to 1L))
             h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
             h.ui.openWorker(h.player, base.id, worker.id)
-            h.body() shouldContain "11.5 / 28"
+            h.body() shouldContain "\uE322 11.5/28"
+            h.body() shouldContain "🍖 20/20"
             h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "feed", "assign", "unassign")
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-detail-ru", h.screen, listOf(588, 380)) }
             h.click("skills")
@@ -534,7 +535,6 @@ class CivsUiTest : FunSpec({
             h.screen.buttons.all { plainText(it.label).contains("освободить") } shouldBe true
             export("scribe-workers-ru")
             h.click("history")
-            h.click("upgrade")
             h.body() shouldContain "2 → 3"
             h.body() shouldContain "8 → 12"
             export("scribe-upgrade-ru")
@@ -546,10 +546,13 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "17/20 опыта"
             export("scribe-skills-ru")
             val hut = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
-            h.city = h.city!!.copy(buildings = h.city!!.buildings.map { if (it.id == hut.id) it.copy(level = 2) else it })
+            h.city = h.city!!.copy(buildings = h.city!!.buildings.map { when (it.id) {
+                hut.id -> it.copy(level = 2)
+                hall.id -> it.copy(level = 3)
+                else -> it
+            } })
             h.ui.openBuilding(h.player, base.id, hut.id)
             h.body() shouldContain "1 / 2"
-            h.click("upgrade")
             h.body() shouldContain "2 → 3"
             h.body() shouldContain "Дополнительный строитель"
             export("builders-upgrade-ru")
@@ -562,8 +565,11 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
             val smith = base.buildings.last().copy(type = BuildingType.BLACKSMITH, level = 2)
-            h.city = base.copy(buildings = base.buildings.map { if (it.id == smith.id) smith else it },
-                inventory = base.inventory!!.copy(materials = mapOf("IRON_INGOT" to 3L, "STICK" to 4L)))
+            h.city = base.copy(buildings = base.buildings.map { when {
+                it.id == smith.id -> smith
+                it.type == BuildingType.TOWN_HALL -> it.copy(level = 3)
+                else -> it
+            } }, inventory = base.inventory!!.copy(materials = mapOf("IRON_INGOT" to 3L, "STICK" to 4L)))
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
             val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
@@ -592,7 +598,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "3 / 3 нужно"
             h.body() shouldContain "Железная кирка × 1"
             export("workshops-smith-recipe-ru")
-            h.click("history"); h.click("upgrade")
+            h.click("history")
             h.body() shouldContain "2 → 3"
             h.body() shouldContain "рецепт и время"
             export("workshops-smith-upgrade-ru")
@@ -612,7 +618,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("warehouse request tables show one current stock snapshot without building buttons and retain held cargo and local supplies") {
+    test("warehouse request board preserves remaining in transit and one current stock snapshot") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -640,16 +646,20 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.logistics"
             h.body() shouldContain "Осталось"
             h.body() shouldContain "складах"
-            h.body() shouldContain "1 / 47"
-            h.body() shouldContain "1 / 12"
-            h.body() shouldContain "8 / 128"
+            h.body() shouldContain "Осталось: 1 · В пути: 2"
+            h.body() shouldContain "На складах: 47"
+            h.body() shouldContain "Часть груза в пути"
+            h.body() shouldContain "На складах: 12"
+            h.body() shouldContain "Осталось: 8 · В пути: 0"
+            h.body() shouldContain "На складах: 128"
             h.body() shouldContain "В пути: 2"
             stockSnapshots shouldBe beforeRequests + 1
             h.screen.buttons.map { it.id.value } shouldBe listOf("next")
             export("logistics-requests-ru")
             physical = physical + ("OAK_LOG" to 6L)
             h.click("next")
-            h.body() shouldContain "4 / 6"
+            h.body() shouldContain "Осталось: 4 · В пути: 0"
+            h.body() shouldContain "На складах: 6"
             stockSnapshots shouldBe beforeRequests + 2
             h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
             export("logistics-requests-page-2-ru")
@@ -666,13 +676,17 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Сначала доставит груз"
             h.screen.buttons.map { it.id.value }.contains("assign") shouldBe true
             export("logistics-carrier-ru")
+            h.click("logistics")
+            h.screen.id shouldBe "civs.logistics"
+            h.click("history")
+            h.screen.id shouldBe "civs.worker"
             h.click("skills"); h.click("next")
             h.body() shouldContain "Кладовщик"
             export("logistics-skills-last-ru")
         }
     }
 
-    test("warehouse request tables keep stock unknown when its snapshot is unavailable") {
+    test("warehouse request board keeps stock unknown when its snapshot is unavailable") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -683,10 +697,85 @@ class CivsUiTest : FunSpec({
             every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-unavailable")
             h.ui.openBuilding(h.player, base.id, warehouse.id)
             h.click("logistics")
-            h.body() shouldContain "3 / Нет данных"
+            h.body() shouldContain "Осталось: 3 · В пути: 0"
+            h.body() shouldContain "На складах: Нет данных"
+            h.body() shouldContain "Запасы неизвестны"
             h.body().contains("3 / 0") shouldBe false
             h.screen.buttons shouldBe emptyList()
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-stock-unavailable-ru", h.screen, listOf(588, 380)) }
+        }
+    }
+
+    test("courier board clamps covered requests and distinguishes empty stock") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val warehouse = base.buildings.last().copy(type = BuildingType.WAREHOUSE)
+            h.city = base.copy(buildings = base.buildings.dropLast(1) + warehouse)
+            every { h.host.supplyRequests(h.player) } returns listOf(
+                CivSupplyRequest(base.buildings.first().id, "PAPER", 3, 5),
+                CivSupplyRequest(base.buildings.first().id, "LEATHER", 2, 0))
+            every { h.host.availableMaterials(h.player) } returns emptyMap()
+            h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            h.body() shouldContain "Осталось: 0 · В пути: 5"
+            h.body() shouldContain "Всё необходимое в пути"
+            h.body() shouldContain "Ожидает материалов"
+            h.body().contains("Осталось: -") shouldBe false
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-covered-and-short-ru", h.screen, listOf(588, 380)) }
+        }
+    }
+
+    test("carpentry exposes automatic orders and inspectable tiers without manual production mutation") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val workshop = base.buildings.last().copy(id = UUID.randomUUID(), type = BuildingType.SAWMILL, level = 1)
+            h.city = base.copy(buildings = base.buildings + workshop)
+            val order = CivCarpentryOrderView(base.workers.first().id, "Александра", "STRIPPED_DARK_OAK_LOG", 1,
+                mapOf("DARK_OAK_LOG" to 1L), mapOf("DARK_OAK_LOG" to 1L), "DARK_OAK_STAIRS", base.buildings.first().id,
+                "waiting-materials")
+            val recipes = CivsCarpentry.views.filter { it.material in setOf("OAK_PLANKS", "STRIPPED_DARK_OAK_LOG",
+                "CHEST", "BARREL", "CAMPFIRE", "SCAFFOLDING", "BOOKSHELF") }
+            var view = CivCarpentryView(1, false, false, listOf(order), recipes)
+            every { h.host.carpentry(h.player, workshop.id) } answers { view }
+            fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
+            h.ui.openBuilding(h.player, base.id, workshop.id); h.click("production")
+            h.screen.id shouldBe "civs.production"
+            h.body() shouldContain "Александра"
+            h.body() shouldContain "Ждёт материалы"
+            h.body() shouldContain "Не хватает:"
+            h.body() shouldContain "Для заявки:"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("recipes", "refresh")
+            export("carpentry-order-missing-ru")
+            view = view.copy(orders = listOf(order.copy(missing = emptyMap(), status = "crafting")))
+            h.click("refresh")
+            h.body() shouldContain "Изготавливает"
+            h.body().contains("Не хватает:") shouldBe false
+            export("carpentry-order-working-ru")
+            h.click("recipes")
+            h.body() shouldContain "Обтёсывание"
+            export("carpentry-tier-1-ru")
+            h.click("tier_2")
+            h.screen.id shouldBe "civs.carpentry-recipes"
+            h.body() shouldContain "улучшите мастерскую до уровня 2"
+            export("carpentry-tier-locked-ru")
+            h.click("next")
+            h.body() shouldContain "Бамбук"
+            export("carpentry-tier-locked-page-2-ru")
+            h.click("history")
+            h.screen.id shouldBe "civs.production"
+            view = view.copy(orders = emptyList(), planning = true)
+            h.click("refresh"); h.body() shouldContain "Подбираем изделия"
+            view = view.copy(planning = false)
+            h.click("refresh"); h.body() shouldContain "нет подходящих заказов"
+            export("carpentry-waiting-ru")
+            view = view.copy(paused = true)
+            h.click("refresh"); h.body() shouldContain "Работа приостановлена"
+            export("carpentry-paused-ru")
+            h.player.setLocale(Locale.US)
+            view = view.copy(paused = false, orders = listOf(order))
+            h.click("refresh"); export("carpentry-order-missing-en")
+            verify(exactly = 0) { h.host.setProduction(any(), any(), any()); h.player.closeDialog() }
         }
     }
 
@@ -714,7 +803,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, base.id, worker.id)
             val before = h.screen
             h.click("feed"); h.click("feed", screen = before); h.paper.performTicks(2)
-            h.body() shouldContain "14 / 20"
+            h.body() shouldContain "\uE322 14/20"
             h.screen.buttons.map { it.id.value } shouldNotContain "feed"
             verify(exactly = 1) { h.host.feedWorker(h.player, worker.id) }
         }
@@ -841,12 +930,11 @@ class CivsUiTest : FunSpec({
             h.click("prepare"); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.beginBuildingSelection(h.player, BuildingType.HOUSE) }
             val building = base.buildings.last()
-            every { h.host.prepareUpgrade(h.player, building.id) } returns CompletableFuture.completedFuture(Unit)
-            h.ui.openBuilding(h.player, base.id, building.id); h.click("upgrade")
-            h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
+            every { h.host.upgradeBuilding(h.player, building.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuilding(h.player, base.id, building.id); h.click("upgrade"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building"
             h.body().contains("temporarily unavailable") shouldBe false
-            h.click("prepare"); h.paper.performTicks(2)
-            verify(exactly = 1) { h.host.prepareUpgrade(h.player, building.id) }
+            verify(exactly = 1) { h.host.upgradeBuilding(h.player, building.id) }
             val site = building.copy(phase = BuildingPhase.SITE)
             h.city = base.copy(buildings = base.buildings.map { if (it.id == site.id) site else it })
             every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-busy")
@@ -985,8 +1073,8 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.building"
             h.body() shouldContain "Site marked out"
             h.click("materials"); h.paper.performTicks(2)
-            h.body() shouldContain "is an estimate"
-            h.body() shouldContain "0 / up to 900"
+            h.body() shouldContain "Missing materials can be added later"
+            materialTableCells(h.screen).last() shouldBe listOf("Oak Log", "900")
             val before = h.screen
             h.click("start"); h.click("start", screen = before)
             h.body() shouldBe "Preparing construction…"
@@ -1010,14 +1098,14 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "refill storage so the builder can continue"
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
             h.body() shouldContain "Waiting for materials"
-            h.body() shouldContain "2 / 19"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "17")
             h.body() shouldContain "A courier can deliver them"
             h.body().contains("up to") shouldBe false
             h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
             h.city = h.city!!.copy(construction = order.copy(phase = ConstructionPhase.CONSTRUCTING,
                 materials = mapOf("COBBLESTONE" to 3L)))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
-            h.body() shouldContain "2 / 3"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "1")
             h.body().contains("Waiting for materials") shouldBe false
             h.city = h.city!!.copy(construction = order.copy(payment = null))
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
@@ -1040,20 +1128,46 @@ class CivsUiTest : FunSpec({
             plainText(h.screen.buttons.single { it.id.value == "warehouse" }.label) shouldBe "Склад ›"
             h.click("materials"); h.paper.performTicks(2)
             plainText(h.screen.title) shouldBe "Строительство"
-            h.body() shouldContain "Предмет"
-            h.body() shouldContain "Нужно"
+            materialTableCells(h.screen).first() shouldBe listOf("Материал", "Не хватает")
             h.body() shouldContain "Булыжные ступеньки"
-            h.body() shouldContain "5 / до 73"
-            h.body() shouldContain "0 / до 516"
+            materialTableCells(h.screen).single { it.first() == "Булыжник" } shouldBe listOf("Булыжник", "68")
+            materialTableCells(h.screen).single { it.first() == "Земля" } shouldBe listOf("Земля", "516")
             h.body() shouldContain "\uE570"
             h.body().contains("Cobblestone") shouldBe false
-            h.body() shouldContain "Еловые доски"
-            h.body() shouldContain "9000001"
-            h.body() shouldContain "2000003"
-            h.body() shouldContain "до"
+            h.body().contains("Еловые доски") shouldBe false
+            h.body().contains("9000001") shouldBe false
+            h.body().contains("2000003") shouldBe false
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "construction-deficit-ru", h.screen, listOf(588, 380)) }
             h.screen.buttons.map { it.id.value } shouldBe listOf("supply", "start")
             verify(exactly = 1) { h.host.buildingMaterials(h.player, site.id) }
             verify(exactly = 0) { h.host.startBuilding(any(), any()) }
+        }
+    }
+
+    test("covered construction materials show a clear complete state without zero rows or supply actions") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val hut = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+            val target = base.buildings.last()
+            h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), target.id, 2, 100, 20,
+                ConstructionPhase.CONSTRUCTING, Stock(), materials = mapOf("COBBLESTONE" to 20L), payment = CivConstructionPayment()))
+            every { h.host.constructionAvailable(h.player, target.id) } returns mapOf("COBBLESTONE" to 25L)
+            h.ui.openBuilding(h.player, base.id, hut.id); h.paper.performTicks(2)
+            h.body() shouldContain "Все нужные материалы уже у строителей."
+            h.body().contains("Булыжник") shouldBe false
+            h.screen.buttons.map { it.id.value } shouldNotContain "supply"
+            h.screen.buttons.map { it.id.value } shouldNotContain "grant"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "builder-materials-covered-ru", h.screen, listOf(588, 380)) }
+            h.ui.openBuilding(h.player, base.id, target.id); h.click("materials"); h.paper.performTicks(2)
+            h.body() shouldContain "Все нужные материалы уже у строителей."
+            h.body().contains("Булыжник") shouldBe false
+            h.screen.buttons shouldBe emptyList()
+
+            every { h.host.constructionAvailable(h.player, target.id) } throws CivsRejection("storage-busy")
+            h.ui.openBuilding(h.player, base.id, target.id); h.click("materials"); h.paper.performTicks(2)
+            h.body().contains("Все нужные материалы уже у строителей.") shouldBe false
+            verify(exactly = 0) { h.host.supplyConstruction(any(), any()); h.host.supplyConstruction(any(), any(), any()) }
         }
     }
 
@@ -1081,9 +1195,9 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Припасы попадут в этот дом строителя"
             h.body() shouldContain "В очереди: 1"
             materialTableCells(h.screen).size shouldBe 9
-            materialTableCells(h.screen).first() shouldBe listOf("Предмет", "Запас", "Нужно", "У вас")
+            materialTableCells(h.screen).first() shouldBe listOf("Материал", "Не хватает")
             tableText() shouldContain "Резная книжная полка"
-            materialTableCells(h.screen).single { it.first() == "Булыжник" } shouldBe listOf("Булыжник", "3", "4", "64")
+            materialTableCells(h.screen).single { it.first() == "Булыжник" } shouldBe listOf("Булыжник", "1")
             tableText().contains(" / ") shouldBe false
             tableText().contains("Факел") shouldBe false
             h.screen.buttons.single { it.id.value == "supply" }.label.color() shouldBe TextColor.color(0x9BD48D)
@@ -1092,7 +1206,7 @@ class CivsUiTest : FunSpec({
             h.click("next"); h.paper.performTicks(2)
             materialTableCells(h.screen).size shouldBe 6
             tableText() shouldContain "Факел"
-            materialTableCells(h.screen).last() shouldBe listOf("Факел", "0", "34", "0")
+            materialTableCells(h.screen).last() shouldBe listOf("Факел", "34")
             export("builder-hut-materials-page-2-ru")
             h.click("previous"); h.paper.performTicks(2)
             tableText() shouldBe firstPage
@@ -1150,7 +1264,7 @@ class CivsUiTest : FunSpec({
             h.click("supply", screen = before)
             freshMaterials.complete(mapOf("COBBLESTONE" to 20L)); h.paper.performTicks(2)
             h.screens.size shouldBe renderCount + 1
-            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "7", "20", "0")
+            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "13")
             h.body() shouldContain "Передано: 5. Ещё нужно: 13."
             h.body().contains("Освободите место и повторите.") shouldBe false
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "builder-hut-materials-partial-ru", h.screen, listOf(588, 380)) }
@@ -1194,7 +1308,7 @@ class CivsUiTest : FunSpec({
             val grant = h.screen.buttons.single { it.id.value == "grant" }
             plainText(grant.label) shouldBe "Выдать всё"
             grant.label.color() shouldBe TextColor.color(0x9BD48D)
-            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "0", "20", "0")
+            materialTableCells(h.screen).last() shouldBe listOf("Булыжник", "20")
             h.screen.buttons.map { it.id.value } shouldNotContain "supply"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "builder-hut-materials-creative-ru", h.screen, listOf(588, 380)) }
             val before = h.screen
@@ -1233,7 +1347,7 @@ class CivsUiTest : FunSpec({
             stored = 7L
             pending.complete(CivsSupplyResult(5L, 12L, false)); h.paper.performTicks(2)
             h.screens.size shouldBe renderCount + 1
-            h.body() shouldContain "7 / 19"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "12")
             h.body() shouldContain "Transferred: 5. Still needed: 12."
             h.body().contains("Free up space") shouldBe false
             verify(exactly = 1) { h.host.supplyConstruction(h.player, building.id) }
@@ -1245,7 +1359,7 @@ class CivsUiTest : FunSpec({
                 CompletableFuture.completedFuture(CivsSupplyResult(4L, 8L, true))
             }
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials"); h.click("grant"); h.paper.performTicks(2)
-            h.body() shouldContain "11 / 19"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "8")
             h.body() shouldContain "Transferred: 4. Still needed: 8."
             h.body() shouldContain "Free up space and try again."
             verify(exactly = 1) { h.host.grantConstructionMaterials(h.player, building.id) }
@@ -1256,7 +1370,8 @@ class CivsUiTest : FunSpec({
             every { h.host.cityBusy(h.player) } returns false
             stored = 19L
             h.ui.openBuilding(h.player, base.id, building.id); h.click("materials")
-            h.screen.buttons.map { it.id.value } shouldBe listOf("grant")
+            h.screen.buttons shouldBe emptyList()
+            h.body() shouldContain "The builders already have all required materials."
         }
     }
 
@@ -1280,7 +1395,7 @@ class CivsUiTest : FunSpec({
             h.screens.size shouldBe renderCount + 1
             h.screen.id shouldBe "civs.building-materials"
             h.body() shouldContain "Your inventory has no plain items needed for this construction."
-            h.body() shouldContain "0 / 19"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "19")
             val pending = CompletableFuture<CivsSupplyResult>()
             every { h.host.supplyConstruction(h.player, building.id) } returns pending
             h.click("supply")
@@ -1549,7 +1664,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, base.id, child.id)
             h.body() shouldContain "Ребёнок"
             h.body() shouldContain "Играет"
-            h.body() shouldContain "7 / 20"
+            h.body() shouldContain "🍖 7/20"
             h.screen.buttons.map { it.id.value } shouldNotContain "assign"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-child-ru", h.screen, listOf(588, 380)) }
             val builder = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
@@ -1676,7 +1791,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "hall_inventory", "guide")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "upgrade", "hall_inventory", "guide")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"
@@ -1722,6 +1837,34 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("town hall overview starts its upgrade in one click and keeps transaction progress on the same screen") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val hall = base.buildings.first { it.type == BuildingType.TOWN_HALL }
+            h.city = base
+            val pending = CompletableFuture<Unit>()
+            every { h.host.upgradeBuilding(h.player, hall.id) } returns pending
+            h.open()
+            h.screen.id shouldBe "civs.overview"
+            h.body() shouldContain "Новый уровень"
+            h.body() shouldContain "Ратуша · ур. 3"
+            val action = h.screen.buttons.single { it.id.value == "upgrade" }
+            plainText(action.label) shouldBe "Улучшить ратушу"
+            action.label.color() shouldBe TextColor.color(0x9BD48D)
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "town-hall-direct-upgrade-ru", h.screen, listOf(588, 380)) }
+            val before = h.screen
+            h.click("upgrade"); h.click("upgrade", screen = before)
+            h.screen.id shouldBe "civs.overview"
+            h.body() shouldContain "Начинаем улучшение"
+            verify(exactly = 1) { h.host.upgradeBuilding(h.player, hall.id) }
+            h.screens.any { it.id == "civs.preview" || it.id == "civs.upgrade" } shouldBe false
+            pending.complete(Unit); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.overview"
+            verify(exactly = 0) { h.host.confirmPreview(any()) }
+        }
+    }
+
     test("overview omits stock quantities and members use saved names with an owner profile instead of an owner table") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -1733,7 +1876,14 @@ class CivsUiTest : FunSpec({
             h.open()
             h.body().contains("Хлеб") shouldBe false
             h.body().contains("1497") shouldBe false
+            h.body() shouldContain "Уровень 2 · Радиус: 64 блоков"
+            h.body() shouldContain "Жители: 4 / 8 · Спальные места: 8"
+            h.body() shouldContain "Постройки: 4 / 16 · Город спит"
+            h.body() shouldContain "Стройка: Нет активной стройки"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "overview-clean-ru", h.screen, listOf(588, 380)) }
+            h.player.setLocale(Locale.US); h.open()
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "overview-clean-en", h.screen, listOf(588, 380)) }
+            h.player.setLocale(Locale.forLanguageTag("ru-RU")); h.open()
             h.click("management"); h.click("stock"); h.click("materials")
             h.body() shouldContain "Хлеб"
             h.open(); h.click("management"); h.click("members")
@@ -1753,27 +1903,49 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("building list presents eight rows in two columns with distinct building colors") {
+    test("building overview shows levels honest construction states and worker counts with nearby paged actions") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
-            h.city = base.copy(buildings = (BuildingType.entries + List(5) { BuildingType.HOUSE }).mapIndexed { index, type ->
+            val types = listOf(BuildingType.TOWN_HALL, BuildingType.BUILDER_HUT, BuildingType.STONEMASON,
+                BuildingType.FORESTER, BuildingType.HOUSE, BuildingType.WAREHOUSE, BuildingType.BLACKSMITH, BuildingType.FARM) +
+                List(8) { BuildingType.HOUSE }
+            val buildings = types.mapIndexed { index, type ->
                 base.buildings.first().copy(id = UUID(0, index.toLong()), type = type)
-            })
+            }
+            val target = buildings[3]
+            h.city = base.copy(buildings = buildings, constructionQueue = listOf(buildings[4].id),
+                workers = base.workers.mapIndexed { index, worker -> worker.copy(assignment = if (index < 2) buildings[1].id else null) },
+                construction = CivConstruction(UUID.randomUUID(), target.id, 3, 500, 40, ConstructionPhase.CONSTRUCTING, Stock()))
             h.open(); h.click("buildings")
-            val buildings = h.screen.buttons.filter { it.id.value.startsWith("building_") }
-            buildings.size shouldBe 16
+            val actions = h.screen.buttons.filter { it.id.value.startsWith("building_") }
+            actions.size shouldBe 8
             h.screen.columns shouldBe 2
-            buildings.map { it.label.color() }.distinct().size shouldBe 11
+            actions.map { it.label.color() }.distinct().size shouldBe 8
+            h.screen.buttons.map { it.id.value }.contains("next") shouldBe true
+            h.screen.buttons.map { it.id.value } shouldNotContain "queue"
+            val rows = materialTableCells(h.screen)
+            rows.first() shouldBe listOf("Постройка", "Ур.", "Состояние", "Работники")
+            rows.single { it.first() == "Дом строителя" } shouldBe listOf("Дом строителя", "2", "Готово", "2 / 2")
+            rows.single { it.first() == "Лесорубка" }[2] shouldBe "Улучшается → 3"
+            rows.single { it.first() == "Дом" }[2] shouldBe "В очереди · №1"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-upgrading-ru", h.screen, listOf(588, 380)) }
+            h.click("building_2")
+            h.screen.id shouldBe "civs.building"
+            h.body() shouldContain "Каменотёсная"
+            h.open(); h.click("buildings"); h.click("next")
+            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 8
             h.screen.buttons.map { it.id.value } shouldNotContain "next"
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-rows-ru", h.screen, listOf(588, 380)) }
-            val target = h.city!!.buildings.last()
-            h.city = h.city!!.copy(construction = CivConstruction(UUID.randomUUID(), target.id, 3,
-                500, 40, ConstructionPhase.CONSTRUCTING, Stock()))
+            h.city = h.city!!.copy(buildings = buildings.map { if (it.id == target.id) it.copy(level = 1, phase = BuildingPhase.CONSTRUCTING) else it },
+                construction = h.city!!.construction!!.copy(targetLevel = 1))
             h.open(); h.click("buildings")
-            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe 16
-            h.screen.buttons.map { it.id.value }.contains("queue") shouldBe true
-            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-eight-active-ru", h.screen, listOf(588, 380)) }
+            materialTableCells(h.screen).single { it.first() == "Лесорубка" }.take(3) shouldBe listOf("Лесорубка", "1", "Строится")
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-constructing-ru", h.screen, listOf(588, 380)) }
+            h.player.setLocale(Locale.US)
+            h.open(); h.click("buildings")
+            materialTableCells(h.screen).any { it.first() == "Stonemason" } shouldBe true
+            materialTableCells(h.screen).any { it.first() == "workshop" } shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-constructing-en", h.screen, listOf(588, 380)) }
         }
     }
 
@@ -2064,7 +2236,7 @@ class CivsUiTest : FunSpec({
             verify(exactly = 1) { h.host.startBuilding(h.player, second.id) }
             h.click("materials"); h.paper.performTicks(2)
             h.body() shouldContain "Queued · No. 2"
-            h.body() shouldContain "0 / up to 19"
+            materialTableCells(h.screen).last() shouldBe listOf("Cobblestone", "19")
             h.screen.buttons.map { it.id.value } shouldBe listOf("supply")
 
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -2095,11 +2267,10 @@ class CivsUiTest : FunSpec({
             val active = base.buildings[1]
             h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), active.id, 2, 500, 0,
                 ConstructionPhase.CONSTRUCTING, Stock()))
-            every { h.host.prepareUpgrade(h.player, target.id) } returns CompletableFuture.completedFuture(Unit)
-            h.ui.openBuilding(h.player, base.id, target.id); h.click("upgrade")
-            h.screen.buttons.map { it.id.value } shouldBe listOf("prepare")
-            h.click("prepare"); h.paper.performTicks(2)
-            verify(exactly = 1) { h.host.prepareUpgrade(h.player, target.id) }
+            every { h.host.upgradeBuilding(h.player, target.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuilding(h.player, base.id, target.id); h.click("upgrade"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building"
+            verify(exactly = 1) { h.host.upgradeBuilding(h.player, target.id) }
             h.city = h.city!!.copy(constructionQueue = listOf(target.id))
             h.ui.openBuilding(h.player, base.id, target.id)
             h.body() shouldContain "В очереди · №1"
@@ -2279,6 +2450,36 @@ class CivsUiTest : FunSpec({
             exportUiScreen(directory, "materials-waiting-ru", h.screen)
             h.screens.any { screen -> screen.buttons.any { it.id.value == "refresh" } } shouldBe false
         }
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            h.city = settlement(h.player)
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            fun export(id: String, screenId: String) {
+                h.screen.id shouldBe "civs.$screenId"
+                exportUiScreen(directory, id, h.screen, listOf(588, 380))
+            }
+
+            h.open(); h.click("management"); h.click("admin")
+            export("admin-overview-ru", "admin")
+            h.click("city_0")
+            export("admin-city-ru", "admin-city")
+            h.click("history"); h.click("reload")
+            export("admin-reload-ru", "admin-reload")
+
+            h.open(); h.click("management"); h.click("members"); h.click("add")
+            export("member-add-ru", "member-add")
+            h.open(); h.click("management"); h.click("upgrades"); h.click("upgrade_0")
+            export("upgrade-detail-ru", "upgrade")
+            h.ui.openCorpse(h.player, h.city!!.id, UUID.randomUUID())
+            export("corpse-expired-ru", "corpse")
+
+            verify(exactly = 0) {
+                h.host.reload(any())
+                h.host.addMember(any(), any())
+                h.host.upgradeBuilding(any(), any())
+                h.host.transferCorpseItem(any(), any(), any(), any())
+            }
+        }
     }
 
     test("private preview rendering shares a per tick budget and eventually includes every block") {
@@ -2403,6 +2604,14 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
     val ui: CivsUi
     val screen: PaperDialogScreen get() = screens.last()
 
+    private fun record(shown: PaperDialogScreen) {
+        screens += shown
+        System.getenv("CIVS_UI_INVENTORY_OUT")?.let { directory ->
+            val id = "inventory-${shown.id.removePrefix("civs.")}-${player.locale().language}"
+            if (!Files.exists(Path.of(directory).resolve("$id.json"))) exportUiScreen(directory, id, shown, listOf(588, 380))
+        }
+    }
+
     init {
         every { player.closeDialog() } just Runs
         every { host.ready() } returns true
@@ -2475,7 +2684,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         if (realHistory) {
             // The same presenter seam used by ArcRanks tests retains real Core sessions and history.
             val presenter: (Player, PaperDialogScreen, Any) -> Unit = { _, shown, registered ->
-                screens += shown
+                record(shown)
                 registration = registered
             }
             val constructor = PaperDialogRuntime::class.java.declaredConstructors
@@ -2484,7 +2693,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         } else {
             runtime = mockk(relaxed = true)
             every { runtime.open(any(), any(), any(), any(), any()) } answers {
-                screens += secondArg<PaperDialogScreen>()
+                record(secondArg<PaperDialogScreen>())
                 dismissAction = arg(3)
                 Unit
             }

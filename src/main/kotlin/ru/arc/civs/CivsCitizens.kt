@@ -86,6 +86,11 @@ class CivsCitizens(
     private val navigationClock: () -> Long = System::currentTimeMillis,
     private val courierFailed: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> },
     private val workPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false },
+    private val craftPlan: (Settlement, CivWorker) -> CivCraftJob? = { _, _ -> null },
+    private val craftDelivery: (UUID, UUID, UUID, Long, Long, UUID, Long) -> CompletableFuture<Settlement> = { _, _, _, _, _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },
+    private val craftSupplies: (UUID, UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
@@ -430,6 +435,7 @@ class CivsCitizens(
                     "actual" to position?.point(), "body_yaw" to if (valid) actor.npc.bodyYaw else null,
                     "head_yaw" to if (valid) actor.npc.headYaw else null,
                     "plan" to mapOf("assignment" to actor.plan.token.assignmentId, "cycle" to actor.plan.token.completedCycles,
+                        "craft_job" to actor.plan.token.craftJobId,
                         "type" to actor.plan.type, "idle_reason" to actor.plan.idleReason, "storage" to actor.plan.storage,
                         "workplace" to actor.plan.workplace, "focus" to actor.plan.worldWork?.let(::citizenWorkFocus),
                         "standing" to actor.plan.worldWork?.standing, "mining_step" to actor.plan.worldWork?.miningStep),
@@ -668,7 +674,12 @@ class CivsCitizens(
     }
 
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
-        val base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
+        var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
+        if (base.type == BuildingType.SAWMILL && base.idleReason == null) {
+            val job = craftPlan(city, worker)
+            base = if (job == null) base.copy(idleReason = "waiting-orders")
+                else base.copy(token = base.token.copy(craftJobId = job.id))
+        }
         val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
         val planned = if (admitted.courier != null || admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
             val work = workPlan(city, worker)
@@ -1211,7 +1222,11 @@ class CivsCitizens(
         if (actor.supplyPickup != null || now < actor.supplyRetryAt) return
         val pickup = SupplyPickup(UUID.randomUUID(), buildingId, resumeWork)
         actor.supplyPickup = pickup
-        val future = try { prepareSupplies(actor.cityId, actor.workerId, buildingId) }
+        val future = try {
+            val job = actor.plan.token.craftJobId.takeIf { buildingId == actor.plan.token.assignmentId }
+            if (job == null) prepareSupplies(actor.cityId, actor.workerId, buildingId)
+            else craftSupplies(actor.cityId, actor.workerId, buildingId, job)
+        }
             catch (error: Exception) { CompletableFuture.failedFuture(error) }
         if (!future.isDone && actor.plan.type == BuildingType.BUILDER_HUT) CivsDiagnostics.event("citizen_supplies_pending", "city" to actor.cityId,
             "worker" to actor.workerId, "source" to buildingId, "phase" to actor.cycle.phase,
@@ -1378,7 +1393,8 @@ class CivsCitizens(
         val visit = actor.social.visit ?: return
         actor.social.finish(Bukkit.getCurrentTick())
         CivsDiagnostics.event("citizen_campfire", "city" to actor.cityId, "worker" to actor.workerId,
-            "action" to "end", "reason" to reason, "fire" to visit.fire.position, "seat" to visit.seat)
+            "action" to "end", "reason" to reason, "fire" to visit.fire.position, "seat" to visit.seat,
+            "actual" to actor.npc.takeIf { it.isValid }?.location?.point()?.coordinates())
         cancelRoute(actor)
     }
 
@@ -1394,19 +1410,20 @@ class CivsCitizens(
             val origin = citizenIdleBuilding(city, worker) ?: return false
             val anchor = origin.control ?: origin.entrance
             val allowed = city.buildings.filter { it.id == origin.id || it.type == BuildingType.TOWN_HALL }.mapTo(hashSetOf()) { it.id }
-            val fire = campfires.nearby(world, city, anchor, tick).take(4).firstOrNull { fire ->
+            val place = campfires.nearby(world, city, anchor, tick).asSequence().take(4).filter { fire ->
                 citizenRouteCellAllowed(city, allowed, fire.position.x, fire.position.z) &&
                     citizenCampfireLit(world, fire.position) &&
                     actors.values.count { it.social.visit?.fire == fire } < 6
-            }
-            val seat = fire?.let { target -> citizenCampSeats(target.position, actor.workerId).firstOrNull { point ->
+            }.mapNotNull { fire -> citizenCampSeats(fire.position, actor.workerId).firstOrNull { point ->
                 citizenRouteCellAllowed(city, allowed, point.x, point.z) && citizenControlClear(city, point) &&
                     actors.values.none { other -> other !== actor && other.worldId == city.worldId &&
                         (other.social.visit?.seat?.let { it.x == point.x && it.z == point.z } == true ||
                             other.npc.isValid && other.npc.location.point().distanceSquared(point.point()) < 1.4 * 1.4) } &&
-                    citizenIdleTerrain(world, point, city.buildings) && citizenStandable(world, point)
-            } }
-            if (fire == null || seat == null) { routine.discoveryMiss(tick); return false }
+                    citizenIdleTerrain(world, point, city.buildings) && citizenStandable(world, point) &&
+                    citizenCampfireVisible(world, point, fire.position)
+            }?.let { fire to it } }.firstOrNull()
+            if (place == null) { routine.discoveryMiss(tick); return false }
+            val (fire, seat) = place
             routine.start(fire, seat, tick, world.fullTime / 24_000, evening)
             visit = requireNotNull(routine.visit)
             CivsDiagnostics.event("citizen_campfire", "city" to actor.cityId, "worker" to actor.workerId,
@@ -1424,7 +1441,15 @@ class CivsCitizens(
             } else "fire-or-seat-unavailable")
             return false
         }
+        if (!citizenCampfireVisible(world, activeVisit.seat, activeVisit.fire.position)) {
+            stopCamp(actor, "fire-occluded")
+            return false
+        }
         if (arrived(actor.npc.location, activeVisit.seat.location(world))) {
+            if (!citizenCampfireVisible(world, actor.npc.location.clone().add(0.0, actor.npc.eyeHeight, 0.0), activeVisit.fire.position)) {
+                stopCamp(actor, "fire-occluded-at-arrival")
+                return false
+            }
             if (activeVisit.arrivedAt == null) {
                 cancelRoute(actor)
                 activeVisit.arrivedAt = tick
@@ -1978,6 +2003,8 @@ class CivsCitizens(
         val workerId = actor.workerId
         val future = try {
             actor.plan.courier?.let { dropoffCargo(actor.cityId, actor.workerId, it.cargo, it.destinationBuildingId) }
+                ?: token.craftJobId?.let { craftDelivery(actor.cityId, actor.workerId, requireNotNull(token.assignmentId),
+                    token.completedCycles, token.nextDeliveryAt, it, now) }
                 ?: delivery(actor.cityId, actor.workerId, requireNotNull(token.assignmentId), token.completedCycles,
                     token.nextDeliveryAt, token.constructionId, now)
         } catch (error: Exception) {
@@ -2560,7 +2587,7 @@ internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, 
     previous != next && !citizenRouteWithinReach(actualPosition, next.point())
 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
-    val shipmentId: UUID? = null)
+    val shipmentId: UUID? = null, val craftJobId: UUID? = null)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false) {

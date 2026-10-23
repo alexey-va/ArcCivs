@@ -496,6 +496,68 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("the carpenter barrel and resident request only the accepted batch ingredients") {
+        serviceScenario { h ->
+            val (workshop, carpenter) = h.prepareCarpentry()
+            h.start()
+            h.craftJob(carpenter.id).inputs shouldBe mapOf("OAK_LOG" to 1L)
+            h.service.buildingRequest(h.player, workshop.id) shouldBe CivsBuildingRequest(Material.OAK_LOG, 1, false)
+            h.service.workerRequest(h.player, carpenter.id) shouldBe CivsBuildingRequest(Material.OAK_LOG, 1, false)
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    test("a replaced same cycle craft rejects both old service callbacks without consuming stock or advancing work") {
+        serviceScenario { h ->
+            val (workshop, carpenter) = h.prepareCarpentry(mapOf("OAK_LOG" to 1L))
+            h.start()
+            val old = h.craftJob(carpenter.id)
+            val dispatcher = CivsService::class.java.getDeclaredField("supply").let {
+                it.isAccessible = true; it.get(h.service) as CivsSupplyDispatcher
+            }
+            dispatcher.releaseCraft(h.city.id, carpenter.id, old.id)
+            val replacement = h.craftJob(carpenter.id)
+            (replacement.id != old.id) shouldBe true
+            replacement.cycle shouldBe old.cycle
+            val before = requireNotNull(h.service.city(h.player))
+            val supplies = h.service.prepareResidentSupplies(before.id, carpenter.id, workshop.id, old.id)
+            (shouldThrow<CompletionException> { h.await(supplies) }.cause as CivsRejection).reason shouldBe "stale-delivery"
+            // Invoke the exact private callback wired into CivsCitizens, without adding a production test seam.
+            val delivery = CivsService::class.java.getDeclaredMethod("deliverCraft", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE).let {
+                it.isAccessible = true
+                @Suppress("UNCHECKED_CAST")
+                (it.invoke(h.service, before.id, carpenter.id, workshop.id, carpenter.completedCycles,
+                    carpenter.nextDeliveryAt, old.id, h.time) as CompletableFuture<Settlement>)
+            }
+            (shouldThrow<CompletionException> { h.await(delivery) }.cause as CivsRejection).reason shouldBe "stale-delivery"
+            h.service.city(h.player) shouldBe before
+            h.service.localMaterials(h.player, workshop.id) shouldBe mapOf("OAK_LOG" to 1L)
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("the carpenter barrel combines two accepted batches instead of counting one log twice") {
+        serviceScenario { h ->
+            val (workshop, first) = h.prepareCarpentry(mapOf("OAK_LOG" to 1L))
+            val base = h.store.load().join().single()
+            val mine = base.buildings.last().copy(type = BuildingType.QUARRY, production = null)
+            val second = base.workers.last().copy(assignment = workshop.id)
+            val miner = h.city.workers[2].copy(assignment = mine.id, nextDeliveryAt = 1)
+            val ready = CivsRules.validate(base.copy(buildings = listOf(base.buildings.first(), workshop.copy(level = 2), mine),
+                workers = listOf(first, second, miner)))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.start()
+            h.craftJob(first.id).inputs shouldBe mapOf("OAK_LOG" to 1L)
+            h.craftJob(second.id).inputs shouldBe mapOf("OAK_LOG" to 1L)
+            h.service.workerRequest(h.player, first.id) shouldBe null
+            h.service.workerRequest(h.player, second.id) shouldBe null
+            h.service.buildingRequest(h.player, workshop.id) shouldBe CivsBuildingRequest(Material.OAK_LOG, 1, false)
+            h.saves shouldBe emptyList()
+        }
+    }
+
     test("personal batch supplies wait for the journal and reduce the next request by the real donated amount") {
         serviceScenario(storageFactory = { CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() } }) { h ->
             val player = h.paper.addPlayer("MasonSupplier").also { it.isOp = true; it.teleport(Location(h.world, 0.0, 65.0, 0.0)) }
@@ -1855,7 +1917,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("legacy upgrade confirmation reserves the authored control before capture without requiring a player barrel") {
+    test("direct legacy upgrade reserves the authored control before capture without requiring a player barrel") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().let { it.copy(control = it.anchor) }
             val target = CivPosition(1, 65, 1)
@@ -1871,15 +1933,9 @@ class CivsServiceTest : FunSpec({
                 CompletableFuture.completedFuture(if (arg<Int>(2) == 3) upgraded else upgraded.copy(building = hall.copy(control = target)))
             }
             h.start()
-            val preview = h.service.prepareUpgrade(h.player, hall.id); h.tick(); preview.join() shouldBe Unit
-            h.service.preview(h.player)!!.let {
-                it.level shouldBe 3
-                it.control shouldBe target
-                it.entrance shouldBe hall.entrance
-                it.movable shouldBe false
-            }
-            verify(exactly = 1) { h.renderer.show(h.player, upgraded.building, upgraded.surface) }
-            val confirmation = h.service.confirmPreview(h.player); h.tick()
+            val confirmation = h.service.upgradeBuilding(h.player, hall.id); h.tick()
+            h.service.preview(h.player) shouldBe null
+            verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
             confirmation.isDone shouldBe false
             h.saves.single().first.pendingControls!!.single().position shouldBe target
             h.world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.AIR
@@ -2164,7 +2220,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("upgrade confirmation persists its own design behind active construction and duplicate requests keep it immutable") {
+    test("direct upgrade persists its own design behind active construction and duplicate requests keep it immutable") {
         serviceScenario { h ->
             val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
             val building = active.city.buildings[1]
@@ -2178,8 +2234,10 @@ class CivsServiceTest : FunSpec({
                 savedPlan = firstArg(); CompletableFuture.completedFuture(firstArg())
             }
             h.start()
-            val prepared = h.service.prepareUpgrade(h.player, building.id); h.tick(); prepared.join()
-            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            val confirmed = h.service.upgradeBuilding(h.player, building.id); h.tick()
+            h.service.preview(h.player) shouldBe null
+            verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
+            h.service.upgradeBuilding(h.player, building.id).isDone shouldBe false
             h.service.city(h.player)!!.constructionQueue shouldBe null
             h.saves.single().first.constructionQueue shouldBe listOf(building.id)
             h.saves.single().first.construction shouldBe active.city.construction
@@ -2192,11 +2250,38 @@ class CivsServiceTest : FunSpec({
             every { h.store.loadPlan(design.id) } returns CompletableFuture.completedFuture(design)
             val materials = h.service.buildingMaterials(h.player, building.id); h.tick()
             materials.join() shouldBe mapOf("STONE" to 1L)
-            val repeated = h.service.prepareUpgrade(h.player, building.id); h.tick(); repeated.join()
-            h.service.confirmPreview(h.player).join() shouldBe Unit
+            val repeated = h.service.upgradeBuilding(h.player, building.id); h.tick(); repeated.join() shouldBe Unit
             h.saves.size shouldBe 1
             verify(exactly = 1) { h.store.saveSchematic(design.id, any()); h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) }
             verify(exactly = 0) { h.store.saveSchematic(building.id, any()); h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("direct upgrade preparation and capture never expose world preview geometry to boundary pulses") {
+        serviceScenario { h ->
+            val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
+            val player = h.paper.addPlayer("UpgradeMayor").apply {
+                isOp = true
+                teleport(Location(h.world, 0.0, 65.0, 0.0))
+            }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(active.city.copy(
+                members = active.city.members + player.uniqueId)))
+            val building = active.city.buildings[1]
+            val blueprint = h.sitePreview(CivBlueprint(building.copy(level = 2, phase = BuildingPhase.CONSTRUCTING,
+                control = CivPosition(10, 63, 0)), h.world.uid, mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(2)))
+            val preparation = CompletableFuture<CivBlueprint>()
+            every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns preparation
+            every { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } returns CompletableFuture<CivPlacementPlan>()
+            h.start()
+            val upgrade = h.service.upgradeBuilding(player, building.id)
+            h.paper.performTicks(20)
+            h.service.preview(player) shouldBe null
+            verify(atLeast = 1) { h.boundary.pulse(player, any(), false, null, null, any()) }
+            preparation.complete(blueprint); h.paper.performTicks(20)
+            upgrade.isDone shouldBe false
+            h.service.preview(player) shouldBe null
+            verify(atLeast = 2) { h.boundary.pulse(player, any(), false, null, null, any()) }
+            verify(exactly = 0) { h.boundary.pulse(player, any(), true, any(), any(), any()); h.renderer.show(any(), any(), any()) }
         }
     }
 
@@ -2253,13 +2338,14 @@ class CivsServiceTest : FunSpec({
             every { h.store.deletePlan(any()) } returns cleanup
             every { h.store.deleteSchematic(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val prepared = h.service.prepareUpgrade(h.player, building.id); h.tick(); prepared.join()
-            val confirmed = h.service.confirmPreview(h.player); h.tick()
+            val confirmed = h.service.upgradeBuilding(h.player, building.id); h.tick()
+            h.service.preview(h.player) shouldBe null
+            verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
             h.saves.single().second.completeExceptionally(if (known) CivsRejection("stale-city") else IllegalStateException("acknowledgement lost"))
             h.tick()
             if (known) {
                 confirmed.isDone shouldBe false
-                val duplicate = h.service.confirmPreview(h.player)
+                val duplicate = h.service.upgradeBuilding(h.player, building.id)
                 duplicate.isDone shouldBe false
                 h.saves.size shouldBe 1
                 cleanup.complete(true); h.tick()
@@ -3601,6 +3687,28 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         }
     fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun prepareCarpentry(stock: Map<String, Long> = emptyMap()): Pair<CivBuilding, CivWorker> {
+        val workshop = city.buildings.last().copy(type = BuildingType.SAWMILL,
+            control = CivPosition(10, 63, 0), production = null)
+        val smith = workshop.copy(id = UUID.randomUUID(), type = BuildingType.BLACKSMITH,
+            anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
+            bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)), production = "IRON_PICKAXE")
+        val carpenter = city.workers.first().copy(assignment = workshop.id, nextDeliveryAt = 1)
+        val smithWorker = city.workers[1].copy(assignment = smith.id, nextDeliveryAt = 1)
+        val ready = CivsRules.validate(city.copy(buildings = listOf(city.buildings.first(), workshop, smith),
+            workers = listOf(carpenter, smithWorker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL,
+                buildingMaterials = mapOf(workshop.id.toString() to stock))))
+        every { store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+        return workshop to carpenter
+    }
+    fun craftJob(workerId: UUID): CivCraftJob {
+        repeat(80) {
+            val current = requireNotNull(service.city(player))
+            service.craftPlan(current, current.workers.first { it.id == workerId })?.let { return it }
+            paper.performTicks(1)
+        }
+        error("Supply dispatcher did not assign a carpenter batch within80 ticks")
+    }
     fun supplyPlan(workerId: UUID): CivCourierPlan {
         repeat(80) {
             val current = requireNotNull(service.city(player))

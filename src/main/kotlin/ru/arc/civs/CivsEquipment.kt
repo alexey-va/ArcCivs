@@ -96,6 +96,26 @@ internal object CivsEquipment {
         if (carried == 0) current else consume(current, material, carried)
     }
 
+    /** A native stripping use costs one durability, with the ordinary Unbreaking roll.
+     * The returned equipment is committed with the same receipt as the paid log and output. */
+    fun strippedWithAxe(worker: CivWorker): List<CivResidentItem?> {
+        val items = slots(worker).toMutableList()
+        val axe = items[4]?.stack()?.takeIf { it.type.name.endsWith("_AXE") }
+            ?: throw CivsRejection("resident-tool-missing")
+        val meta = axe.itemMeta as? org.bukkit.inventory.meta.Damageable
+            ?: throw CivsRejection("resident-tool-missing")
+        if (meta.isUnbreakable) return items
+        val unbreaking = axe.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.UNBREAKING).coerceAtLeast(0)
+        if (java.util.concurrent.ThreadLocalRandom.current().nextLong(unbreaking.toLong() + 1) == 0L) {
+            meta.damage += 1
+            items[4] = if (meta.damage >= axe.type.maxDurability.toInt()) null else {
+                axe.itemMeta = meta
+                CivResidentItem.of(axe)
+            }
+        }
+        return items
+    }
+
     fun supplyRoom(worker: CivWorker, material: Material): Int = slots(worker).take(SLOTS).drop(BAG).sumOf {
         when { it == null -> material.maxStackSize; it.material == material.name && it.data == null -> material.maxStackSize - it.amount; else -> 0 }
     }

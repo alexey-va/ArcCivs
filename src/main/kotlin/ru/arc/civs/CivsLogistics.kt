@@ -81,6 +81,8 @@ object CivsLogistics {
     }
 
     internal fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
+        // Automatic carpentry reserves only an accepted batch, in the supply allocator.
+        if (building.type == BuildingType.SAWMILL) return emptyMap()
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(building) + when (building.type) {
@@ -150,13 +152,13 @@ object CivsLogistics {
     }
 
     /** Equipped and custom items stay personal; real work inputs and sixteen bread stay available. */
-    internal fun workerExcess(city: Settlement, worker: CivWorker): Map<String, Long> {
+    internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
             ?: return emptyMap()
         if (worker.cargo != null || CivsResidents.isChild(worker) || CivsRules.isBuilder(city, building) ||
             building.type !in setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.SAWMILL,
                 BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TOWN_HALL)) return emptyMap()
-        val reserve = CivsProduction.inputs(building) + when (building.type) {
+        val reserve = (if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(building)) + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) {
                 "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
             }) to (CivsWorksiteLayouts.field(building).size.toLong().takeIf { it > 0 } ?: 16L), "BONE_MEAL" to 16L)
@@ -216,7 +218,8 @@ object CivsLogistics {
     private fun withinRoute(from: CivPosition, to: CivPosition): Boolean =
         distanceSquared(from, to) <= CivsRules.MAX_WORK_ROUTE_DISTANCE.toDouble() * CivsRules.MAX_WORK_ROUTE_DISTANCE
 
-    fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo): Settlement {
+    fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,
+        craftInputs: Map<UUID, Map<String, Long>> = emptyMap()): Settlement {
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         if (worker.cargo == cargo.copy(inventoryBacked = true)) return city
         val source = city.building(cargo.sourceBuildingId) ?: throw CivsRejection("stale-delivery")
@@ -228,7 +231,7 @@ object CivsLogistics {
         val producer = cargo.sourceWorkerId?.let { id ->
             city.workers.firstOrNull { it.id == id }?.takeIf { it.id != workerId && it.assignment == source.id &&
                 withinRoute(cargo.sourceEntrance, requireNotNull(warehouse.control)) &&
-                (workerExcess(city, it)[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
+                (workerExcess(city, it, craftInputs[it.id].orEmpty())[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
         }
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))
             .copy(cargo = cargo.copy(inventoryBacked = true))

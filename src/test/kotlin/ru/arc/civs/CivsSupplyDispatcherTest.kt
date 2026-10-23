@@ -13,6 +13,32 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 class CivsSupplyDispatcherTest : FunSpec({
+    test("workshop incidental excess leaves while ingredients and destination room remain reserved") {
+        val original = supplyFixture()
+        val workshop = original.stores.getValue(SUPPLY_TARGET).copy(
+            stock = mapOf("DIRT" to 96L, "OAK_LOG" to 8L),
+            desiredStock = mapOf("OAK_LOG" to 8L), outputMaterial = "OAK_PLANKS")
+        val input = original.copy(requests = emptyList(), stores = original.stores + (SUPPLY_TARGET to workshop),
+            couriers = original.couriers.map { it.copy(bagRoom = mapOf("DIRT" to 64L, "OAK_LOG" to 64L)) },
+            stackSizes = original.stackSizes + mapOf("DIRT" to 64, "OAK_LOG" to 64))
+        val plans = allocateCivSupplies(input).plans
+        plans.size shouldBe 2
+        plans.values.map { it.cargo.material }.toSet() shouldBe setOf("DIRT")
+        plans.values.sumOf { it.cargo.amount } shouldBe 96L
+        allocateCivSupplies(input.copy(retained = plans)).plans shouldBe plans
+
+        val warehouse = input.stores.getValue(SUPPLY_WAREHOUSE)
+        val full = input.copy(stores = input.stores + (SUPPLY_WAREHOUSE to warehouse.copy(
+            capacity = CivSupplyCapacity(0, emptyMap()))))
+        allocateCivSupplies(full).plans shouldBe emptyMap()
+        val partial = full.copy(stores = full.stores + (SUPPLY_WAREHOUSE to warehouse.copy(
+            capacity = CivSupplyCapacity(0, mapOf("DIRT" to 5L)))))
+        allocateCivSupplies(partial).plans.values.sumOf { it.cargo.amount } shouldBe 5L
+
+        val personalStore = input.copy(stores = input.stores + (SUPPLY_TARGET to workshop.copy(outputMaterial = null)))
+        allocateCivSupplies(personalStore).plans shouldBe emptyMap()
+    }
+
     test("different materials cannot independently reserve the same empty destination slot") {
         val input = supplyFixture().let { it.copy(
             requests = listOf(CivSupplyRequest(SUPPLY_TARGET, "IRON_INGOT", 64, 0), CivSupplyRequest(SUPPLY_TARGET, "STICK", 64, 0)),

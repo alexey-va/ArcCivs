@@ -21,12 +21,14 @@ internal class CivsSupplyPlanning(
     private val position: (UUID) -> CivPosition?,
     private val sources: () -> Map<UUID, CivPosition>,
     private val unavailable: (UUID) -> Boolean,
+    private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
     private var meetings = emptyMap<UUID, CivPosition>()
     private val workerSources = mutableListOf<CivSupplyWorkerSource>()
     private val couriers = mutableListOf<CivSupplyCourier>()
+    private val craftWorkers = mutableListOf<CivCraftWorker>()
     private var materials = emptyMap<String, Material>()
     private var workerIndex = 0
 
@@ -38,7 +40,7 @@ internal class CivsSupplyPlanning(
                 id to CivSupplyStore(id, building.entrance, requireNotNull(building.control), observed.stock,
                     CivsLogistics.desiredStock(city, building),
                     CivsProduction.material(building).takeIf { building.phase == BuildingPhase.ACTIVE && !CivsRules.isBuilder(city, building) },
-                    observed.capacity)
+                    observed.capacity, building.type)
             }.toMap()
             requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
             meetings = sources()
@@ -46,12 +48,18 @@ internal class CivsSupplyPlanning(
             val names = requests.map(CivSupplyRequest::material).toMutableSet()
             stores.orEmpty().values.forEach { names += it.stock.keys }
             city.workers.forEach { names += CivsEquipment.materials(it).keys }
+            if (city.buildings.any { it.type == BuildingType.SAWMILL }) names += CivsCarpentry.materials
             materials = names.mapNotNull { name -> Material.getMaterial(name)?.takeIf { it.isItem && !it.isAir }?.let { name to it } }.toMap()
             return null
         }
         if (workerIndex < city.workers.size) {
             val worker = city.workers[workerIndex++]
             val building = worker.assignment?.let(city::building)
+            if (worker.cargo == null && !CivsResidents.isChild(worker) && building?.type == BuildingType.SAWMILL &&
+                CivsRules.productionAvailable(city, building) && building.control != null) {
+                craftWorkers += CivCraftWorker(worker.id, building.id, worker.completedCycles, building.level,
+                    CivsEquipment.available(worker, emptyMap()).toMap(), CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true)
+            }
             if (worker.cargo == null && !unavailable(worker.id) && !CivsResidents.isChild(worker) && building?.type == BuildingType.WAREHOUSE &&
                 building.phase == BuildingPhase.ACTIVE && building.control != null) {
                 couriers += CivSupplyCourier(worker.id, building.id, worker.completedCycles,
@@ -60,7 +68,7 @@ internal class CivsSupplyPlanning(
             }
             meetings[worker.id]?.let { point ->
                 if (building != null) workerSources += CivSupplyWorkerSource(worker.id, building.id, point,
-                    CivsLogistics.workerExcess(city, worker))
+                    CivsLogistics.workerExcess(city, worker, crafts[worker.id]?.inputs.orEmpty()))
             }
             return null
         }
@@ -95,6 +103,6 @@ internal class CivsSupplyPlanning(
         }.orEmpty()
         return CivSupplySnapshot(city.id, CivSupplyObservation(civSupplyInputs(city), requireNotNull(capture.result)), requireNotNull(stores),
             requests, couriers.toList(), workerSources.toList(), existing.toMap(), materials.mapValues { it.value.maxStackSize },
-            constructionTargets)
+            constructionTargets, craftWorkers.toList(), crafts.toMap(), constructionId = city.construction?.id)
     }
 }

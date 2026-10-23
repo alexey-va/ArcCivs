@@ -16,7 +16,8 @@ import kotlin.math.sqrt
 /** Actual unreserved room. Empty native slots are shared by all materials; virtual room is units. */
 internal data class CivSupplyCapacity(val emptySlots: Int, val partialRoom: Map<String, Long>, val virtualRoom: Long? = null)
 internal data class CivSupplyStore(val id: UUID, val entrance: CivPosition, val control: CivPosition,
-    val stock: Map<String, Long>, val desiredStock: Map<String, Long>, val outputMaterial: String?, val capacity: CivSupplyCapacity)
+    val stock: Map<String, Long>, val desiredStock: Map<String, Long>, val outputMaterial: String?, val capacity: CivSupplyCapacity,
+    val type: BuildingType? = null)
 internal data class CivSupplyCourier(val workerId: UUID, val warehouseId: UUID, val cycle: Long,
     val position: CivPosition, val bagRoom: Map<String, Long>)
 internal data class CivSupplyWorkerSource(val workerId: UUID, val buildingId: UUID,
@@ -31,13 +32,17 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
     val stores: Map<UUID, CivSupplyStore>, val requests: List<CivSupplyRequest>,
     val couriers: List<CivSupplyCourier>, val workerSources: List<CivSupplyWorkerSource>,
     val retained: Map<UUID, CivCourierPlan>, val stackSizes: Map<String, Int>,
-    val constructionTargets: Map<UUID, UUID> = emptyMap()) {
+    val constructionTargets: Map<UUID, UUID> = emptyMap(),
+    val craftWorkers: List<CivCraftWorker> = emptyList(), val craftJobs: Map<UUID, CivCraftJob> = emptyMap(),
+    val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null) {
     internal fun detached() = copy(inputKey = Unit,
         stores = stores.mapValues { (_, value) -> value.copy(stock = value.stock.toMap(), desiredStock = value.desiredStock.toMap(),
             capacity = value.capacity.copy(partialRoom = value.capacity.partialRoom.toMap())) },
         requests = requests.toList(), couriers = couriers.map { it.copy(bagRoom = it.bagRoom.toMap()) },
         workerSources = workerSources.map { it.copy(excess = it.excess.toMap()) }, retained = retained.toMap(),
-        stackSizes = stackSizes.toMap(), constructionTargets = constructionTargets.toMap())
+        stackSizes = stackSizes.toMap(), constructionTargets = constructionTargets.toMap(),
+        craftWorkers = craftWorkers.map { it.copy(carried = it.carried.toMap()) },
+        craftJobs = craftJobs.mapValues { it.value.copy(inputs = it.value.inputs.toMap()) })
 }
 
 /**
@@ -73,6 +78,8 @@ internal class CivsSupplyDispatcher(
         var failure: String? = null
         var job: Job? = null
         var plans = emptyMap<UUID, CivCourierPlan>()
+        var crafts = emptyMap<UUID, CivCraftJob>()
+        var craftObservation: CivSupplySnapshot? = null
         var captured: CaptureSummary? = null
         var acceptedGeneration: Long? = null
         val ages = hashMapOf<CivSupplyTask, Long>()
@@ -100,6 +107,16 @@ internal class CivsSupplyDispatcher(
 
     fun plan(cityId: UUID, workerId: UUID): CivCourierPlan? { checkOwner(); return cities[cityId]?.plans?.get(workerId) }
     fun retained(cityId: UUID): Map<UUID, CivCourierPlan> { checkOwner(); return cities[cityId]?.plans?.toMap().orEmpty() }
+    fun craftJobs(cityId: UUID): Map<UUID, CivCraftJob> { checkOwner(); return cities[cityId]?.crafts?.toMap().orEmpty() }
+    fun craftObservation(cityId: UUID): CivSupplySnapshot? { checkOwner(); return cities[cityId]?.craftObservation }
+    fun releaseCraft(cityId: UUID, workerId: UUID, jobId: UUID) {
+        checkOwner()
+        val city = cities[cityId] ?: return
+        if (city.crafts[workerId]?.id != jobId) return
+        city.crafts = city.crafts - workerId
+        city.generation++; city.job?.cancel(); city.job = null
+        city.requested = true; city.after = Long.MIN_VALUE
+    }
     fun failure(cityId: UUID): String? { checkOwner(); return cities[cityId]?.failure }
     fun cityIds(): Set<UUID> { checkOwner(); return cities.keys.toSet() }
 
@@ -141,6 +158,17 @@ internal class CivsSupplyDispatcher(
                         "assignedAgeMillis" to city.lastAssigned[worker]?.let { (now - it).coerceAtLeast(0) }) },
                 "reservations" to mapOf("waitingPickup" to plans.count { !it.value.carrying },
                     "carrying" to plans.count { it.value.carrying }, "units" to plans.sumOf { it.value.cargo.amount }),
+                "crafts" to sample(city.crafts.values.filter { workerId == null || it.workerId == workerId }) { craft ->
+                    val carried = city.craftObservation?.craftWorkers?.firstOrNull { it.workerId == craft.workerId }?.carried.orEmpty()
+                    val missing = craft.inputs.mapValues { (material, count) -> (count - (carried[material] ?: 0L)).coerceAtLeast(0) }
+                        .filterValues { it > 0 }
+                    mapOf("worker" to craft.workerId.toString(), "jobId" to craft.id.toString(), "cycle" to craft.cycle,
+                        "building" to craft.buildingId.toString(), "recipe" to craft.recipeId, "recipeVersion" to craft.version,
+                        "inputs" to craft.inputs, "output" to mapOf(craft.material to craft.amount),
+                        "demand" to craft.demandMaterial, "target" to craft.targetBuildingId.toString(),
+                        "construction" to craft.constructionId?.toString(), "epoch" to city.craftObservation?.craftEpoch?.toString(),
+                        "missingCarriedAtCapture" to missing,
+                        "statusAtCapture" to if (missing.isEmpty()) "crafting" else "waiting-materials") },
                 "capturedRequests" to snapshot?.let { sample(it.requests) { request -> mapOf(
                     "building" to request.buildingId.toString(), "material" to request.material,
                     "needed" to request.needed, "inTransit" to request.inTransit, "construction" to request.construction) } },
@@ -258,6 +286,8 @@ internal class CivsSupplyDispatcher(
                 for ((worker, plan) in result.plans) if (city.plans[worker]?.cargo?.id != plan.cargo.id)
                     city.lastAssigned[worker] = now
                 city.plans = result.plans.toMap()
+                city.crafts = result.crafts.toMap()
+                city.craftObservation = snapshot.takeIf { it.craftWorkers.isNotEmpty() }
                 city.acceptedGeneration = job.generation
                 city.ages.keys.retainAll(result.seen)
                 for (key in result.seen) city.ages.putIfAbsent(key, now)
@@ -319,14 +349,23 @@ internal data class CivSupplyTrip(val source: UUID, val worker: UUID?, val targe
     companion object { fun of(plan: CivCourierPlan) = CivSupplyTrip(plan.cargo.sourceBuildingId, plan.cargo.sourceWorkerId,
         plan.destinationBuildingId, plan.cargo.material) }
 }
-internal data class CivSupplyAllocation(val plans: Map<UUID, CivCourierPlan>, val seen: Set<CivSupplyTask>, val served: Set<CivSupplyTask>)
+internal data class CivSupplyAllocation(val plans: Map<UUID, CivCourierPlan>, val seen: Set<CivSupplyTask>, val served: Set<CivSupplyTask>,
+    val crafts: Map<UUID, CivCraftJob> = emptyMap())
 private class CivSupplyBudget : RuntimeException()
 
 /** Shared slot arithmetic: reserving a partial new stack leaves room only for that material. */
-private class CivSupplyRoom(capacity: CivSupplyCapacity, private val stacks: Map<String, Int>) {
+internal class CivSupplyRoom(capacity: CivSupplyCapacity, private val stacks: Map<String, Int>) {
     private var empty = capacity.emptySlots.coerceAtLeast(0)
     private val partial = capacity.partialRoom.mapValues { it.value.coerceAtLeast(0) }.toMutableMap()
     private var virtual = capacity.virtualRoom?.coerceAtLeast(0)
+    /** Only a complete plain material removal proves which captured slots become empty.
+     * Partial debits deliberately receive no optimistic slot credit. */
+    fun removeAll(material: String, stock: Long) {
+        if (stock <= 0) return
+        if (virtual != null) { virtual = Math.addExact(requireNotNull(virtual), stock); return }
+        val room = partial.remove(material) ?: 0L
+        empty = Math.addExact(empty, ((stock + room) / stack(material)).toInt())
+    }
     fun fits(material: String): Long = virtual ?: ((partial[material] ?: 0) + empty.toLong() * stack(material))
     fun take(material: String, amount: Long) {
         if (virtual != null) { virtual = (requireNotNull(virtual) - amount).coerceAtLeast(0); return }
@@ -354,15 +393,27 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     blockedTrips: Set<CivSupplyTrip> = emptySet(), now: Long = 0, cancelled: AtomicBoolean = AtomicBoolean()): CivSupplyAllocation {
     require(snapshot.inputKey === Unit) { "Owner validation metadata must not enter the allocator" }
     if (snapshot.couriers.size > 48 || snapshot.workerSources.size > 48) throw CivSupplyBudget()
-    val stores = snapshot.stores
+    val crafts = CivsCarpentry.allocate(snapshot, cancelled)
+    val stores = snapshot.stores.mapValues { (id, store) -> store.copy(desiredStock = store.desiredStock + crafts.required[id].orEmpty()) }
     val stock = stores.mapValues { it.value.stock.toMutableMap() }
     val sources = snapshot.workerSources.associateBy { it.workerId }
     val excess = sources.mapValues { it.value.excess.toMutableMap() }
+    crafts.jobs.values.forEach { job -> job.inputs.forEach { (material, count) ->
+        val newlyReserved = (count - (snapshot.craftJobs[job.workerId]?.inputs?.get(material) ?: 0)).coerceAtLeast(0)
+        excess[job.workerId]?.let { it[material] = ((it[material] ?: 0) - newlyReserved).coerceAtLeast(0) }
+    } }
     val rooms = stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes) }
+    crafts.jobs.values.forEach { rooms[it.buildingId]?.take(it.material, it.amount) }
+    // Inputs can occupy the output's future slot: the carpenter must physically pick them
+    // all up before working. They still compete with each other for actual native slots.
+    val actualRooms = stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes) }
+    fun craftInput(building: UUID, material: String) = (crafts.required[building]?.get(material) ?: 0L) > 0
+    fun roomFor(building: UUID, material: String): Long = minOf(actualRooms[building]?.fits(material) ?: 0L,
+        if (craftInput(building, material)) Long.MAX_VALUE else rooms[building]?.fits(material) ?: 0L)
     val couriers = snapshot.couriers.associateBy { it.workerId }
     val busySources = hashSetOf<UUID>()
     fun task(request: CivSupplyRequest) = CivSupplyTask(null, null, request.buildingId, request.material, request.construction)
-    val requests = snapshot.requests.associateBy(::task)
+    val requests = (snapshot.requests + crafts.requests).associateBy(::task)
     val demand = requests.mapValues { (_, value) -> (value.needed - value.inTransit).coerceAtLeast(0) }.toMutableMap()
     val seen = requests.filterValues { it.needed > it.inTransit }.keys.toMutableSet()
     val served = hashSetOf<CivSupplyTask>()
@@ -390,8 +441,8 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     fun reserve(worker: UUID, plan: CivCourierPlan, key: CivSupplyTask?, carried: Boolean = false) {
         assigned[worker] = plan
         val cargo = plan.cargo
-        val room = rooms[plan.destinationBuildingId]
-        if (room != null) {
+        val futureRoom = rooms[plan.destinationBuildingId].takeUnless { craftInput(plan.destinationBuildingId, cargo.material) }
+        for (room in listOfNotNull(actualRooms[plan.destinationBuildingId], futureRoom)) {
             if (carried && room.fits(cargo.material) < cargo.amount) room.block()
             else room.take(cargo.material, cargo.amount)
         }
@@ -417,7 +468,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             cargo.id != CivsLogistics.shipmentId(snapshot.cityId, worker, courier.cycle, cargo.sourceBuildingId,
                 cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
             remaining(plan) < cargo.amount || (courier.bagRoom[cargo.material] ?: 0) < cargo.amount ||
-            (rooms[plan.destinationBuildingId]?.fits(cargo.material) ?: 0) < cargo.amount ||
+            roomFor(plan.destinationBuildingId, cargo.material) < cargo.amount ||
             cargo.sourceWorkerId?.let { sources[it]?.meeting != cargo.sourceEntrance } == true ||
             cargo.sourceWorkerId in busySources || key != null && (demand[key] ?: 0) < cargo.amount ||
             cargo.sourceBuildingId == cargo.warehouseId && key == null) continue
@@ -442,7 +493,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             if (producer != null && (producer.workerId in busySources || producer.workerId == courier.workerId)) return
             seen += key
             val amount = minOf(CivsLogistics.MAX_CARGO, quantity, courier.bagRoom[material] ?: 0,
-                rooms[target.id]?.fits(material) ?: 0)
+                roomFor(target.id, material))
             if (amount <= 0) return
             val cargo = CivCargo(CivsLogistics.shipmentId(snapshot.cityId, courier.workerId, courier.cycle,
                 source.id, target.id, material, producer?.workerId), warehouse.id, source.id, target.id,
@@ -457,9 +508,14 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             offer(warehouse, target, key.material, minOf(needed, stock[warehouse.id]?.get(key.material) ?: 0), key)
         }
         for (source in stores.values) {
-            val material = source.outputMaterial ?: continue
-            val count = ((stock[source.id]?.get(material) ?: 0) - (source.desiredStock[material] ?: 0)).coerceAtLeast(0)
-            if (count > 0) offer(source, warehouse, material, count, CivSupplyTask(source.id, null, warehouse.id, material, false))
+            if (source.outputMaterial == null) continue
+            // A workshop retains its inputs; every other plain excess can leave,
+            // including incidental dirt/stone rather than only its advertised output.
+            for ((material, available) in stock[source.id].orEmpty()) {
+                val count = (available - (source.desiredStock[material] ?: 0)).coerceAtLeast(0)
+                if (count > 0) offer(source, warehouse, material, count,
+                    CivSupplyTask(source.id, null, warehouse.id, material, false))
+            }
         }
         for (producer in sources.values) {
             val source = stores[producer.buildingId] ?: continue
@@ -471,5 +527,5 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         reserve(courier.workerId, selected.plan, selected.key)
         served += selected.key
     }
-    return CivSupplyAllocation(assigned.toMap(), seen.toSet(), served.toSet())
+    return CivSupplyAllocation(assigned.toMap(), seen.toSet(), served.toSet(), crafts.jobs)
 }

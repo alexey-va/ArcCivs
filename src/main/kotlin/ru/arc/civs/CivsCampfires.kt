@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Material
+import org.bukkit.Location
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.data.Lightable
@@ -59,6 +60,13 @@ internal fun citizenCampfireLit(block: Block): Boolean =
 internal fun citizenCampfireLit(world: World, point: CivPosition): Boolean =
     point.y in world.minHeight until world.maxHeight && world.isChunkLoaded(point.x shr 4, point.z shr 4) &&
         citizenCampfireLit(world.getBlockAt(point.x, point.y, point.z))
+
+/** A fireplace is a social destination only on its open side, never through a wall or floor. */
+internal fun citizenCampfireVisible(world: World, eye: Location, fire: CivPosition): Boolean =
+    citizenCanReachBlockPoint(world, eye, fire, Location(world, fire.x + .5, fire.y + .4, fire.z + .5), reach = 4.0)
+
+internal fun citizenCampfireVisible(world: World, seat: CivPosition, fire: CivPosition): Boolean =
+    citizenCampfireVisible(world, Location(world, seat.x + .5, seat.y + 1.62, seat.z + .5), fire)
 
 /** Six distinct standing places leave the fire and the route between neighbours clear. */
 internal fun citizenCampSeats(fire: CivPosition, workerId: UUID): Sequence<CivPosition> = sequence {

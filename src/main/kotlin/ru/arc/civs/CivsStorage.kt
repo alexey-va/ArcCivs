@@ -688,14 +688,15 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     /** Consume local recipe inputs and insert local output in the same snapshots and durable receipt. */
-    fun prepareProduction(city: Settlement, building: CivBuilding, worker: CivWorker? = null): CivStoragePlan {
+    fun prepareProduction(city: Settlement, building: CivBuilding, worker: CivWorker? = null, craftJob: CivCraftJob? = null): CivStoragePlan {
         checkClaim(city)
         reject(city.building(building.id) != building, "not-authorized")
-        val material = CivsProduction.material(building) ?: throw CivsRejection("invalid-production")
-        val inputs = CivsProduction.inputs(building)
+        if (craftJob != null) reject(worker == null || !CivsCarpentry.valid(city, worker, craftJob), "stale-delivery")
+        val material = craftJob?.material ?: CivsProduction.material(building) ?: throw CivsRejection("invalid-production")
+        val inputs = craftJob?.inputs ?: CivsProduction.inputs(building)
         if (worker != null) reject(!CivsEquipment.inputsReady(worker, inputs, emptyMap()), "materials-missing")
         return prepareWork(city, building.id, if (worker == null) inputs else emptyMap(),
-            mapOf(material to CivsProduction.amount(building)), emptyList())
+            mapOf(material to (craftJob?.amount ?: CivsProduction.amount(building))), emptyList())
     }
 
     fun prepareWork(city: Settlement, buildingId: UUID, inputs: Map<String, Long>, outputs: Map<String, Long>, worldChanges: List<CivPlanBlock>): CivStoragePlan {

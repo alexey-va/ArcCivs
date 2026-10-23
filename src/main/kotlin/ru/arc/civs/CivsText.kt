@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.JsonParser
+import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.format.TextDecoration
@@ -56,6 +57,19 @@ class CivsText private constructor(
     }
 
     fun literal(value: Any?): Component = renderer.literal(value).color(BODY).decoration(TextDecoration.ITALIC, false)
+
+    /** Existing pack glyphs: spectra_aurelium_skills:stat_hearts and betterranks:mc_hunger. */
+    fun residentVitals(player: Player?, health: Double, maximum: Double, hunger: Int): Component {
+        fun number(value: Double) = String.format(Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')
+        fun icon(value: String, label: String) = Component.text(value, TextColor.color(0xFFFFFF))
+            .font(Key.key("minecraft:default")).decoration(TextDecoration.BOLD, false).hoverEvent(render(player, label))
+        return render(player, "hologram.health",
+            "heart" to icon("\uE322", "workers.health-label"),
+            "food" to icon("\uD83C\uDF56", "workers.hunger-label"),
+            "health" to literal(number(health)).color(if (health <= maximum / 2) ERROR else SUCCESS),
+            "max" to number(maximum),
+            "hunger" to literal(hunger).color(if (hunger <= 6) ERROR else WARNING))
+    }
 
     fun success(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =
         feedback(render(player, key, *values), SUCCESS)
