@@ -86,6 +86,68 @@ class CivsStorageTest : FunSpec({
     }
     afterEach { storage.close(); paper.close() }
 
+    for (autonomous in listOf(false, true)) test("resurrection receipts debit one exact tagged scroll without synthetic stock autonomous=$autonomous") {
+        var persisted = 0
+        storage.close()
+        storage = CivsStorage(plugin, PaperPlayerDataPersistence { persisted++ }) { emptyArray() }
+        val player = paper.addPlayer("ScrollOwner").apply { addAttachment(plugin, "arccivs.admin", autonomous) }
+        val worker = CivWorker(UUID.randomUUID(), "Fallen", null, skills = mapOf("FORESTER" to 10L),
+            items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("BREAD", 2) else null })
+        val corpse = CivsCorpses.create(worker, CivDeathContext(CivPosition(5, 64, 5), 2_000))
+        city = city.copy(owner = player.uniqueId, stock = if (autonomous) CivsRules.STARTING_STOCK else Stock(),
+            inventory = if (autonomous) null else city.inventory, autonomy = if (autonomous) CivAutonomy() else null,
+            corpses = listOf(corpse))
+        val scroll = CivsResurrectionScroll.create(CivsText.fromYaml(civsLocaleSource()), player).apply { amount = 3 }
+        val before = requireNotNull(CivResidentItem.of(scroll))
+        val debit = CivResurrectionDebit(player.uniqueId, corpse, CivNativePlayerSlot(0, before, before.copy(amount = 2)),
+            3_000, corpse.position, 64.0)
+        val after = CivsRules.resurrect(city, player.uniqueId, worker.id, corpse.diedAt, 3_000, administrator = autonomous)
+        val receipt = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(), resurrection = debit).validated()
+        player.inventory.setItem(0, scroll.clone())
+        storage.reserve(city, receipt.id, player)
+        storage.seal(receipt)
+        player.inventory.setItem(0, scroll.clone().apply { editMeta { it.displayName(Component.text("Changed scroll")) } })
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Conflict) shouldBe true
+        player.inventory.getItem(0)!!.amount shouldBe 3
+        player.inventory.setItem(0, scroll.clone())
+        storage.resurrectionDebitState(receipt) shouldBe null
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.resurrectionDebitState(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        player.inventory.getItem(0) shouldBe scroll.clone().apply { amount = 2 }
+        persisted shouldBe 2 // Recovery persists the same after-state, without a second debit.
+        receipt.after.inventory shouldBe city.inventory
+        receipt.after.stock shouldBe city.stock
+        shouldThrow<IllegalArgumentException> { receipt.copy(resurrection = debit.copy(change = debit.change.copy(after = null))).validated() }
+        shouldThrow<IllegalArgumentException> { receipt.copy(changes = listOf(CivInventorySlotChange(control, "BARREL", 0,
+            null, CivPlainItem("PAPER", 1)))).validated() }
+    }
+
+    test("autonomous corpse loot conserves native items without creating town inventory") {
+        storage.close()
+        storage = CivsStorage(plugin, PaperPlayerDataPersistence { }) { emptyArray() }
+        val admin = paper.addPlayer("CorpseAdmin").apply { addAttachment(plugin, "arccivs.admin", true) }
+        val pickaxe = named(Material.DIAMOND_PICKAXE, 1)
+        val dead = CivWorker(UUID.randomUUID(), "Fallen", null,
+            items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem.of(pickaxe) else null })
+        val corpse = CivsCorpses.create(dead, CivDeathContext(CivPosition(5, 64, 5), 2_000))
+        city = city.copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy(), corpses = listOf(corpse))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, admin)
+        val prepared = storage.prepareCorpseTransfer(city, dead.id, admin, 4, ClickType.LEFT)
+        val after = city.copy(corpses = listOf(corpse.copy(worker = prepared.worker)), revision = city.revision + 1)
+        val receipt = CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), residentTransfer = prepared.transfer)
+        storage.seal(receipt)
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        admin.inventory.getItem(0) shouldBe pickaxe
+        after.inventory shouldBe null
+        after.stock shouldBe city.stock
+        storage.unlock(id)
+        val stranger = paper.addPlayer("CorpseStranger")
+        shouldThrow<CivsRejection> { storage.reserve(city, UUID.randomUUID(), stranger) }.reason shouldBe "not-authorized"
+    }
+
     fun addLocalBuilding(type: BuildingType, x: Int = 6): CivBuilding {
         val position = CivPosition(x, 64, 0)
         val building = city.buildings.first().copy(id = UUID.randomUUID(), type = type, phase = BuildingPhase.ACTIVE,

@@ -166,7 +166,10 @@ class CivsStore(
         val snapshot = transaction.copy(after = snapshotCity(transaction.after), changes = transaction.changes.toList(),
             playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) },
             residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
-            worldChanges = transaction.worldChanges?.toList())
+            worldChanges = transaction.worldChanges?.toList(),
+            resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = it.corpse.worker.copy(
+                items = it.corpse.worker.items?.toList(), skills = it.corpse.worker.skills?.toMap(),
+                inventory = it.corpse.worker.inventory?.toMap(), parentIds = it.corpse.worker.parentIds?.toSet()))) })
         return submit {
             snapshot.validated()
             val trustedRoot = trustedRoot()

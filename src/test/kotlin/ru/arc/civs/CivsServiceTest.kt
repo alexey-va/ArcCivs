@@ -48,6 +48,153 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("public building inspection is nearby and autonomous without widening foreign personal access") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val personal = h.city.copy(owner = UUID.randomUUID(), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = listOf(hall), workers = emptyList())
+            val auto = personal.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), inventory = null,
+                stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(personal, auto))
+            val visitor = h.paper.addPlayer("Inspector").apply {
+                addAttachment(h.plugin, "arccivs.use", true)
+                teleport(Location(h.world, .5, 64.0, 2.5))
+            }
+            h.start()
+            h.service.inspectBuilding(visitor, auto.id, hall.id) shouldBe auto
+            shouldThrow<CivsRejection> { h.service.inspectBuilding(visitor, personal.id, hall.id) }.reason shouldBe "not-authorized"
+            visitor.addAttachment(h.plugin, "arccivs.admin", true)
+            shouldThrow<CivsRejection> { h.service.inspectBuilding(visitor, personal.id, hall.id) }.reason shouldBe "not-authorized"
+            visitor.teleport(Location(h.world, 30.0, 64.0, 0.0))
+            shouldThrow<CivsRejection> { h.service.inspectBuilding(visitor, auto.id, hall.id) }.reason shouldBe "too-far"
+        }
+    }
+
+    for (autonomous in listOf(false, true)) test("scroll resurrection is one durable exact-item operation autonomous=$autonomous") {
+        serviceScenario(nativeGeometry = true, storageFactory = {
+            CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() }
+        }) { h ->
+            val player = h.paper.addPlayer("ResurrectionOwner").apply {
+                addAttachment(h.plugin, "arccivs.use", true)
+                addAttachment(h.plugin, "arccivs.admin", autonomous)
+                teleport(Location(h.world, .5, 64.0, 2.5))
+            }
+            val original = h.city.workers.first().copy(skills = mapOf("QUARRY" to 20L),
+                items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("BREAD", 2) else null })
+            val corpse = CivsCorpses.create(original, CivDeathContext(CivPosition(0, 64, 0), h.time - 1_000))
+            val before = h.city.copy(owner = player.uniqueId, stock = if (autonomous) h.city.stock else Stock(),
+                inventory = if (autonomous) null else CivInventory(CivStorageMode.VIRTUAL),
+                autonomy = if (autonomous) CivAutonomy() else null,
+                workers = h.city.workers.drop(1), corpses = listOf(corpse))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            val retirement = CompletableFuture<Boolean>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns retirement
+            h.service.corpseLocation = { _, _, _ -> Location(h.world, .5, 64.0, .5) }
+            val scroll = CivsResurrectionScroll.create(CivsText.fromYaml(civsLocaleSource()), player).apply { amount = 2 }
+            player.inventory.setItem(0, scroll)
+            h.start()
+            val resurrecting = h.service.resurrect(player, before.id, original.id, corpse.diedAt)
+            player.inventory.getItem(0) shouldBe scroll
+            h.saves.size shouldBe 0
+            h.service.settlements().single().corpses shouldBe listOf(corpse)
+            val duplicate = h.service.resurrect(player, before.id, original.id, corpse.diedAt)
+            (shouldThrow<CompletionException> { duplicate.join() }.cause as CivsRejection).reason shouldBe "city-busy"
+            journal.complete(requireNotNull(receipt)); h.tick()
+            player.inventory.getItem(0) shouldBe scroll.clone().apply { amount = 1 }
+            h.service.settlements().single().corpses shouldBe listOf(corpse)
+            h.saves.single().first.workers.last() shouldBe CivsRules.resurrectedWorker(before, corpse)
+            h.commit()
+            resurrecting.isDone shouldBe false
+            verify(exactly = 1) { h.citizens.requestAdmissionAt(before.id, original.id, any()) }
+            h.paper.performTicks(25)
+            verify(exactly = 1) { h.citizens.requestAdmissionAt(before.id, original.id, any()) }
+            retirement.complete(true); h.await(resurrecting)
+            val after = h.service.settlements().single()
+            after.workers.count { it.id == original.id } shouldBe 1
+            after.corpses shouldBe emptyList()
+            after.inventory shouldBe before.inventory
+            after.stock shouldBe before.stock
+            (shouldThrow<CompletionException> { h.service.resurrect(player, before.id, original.id, corpse.diedAt).join() }
+                .cause as CivsRejection).reason shouldBe "worker-not-found"
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 2) { h.citizens.requestAdmissionAt(before.id, original.id, any()) }
+        }
+    }
+
+    for (guard in listOf("expired", "unsafe", "moved")) test("resurrection rechecks $guard after journal IO before consuming the scroll") {
+        serviceScenario(nativeGeometry = true, storageFactory = {
+            CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() }
+        }) { h ->
+            val player = h.paper.addPlayer("RecheckedOwner").apply {
+                addAttachment(h.plugin, "arccivs.use", true)
+                teleport(Location(h.world, .5, 64.0, 2.5))
+            }
+            val worker = h.city.workers.first()
+            val corpse = CivsCorpses.create(worker, CivDeathContext(CivPosition(0, 64, 0), h.time - 1_000))
+            val before = h.city.copy(owner = player.uniqueId, stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                workers = h.city.workers.drop(1), corpses = listOf(corpse))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.service.corpseLocation = { _, _, _ -> Location(h.world, .5, 64.0, .5) }
+            val scroll = CivsResurrectionScroll.create(CivsText.fromYaml(civsLocaleSource()), player)
+            player.inventory.setItem(0, scroll)
+            h.start()
+            val resurrecting = h.service.resurrect(player, before.id, worker.id, corpse.diedAt)
+            when (guard) {
+                "expired" -> h.time = corpse.expiresAt
+                "unsafe" -> h.world.getBlockAt(0, 64, 0).type = Material.STONE
+                "moved" -> h.service.corpseLocation = { _, _, _ -> Location(h.world, 1.5, 64.0, .5) }
+            }
+            journal.complete(requireNotNull(receipt)); h.tick()
+            resurrecting.isCompletedExceptionally shouldBe true
+            player.inventory.getItem(0) shouldBe scroll
+            verify(exactly = 0) { h.store.save(any()) }
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 0) { h.citizens.requestAdmissionAt(any(), any(), any()) }
+        }
+    }
+
+    for (nativeApplied in listOf(false, true)) test("resurrection recovery classifies the exact scroll before finishing nativeApplied=$nativeApplied") {
+        serviceScenario(nativeGeometry = true, storageFactory = {
+            CivsStorage(it, ru.arc.paper.playerstate.PaperPlayerDataPersistence { }) { emptyArray() }
+        }) { h ->
+            val player = h.paper.addPlayer("RecoveredOwner").apply { addAttachment(h.plugin, "arccivs.use", true) }
+            val worker = h.city.workers.first()
+            val corpse = CivsCorpses.create(worker, CivDeathContext(CivPosition(0, 64, 0), h.time - 1_000))
+            val before = h.city.copy(owner = player.uniqueId, stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                workers = h.city.workers.drop(1), corpses = listOf(corpse))
+            val scroll = CivsResurrectionScroll.create(CivsText.fromYaml(civsLocaleSource()), player).apply { amount = 2 }
+            val nativeBefore = requireNotNull(CivResidentItem.of(scroll))
+            val debit = CivResurrectionDebit(player.uniqueId, corpse, CivNativePlayerSlot(0, nativeBefore,
+                nativeBefore.copy(amount = 1)), h.time, corpse.position, 64.0)
+            val after = CivsRules.resurrect(before, player.uniqueId, worker.id, corpse.diedAt, h.time)
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, emptyList(), resurrection = debit)
+            val admitted = mutableListOf<Boolean>()
+            every { h.citizens.requestAdmissionAt(before.id, worker.id, any()) } answers {
+                admitted += h.service.corpseSettlements().any { city -> city.id == before.id && city.workers.any { it.id == worker.id } }
+            }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(receipt.id) } returns CompletableFuture.completedFuture(true)
+            player.inventory.setItem(0, scroll.clone().apply { amount = if (nativeApplied) 1 else 2 })
+            if (nativeApplied) { h.time = corpse.expiresAt; h.world.getBlockAt(0, 64, 0).type = Material.STONE }
+            h.start(); h.paper.performTicks(25)
+            h.saves.single().first shouldBe after
+            player.inventory.getItem(0) shouldBe scroll.clone().apply { amount = 1 }
+            h.commit()
+            h.service.settlements().single() shouldBe after
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+            verify(exactly = 2) { h.citizens.requestAdmissionAt(before.id, worker.id, any()) }
+            admitted shouldBe listOf(false, true)
+        }
+    }
+
     test("historical access repair precedes growth with empty stock and publishes no construction or resource credit") {
         serviceScenario { h ->
             val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), workers = emptyList())
@@ -4073,15 +4220,16 @@ private class RequestDialog(h: ServiceScenario, private val player: Player) : Au
 
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
+    nativeGeometry: Boolean = false,
     action: (ServiceScenario) -> Unit) =
     failOnUnsupportedMockBukkitOperation {
-        MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory).use(action) }
+        MockBukkitTestRuntime.open().use { paper -> ServiceScenario(paper, empty, maximumCities, worldName, allowedWorlds, storageFactory, nativeGeometry).use(action) }
     }
 
 private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, maximumCities: Int,
-    worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?) : AutoCloseable {
+    worldName: String, allowedWorlds: Set<String>, storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)?, nativeGeometry: Boolean) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CivsServiceTest")
-    val world = paper.addSimpleWorld(worldName)
+    val world = if (nativeGeometry) CivsWorksiteWorldFixture(worldName).also(paper.server::addWorld) else paper.addSimpleWorld(worldName)
     val player = mockk<Player>(relaxed = true)
     val store = mockk<CivsStore>()
     val blueprints = mockk<CivsBlueprints>()

@@ -602,6 +602,34 @@ class CivsStoreTest : FreeSpec({
         shouldThrow<CompletionException> { reopened.saveInventoryTransaction(debit).join() }
     }
 
+    "resurrection receipts freeze exact corpse belongings and load autonomous stock without normalization" {
+        ru.arc.paper.testing.MockBukkitTestRuntime.open().use { paper ->
+            val queued = QueuedExecutor()
+            val store = CivsStore(root, queued)
+            val before = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+            val items = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("BREAD", 2) else null }
+            val skills = mutableMapOf("FORESTER" to 10L)
+            val corpse = CivsCorpses.create(CivWorker(UUID.randomUUID(), "Fallen", null, skills = skills, items = items),
+                CivDeathContext(before.center, 2_000))
+            val dead = before.copy(corpses = listOf(corpse))
+            val scroll = requireNotNull(CivResidentItem.of(CivsResurrectionScroll.create(CivsText.fromYaml(civsLocaleSource()), null)))
+            val debit = CivResurrectionDebit(dead.owner, corpse, CivNativePlayerSlot(0, scroll, null), 3_000, corpse.position, 64.0)
+            val after = CivsRules.resurrect(dead, dead.owner, corpse.worker.id, corpse.diedAt, 3_000, administrator = true)
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), dead.id, dead.revision, after, emptyList(), resurrection = debit)
+            val expected = receipt.copy(after = receipt.after.copy(workers = receipt.after.workers.map {
+                it.copy(items = it.items!!.toList(), skills = it.skills!!.toMap())
+            }), resurrection = debit.copy(corpse = corpse.copy(worker = corpse.worker.copy(items = items.toList(), skills = skills.toMap()))))
+            val saved = store.saveInventoryTransaction(receipt)
+            items.clear(); skills.clear()
+            queued.runNext()
+            saved.join() shouldBe expected
+            val reopened = CivsStore(root, directExecutor)
+            reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
+            expected.after.inventory shouldBe null
+            expected.after.stock shouldBe before.stock
+        }
+    }
+
     "legacy receipts without a player endpoint still load and malformed player endpoints stay preserved" {
         val legacy = inventoryTransaction(settlement())
         val path = root.resolve("inventory-transactions/${legacy.id}.json")

@@ -64,10 +64,26 @@ data class CivPlayerSlotChange(val slot: Int, val before: CivPlainItem, val afte
 data class CivPlayerDebit(val playerId: UUID, val changes: List<CivPlayerSlotChange>)
 
 data class CivNativePlayerSlot(val slot: Int, val before: CivResidentItem?, val after: CivResidentItem?)
+data class CivResurrectionDebit(val playerId: UUID, val corpse: CivCorpse, val change: CivNativePlayerSlot,
+    val acceptedAt: Long, val position: CivPosition, val feetY: Double) {
+    fun validated(city: Settlement) {
+        require(city.canManage(playerId) || city.autonomy != null)
+        require(acceptedAt >= corpse.diedAt && acceptedAt < corpse.expiresAt)
+        require(change.slot in 0..8 && change.before != null && change.before.material == "PAPER" && change.before.data != null)
+        change.before.validated(); change.after?.validated()
+        require(if (change.before.amount == 1) change.after == null
+            else change.after == change.before.copy(amount = change.before.amount - 1))
+        require(position.y in -4096..4096 && feetY.isFinite() && kotlin.math.floor(feetY).toInt() == position.y)
+        CivsCorpses.validate(city.copy(workers = city.workers.filterNot { it.id == corpse.worker.id }, corpses = listOf(corpse)))
+        require(city.corpses.orEmpty().none { it.worker.id == corpse.worker.id })
+        require(city.workers.single { it.id == corpse.worker.id } == CivsRules.resurrectedWorker(city, corpse))
+    }
+}
 data class CivResidentTransfer(val playerId: UUID, val workerId: UUID,
     val before: List<CivResidentItem?>, val changes: List<CivNativePlayerSlot>) {
     fun validated(city: Settlement) {
-        require(city.canManage(playerId) && changes.size in 1..36 && changes.map { it.slot }.distinct().size == changes.size)
+        require((if (city.autonomy != null) city.corpses.orEmpty().any { it.worker.id == workerId } else city.canManage(playerId)) &&
+            changes.size in 1..36 && changes.map { it.slot }.distinct().size == changes.size)
         CivsEquipment.validate(before)
         val after = (city.workers.firstOrNull { it.id == workerId }
             ?: city.corpses.orEmpty().first { it.worker.id == workerId }.worker).items ?: error("Missing resident inventory")
@@ -90,6 +106,7 @@ data class CivStoragePlan(val inventoryAfter: CivInventory, val changes: List<Ci
     val worldChanges: List<CivPlanBlock>? = null)
 data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupplyResult)
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
+data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
 
 /** Exact slot receipt; the service persists this before applying any native item change. */
 data class CivInventoryTransaction(
@@ -98,13 +115,19 @@ data class CivInventoryTransaction(
     val playerDebit: CivPlayerDebit? = null,
     val residentTransfer: CivResidentTransfer? = null,
     val worldChanges: List<CivPlanBlock>? = null,
+    val resurrection: CivResurrectionDebit? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
-        requireNotNull(after.inventory)
-        require(playerDebit == null || residentTransfer == null)
+        require(after.inventory != null || resurrection != null || after.autonomy != null && residentTransfer != null)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection).size <= 1)
+        resurrection?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
+            it.validated(after)
+        }
+        if (after.inventory == null) require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
         residentTransfer?.validated(after)
         require(worldChanges.orEmpty().size <= 128 && worldChanges.orEmpty().map { it.position }.distinct().size == worldChanges.orEmpty().size)
         worldChanges.orEmpty().forEach { cell ->
@@ -142,7 +165,7 @@ data class CivInventoryTransaction(
     }
 }
 
-internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId
+internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId ?: resurrection?.playerId
 
 sealed interface CivInventoryApplyResult {
     data object Applied : CivInventoryApplyResult
@@ -303,7 +326,8 @@ class CivsStorage(private val plugin: Plugin,
     /** Reserve membership for synchronous planning; seal keeps only the receipt's native containers locked. */
     fun reserve(city: Settlement, transactionId: UUID, player: Player? = null) {
         checkMain(); requireOpen()
-        if (player != null) reject(!player.isOnline || !city.canManage(player.uniqueId), "not-authorized")
+        if (player != null) reject(!player.isOnline || !(if (city.autonomy != null) player.hasPermission("arccivs.admin")
+            else city.canManage(player.uniqueId)), "not-authorized")
         lock(city, transactionId, index.positions(city), player?.uniqueId, closeViewers = false)
     }
 
@@ -319,6 +343,12 @@ class CivsStorage(private val plugin: Plugin,
         transaction.residentTransfer?.let { transfer ->
             require(transfer.before == CivsEquipment.slots(claim.city.workers.firstOrNull { it.id == transfer.workerId }
                 ?: claim.city.corpses.orEmpty().first { it.worker.id == transfer.workerId }.worker))
+        }
+        transaction.resurrection?.let { resurrection ->
+            require(claim.city.corpses.orEmpty().single { it.worker.id == resurrection.corpse.worker.id } == resurrection.corpse)
+            require(transaction.after == CivsRules.resurrect(claim.city, resurrection.playerId,
+                resurrection.corpse.worker.id, resurrection.corpse.diedAt, resurrection.acceptedAt,
+                administrator = claim.city.autonomy != null))
         }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
@@ -387,6 +417,36 @@ class CivsStorage(private val plugin: Plugin,
 
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
     fun isWorldLocked(worldId: UUID, position: CivPosition): Boolean = Key(worldId, position) in lockedWorld
+
+    fun prepareResurrection(city: Settlement, player: Player, corpse: CivCorpse, at: Long,
+        location: org.bukkit.Location): CivResurrectionDebit {
+        checkClaim(city)
+        reject(!player.isOnline || !(if (city.autonomy != null) player.hasPermission("arccivs.admin")
+            else city.canManage(player.uniqueId)), "not-authorized")
+        reject(location.world?.uid != city.worldId || !civsCorpseStandingSafe(location), "corpse-unavailable")
+        val slot = player.inventory.heldItemSlot
+        val item = player.inventory.getItem(slot)
+        reject(!CivsResurrectionScroll.matches(item), "resurrection-scroll-required")
+        val before = requireNotNull(CivResidentItem.of(item))
+        return CivResurrectionDebit(player.uniqueId, corpse,
+            CivNativePlayerSlot(slot, before, before.takeIf { it.amount > 1 }?.copy(amount = before.amount - 1)),
+            at, CivPosition(location.blockX, location.blockY, location.blockZ), location.y)
+    }
+
+    /** Auto corpses have exact belongings but deliberately have no physical-stock record. */
+    fun prepareCorpseTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int,
+        click: org.bukkit.event.inventory.ClickType): CivCorpseTransferPlan {
+        checkClaim(city)
+        reject(!player.isOnline || !(if (city.autonomy != null) player.hasPermission("arccivs.admin")
+            else city.canManage(player.uniqueId)), "not-authorized")
+        reject(!isEmpty(player.itemOnCursor), "resident-cursor-busy")
+        val worker = city.corpses.orEmpty().firstOrNull { it.worker.id == workerId }?.worker
+            ?: throw CivsRejection("worker-not-found")
+        val (updated, changes) = CivsEquipment.transfer(worker, player, npcSlot, null, click)
+        return CivCorpseTransferPlan(updated, changes.takeIf { it.isNotEmpty() }?.let {
+            CivResidentTransfer(player.uniqueId, workerId, CivsEquipment.slots(worker), it)
+        })
+    }
 
     fun prepareResidentTransfer(city: Settlement, workerId: UUID, player: Player, npcSlot: Int?, playerSlot: Int?, click: org.bukkit.event.inventory.ClickType, requestedTool: Material? = null, requestedSupply: Pair<Material, Long>? = null, requestedSupplies: Map<String, Long>? = null): CivResidentTransferPlan {
         checkClaim(city)
@@ -910,7 +970,7 @@ class CivsStorage(private val plugin: Plugin,
     fun openControl(player: Player, city: Settlement, building: CivBuilding) {
         checkMain()
         requireOpen()
-        reject(!city.canManage(player.uniqueId) || player.world.uid != city.worldId, "not-authorized")
+        reject(!(city.canManage(player.uniqueId) || city.autonomy != null) || player.world.uid != city.worldId, "not-authorized")
         reject(city.id in cityClaims, "storage-busy")
         player.openInventory(control(city, building).inventory)
     }
@@ -924,12 +984,16 @@ class CivsStorage(private val plugin: Plugin,
         require(claim.city.id == transaction.cityId && claim.city.owner == transaction.after.owner &&
             claim.city.worldId == transaction.after.worldId && claim.city.revision in transaction.beforeRevision..transaction.after.revision)
         val playerId = transaction.playerId()
-        val playerChanges = transaction.residentTransfer?.changes ?: transaction.playerDebit?.changes.orEmpty().map {
+        val playerChanges = transaction.residentTransfer?.changes ?: transaction.resurrection?.let { listOf(it.change) } ?: transaction.playerDebit?.changes.orEmpty().map {
             CivNativePlayerSlot(it.slot, CivResidentItem(it.before.material, it.before.amount), it.after?.let { item -> CivResidentItem(item.material, item.amount) })
         }
         playerChanges.forEach { change ->
             if (runCatching { change.before?.stack(); change.after?.stack() }.isFailure)
                 return CivInventoryApplyResult.Conflict(mapOf("reason" to "invalid-player-item", "slot" to change.slot.toString()))
+        }
+        transaction.resurrection?.let {
+            if (!CivsResurrectionScroll.matches(it.change.before?.stack()))
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "invalid-resurrection-scroll"))
         }
         val player = if (playerId == null) null else {
             if (claim.playerId != playerId || lockedPlayers[playerId] != transaction.id)
@@ -1017,6 +1081,13 @@ class CivsStorage(private val plugin: Plugin,
     fun waitingForPlayer(transaction: CivInventoryTransaction): Boolean {
         checkMain(); requireOpen()
         return transaction.playerId()?.let { plugin.server.getPlayer(it)?.isOnline != true } == true
+    }
+
+    /** null means the exact accepted scroll is untouched; Applied means its native slot already matches the debit. */
+    internal fun resurrectionDebitState(transaction: CivInventoryTransaction): CivInventoryApplyResult? {
+        checkMain(); requireOpen()
+        val debit = requireNotNull(transaction.resurrection)
+        return classifyPlayer(debit.playerId, listOf(debit.change), plugin.server.getPlayer(debit.playerId))
     }
 
     private fun classifyPlayer(playerId: UUID?, changes: List<CivNativePlayerSlot>, player: Player?): CivInventoryApplyResult? {

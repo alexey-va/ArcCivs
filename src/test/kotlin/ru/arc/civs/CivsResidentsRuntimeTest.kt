@@ -1655,6 +1655,66 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a committed resurrection prefers safe body-site admission and never moves an existing actor") {
+        residentRuntime { h ->
+            val saved = h.city
+            h.city = saved.copy(workers = emptyList())
+            h.owner.pulse(2_000)
+            h.owner.collisionActors().size shouldBe 0
+            h.city = saved
+            val body = Location(h.world, 12.5, 64.0, .5)
+            h.owner.requestAdmissionAt(saved.id, h.workerId, body)
+            h.owner.pulse(3_000)
+            val actor = h.owner.collisionActors().single()
+            (actor.location.distance(body) <= 6.0) shouldBe true
+            (actor.location.x > 6) shouldBe true
+            citizenPacketSupported(h.world, CitizenPoint(actor.location.x, actor.location.y, actor.location.z)) shouldBe true
+            val before = actor.location.clone()
+            h.owner.requestAdmissionAt(saved.id, h.workerId, Location(h.world, 25.5, 64.0, .5))
+            actor.location shouldBe before
+            h.spawns shouldBe 2
+            h.city shouldBe saved
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("unassigned autonomous residents wander from the prepared entrance below a floating hall control") {
+        residentRuntime { h ->
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val hall = h.city.buildings.first().copy(phase = BuildingPhase.SITE,
+                bounds = CivBox(CivPosition(-2, 64, -6), CivPosition(2, 70, -3)),
+                control = CivPosition(0, 67, -4))
+            h.world.getBlockAt(0, 67, -4).type = Material.BARREL
+            h.city = h.city.copy(autonomy = CivAutonomy(), inventory = null, buildings = listOf(hall),
+                workers = h.city.workers.map { it.copy(assignment = null, nextDeliveryAt = 2) })
+            val city = h.city
+            citizenIdleAnchor(city, hall) shouldBe hall.entrance
+            citizenIdleAnchor(city.copy(autonomy = null), hall) shouldBe hall.control
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            val actor = h.owner.collisionActors().single()
+            val origin = actor.location.clone()
+            val spawns = h.spawns
+            var walked = 0.0
+            for (tick in 1..800) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                val distance = before.distance(actor.location)
+                (distance <= .118251) shouldBe true
+                walked += distance
+                if (actor.location.distance(origin) >= 2.0) break
+            }
+            withClue("position=${actor.location} ${h.navigationState()}") { (walked >= 2.0) shouldBe true }
+            // PacketPlayerNpc.teleport also emits ordinary per-tick walking positions;
+            // the bounded displacement above excludes a recovery jump.
+            h.spawns shouldBe spawns
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
+            h.city shouldBe city
+        }
+    }
+
     test("an unreachable optional wander keeps safe actual feet then tries another destination without recovery teleport") {
         residentRuntime { h ->
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)

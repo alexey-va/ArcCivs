@@ -31,6 +31,12 @@ import org.bukkit.event.block.BlockPhysicsEvent
 import org.bukkit.event.block.LeavesDecayEvent
 import org.bukkit.event.block.MoistureChangeEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
+import org.bukkit.event.inventory.ClickType
+import org.bukkit.event.inventory.InventoryAction
+import org.bukkit.event.inventory.InventoryClickEvent
+import org.bukkit.event.inventory.InventoryCreativeEvent
+import org.bukkit.event.inventory.InventoryDragEvent
+import org.bukkit.event.inventory.InventoryType
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
 import org.bukkit.event.player.PlayerInteractEvent
@@ -43,6 +49,80 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("autonomous control contents are public read-only while administrator writes retain every existing lock") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("auto-control")
+            val plugin = paper.createSimplePlugin("AutoControlProtection")
+            val owner = paper.addPlayer("AutoOwner")
+            val visitor = paper.addPlayer("AutoVisitor")
+            val admin = paper.addPlayer("AutoAdmin").apply { addAttachment(plugin, "arccivs.admin", true) }
+            for (actor in listOf(owner, visitor, admin)) {
+                actor.addAttachment(plugin, "arccivs.use", true)
+                actor.teleport(Location(world, .5, 64.0, 2.5))
+            }
+            val point = CivPosition(0, 64, 0)
+            val building = protectionBuilding(0, 2).copy(control = point)
+            var city = protectionCity(world.uid, owner.uniqueId, building).copy(autonomy = CivAutonomy())
+            var available = true
+            val protection = CivsProtection({ listOf(city) }, { available })
+            val block = world.getBlockAt(0, 64, 0).apply { type = Material.BARREL }
+            val holder = block.state as Container
+            val inventory = mockk<Inventory> {
+                every { getHolder(false) } returns holder
+                every { location } returns block.location
+            }
+            val other = mockk<Inventory> {
+                every { getHolder(false) } returns null
+                every { location } returns Location(world, 20.0, 64.0, 0.0)
+            }
+            for (actor in listOf(owner, visitor, admin)) {
+                val view = mockk<InventoryView>(relaxed = true) {
+                    every { topInventory } returns inventory
+                    every { player } returns actor
+                }
+                val opened = InventoryOpenEvent(view)
+                protection.open(opened)
+                opened.isCancelled shouldBe false
+                for (click in listOf(ClickType.LEFT, ClickType.RIGHT, ClickType.SHIFT_LEFT, ClickType.SHIFT_RIGHT,
+                    ClickType.NUMBER_KEY, ClickType.SWAP_OFFHAND, ClickType.DOUBLE_CLICK, ClickType.DROP, ClickType.CONTROL_DROP)) {
+                    val event = InventoryClickEvent(view, InventoryType.SlotType.CONTAINER, 0, click, InventoryAction.UNKNOWN)
+                    protection.click(event)
+                    event.isCancelled shouldBe (actor != admin)
+                }
+                val creative = InventoryCreativeEvent(view, InventoryType.SlotType.CONTAINER, 0, ItemStack(Material.DIAMOND))
+                protection.click(creative)
+                creative.isCancelled shouldBe (actor != admin)
+                val drag = InventoryDragEvent(view, null, ItemStack(Material.STONE, 2), false, mapOf(0 to ItemStack(Material.STONE)))
+                protection.drag(drag)
+                drag.isCancelled shouldBe (actor != admin)
+                val previouslyCancelled = InventoryClickEvent(view, InventoryType.SlotType.CONTAINER, 0,
+                    ClickType.LEFT, InventoryAction.PICKUP_ALL).also { it.isCancelled = true }
+                protection.click(previouslyCancelled)
+                previouslyCancelled.isCancelled shouldBe true
+                protection.isProtected(world.uid, 0, 64, 0, actor.uniqueId) shouldBe true
+            }
+            for ((source, destination) in listOf(inventory to other, other to inventory)) {
+                val move = InventoryMoveItemEvent(source, ItemStack(Material.STONE), destination, true)
+                protection.moveItem(move)
+                move.isCancelled shouldBe true
+            }
+            val view = mockk<InventoryView>(relaxed = true) { every { topInventory } returns inventory; every { player } returns admin }
+            available = false
+            val unavailable = InventoryOpenEvent(view)
+            protection.open(unavailable)
+            unavailable.isCancelled shouldBe true
+            available = true
+            city = city.copy(pendingDeletion = CivDeletion(null))
+            protection.refresh() shouldBe true
+            val deleting = InventoryOpenEvent(view)
+            protection.open(deleting)
+            deleting.isCancelled shouldBe true
+            val deletingClick = InventoryClickEvent(view, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+            protection.click(deletingClick)
+            deletingClick.isCancelled shouldBe true
+        }
+    }
+
     test("owner attributed terrain wear may enter buildings but respects strangers and receipt locks") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("interior-trails")

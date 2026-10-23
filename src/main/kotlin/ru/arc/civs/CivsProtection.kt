@@ -49,7 +49,8 @@ class CivsProtection(
         val barrelRestorers: Set<UUID> = emptySet())
     internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
         val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>,
-        val cropCells: Set<Pair<UUID, CivPosition>>)
+        val cropCells: Set<Pair<UUID, CivPosition>>,
+        val autonomousControls: Map<Pair<UUID, CivPosition>, Boolean> = emptyMap())
     internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
         fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false): Boolean = bounds.contains(x, y, z) &&
             (boxes.any { it.bounds.contains(x, y, z) &&
@@ -67,7 +68,8 @@ class CivsProtection(
     /** Compatibility for small fixture/offline callers; runtime preparation uses [prepare] on its worker. */
     fun refresh(): Boolean {
         val prepared = prepare(cities())
-        if (prepared.geometry == snapshot.geometry) return false
+        if (prepared.geometry == snapshot.geometry && prepared.controlEditors == snapshot.controlEditors &&
+            prepared.cropCells == snapshot.cropCells && prepared.autonomousControls == snapshot.autonomousControls) return false
         return publish(prepared)
     }
 
@@ -112,7 +114,10 @@ class CivsProtection(
             }.distinct()
             return Snapshot(current, current.groupBy { it.worldId }.mapValues { (_, footprints) ->
                 index(footprints)
-            }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap(), crops)
+            }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap(), crops,
+                cities.filter { it.autonomy != null }.flatMap { city ->
+                    city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.pendingDeletion == null) }
+                }.toMap())
         }
 
         /** Area-independent memory preserves old large footprints without enumerating their chunks. */
@@ -160,12 +165,24 @@ class CivsProtection(
         else -> false
     }
     private fun protectedInventory(location: Location?, actor: UUID): Boolean {
-        if (available() && location?.world != null && actor in snapshot.controlEditors[location.world!!.uid to
-                CivPosition(location.blockX, location.blockY, location.blockZ)].orEmpty()) return false
+        if (available() && location?.world != null) {
+            val key = location.world!!.uid to CivPosition(location.blockX, location.blockY, location.blockZ)
+            if (key in snapshot.autonomousControls) return snapshot.autonomousControls[key] != true ||
+                Bukkit.getPlayer(actor)?.hasPermission("arccivs.admin") != true
+            if (actor in snapshot.controlEditors[key].orEmpty()) return false
+        }
         return protected(location, actor)
     }
     private fun protected(inventory: Inventory, actor: UUID): Boolean =
         protected(inventory.getHolder(false), actor) || protectedInventory(inventory.location, actor)
+
+    private fun inspectableAutonomous(inventory: Inventory, actor: UUID): Boolean {
+        val location = inventory.location ?: (inventory.getHolder(false) as? BlockState)?.location ?: return false
+        val world = location.world ?: return false
+        val player = Bukkit.getPlayer(actor) ?: return false
+        return available() && snapshot.autonomousControls[world.uid to CivPosition(location.blockX, location.blockY, location.blockZ)] == true &&
+            player.hasPermission("arccivs.use") && player.world.uid == world.uid && player.location.distanceSquared(location.clone().add(.5, .5, .5)) <= 64.0
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun breakBlock(event: BlockBreakEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
@@ -330,7 +347,9 @@ class CivsProtection(
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    fun open(event: InventoryOpenEvent) { if (protected(event.inventory, event.player.uniqueId)) event.isCancelled = true }
+    fun open(event: InventoryOpenEvent) {
+        if (!inspectableAutonomous(event.inventory, event.player.uniqueId) && protected(event.inventory, event.player.uniqueId)) event.isCancelled = true
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun click(event: InventoryClickEvent) {

@@ -129,8 +129,11 @@ interface CivsUiHost {
     fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
     fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
     fun corpseItems(player: Player, workerId: UUID): List<ItemStack?> = throw CivsRejection("worker-not-found")
+    fun corpseItems(player: Player, cityId: UUID, workerId: UUID): List<ItemStack?> = corpseItems(player, workerId)
     fun transferCorpseItem(player: Player, workerId: UUID, npcSlot: Int, click: ClickType): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("worker-not-found"))
+    fun transferCorpseItem(player: Player, cityId: UUID, workerId: UUID, npcSlot: Int, click: ClickType): CompletableFuture<Unit> =
+        transferCorpseItem(player, workerId, npcSlot, click)
     fun addMember(player: Player, name: String): CompletableFuture<Unit>
     fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit>
     fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit>
@@ -153,6 +156,9 @@ interface CivsUiHost {
     fun localMaterials(player: Player, buildingId: UUID): Map<String, Long>
     fun supplyRequests(player: Player): List<CivSupplyRequest>
     fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
+    fun inspectBuilding(player: Player, cityId: UUID, buildingId: UUID): Settlement = throw CivsRejection("not-authorized")
+    fun openBuildingInventory(player: Player, cityId: UUID, buildingId: UUID): CompletableFuture<Unit> =
+        openBuildingInventory(player, buildingId)
     fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>
     fun relocateControl(player: Player, buildingId: UUID, expectedTarget: CivPosition): CompletableFuture<Unit>
     fun setStorageMode(player: Player, mode: CivStorageMode): CompletableFuture<Unit>

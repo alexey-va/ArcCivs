@@ -157,6 +157,7 @@ class CivsService(
         }
     }
     lateinit var ui: CivsUi
+    internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
         storage::isWorldLocked, { it in busy || it in unhealthy })
@@ -1306,31 +1307,64 @@ class CivsService(
         }
     }
 
-    private fun corpse(player: Player, city: Settlement, workerId: UUID): CivCorpse {
+    private fun corpseCity(player: Player, cityId: UUID): Settlement {
+        requireReady(player)
+        val city = cities[cityId] ?: throw CivsRejection("no-city")
+        rejectIf(!(if (city.autonomy != null) player.hasPermission("arccivs.admin") else city.canManage(player.uniqueId)), "not-authorized")
+        rejectIf(city.id in unhealthy, "storage-unavailable")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        return city
+    }
+
+    private fun corpse(player: Player, city: Settlement, workerId: UUID, diedAt: Long? = null): CivCorpse {
         val corpse = city.corpses.orEmpty().firstOrNull { it.worker.id == workerId && it.expiresAt > now() }
             ?: throw CivsRejection("worker-not-found")
+        rejectIf(diedAt != null && corpse.diedAt != diedAt, "worker-not-found")
         rejectIf(player.world.uid != city.worldId, "wrong-world")
-        rejectIf(player.location.distanceSquared(org.bukkit.Location(player.world, corpse.position.x + .5,
-            corpse.feetY ?: corpse.position.y.toDouble(), corpse.position.z + .5)) > 36.0, "worker-too-far")
+        val location = corpseLocation(city.id, workerId, corpse.diedAt)
+            ?: throw CivsRejection("corpse-unavailable")
+        rejectIf(location.world?.uid != city.worldId || !civsCorpseStandingSafe(location), "corpse-unavailable")
+        rejectIf(player.location.distanceSquared(location) > 36.0, "worker-too-far")
         return corpse
     }
 
     override fun corpseItems(player: Player, workerId: UUID): List<org.bukkit.inventory.ItemStack?> =
-        CivsEquipment.slots(corpse(player, managed(player), workerId).worker).map { it?.stack() }
+        corpseItems(player, managed(player).id, workerId)
+
+    override fun corpseItems(player: Player, cityId: UUID, workerId: UUID): List<org.bukkit.inventory.ItemStack?> =
+        CivsEquipment.slots(corpse(player, corpseCity(player, cityId), workerId).worker).map { it?.stack() }
 
     override fun transferCorpseItem(player: Player, workerId: UUID, npcSlot: Int,
         click: org.bukkit.event.inventory.ClickType): CompletableFuture<Unit> =
-        cityAction("corpse_loot", player, "worker" to workerId, "slot" to npcSlot) { city ->
-            var updated: CivWorker? = null
-            inventoryMutation(city.id, { before ->
-                corpse(player, before, workerId)
-                storage.prepareResidentTransfer(before, workerId, player, npcSlot, null, click)
-                    .also { updated = it.worker }.plan
-            }, sourcePlayer = player, keepViewersOpen = true) { before, inventory ->
-                before.copy(corpses = before.corpses.orEmpty().map {
-                    if (it.worker.id == workerId) it.copy(worker = requireNotNull(updated)) else it
-                }, inventory = inventory, revision = before.revision + 1)
+        action("corpse_loot", player) { transferCorpseItem(player, managed(player).id, workerId, npcSlot, click) }
+
+    override fun transferCorpseItem(player: Player, cityId: UUID, workerId: UUID, npcSlot: Int,
+        click: org.bukkit.event.inventory.ClickType): CompletableFuture<Unit> =
+        action("corpse_loot", player, "city" to cityId, "worker" to workerId, "slot" to npcSlot) {
+            corpseCity(player, cityId)
+            nativePlayerMutation(cityId, player, keepViewersOpen = true) { before, id ->
+                corpse(player, corpseCity(player, cityId), workerId)
+                val prepared = storage.prepareCorpseTransfer(before, workerId, player, npcSlot, click)
+                val transfer = prepared.transfer ?: return@nativePlayerMutation null
+                val after = before.copy(corpses = before.corpses.orEmpty().map {
+                    if (it.worker.id == workerId) it.copy(worker = prepared.worker) else it
+                }, revision = before.revision + 1)
+                CivInventoryTransaction(id, before.id, before.revision, after, emptyList(), residentTransfer = transfer)
             }.thenApply { Unit }
+        }
+
+    fun resurrect(player: Player, cityId: UUID, workerId: UUID, diedAt: Long): CompletableFuture<Settlement> =
+        action("resident_resurrect", player, "city" to cityId, "worker" to workerId, "died_at" to diedAt) {
+            corpseCity(player, cityId)
+            nativePlayerMutation(cityId, player) { before, id ->
+                val corpse = corpse(player, corpseCity(player, cityId), workerId, diedAt)
+                val at = now()
+                val after = CivsRules.resurrect(before, player.uniqueId, workerId, diedAt, at,
+                    administrator = player.hasPermission("arccivs.admin"))
+                val location = corpseLocation(cityId, workerId, diedAt) ?: throw CivsRejection("corpse-unavailable")
+                val debit = storage.prepareResurrection(before, player, corpse, at, location)
+                CivInventoryTransaction(id, cityId, before.revision, after, emptyList(), resurrection = debit)
+            }
         }
 
     override fun supplyWorker(player: Player, workerId: UUID, material: String): CompletableFuture<Unit> =
@@ -1977,6 +2011,29 @@ class CivsService(
                 prepared.residentTransfer, prepared.worldChanges)
                 .also { storage.seal(it, keepViewersOpen) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
+        return journalInventory(tx)
+    }
+
+    /** Native player-only operations share the existing exact receipt without inventing town stock. */
+    private fun nativePlayerMutation(cityId: UUID, player: Player, keepViewersOpen: Boolean = false,
+        prepare: (Settlement, UUID) -> CivInventoryTransaction?): CompletableFuture<Settlement> {
+        checkMain()
+        rejectIf(!ready(), "not-ready")
+        rejectIf(cityId in busy || cityId in unhealthy, "city-busy")
+        val city = cities[cityId] ?: throw CivsRejection("no-city")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        val id = UUID.randomUUID()
+        storage.reserve(city, id, player)
+        val tx = try {
+            val prepared = prepare(city, id) ?: run { storage.unlock(id); return CompletableFuture.completedFuture(city) }
+            prepared.also { storage.seal(it, keepViewersOpen) }
+        } catch (failure: Exception) { storage.unlock(id); throw failure }
+        return journalInventory(tx)
+    }
+
+    private fun journalInventory(tx: CivInventoryTransaction): CompletableFuture<Settlement> {
+        val cityId = tx.cityId
+        val id = tx.id
         busy += cityId
         val result = tracked<Settlement>()
         store.saveInventoryTransaction(tx).whenCompleteSync(tasks) { _, failure ->
@@ -2015,6 +2072,36 @@ class CivsService(
             updateHealth()
         }
         runCatching {
+            tx.resurrection?.let { debit ->
+                when (val state = storage.resurrectionDebitState(tx)) {
+                    is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", state.values), retry = true)
+                    is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", state.values))
+                    CivInventoryApplyResult.Applied -> Unit // The accepted debit must finish even after later expiry.
+                    null -> {
+                        val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
+                        if (current.revision == tx.beforeRevision) {
+                            val accepted = org.bukkit.Location(plugin.server.getWorld(current.worldId), debit.position.x + .5,
+                                debit.feetY, debit.position.z + .5)
+                            val reason = runCatching {
+                                rejectIf(current.pendingDeletion != null, "deletion-pending")
+                                rejectIf(current.corpses.orEmpty().firstOrNull { it.worker.id == debit.corpse.worker.id } != debit.corpse,
+                                    "resurrection-changed")
+                                CivsRules.resurrect(current, debit.playerId, debit.corpse.worker.id, debit.corpse.diedAt, now(),
+                                    administrator = current.autonomy != null)
+                                rejectIf(!civsCorpseStandingSafe(accepted), "corpse-unavailable")
+                                if (result != null) {
+                                    val player = plugin.server.getPlayer(debit.playerId) ?: throw CivsRejection("player-offline")
+                                    corpse(player, corpseCity(player, current.id), debit.corpse.worker.id, debit.corpse.diedAt)
+                                    val actual = corpseLocation(current.id, debit.corpse.worker.id, debit.corpse.diedAt)
+                                    rejectIf(actual == null || actual.world?.uid != current.worldId ||
+                                        actual.distanceSquared(accepted) > .0001, "corpse-unavailable")
+                                }
+                            }.exceptionOrNull()
+                            if (reason != null) return abortResurrection(tx, result, reason)
+                        }
+                    }
+                }
+            }
             when (val applied = storage.reconcile(tx)) {
                 is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
                 is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", applied.values))
@@ -2027,10 +2114,40 @@ class CivsService(
                 if (failure != null) return@whenCompleteSync fail(CivsRejection("inventory-recovery").also { it.initCause(failure) })
                 publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
                     if (publishFailure != null) return@whenCompleteSync fail(publishFailure)
+                    requestResurrectionAdmission(tx)
                     finishInventory(tx, result)
                 }
             }
         }.onFailure { fail(it) }
+    }
+
+    /** Untouched scrolls can cancel safely; an uncertain journal deletion keeps the existing recovery lock. */
+    private fun abortResurrection(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?, reason: Throwable) {
+        store.deleteInventoryTransaction(tx.id).whenCompleteSync(tasks) { _, failure ->
+            busy -= tx.cityId
+            if (failure == null) {
+                inventoryRecovery.remove(tx.cityId)
+                unhealthy -= tx.cityId
+                blockedRecovery -= tx.cityId
+                storage.unlock(tx.id)
+                result?.completeExceptionally(reason)
+            } else {
+                unhealthy += tx.cityId
+                blockedRecovery += tx.cityId
+                log("cancel resurrection journal ${tx.id}", failure)
+                result?.completeExceptionally(CivsRejection("inventory-recovery"))
+            }
+            updateHealth()
+        }
+    }
+
+    private fun requestResurrectionAdmission(tx: CivInventoryTransaction) {
+        val debit = tx.resurrection ?: return
+        val current = cities[tx.cityId] ?: return
+        plugin.server.getWorld(current.worldId)?.let { world ->
+            if (current.workers.any { it.id == debit.corpse.worker.id }) citizens.requestAdmissionAt(current.id,
+                debit.corpse.worker.id, org.bukkit.Location(world, debit.position.x + .5, debit.feetY, debit.position.z + .5))
+        }
     }
 
     private fun finishInventory(tx: CivInventoryTransaction, result: CompletableFuture<Settlement>?) {
@@ -2046,6 +2163,8 @@ class CivsService(
                 unhealthy -= tx.cityId
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
+                // Recovery publication can still be hidden by unhealthy; retry after releasing that gate.
+                requestResurrectionAdmission(tx)
                 physics.enqueue(tx.after.worldId, tx.worldChanges.orEmpty())
                 CivsDiagnostics.event("inventory_committed", "city" to tx.cityId, "transaction" to tx.id, "revision" to tx.after.revision)
                 tx.residentTransfer?.let { transfer ->
@@ -2063,6 +2182,10 @@ class CivsService(
                     }
                 }
                 val current = cities.getValue(tx.cityId)
+                tx.resurrection?.let { debit ->
+                    CivsDiagnostics.event("resident_resurrected", "city" to tx.cityId, "worker" to debit.corpse.worker.id,
+                        "died_at" to debit.corpse.diedAt, "transaction" to tx.id, "player" to debit.playerId)
+                }
                 if (current.workers.any { it.cargo?.inventoryBacked == false }) {
                     // Retire the immutable old receipt first; migration owns a new durable revision.
                     val migration = runCatching { mutate(current.id) { CivsLogistics.materializeCargo(it) } }
@@ -2094,11 +2217,12 @@ class CivsService(
             storage.lock(tx)
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
-                if (city.revision == tx.after.revision || tx.residentTransfer != null) when (val applied = storage.reconcile(tx)) {
+                if (city.revision == tx.after.revision || tx.residentTransfer != null || tx.resurrection != null) when (val applied = storage.reconcile(tx)) {
                     is CivInventoryApplyResult.Retry -> { busy -= city.id; unhealthy += city.id; return@runCatching }
                     is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", applied.values)
                     CivInventoryApplyResult.Applied -> Unit
                 }
+                requestResurrectionAdmission(tx)
                 finishInventory(tx, null)
             }
             else throw CivsRejection("inventory-conflict")
@@ -2168,6 +2292,26 @@ class CivsService(
             org.bukkit.util.Vector(control.x + .5, control.y + .5, control.z + .5)) > 64.0, "too-far")
         return building
     }
+
+    override fun inspectBuilding(player: Player, cityId: UUID, buildingId: UUID): Settlement {
+        requireReady(player)
+        val city = cities[cityId] ?: throw CivsRejection("no-city")
+        rejectIf(city.autonomy == null && !city.canManage(player.uniqueId), "not-authorized")
+        rejectIf(city.id in unhealthy, "storage-unavailable")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        inventoryBuilding(player, city, buildingId)
+        return city
+    }
+
+    override fun openBuildingInventory(player: Player, cityId: UUID, buildingId: UUID): CompletableFuture<Unit> =
+        action("inventory_inspect", player, "city" to cityId, "building" to buildingId) {
+            val city = inspectBuilding(player, cityId, buildingId)
+            if (city.autonomy == null) openBuildingInventory(player, buildingId)
+            else {
+                storage.openControl(player, city, requireNotNull(city.building(buildingId)))
+                CompletableFuture.completedFuture(Unit)
+            }
+        }
 
     override fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit> = cityAction("inventory_open", player, "building" to buildingId) { city ->
         inventoryBuilding(player, city, buildingId)
@@ -3013,10 +3157,12 @@ class CivsService(
         val point = CivPosition(block.x, block.y, block.z)
         val autonomous = cities.values.firstOrNull { it.autonomy != null && it.worldId == block.world.uid &&
             it.buildings.any { b -> b.control == point } }
-        if (autonomous != null && player.hasPermission("arccivs.admin") && ::ui.isInitialized) {
+        if (autonomous != null) {
             event.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY)
             event.setUseItemInHand(org.bukkit.event.Event.Result.DENY)
-            tasks.runSync { if (player.isOnline && ready()) ui.openAutonomous(player, autonomous.id) }
+            if (!player.hasPermission("arccivs.use") || !::ui.isInitialized) return
+            val building = autonomous.buildings.first { it.control == point }
+            tasks.runSync { if (player.isOnline && ready()) ui.openBuildingInspection(player, autonomous.id, building.id) }
             return
         }
         val city = city(player)?.takeIf { it.worldId == block.world.uid } ?: return

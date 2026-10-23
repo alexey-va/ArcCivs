@@ -5,6 +5,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
+import io.kotest.matchers.doubles.plusOrMinus
 import io.kotest.matchers.string.shouldContain
 import io.mockk.every
 import io.mockk.mockk
@@ -109,6 +110,55 @@ class CivsCorpseRendererTest : FunSpec({
         }
     }
 
+    test("an airborne saved death is rendered and opened at its actual grounded position") {
+        withCorpses { f ->
+            f.corpse = f.corpse.copy(position = CivPosition(0, 73, 0), feetY = 73.25)
+            val saved = f.corpse
+            f.capture()
+            f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt)!!.y shouldBe 64.0
+            f.renderer.openIfCurrent(f.player, f.id())
+            f.opened shouldBe listOf(f.city.id to saved.worker.id)
+            f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt - 1) shouldBe null
+            val detached = f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt)!!
+            detached.y = 100.0
+            f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt)!!.y shouldBe 64.0
+            f.corpse shouldBe saved
+        }
+    }
+
+    test("a wall invalidates corpse clicks immediately and the next pulse rotates the same body clear") {
+        withCorpses { f ->
+            f.capture()
+            val saved = f.corpse
+            f.world.getBlockAt(-2, 64, 0).type = Material.STONE
+            f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt) shouldBe null
+            f.renderer.openIfCurrent(f.player, f.id())
+            f.opened shouldBe emptyList()
+            f.capture()
+            f.npcs.size shouldBe 1
+            verify { f.npcs.single().teleport(match { it.yaw == 90f }) }
+            f.renderer.resolvedLocation(f.city.id, saved.worker.id, saved.diedAt)!!.y shouldBe 64.0
+            f.corpse shouldBe saved
+        }
+    }
+
+    test("Auto admins may use the body while foreign personal cities retain their authority boundary") {
+        withCorpses { f ->
+            f.city = f.city.copy(autonomy = CivAutonomy())
+            f.capture()
+            f.renderer.openIfCurrent(f.player, f.id())
+            f.opened shouldBe emptyList()
+            f.city = f.city.copy(owner = UUID.randomUUID())
+            f.player.addAttachment(f.plugin, "arccivs.admin", true)
+            f.renderer.openIfCurrent(f.player, f.id())
+            f.opened shouldBe listOf(f.city.id to f.corpse.worker.id)
+            f.opened.clear()
+            f.city = f.city.copy(autonomy = null)
+            f.renderer.openIfCurrent(f.player, f.id())
+            f.opened shouldBe emptyList()
+        }
+    }
+
     test("unloaded chunks inactive state and duplicate living resident cannot retain a corpse visual") {
         withCorpses { f ->
             f.loaded = false
@@ -197,25 +247,27 @@ class CivsCorpseRendererTest : FunSpec({
 
     test("lying body controls follow adult and child geometry with no large invisible square around the body") {
         withCorpses { f ->
-            val adult = civsCorpseGeometry(f.world, f.corpse)
-            val child = civsCorpseGeometry(f.world, f.corpse.copy(worker = f.corpse.worker.copy(childMinutes = 0)))
+            val adult = requireNotNull(civsCorpsePlacement(f.world, f.corpse))
+            val child = requireNotNull(civsCorpsePlacement(f.world, f.corpse.copy(worker = f.corpse.worker.copy(childMinutes = 0))))
             adult.targets.size shouldBe 2
-            adult.bounds.widthX shouldBe 2.0
-            adult.bounds.widthZ shouldBe 1.0
-            adult.targets.all { it.native.width == 1f && it.native.height == .55f && it.planes.size == 6 } shouldBe true
-            adult.targets.first().bounds.maxX shouldBe adult.targets.last().bounds.minX
+            adult.bounds.widthX shouldBe (2.03 plusOrMinus 1e-6)
+            adult.bounds.widthZ shouldBe (1.24 plusOrMinus 1e-6)
+            adult.targets.all { it.native.width == 1.015f && it.native.height == .62f && it.planes.size == 6 } shouldBe true
+            adult.targets.first().bounds.maxX shouldBe (adult.targets.last().bounds.minX plusOrMinus 1e-6)
             adult.targets.all { it.bounds.minY > f.corpse.position.y } shouldBe true
-            child.bounds.widthX shouldBe 1.0
-            child.bounds.widthZ shouldBe .5
-            child.targets.all { it.native.width == .5f && it.native.height == .275f } shouldBe true
+            child.bounds.widthX shouldBe (1.015 plusOrMinus 1e-6)
+            child.bounds.widthZ shouldBe (.62 plusOrMinus 1e-6)
+            child.targets.all { it.native.width == .5075f && it.native.height == .31f } shouldBe true
             adult.touches(-1, 0) shouldBe true
             adult.touches(0, 0) shouldBe true
             adult.touches(1, 0) shouldBe false
             (adult.label.y > adult.bounds.maxY) shouldBe true
-            val slab = civsCorpseGeometry(f.world, f.corpse.copy(feetY = 64.5))
-            slab.bounds.minY shouldBe adult.bounds.minY + .5
-            slab.feet.y shouldBe adult.feet.y + .5
-            slab.label.y shouldBe adult.label.y + .5
+            for (x in -4..4) for (z in -4..4) f.world.getBlockAt(x, 63, z).type = Material.DIRT_PATH
+            val path = requireNotNull(civsCorpsePlacement(f.world, f.corpse.copy(position = CivPosition(0, 63, 0), feetY = 63.9375)))
+            path.anchor.y shouldBe 63.9375
+            path.bounds.minY shouldBe (adult.bounds.minY - .0625 plusOrMinus 1e-6)
+            path.feet.y shouldBe (adult.feet.y - .0625 plusOrMinus 1e-6)
+            path.label.y shouldBe (adult.label.y - .0625 plusOrMinus 1e-6)
             f.export(adult, child)
         }
     }
@@ -238,7 +290,9 @@ private fun withCorpses(test: (CorpseRendererFixture) -> Unit) = failOnUnsupport
 
 private class CorpseRendererFixture(val paper: MockBukkitTestRuntime) : AutoCloseable {
     val plugin = paper.createSimplePlugin("CorpseRendererTest")
-    val world = paper.addSimpleWorld("corpses")
+    val world = CivsWorksiteWorldFixture("corpses").also(paper.server::addWorld).also {
+        for (x in -1..1) for (z in -1..1) it.loadChunk(x, z)
+    }
     val player = paper.addPlayer("Owner").apply { teleport(Location(world, .5, 64.0, 2.0)) }
     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     val packetNpcs = mockk<PaperPacketNpcs>(relaxed = true)

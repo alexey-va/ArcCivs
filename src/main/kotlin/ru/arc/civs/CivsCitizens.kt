@@ -104,6 +104,7 @@ class CivsCitizens(
     private var statuses = mutableMapOf<UUID, String>()
     private var spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
     private val admissions = mutableMapOf<UUID, CitizenAdmission>()
+    private val admissionOrigins = mutableMapOf<UUID, Pair<UUID, CivPosition>>()
     @Volatile private var completions = ConcurrentLinkedQueue<Completion>()
     private val closed = AtomicBoolean()
     private var retirement: CompletableFuture<Void>? = null
@@ -197,6 +198,7 @@ class CivsCitizens(
         statuses.keys.retainAll(workers.keys)
         spawnRetries.keys.retainAll(workers.keys)
         admissions.keys.retainAll(workers.keys - actors.keys)
+        admissionOrigins.keys.retainAll(workers.keys - actors.keys)
         val viewers = viewers()
 
         for (actor in actors.values.toList()) {
@@ -245,16 +247,17 @@ class CivsCitizens(
         }
         val candidates = workers.values.filter { it.second.id !in actors && it.second.id !in pendingHarm }
             .map { (city, worker) -> Triple(city, worker, plan(city, worker)) }
-            .sortedByDescending { (city, _, plan) -> plan != null &&
-                citizenHasViewer(city.worldId, plan.spawnOrigin.point(), viewers, viewerRange) }
+            .sortedByDescending { (city, worker, plan) -> plan != null &&
+                citizenHasViewer(city.worldId, admissionOrigin(city, worker.id, plan).point(), viewers, viewerRange) }
         for ((city, worker, plan) in candidates) {
             val workerId = worker.id
-            val visible = plan != null && citizenHasViewer(city.worldId, plan.spawnOrigin.point(), viewers, viewerRange)
+            val origin = plan?.let { admissionOrigin(city, workerId, it) }
+            val visible = origin != null && citizenHasViewer(city.worldId, origin.point(), viewers, viewerRange)
             val world = plugin.server.getWorld(city.worldId)
             val reason = when {
                 plan == null -> "storage-unavailable"
                 world == null -> "world-unloaded"
-                !activeAt(city.id, city.worldId, plan.spawnOrigin.point(), viewers) -> "sleeping"
+                !activeAt(city.id, city.worldId, requireNotNull(origin).point(), viewers) -> "sleeping"
                 !plan.chunksReady(world) -> "chunk-unloaded"
                 else -> null
             }
@@ -288,7 +291,8 @@ class CivsCitizens(
             budget-- // Failed spawns consume the same per-pulse budget as successful spawns.
             var npc: PacketPlayerNpc? = null
             try {
-                val search = spawnPoint(city, requireNotNull(world), requireNotNull(plan).spawnOrigin,
+                requireNotNull(plan)
+                val search = spawnPoint(city, requireNotNull(world), requireNotNull(origin),
                     city.workers.indexOf(worker), viewers, nowMillis)
                 val point = search.point?.location(world)
                 if (point == null) {
@@ -297,7 +301,7 @@ class CivsCitizens(
                     statuses[workerId] = "route-unreachable"
                     recordAdmission(city, worker, plan, world, "no-safe-spawn", nowMillis, retry, search)
                     if (retry.attempts == 1 || retry.attempts == 3) plugin.logger.warning(CivsDiagnostics.line(
-                        "citizen_spawn_blocked", "city" to city.id, "worker" to workerId, "origin" to plan.spawnOrigin,
+                        "citizen_spawn_blocked", "city" to city.id, "worker" to workerId, "origin" to origin,
                         "attempt" to retry.attempts, "retry_at" to retry.nextAttemptAt,
                         "candidates" to search.inspected, "rejections" to search.rejections))
                     continue
@@ -312,6 +316,7 @@ class CivsCitizens(
                 syncResident(npc, worker, plan)
                 spawnRetries.remove(workerId)
                 admissions.remove(workerId)
+                admissionOrigins.remove(workerId)
                 update(actor, city, world, nowMillis)
                 if (actors[workerId] === actor) CivsDiagnostics.event("citizen_spawn", "city" to city.id,
                     "worker" to workerId, "type" to "PACKET_PLAYER",
@@ -519,6 +524,21 @@ class CivsCitizens(
                 actor.plan.idleReason in listOf(null, "placing") &&
                 actor.cycle.phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED)
         }.mapTo(hashSetOf()) { it.workerId }
+    }
+
+    private fun admissionOrigin(city: Settlement, workerId: UUID, plan: CitizenPlan): CivPosition =
+        admissionOrigins[workerId]?.takeIf { it.first == city.id }?.second ?: plan.spawnOrigin
+
+    /** A committed resurrection may prefer its body site; normal admission still proves safe loaded feet. */
+    internal fun requestAdmissionAt(cityId: UUID, workerId: UUID, location: Location) {
+        checkMainThread()
+        if (closed.get() || workerId in actors) return
+        val city = cityProvider().firstOrNull { it.id == cityId && it.worldId == location.world?.uid &&
+            it.pendingDeletion == null && it.workers.any { worker -> worker.id == workerId } } ?: return
+        if (!location.x.isFinite() || !location.y.isFinite() || !location.z.isFinite() ||
+            !city.contains(location.blockX, location.blockZ)) return
+        admissionOrigins[workerId] = cityId to CivPosition(location.blockX, location.blockY, location.blockZ)
+        spawnRetries.remove(workerId)
     }
 
     /** The UI owns management/reach checks. Moving an existing actor never completes work or a receipt. */
@@ -1503,7 +1523,7 @@ class CivsCitizens(
             campBudget--
             citizenRotateAfterAdmission(actors, actor.workerId)
             val origin = citizenIdleBuilding(city, worker) ?: return false
-            val anchor = origin.control ?: origin.entrance
+            val anchor = citizenIdleAnchor(city, origin)
             val allowed = city.buildings.filter { it.id == origin.id || it.type == BuildingType.TOWN_HALL }.mapTo(hashSetOf()) { it.id }
             val place = campfires.nearby(world, city, anchor, tick).asSequence().take(4).filter { fire ->
                 citizenRouteCellAllowed(city, allowed, fire.position.x, fire.position.z) &&
@@ -1578,7 +1598,7 @@ class CivsCitizens(
     private fun wander(actor: Actor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         val home = citizenIdleBuilding(city, worker) ?: return
-        val anchor = home.control ?: home.entrance
+        val anchor = citizenIdleAnchor(city, home)
         val route = actor.route
         if (route != null) {
             val outcome = if (!route.chunks.ready(world)) CitizenNavigationOutcome.STOPPED
@@ -2549,6 +2569,7 @@ class CivsCitizens(
         pendingHarm.clear()
         spawnRetries.clear()
         admissions.clear()
+        admissionOrigins.clear()
         statuses.clear()
         val packetRetirement = try { packets.closeAsync() }
             catch (error: Throwable) { CompletableFuture.failedFuture<Void>(error) }
@@ -2847,7 +2868,7 @@ internal fun citizenSummonEligible(city: Settlement, worker: CivWorker, building
 internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourierPlan? = null): CitizenPlan? {
     if (CivsResidents.isChild(worker)) {
         val home = citizenHomeBuilding(city, worker) ?: return null
-        return CitizenPlan(CitizenToken(null, 0, 0, null), home.control ?: home.entrance, null, null, 0, "playing")
+        return CitizenPlan(CitizenToken(null, 0, 0, null), citizenIdleAnchor(city, home), null, null, 0, "playing")
     }
     if (courier != null) {
         val destination = city.building(courier.destinationBuildingId)?.control ?: return null
@@ -3138,6 +3159,10 @@ private const val CITIZEN_IDLE_RADIUS = 8.0
 
 internal fun citizenIdleBuilding(city: Settlement, worker: CivWorker): CivBuilding? =
     worker.assignment?.let(city::building) ?: citizenHomeBuilding(city, worker)
+
+/** Autonomous sites prepare their exterior entrance before an authored interior control is reachable. */
+internal fun citizenIdleAnchor(city: Settlement, building: CivBuilding): CivPosition =
+    if (city.autonomy != null) building.entrance else building.control ?: building.entrance
 
 private fun citizenWithinIdleArea(anchor: CivPosition, at: CitizenPoint): Boolean =
     (at.x - (anchor.x + .5)) * (at.x - (anchor.x + .5)) +

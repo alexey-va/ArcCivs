@@ -145,7 +145,8 @@ class CivsUi internal constructor(
         equipment.dismiss(player)
         host.cancelSelection(player, "menu-reopened")
         runtime.beginFlow(player)
-        val city = host.settlements().firstOrNull { it.id == cityId && it.canManage(player.uniqueId) }
+        val city = host.settlements().firstOrNull { it.id == cityId &&
+            (if (it.autonomy != null) isAdmin(player) else it.canManage(player.uniqueId)) }
         val corpse = city?.corpses.orEmpty().firstOrNull { it.worker.id == corpseId }
         if (corpse == null) {
             roots[player.uniqueId] = "civs.corpse"
@@ -160,11 +161,16 @@ class CivsUi internal constructor(
         visits.remove(player.uniqueId)
         roots.remove(player.uniqueId)
         runtime.close(player)
-        equipment.open(player, corpse.worker.name, items = { host.corpseItems(player, corpseId) },
+        fun checkDeath() {
+            if (host.settlements().firstOrNull { it.id == cityId }?.corpses.orEmpty().none {
+                    it.worker.id == corpseId && it.diedAt == corpse.diedAt }) throw CivsRejection("worker-not-found")
+        }
+        equipment.open(player, corpse.worker.name, items = { checkDeath(); host.corpseItems(player, cityId, corpseId) },
             transfer = { actor, npcSlot, playerSlot, click ->
-                if (npcSlot != null && playerSlot == null) host.transferCorpseItem(actor, corpseId, npcSlot, click)
+                checkDeath()
+                if (npcSlot != null && playerSlot == null) host.transferCorpseItem(actor, cityId, corpseId, npcSlot, click)
                 else CompletableFuture.failedFuture(CivsRejection("not-authorized"))
-            }, back = { open(player) }, canDeposit = false,
+            }, back = { if (city?.autonomy != null) openAutonomous(player, cityId) else open(player) }, canDeposit = false,
             titleKey = if (corpse.worker.sex == CivSex.FEMALE) "corpse.inventory-title-female" else "corpse.inventory-title",
             backKey = "corpse.back",
             details = listOf(death))
@@ -186,6 +192,67 @@ class CivsUi internal constructor(
                 roots[player.uniqueId] = "civs.builder-materials"
                 loadBuilderMaterials(player, buildingId)
             } else showBuilding(player, buildingId)
+        }
+    }
+
+    /** Public Auto controls disclose the building and real barrel; management stays in its own flow. */
+    fun openBuildingInspection(player: Player, cityId: UUID, buildingId: UUID) {
+        if (closed || !player.isOnline) return
+        equipment.dismiss(player)
+        host.cancelSelection(player, "menu-reopened")
+        runtime.beginFlow(player)
+        roots[player.uniqueId] = "civs.building-inspection"
+        showBuildingInspection(player, cityId, buildingId)
+    }
+
+    private fun showBuildingInspection(player: Player, cityId: UUID, buildingId: UUID, error: Component? = null) {
+        val city = try { host.inspectBuilding(player, cityId, buildingId) } catch (failure: Exception) {
+            present(player, "civs.building-inspection", "autonomy.building-title", listOf(body(text.failure(player, failure))),
+                emptyList(), reopen = { showBuildingInspection(player, cityId, buildingId) })
+            return
+        }
+        if (city.autonomy == null) return openBuilding(player, cityId, buildingId)
+        val building = city.building(buildingId) ?: return
+        val workers = city.workers.filter { it.assignment == buildingId }
+        present(player, "civs.building-inspection", "autonomy.building-title", listOfNotNull(
+            body(buildingName(player, building.type, building.level)),
+            table(buildList {
+                add(tr(player, "autonomy.village-label") to tint(text.literal(city.name), LAND))
+                add(tr(player, "label.state") to buildingStatus(player, city, building))
+                add(tr(player, "label.workers") to tint(tr(player, "common.fraction", "value" to workers.size,
+                    "limit" to CivsRules.slots(city, building)), PEOPLE))
+                CivsRules.resource(building.type)?.let { resource ->
+                    add(tr(player, "label.output") to tr(player, "autonomy.production", "amount" to CivsRules.deliveryAmount(building),
+                        "resource" to text.resource(player, resource)))
+                }
+            }),
+            if (workers.isEmpty()) null else body(Component.join(Component.newline(), workers.map {
+                tr(player, "common.detail", "label" to tint(text.literal(it.name), PEOPLE), "value" to workerStatus(player, it))
+            })),
+            body(tint(tr(player, "autonomy.shared-stock"), STOCK)),
+            DialogTables.body(listOf(Resource.entries.map { tint(text.literal(city.stock[it]), STOCK) }),
+                Resource.entries.map { text.resource(player, it) }, DialogTables.Frame.COMMON, 320, listOf(1, 1, 1)),
+            body(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help"),
+            error?.let(::body),
+        ), listOf(
+            button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) },
+            button(player, "refresh", "autonomy.refresh", NAVIGATION) { showBuildingInspection(player, cityId, buildingId) },
+        ), reopen = { showBuildingInspection(player, cityId, buildingId) })
+    }
+
+    private fun openInspectionInventory(player: Player, cityId: UUID, buildingId: UUID) {
+        val epoch = tasks.token()
+        visits.remove(player.uniqueId)
+        roots.remove(player.uniqueId)
+        runtime.close(player)
+        val future = try { host.openBuildingInventory(player, cityId, buildingId) }
+            catch (error: Exception) { CompletableFuture.failedFuture(error) }
+        future.whenCompleteSync(tasks, epoch) { _, failure ->
+            if (failure != null && !closed && player.isOnline && player.uniqueId !in visits) {
+                runtime.beginFlow(player)
+                roots[player.uniqueId] = "civs.building-inspection"
+                showBuildingInspection(player, cityId, buildingId, text.failure(player, failure))
+            }
         }
     }
 

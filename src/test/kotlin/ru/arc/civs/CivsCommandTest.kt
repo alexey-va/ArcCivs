@@ -14,6 +14,37 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("resurrection scroll issuance is admin self-only and never drops items from a full inventory") {
+        ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation {
+            ru.arc.paper.testing.MockBukkitTestRuntime.open().use { paper ->
+                val plugin = paper.createSimplePlugin("ScrollCommand")
+                val player = paper.addPlayer("Issuer").apply { addAttachment(plugin, "arccivs.use", true) }
+                val other = paper.addPlayer("Other")
+                val text = CivsText.fromYaml(civsLocaleSource())
+                val router = CivsCommand(mockk(relaxed = true), mockk(relaxed = true), text, mockk(relaxed = true))
+                val command = mockk<Command>()
+                val args = arrayOf("give-resurrection-scroll")
+                router.onCommand(player, command, "civs", args)
+                player.inventory.isEmpty shouldBe true
+                player.addAttachment(plugin, "arccivs.admin", true)
+                router.onCommand(player, command, "civs", args + other.name)
+                player.inventory.isEmpty shouldBe true
+                other.inventory.isEmpty shouldBe true
+                router.onCommand(player, command, "civs", args)
+                player.inventory.storageContents.filterNotNull().single().let {
+                    it.amount shouldBe 1
+                    CivsResurrectionScroll.matches(it) shouldBe true
+                }
+                for (slot in 0..35) player.inventory.setItem(slot, org.bukkit.inventory.ItemStack(org.bukkit.Material.STONE, 64))
+                router.onCommand(player, command, "civs", args)
+                player.inventory.storageContents.all { it?.type == org.bukkit.Material.STONE && it.amount == 64 } shouldBe true
+                other.inventory.isEmpty shouldBe true
+                CivsCommand.completions(true, false, arrayOf("give")) shouldBe emptyList()
+                CivsCommand.completions(true, true, arrayOf("give")) shouldBe listOf("give-resurrection-scroll")
+            }
+        }
+    }
+
     test("autonomous placement is admin-only and preserves the whole village name") {
         val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
         val host = mockk<CivsUiHost>(relaxed = true)

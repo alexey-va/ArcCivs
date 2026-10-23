@@ -579,6 +579,23 @@ a saved corpse for five minutes and releases its shipment reservation. The corps
 shows its resident and killer/cause; city members can loot nearby through the same
 native item journal. Expiry removes unclaimed contents. Rendering creates no loot
 copies, and the body preserves fractional feet height on paths, slabs and stairs.
+Corpse presentation searches at most 25 loaded columns, up to 24 blocks below the
+saved death height. The existing sleeping-body envelope must fit with native support
+under head, torso and legs, and the standing resurrection envelope must be safe.
+No safe pose hides presentation without changing the persisted death or its items.
+Every action resolves the current pose and exact `diedAt`, so stale body controls
+cannot target a later death of the same worker. Auto corpse access requires admin.
+An admin-issued tagged paper scroll uses the existing durable inventory receipt:
+persist exact native player-slot debit, apply and flush player data, save/publish
+the same worker identity and remaining belongings, then retire the receipt. An
+untouched debit can abort when the corpse expires or its pose changes; an applied
+debit completes the accepted transition on recovery. Admission prefers the accepted
+body site through normal loaded-space checks and never moves an existing actor.
+Auto control barrels permit nearby ordinary inspection but all inventory mutation
+paths require admin; receipt locks still override admin writes. Abstract Auto stock
+remains separate from native barrel contents and `inventory` stays null.
+Autonomous idle residents use the prepared building entrance as their roaming
+anchor, including a SITE whose authored control is not reachable yet.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
 
 Hungry residents with no personal bread fetch up to four existing bread from their

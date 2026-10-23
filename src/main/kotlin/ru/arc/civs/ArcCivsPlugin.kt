@@ -125,7 +125,16 @@ open class ArcCivsPlugin : JavaPlugin() {
                 }))
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks, text))
             service.ui = ui
-            val corpses = CivsCorpseRenderer(this, lifecycle.tasks, text, service::corpseSettlements, ui::openCorpse)
+            val corpses = CivsCorpseRenderer(this, lifecycle.tasks, text, service::corpseSettlements, ui::openCorpse,
+                interact = { player, cityId, workerId, diedAt ->
+                    if (CivsResurrectionScroll.matches(player.inventory.itemInMainHand)) {
+                        service.resurrect(player, cityId, workerId, diedAt).whenCompleteSync(lifecycle.tasks) { _, failure ->
+                            if (player.isOnline) player.sendMessage(if (failure == null) text.info(player, "resurrection.complete")
+                                else text.failure(player, failure))
+                        }
+                    } else ui.openCorpse(player, cityId, workerId)
+                })
+            service.corpseLocation = corpses::resolvedLocation
             lifecycle.own(AutoCloseable {
                 val failure = runCatching { corpses.close() }.exceptionOrNull()
                 nativeDrains += corpses.drained()

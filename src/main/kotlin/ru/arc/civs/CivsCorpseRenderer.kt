@@ -21,7 +21,6 @@ import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.Transformation
-import org.bukkit.util.Vector
 import org.joml.Quaternionf
 import org.joml.Vector3f
 import ru.arc.core.BudgetedTaskQueue
@@ -70,15 +69,17 @@ class CivsCorpseRenderer internal constructor(
     private val now: () -> Long = System::currentTimeMillis,
     private val skins: List<CitizenSkin> = loadCitizenSkins(),
     private val space: PaperSpatialSpace = PaperSpatialSpace(),
+    private val interact: ((Player, UUID, UUID, Long) -> Unit)? = null,
 ) : Listener, AutoCloseable {
     constructor(plugin: Plugin, tasks: LifecycleTaskScope, text: CivsText,
-                cities: () -> Collection<Settlement>, open: (Player, UUID, UUID) -> Unit) :
+                cities: () -> Collection<Settlement>, open: (Player, UUID, UUID) -> Unit,
+                interact: ((Player, UUID, UUID, Long) -> Unit)? = null) :
         this(plugin, tasks, text, cities, open, PaperPacketNpcs(plugin, "civs-corpses"),
-            PaperPacketDisplays(plugin, "civs-corpses"))
+            PaperPacketDisplays(plugin, "civs-corpses"), interact = interact)
 
     private data class Desired(val cityId: UUID, val worldId: UUID, val corpse: CivCorpse)
     private data class Rendered(val npc: PacketPlayerNpc, val label: PacketDisplayScene<String>,
-        val geometry: CivsCorpseGeometry, var value: Desired, var items: List<CivResidentItem?>? = null)
+        var geometry: CivsCorpseGeometry, var value: Desired, var items: List<CivResidentItem?>? = null)
 
     private val epoch = tasks.token()
     private val work = BudgetedTaskQueue(tasks)
@@ -140,8 +141,6 @@ class CivsCorpseRenderer internal constructor(
         val value = desired[id] ?: run { remove(id); return false }
         val world = Bukkit.getWorld(value.worldId)
         if (world == null || value.corpse.expiresAt <= now()) { remove(id); return false }
-        val geometry = civsCorpseGeometry(world, value.corpse)
-        if (!space.known(world, geometry.bounds)) { remove(id); return false }
         var shown = rendered[id]
         if (shown != null && (shown.value.worldId != value.worldId || shown.value.corpse.position != value.corpse.position ||
                 shown.value.corpse.feetY != value.corpse.feetY ||
@@ -149,6 +148,8 @@ class CivsCorpseRenderer internal constructor(
             remove(id)
             shown = null
         }
+        val geometry = civsCorpsePlacement(world, value.corpse, shown?.geometry)
+        if (geometry == null || !space.known(world, geometry.bounds)) { remove(id); return false }
         if (shown == null) {
             val skin = citizenSkin(skins, value.corpse.worker)
             val visualId = UUID.nameUUIDFromBytes("civs-corpse:$id".toByteArray(Charsets.UTF_8))
@@ -158,11 +159,16 @@ class CivsCorpseRenderer internal constructor(
             shown = Rendered(npc, label, geometry, value).also { rendered[id] = it }
             npc.scale = citizenScale(value.corpse.worker)
             npc.sleepingBed = null // No fake bed/block; native sleeping rotation uses bodyYaw.
-            npc.bodyYaw = 0f
-            npc.headYaw = 0f
+            npc.bodyYaw = geometry.feet.yaw
+            npc.headYaw = geometry.feet.yaw
             npc.pitch = 0f
             npc.pose = PacketNpcPose.SLEEPING
             npc.viewRange = 32.0
+        } else if (shown.geometry != geometry) {
+            shown.npc.teleport(geometry.feet)
+            shown.npc.bodyYaw = geometry.feet.yaw
+            shown.npc.headYaw = geometry.feet.yaw
+            shown.geometry = geometry
         }
         shown.label.apply(SceneFrame(listOf(ScenePart.Text("nameplate",
             ScenePose(geometry.label, Transformation(Vector3f(), Quaternionf(), Vector3f(.5f), Quaternionf())),
@@ -190,18 +196,33 @@ class CivsCorpseRenderer internal constructor(
             }, SpatialInputProfile.ENTITY_RIGHT, SpatialReach.NativeInteraction)
 
     internal fun openIfCurrent(player: Player, id: CivsCorpseIdentity) {
-        if (mayOpen(player, id)) open(player, id.cityId, id.workerId)
+        if (mayOpen(player, id)) {
+            if (interact == null) open(player, id.cityId, id.workerId)
+            else interact.invoke(player, id.cityId, id.workerId, id.diedAt)
+        }
+    }
+
+    /** Exact saved death plus fresh native placement; callers retain their own action authority. */
+    internal fun resolvedLocation(cityId: UUID, workerId: UUID, diedAt: Long): Location? {
+        if (closed || !tasks.isCurrent(epoch)) return null
+        val id = CivsCorpseIdentity(cityId, workerId, diedAt)
+        val shown = rendered[id] ?: return null
+        val city = cities().firstOrNull { it.id == cityId && it.worldId == shown.geometry.world.uid } ?: return null
+        val corpse = city.corpses.orEmpty().firstOrNull { identity(cityId, it) == id } ?: return null
+        if (corpse.diedAt > now() || corpse.expiresAt <= now() || city.workers.any { it.id == workerId } ||
+            corpse.position != shown.value.corpse.position || corpse.feetY != shown.value.corpse.feetY ||
+            citizenScale(corpse.worker) != citizenScale(shown.value.corpse.worker) ||
+            !civsCorpsePlacementValid(shown.geometry)) return null
+        return shown.geometry.anchor.clone()
     }
 
     private fun mayOpen(player: Player, id: CivsCorpseIdentity): Boolean {
         if (closed || !tasks.isCurrent(epoch) || !player.isOnline || player.isDead) return false
         val shown = rendered[id] ?: return false
-        val city = cities().firstOrNull { it.id == id.cityId && it.worldId == player.world.uid && it.canManage(player.uniqueId) } ?: return false
-        val corpse = city.corpses.orEmpty().firstOrNull { identity(city.id, it) == id } ?: return false
-        return corpse.diedAt <= now() && corpse.expiresAt > now() && corpse.position == shown.value.corpse.position &&
-            corpse.feetY == shown.value.corpse.feetY && city.workers.none { it.id == id.workerId } &&
-            player.location.distanceSquared(Location(player.world, corpse.position.x + .5,
-                corpse.feetY ?: corpse.position.y.toDouble(), corpse.position.z + .5)) <= 36.0 &&
+        cities().firstOrNull { it.id == id.cityId && it.worldId == player.world.uid &&
+            (if (it.autonomy != null) player.hasPermission("arccivs.admin") else it.canManage(player.uniqueId)) } ?: return false
+        val location = resolvedLocation(id.cityId, id.workerId, id.diedAt) ?: return false
+        return player.location.distanceSquared(location) <= 36.0 &&
             space.known(shown.geometry.world, shown.geometry.bounds, player)
     }
 
@@ -274,35 +295,9 @@ private fun identity(cityId: UUID, corpse: CivCorpse) = CivsCorpseIdentity(cityI
 
 internal data class CivsCorpseTarget(val bounds: BoundingBox, val native: SpatialNativeTarget, val planes: List<SpatialHitPlane>)
 internal data class CivsCorpseGeometry(val world: World, val feet: Location, val label: Location,
-    val bounds: BoundingBox, val targets: List<CivsCorpseTarget>) {
+    val bounds: BoundingBox, val targets: List<CivsCorpseTarget>, val anchor: Location) {
     fun touches(x: Int, z: Int): Boolean = x in (floor(bounds.minX).toInt() shr 4)..(floor(bounds.maxX - 1e-5).toInt() shr 4) &&
         z in (floor(bounds.minZ).toInt() shr 4)..(floor(bounds.maxZ - 1e-5).toInt() shr 4)
-}
-
-/** 1.21.11: Ry(0) Rz(90) Ry(270), player scale .9375 and model-origin translation -1.501.
- * Head lies toward -X. Two adjacent low squares cover the body, never a two-block-wide square. */
-internal fun civsCorpseGeometry(world: World, corpse: CivCorpse): CivsCorpseGeometry {
-    val scale = citizenScale(corpse.worker)
-    val center = Location(world, corpse.position.x + .5, corpse.feetY ?: corpse.position.y.toDouble(), corpse.position.z + .5)
-    val floor = center.y + .02
-    val width = scale
-    val height = .55 * scale
-    val targets = listOf(-.5, .5).map { offset ->
-        val at = center.clone().add(offset * scale, .02, 0.0)
-        val box = BoundingBox(at.x - width / 2, floor, at.z - width / 2, at.x + width / 2, floor + height, at.z + width / 2)
-        val midY = floor + height / 2
-        val planes = listOf(
-            SpatialHitPlane(Location(world, at.x, floor + height, at.z), Vector(1, 0, 0), Vector(0, 0, 1), width, width),
-            SpatialHitPlane(Location(world, at.x, floor, at.z), Vector(1, 0, 0), Vector(0, 0, 1), width, width),
-            SpatialHitPlane(Location(world, box.minX, midY, at.z), Vector(0, 0, 1), Vector(0, 1, 0), width, height),
-            SpatialHitPlane(Location(world, box.maxX, midY, at.z), Vector(0, 0, 1), Vector(0, 1, 0), width, height),
-            SpatialHitPlane(Location(world, at.x, midY, box.minZ), Vector(1, 0, 0), Vector(0, 1, 0), width, height),
-            SpatialHitPlane(Location(world, at.x, midY, box.maxZ), Vector(1, 0, 0), Vector(0, 1, 0), width, height),
-        )
-        CivsCorpseTarget(box, SpatialNativeTarget(at, width.toFloat(), height.toFloat()), planes)
-    }
-    return CivsCorpseGeometry(world, center.clone().add(.9384375 * scale, .02 + .265 * scale, 0.0),
-        center.clone().add(0.0, .25 + .85 * scale, 0.0), targets.first().bounds.clone().union(targets.last().bounds), targets)
 }
 
 internal fun civsCorpseText(text: CivsText, corpse: CivCorpse): Component {

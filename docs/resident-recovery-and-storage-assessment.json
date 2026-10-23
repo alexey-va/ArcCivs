@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "title": "ArcCivs .67 resident recovery and autonomous storage access",
+  "assumptions": [
+    "This assessment models the scoped .67 resident-recovery and Auto-barrel behavior. Before is the preceding behavior without resurrection-scroll issuance/use; after is the specified tagged-scroll flow. Source references point to the current working tree and do not establish publication, activation, or client acceptance.",
+    "Low/base/high are sensitivity cases of 1/10/100 scrolls issued per day by one administrator; participants=[1,1,1]. These are not measured usage, a daily cap, or a claim about the actual number of administrators. Each command event creates one tagged PAPER scroll. Ordinary vanilla PAPER is not a scroll; ordinary crafting, shops, reward payouts and other player-facing issuance are outside the scope.",
+    "The consumption flow mirrors issuance only for the conditional case where every scroll issued in that sensitivity is used in a successful corpse resurrection. Actual successful use is unmeasured and may be zero or lower than issuance. Attempts rejected before the durable transaction is accepted consume no scroll; after acceptance the one-item debit and corpse-to-worker revision share the durable receipt.",
+    "A successful resurrection retains the resident UUID, skills and the exact currently saved remaining corpse inventory. Items previously removed from the corpse are not recreated. The resident's assignment, cargo, health and eligible home are governed by the resurrection rules; this is not a payout or item grant. Safe corpse placement and the returning resident's idle walk add no item, currency or XP emission.",
+    "Resurrection-scroll issuance and consumption are counted in a distinct item unit, not as Vault, tokens, player XP or a currency proxy. The evaluator reports the two directional item flows separately and does not calculate a net item balance. No item-to-currency conversion or redemption price is assumed.",
+    "Auto barrels remain real physical storage: ordinary users with arccivs.use can inspect them read-only, while arccivs.admin can take or place items. Barrel contents are existing item transfers, separate from abstract village stock; this scope adds no container or capacity. Rack/pickup work remains pending for a later release and is excluded here, not represented as implemented.",
+    "Current item SELL behavior and the planned SELL-to-contract transition remain unchanged. No price, shop, contract, or other payout flow changes in this assessment.",
+    "Direct Vault, premium-token and Minecraft player-XP deltas are each zero. The existing 168-hour network ledger context is referenced only in docs/autonomous-economy-assessment.md; it is not refreshed here and is not attributable to this feature."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "resident_recovery_direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs .67 resurrection and storage behavior",
+          "basis": "No Vault callback, price, fee, or payout is introduced; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "resident_recovery_direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs .67 resurrection and storage behavior",
+          "basis": "No premium-token callback, price, fee, or payout is introduced; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "resident_recovery_direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs .67 resurrection and storage behavior",
+          "basis": "No Minecraft player experience is granted; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "resurrection_scroll_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "admin_scroll_issuance",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsCommand.kt:78-90; CivsResurrectionScroll.kt:12-33",
+          "basis": "One arccivs.admin-only /civs give-resurrection-scroll command gives one PAPER item tagged arccivs:resurrection_scroll. Sensitivity is 1/10/100 scrolls per single administrator-day; it is not telemetry or a configured cap.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "1", "unit": "major" },
+            "events_per_player_day": [1, 10, 100]
+          }
+        },
+        {
+          "id": "scroll_consumption_if_all_issued_are_successfully_used",
+          "kind": "item",
+          "source": "src/main/kotlin/ru/arc/civs/CivsStorage.kt:421-433; CivsService.kt:2075-2118",
+          "basis": "Conditional item sink only: one tagged scroll is consumed for each successful resurrection if every issued scroll in that scenario is used successfully. Failed or rejected attempts consume none; actual use is unmeasured. This is a second directional item flow, not a currency burn or a net-item calculation.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "1", "unit": "major" },
+            "events_per_player_day": [1, 10, 100]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

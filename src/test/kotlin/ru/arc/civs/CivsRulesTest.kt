@@ -8,6 +8,30 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    test("resurrection restores the exact surviving belongings and skills with no work assignment or cargo") {
+        val base = activeCity()
+        val original = base.workers.first().copy(skills = mapOf("QUARRY" to 20L), homeId = base.buildings.first().id,
+            items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("BREAD", 3) else null })
+        val corpse = CivsCorpses.create(original, CivDeathContext(base.center, 10_000))
+        val dead = base.copy(workers = base.workers.drop(1), corpses = listOf(corpse))
+        val restored = CivsRules.resurrect(dead, owner, original.id, corpse.diedAt, 11_000)
+        val resident = restored.workers.last()
+        resident shouldBe original.copy(assignment = null, cargo = null, nextDeliveryAt = 0, health = 24.0)
+        restored.corpses shouldBe emptyList()
+        restored.stock shouldBe dead.stock
+        restored.inventory shouldBe dead.inventory
+        CivsRules.validate(Gson().fromJson(Gson().toJson(restored), Settlement::class.java)) shouldBe restored
+        rejects("worker-not-found") { CivsRules.resurrect(restored, owner, original.id, corpse.diedAt, 11_000) }
+        rejects("worker-not-found") { CivsRules.resurrect(dead, owner, original.id, corpse.diedAt + 1, 11_000) }
+        rejects("corpse-expired") { CivsRules.resurrect(dead, owner, original.id, corpse.diedAt, corpse.expiresAt) }
+        rejects("not-authorized") { CivsRules.resurrect(dead, uuid(999), original.id, corpse.diedAt, 11_000, administrator = true) }
+        val full = dead.copy(workers = (0 until CivsRules.populationLimit(dead)).map { CivWorker(UUID.randomUUID(), "Other $it", null) })
+        rejects("population-full") { CivsRules.resurrect(full, owner, original.id, corpse.diedAt, 11_000) }
+        val auto = dead.copy(inventory = null, autonomy = CivAutonomy())
+        rejects("not-authorized") { CivsRules.resurrect(auto, owner, original.id, corpse.diedAt, 11_000) }
+        CivsRules.resurrect(auto, uuid(999), original.id, corpse.diedAt, 11_000, administrator = true).inventory shouldBe null
+    }
+
     test("legacy snapshots keep testing off and settings survive the durable codec") {
         val city = activeCity()
         val legacy = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))

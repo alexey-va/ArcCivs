@@ -75,6 +75,22 @@ class CivsCommand(
             sender.sendMessage(text.warning(null as Player?, "common.player-only"))
             return true
         }
+        if (args.firstOrNull() == "give-resurrection-scroll") {
+            if (args.size != 1 || !player.hasPermission("arccivs.admin")) {
+                player.sendMessage(text.error(player, "reason.not-authorized"))
+            } else {
+                val item = CivsResurrectionScroll.create(text, player)
+                val free = (0..35).firstOrNull { player.inventory.getItem(it)?.let { stack -> stack.type.isAir || stack.amount <= 0 ||
+                    stack.isSimilar(item) && stack.amount < stack.maxStackSize } != false }
+                if (free == null) player.sendMessage(text.error(player, "reason.storage-full"))
+                else {
+                    val existing = player.inventory.getItem(free)
+                    player.inventory.setItem(free, if (existing != null && existing.isSimilar(item)) existing.clone().apply { amount++ } else item)
+                    player.sendMessage(text.info(player, "resurrection.given"))
+                }
+            }
+            return true
+        }
         when {
             args.isEmpty() -> ui.open(player)
             args.firstOrNull() == "autonomous" && player.hasPermission("arccivs.admin") -> {
@@ -111,7 +127,7 @@ class CivsCommand(
             if (admin && args.size == 2 && args[0] == "autonomous")
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
-            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous") else emptyList()).filter { it.startsWith(args[0], true) }
+            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         internal fun statusLine(host: CivsUiHost, city: Settlement?): String {

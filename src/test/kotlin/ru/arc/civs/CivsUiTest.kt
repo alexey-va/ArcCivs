@@ -307,6 +307,58 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("ordinary Auto building inspection identifies its work and opens only the real city-specific barrel") {
+        for (language in listOf("ru", "en")) withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val personal = settlement(h.player)
+            val base = autonomousSettlement(h.player, "Auto")
+            val building = base.buildings.first { it.type == BuildingType.FORESTER }
+            val village = base.copy(owner = UUID.randomUUID(), workers = listOf(
+                base.workers.first().copy(name = "Мирослава", assignment = building.id)))
+            h.city = personal
+            every { h.host.settlements() } returns listOf(personal, village)
+            every { h.host.inspectBuilding(h.player, village.id, building.id) } returns village
+            every { h.host.openBuildingInventory(h.player, village.id, building.id) } returns CompletableFuture.completedFuture(Unit)
+            h.ui.openBuildingInspection(h.player, village.id, building.id)
+            h.screen.id shouldBe "civs.building-inspection"
+            h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "refresh")
+            h.body() shouldContain "Auto"
+            h.body() shouldContain "Мирослава"
+            h.body() shouldContain if (language == "ru") "Общий запас деревни" else "Shared village stock"
+            h.body() shouldContain if (language == "ru") "только для просмотра" else "read-only"
+            h.body() shouldContain if (language == "ru") "не превращается" else "does not turn into"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "auto-building-readonly-$language", h.screen, listOf(640, 360)) }
+            h.click("inventory")
+            verify(exactly = 1) { h.host.openBuildingInventory(h.player, village.id, building.id) }
+            verify(exactly = 0) { h.host.openBuildingInventory(any(), any()); h.host.setProduction(any(), any(), any()) }
+            h.city shouldBe personal
+        }
+    }
+
+    test("Auto admin barrel details retain the native failure and recheck inspection on refresh") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            h.player.addAttachment(h.plugin, "arccivs.admin", true)
+            val village = autonomousSettlement(h.player, "Auto")
+            val building = village.buildings.first { it.type == BuildingType.QUARRY }
+            every { h.host.inspectBuilding(h.player, village.id, building.id) } returns village
+            every { h.host.openBuildingInventory(h.player, village.id, building.id) } returns
+                CompletableFuture.failedFuture(CivsRejection("storage-busy"))
+            h.ui.openBuildingInspection(h.player, village.id, building.id)
+            h.body() shouldContain "Админ-доступ"
+            h.body() shouldContain "можно брать и класть"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "auto-building-admin-ru", h.screen, listOf(640, 360)) }
+            h.click("inventory")
+            h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.building-inspection"
+            h.body() shouldContain plainText(CivsText.fromYaml(civsLocaleSource()).reason(h.player, "storage-busy"))
+            every { h.host.inspectBuilding(h.player, village.id, building.id) } throws CivsRejection("worker-too-far")
+            h.click("refresh")
+            h.screen.buttons shouldBe emptyList()
+            h.body() shouldContain plainText(CivsText.fromYaml(civsLocaleSource()).reason(h.player, "worker-too-far"))
+        }
+    }
+
     test("autonomous planner states and paginated rosters render in both locales and native fallback") {
         listOf("ru", "en").forEach { language ->
             listOf("", "arc:dialog_ui").forEach { font ->
@@ -1168,8 +1220,8 @@ class CivsUiTest : FunSpec({
             val worker = base.workers.first().copy(name = "Василий", health = 0.0)
             val corpse = CivCorpse(worker, base.center, 1, Long.MAX_VALUE, "<red>Mayor", "PLAYER", "ENTITY_ATTACK")
             h.city = base.copy(workers = base.workers.filterNot { it.id == worker.id }, corpses = listOf(corpse))
-            every { h.host.corpseItems(h.player, worker.id) } returns List(33) { if (it == 4) ItemStack(Material.IRON_PICKAXE) else null }
-            every { h.host.transferCorpseItem(h.player, worker.id, 4, ClickType.LEFT) } returns CompletableFuture()
+            every { h.host.corpseItems(h.player, base.id, worker.id) } returns List(33) { if (it == 4) ItemStack(Material.IRON_PICKAXE) else null }
+            every { h.host.transferCorpseItem(h.player, base.id, worker.id, 4, ClickType.LEFT) } returns CompletableFuture()
             h.ui.openCorpse(h.player, base.id, worker.id)
             val view = h.player.openInventory.topInventory
             plainText(h.player.openInventory.title()) shouldBe "Погибший · Василий"
@@ -1180,11 +1232,11 @@ class CivsUiTest : FunSpec({
             h.nativeClick(54).isCancelled shouldBe true
             h.player.setItemOnCursor(ItemStack(Material.DIAMOND))
             h.nativeClick(18).isCancelled shouldBe true
-            verify(exactly = 0) { h.host.transferResidentItem(any(), any(), any(), any(), any()); h.host.transferCorpseItem(any(), any(), any(), any()) }
+            verify(exactly = 0) { h.host.transferResidentItem(any(), any(), any(), any(), any()); h.host.transferCorpseItem(any(), any(), any(), any(), any()) }
             h.player.setItemOnCursor(null)
             h.nativeClick(6)
             h.nativeClick(6)
-            verify(exactly = 1) { h.host.transferCorpseItem(h.player, worker.id, 4, ClickType.LEFT) }
+            verify(exactly = 1) { h.host.transferCorpseItem(h.player, base.id, worker.id, 4, ClickType.LEFT) }
 
             for ((changed, expected) in listOf(
                 corpse.copy(killerName = null, killerType = "ZOMBIE") to "Убийца: Зомби",
@@ -1198,6 +1250,25 @@ class CivsUiTest : FunSpec({
             h.city = h.city!!.copy(corpses = listOf(corpse.copy(worker = worker.copy(name = "Анна", sex = CivSex.FEMALE))))
             h.ui.openCorpse(h.player, base.id, worker.id)
             plainText(h.player.openInventory.title()) shouldBe "Погибшая · Анна"
+        }
+    }
+
+    test("Auto corpse inventory requires admin and an old menu cannot take a later death's items") {
+        withUi { h ->
+            val base = autonomousSettlement(h.player, "Auto")
+            val worker = base.workers.first().copy(health = 0.0)
+            val corpse = CivCorpse(worker, base.center, 100, Long.MAX_VALUE, null, null, "FALL")
+            h.city = base.copy(workers = base.workers.drop(1), corpses = listOf(corpse))
+            every { h.host.corpseItems(h.player, base.id, worker.id) } returns
+                List(33) { if (it == 4) ItemStack(Material.IRON_PICKAXE) else null }
+            h.ui.openCorpse(h.player, base.id, worker.id)
+            verify(exactly = 0) { h.host.corpseItems(any(), any(), any()) }
+            h.player.addAttachment(h.plugin, "arccivs.admin", true)
+            h.ui.openCorpse(h.player, base.id, worker.id)
+            h.player.openInventory.topInventory.getItem(6)!!.type shouldBe Material.IRON_PICKAXE
+            h.city = h.city!!.copy(corpses = listOf(corpse.copy(diedAt = 200)))
+            h.nativeClick(6).isCancelled shouldBe true
+            verify(exactly = 0) { h.host.transferCorpseItem(any(), any(), any(), any(), any()) }
         }
     }
 

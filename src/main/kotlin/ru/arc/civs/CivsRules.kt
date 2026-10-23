@@ -317,6 +317,28 @@ object CivsRules {
                 else city.corpses))
     }
 
+    /** The native scroll debit belongs to the same durable receipt as this exact death transition. */
+    fun resurrect(city: Settlement, actor: UUID, workerId: UUID, diedAt: Long, now: Long,
+        administrator: Boolean = false): Settlement {
+        check(city.autonomy == null || administrator, "not-authorized")
+        authorized(city, if (city.autonomy != null && administrator) city.owner else actor)
+        check(now >= 0, "invalid-time")
+        val corpse = city.corpses.orEmpty().firstOrNull { it.worker.id == workerId && it.diedAt == diedAt }
+            ?: reject("worker-not-found")
+        check(now >= diedAt && now < corpse.expiresAt, "corpse-expired")
+        check(city.workers.none { it.id == workerId }, "duplicate-worker")
+        check(city.workers.size < populationLimit(city), "population-full")
+        check(city.workers.size < beds(city), "no-beds")
+        return changed(city, city.copy(workers = city.workers + resurrectedWorker(city, corpse),
+            corpses = city.corpses.orEmpty().filterNot { it.worker.id == workerId && it.diedAt == diedAt }))
+    }
+
+    internal fun resurrectedWorker(city: Settlement, corpse: CivCorpse): CivWorker = corpse.worker.copy(
+        assignment = null, cargo = null, nextDeliveryAt = 0, health = CivsResidents.maxHealth(corpse.worker),
+        homeId = corpse.worker.homeId?.takeIf { id -> city.buildings.any {
+            it.id == id && it.type in setOf(BuildingType.TOWN_HALL, BuildingType.HOUSE)
+        } })
+
     /** The caller includes the exact town-storage debit/credit in this same revision's receipt. */
     fun supplyResident(city: Settlement, actor: UUID, workerId: UUID, material: String, returning: Boolean = false): Settlement {
         authorized(city, actor)
