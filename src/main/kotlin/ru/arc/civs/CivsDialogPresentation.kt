@@ -3,6 +3,7 @@ package ru.arc.civs
 import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.Component
 import ru.arc.paper.menu.DialogDecoration
+import ru.arc.paper.menu.DialogTables
 import ru.arc.paper.menu.DialogTextLayout
 import ru.arc.paper.menu.PaperDialogBody
 import ru.arc.paper.menu.PaperDialogButton
@@ -20,6 +21,11 @@ internal class CivsDialogPresentation(font: String) {
 
     fun callout(text: Component, width: Int = 320): PaperDialogBody =
         decoration?.openCorners(text, width, corners) ?: PaperDialogBody(text, width)
+
+    /** One explicit state summary; installations without the pack retain native prose. */
+    fun summary(text: Component, width: Int = 320): PaperDialogBody =
+        if (decoration == null) PaperDialogBody(text, width)
+        else DialogTables.filledBody(listOf(listOf(text)), null, width, listOf(1))
 
     fun divider(width: Int = 320): PaperDialogBody? = decoration?.let { PaperDialogBody(it.divider(width, rule), width) }
 

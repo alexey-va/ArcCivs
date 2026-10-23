@@ -323,7 +323,7 @@ class CivsUi internal constructor(
         val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
         present(player, "civs.overview", "city.title", listOfNotNull(
             body(tint(tr(player, "city.intro", "name" to city.name), LAND)),
-            presentation.callout(Component.join(Component.newline(), listOf(
+            presentation.summary(Component.join(Component.newline(), listOf(
                 tr(player, "city.summary-land", "level" to tint(text.literal(city.level()), PERSONAL),
                     "radius" to tint(tr(player, "city.radius", "radius" to city.radius), NAVIGATION)),
                 tr(player, "city.summary-residents", "population" to tint(tr(player, "common.fraction", "value" to city.workers.size,
@@ -680,7 +680,7 @@ class CivsUi internal constructor(
         val queued = city.constructionQueue.orEmpty()
         val current = page.coerceIn(0, lastPage(queued.size))
         present(player, "civs.queue", "queue.title", listOfNotNull(
-            city.construction?.let { presentation.callout(Component.join(Component.newline(),
+            city.construction?.let { presentation.summary(Component.join(Component.newline(),
                 listOf(tr(player, "queue.active").color(LAND), constructionText(player, city)))) }
                 ?: presentation.paragraph(tr(player, "queue.no-active")),
             presentation.divider(),
@@ -1283,7 +1283,7 @@ class CivsUi internal constructor(
         val current = page.coerceIn(0, lastPage(city.workers.size))
         val limit = minOf(CivsRules.populationLimit(city), CivsRules.beds(city))
         present(player, "civs.workers", "workers.title", listOfNotNull(
-            body(player, "workers.help"), presentation.callout(Component.join(Component.newline(), listOf(
+            body(player, "workers.help"), presentation.summary(Component.join(Component.newline(), listOf(
                 detail(player, "label.population", tint(tr(player, "common.fraction", "value" to city.workers.size, "limit" to limit), PEOPLE)),
                 detail(player, "label.unassigned", tint(text.literal(city.workers.count { it.assignment == null && !CivsResidents.isChild(it) }), STOCK)),
             ))), body(player, "guide.population-help"),
@@ -1306,7 +1306,7 @@ class CivsUi internal constructor(
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(tint(text.literal(worker.name), PEOPLE)),
             body(text.residentVitals(player, CivsResidents.health(worker), CivsResidents.maxHealth(worker), CivsResidents.hunger(worker))),
-            presentation.callout(Component.join(Component.newline(), listOfNotNull(
+            presentation.summary(Component.join(Component.newline(), listOfNotNull(
                 tr(player, "profession.${if (CivsResidents.isChild(worker)) "child"
                     else building?.let { CivsRules.profession(city, it) } ?: "unassigned"}").color(PEOPLE),
                 building?.let { buildingName(player, it.type, it.level) },
@@ -1507,7 +1507,7 @@ class CivsUi internal constructor(
         val completed = CivsAutonomy.profile.count { type -> city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= 2 } }
         present(player, "civs.autonomous-city", "autonomy.detail-title", listOfNotNull(
             body(tint(text.literal(city.name), LAND)),
-            presentation.callout(Component.join(Component.newline(), buildList {
+            presentation.summary(Component.join(Component.newline(), buildList {
                 add(autonomyStage(player, status))
                 target?.let { add(tr(player, "autonomy.goal", "target" to it)) }
                 add(tr(player, "autonomy.progress", "count" to completed, "total" to CivsAutonomy.profile.size))
@@ -1853,7 +1853,7 @@ class CivsUi internal constructor(
             tr(player, "common.detail", "label" to label, "value" to value)
         }))
     private fun table(rows: List<Pair<Component, Component>>, columns: DialogTables.Columns = DialogTables.Columns.VALUE_WIDE,
-        frame: DialogTables.Frame = DialogTables.Frame.LEGENDARY): PaperDialogBody = DialogTables.body(
+        frame: DialogTables.Frame = DialogTables.Frame.UNCOMMON): PaperDialogBody = DialogTables.body(
         rows.map { (label, value) -> label.color(CivsText.BODY) to value.colorIfAbsent(WHITE) },
         null, frame, 320, columns,
     )

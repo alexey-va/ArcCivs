@@ -21,6 +21,7 @@ import io.papermc.paper.dialog.DialogResponseView
 import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.Component
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer
+import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer
 import net.kyori.adventure.text.format.TextColor
 import net.kyori.adventure.text.format.TextDecoration
 import org.bukkit.entity.Player
@@ -60,6 +61,8 @@ class CivsUiTest : FunSpec({
                 h.open()
                 h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "upgrade", "hall_inventory", "guide")
                 h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
+                h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0xFA300..0xFAF1B } } shouldBe
+                    if (font.isEmpty()) 0 else 1
                 val suffix = if (font.isEmpty()) "plain-$locale" else locale
                 fun export(name: String) = System.getenv("CIVS_UI_PREVIEW_OUT")?.let { directory ->
                     exportUiScreen(directory, "dialog-$name-$suffix", h.screen, listOf(640, 360))
@@ -3142,7 +3145,8 @@ private fun materialEstimate() = mapOf("COBBLESTONE" to 73L, "COBBLESTONE_STAIRS
     "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 90L, "SPRUCE_PLANKS" to 2_000_003L)
 
 private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> {
-    val base = listOf(0xE560, 0xE570, 0xE580).single { point -> screen.body.any { plainText(it.text).contains(point.toChar()) } }
+    val base = listOf(0xE540, 0xE550, 0xE560, 0xE570, 0xE580, 0xE590)
+        .single { point -> screen.body.any { plainText(it.text).contains(point.toChar()) } }
     return screen.body.single { plainText(it.text).contains(base.toChar()) }.let { plainText(it.text) }.lineSequence()
         .filter { it.contains((base + 4).toChar()) }.map { line -> line.split((base + 5).toChar()).map { cell -> buildString {
             cell.codePoints().filter { it !in base..base + 14 && it !in 0xF0F01..0xF0F11 }.forEach(::appendCodePoint)
@@ -3208,6 +3212,9 @@ private fun exportUiScreen(directory: String, id: String, screen: PaperDialogScr
     Files.createDirectories(out)
     Files.writeString(out.resolve("$id.json"), GsonBuilder().disableHtmlEscaping().setPrettyPrinting().create().toJson(
         mapOf("content" to content, "dialog" to dialog, "sourceSha256" to uiSourceHashes(),
+            "components" to mapOf("id" to screen.id, "body" to screen.body.map {
+                mapOf("text" to GsonComponentSerializer.gson().serializeToTree(it.text), "width" to it.width)
+            }, "actions" to screen.buttons.map { it.id.value }),
             "evidence" to "Actual native dialog presenter components with fixture town state and server-resolved material names. No native-client acceptance.")))
 }
 
