@@ -41,6 +41,7 @@ class CivsWorld(
     private var closed = false
     private var nextScan = 0
     private var tickSequence = 0L
+    private var accessRepairChangedTick = Long.MIN_VALUE
     private var lands: CivsLandsAccess? = null
     private val timer = tasks.runTimer(1, 1, ::tick)
 
@@ -102,6 +103,14 @@ class CivsWorld(
     internal fun repairWarehouse(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
         requireCivs(cells.size in 1..512 && cells.map { it.position }.distinct().size == cells.size, "invalid-plan")
         WarehouseRepair(city.id, city.owner, city.worldId, building, cells.toList())
+    }
+
+    /** Inverse journal cells restore an older access route; no construction credit, drops or resources. */
+    internal fun repairAutonomousAccess(city: Settlement,
+        repairs: List<CivAutonomousAccessRepair>): CompletableFuture<Map<String, Int>> = admit {
+        requireCivs(repairs.size in 1..512 && repairs.map { it.cell.position }.distinct().size == repairs.size, "invalid-plan")
+        val protected = city.building(repairs.first().protectedBuildingId) ?: throw CivsRejection("stale-building")
+        AutonomousAccessRepair(city, protected, repairs.toList())
     }
 
     fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit {
@@ -250,7 +259,7 @@ class CivsWorld(
         }
 
         /** Terrain extends beyond the schematic; check the exact position rather than its broad route box. */
-        protected fun checkTerrainOwnership(position: CivPosition) {
+        protected fun checkTerrainOwnership(position: CivPosition, repair: CivAutonomousAccessRepair? = null) {
             requireCivs(position.y in world.minHeight until world.maxHeight, "outside-world")
             requireCivs(world.worldBorder.isInside(Location(world, position.x + .5, position.y.toDouble(), position.z + .5)),
                 "outside-border")
@@ -270,6 +279,12 @@ class CivsWorld(
                     requireCivs(!retained || !occupied.bounds.contains(position.x, position.y, position.z) &&
                         !CivsWorksiteLayouts.isField(occupied, position.x, position.z), "building-overlap")
                 }
+                val repairedPair = repair?.takeIf { other.id == cityId && position == it.cell.position }
+                val approachCity = if (repairedPair == null) other else other.copy(buildings = other.buildings.filter {
+                    it.id != repairedPair.protectedBuildingId && it.id != repairedPair.offendingBuildingId
+                })
+                requireCivs(civsTerrainKey(position.x, position.z) !in CivAutonomousAccess().standing(approachCity,
+                    repairedPair?.protectedBuildingId ?: building.id), "building-overlap")
                 requireCivs(other.pendingControls.orEmpty().none { receipt ->
                     receipt.position == position || (other.id != cityId || receipt.buildingId != building.id) &&
                         receipt.approach.orEmpty().any { it.position == position }
@@ -477,6 +492,7 @@ class CivsWorld(
         Scan<CivTerraformPlan>(city.id, city.owner, city.worldId, draft.building) {
         private val captured = linkedMapOf<CivPosition, CivTerraformCell>()
         private val columns = draft.columns.toList()
+        private val protectedAccess = draft.access.standing(city, draft.building.id)
         private var columnIndex = 0
         private var y: Int? = null
         private var leafY: Int? = null
@@ -511,7 +527,8 @@ class CivsWorld(
             if (block.type in TERRAFORM_GROUND) leafY = null
             if (naturalLeaves(block.blockData)) leafY = currentY
             val tree = leafY?.let { it.toLong() - currentY in 1..MAXIMUM_TREE_READS.toLong() } == true
-            val safe = naturalTerraform(block, tree) && canModify(owner, block) && try {
+            val safe = (column.preserve || civsTerrainKey(position.x, position.z) !in protectedAccess) &&
+                naturalTerraform(block, tree) && canModify(owner, block) && try {
                 checkTerrainOwnership(position); true
             } catch (_: CivsRejection) { false }
             captured[position] = CivTerraformCell(position, block.blockData.asString, safe,
@@ -699,7 +716,8 @@ class CivsWorld(
 
     private fun fullTerraformSupport(block: Block): Boolean = block.type.isSolid && !block.isLiquid &&
         (block.blockData as? Waterlogged)?.isWaterlogged != true && block.collisionShape.boundingBoxes.any {
-            it.minX <= 0.0 && it.minZ <= 0.0 && it.maxX >= 1.0 && it.maxZ >= 1.0 && it.maxY >= 1.0
+            it.minX <= 0.0 && it.minZ <= 0.0 && it.maxX >= 1.0 && it.maxZ >= 1.0 &&
+                it.maxY >= if (block.type in setOf(Material.DIRT_PATH, Material.FARMLAND)) 15.0 / 16.0 else 1.0
         }
 
     private fun passableTerraform(block: Block): Boolean = block.type.isAir ||
@@ -741,6 +759,63 @@ class CivsWorld(
             if (!canModify(owner, block, after.material)) { count("denied"); return }
             block.setBlockData(after, false)
             count("changed")
+        }
+    }
+
+    private inner class AutonomousAccessRepair(citySnapshot: Settlement, protected: CivBuilding,
+        private val repairs: List<CivAutonomousAccessRepair>) :
+        Scan<Map<String, Int>>(citySnapshot.id, citySnapshot.owner, citySnapshot.worldId, protected) {
+        private val counts = linkedMapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "denied" to 0)
+        private val involved = repairs.flatMap { listOf(it.protectedBuildingId, it.offendingBuildingId) }.distinct()
+            .associateWith { id -> citySnapshot.building(id) ?: throw CivsRejection("stale-building") }
+
+        init {
+            requireCivs(citySnapshot.autonomy != null && citySnapshot.pendingDeletion == null &&
+                involved.values.all { it.phase == BuildingPhase.ACTIVE }, "stale-building")
+            requireCivs(repairs.all { repair ->
+                repair.protectedBuildingId != repair.offendingBuildingId &&
+                    repair.cell.position.x == repair.standing.x && repair.cell.position.z == repair.standing.z &&
+                    repair.cell.position.y.toLong() in repair.standing.y.toLong() - 1..repair.standing.y.toLong() + 1
+            }, "invalid-plan")
+        }
+
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city != null && city.autonomy != null && city.pendingDeletion == null &&
+                involved.all { (id, snapshot) -> city.building(id) == snapshot } &&
+                city.construction?.buildingId?.let { it in involved } != true, "stale-building")
+        }
+
+        override fun ready(): Boolean = accessRepairChangedTick != tickSequence
+
+        override fun step() {
+            if (index == repairs.size) return finish(counts.toMap())
+            val repair = repairs[index++]
+            val cell = repair.cell
+            val before = parse(cell.before)
+            val after = parse(cell.after)
+            fun count(key: String) { counts[key] = counts.getValue(key) + 1 }
+            val support = cell.position.y.toLong() == repair.standing.y.toLong() - 1
+            if (before.asString != cell.before || after.asString != cell.after ||
+                !before.material.isAir && before.material !in TERRAFORM_GROUND ||
+                (if (support) after.material !in TREE_GROUND else !after.material.isAir) ||
+                (after as? Waterlogged)?.isWaterlogged == true) { count("denied"); return }
+            val block = try {
+                checkTerrainOwnership(cell.position, repair)
+                read(cell.position)
+            } catch (_: CivsRejection) { count("denied"); return }
+            val current = block.blockData.asString
+            if (current == cell.after) { count("unchanged"); return }
+            if (current != cell.before) { count("conflicts"); return }
+            val state = if (block.type.isAir) null else block.state
+            if (state is TileState || state is InventoryHolder || block.isLiquid ||
+                (block.blockData as? Waterlogged)?.isWaterlogged == true || !naturalTerraform(block) ||
+                !canModify(owner, block, after.material)) { count("denied"); return }
+            validateContext()
+            // Exact inverse only: no breakNaturally, item transfer, physics or builder receipt.
+            block.setBlockData(after, false)
+            accessRepairChangedTick = tickSequence
+            count("changed")
+            if (index == repairs.size) finish(counts.toMap())
         }
     }
 

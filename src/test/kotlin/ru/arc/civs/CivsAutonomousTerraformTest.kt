@@ -161,6 +161,60 @@ class CivsAutonomousTerraformTest : FunSpec({
         plan.blocks.all { it.after == "minecraft:air" } shouldBe true
         plan.blocks.filter { it.position.x == 2 && it.position.z == 22 }.map { it.position.y } shouldBe (74 downTo 65).toList()
     }
+
+    test("a new graded road cannot raise the neighbouring forester entrance or its approach") {
+        val original = terraceCity()
+        val forester = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = CivPosition(2, 64, 8), entrance = CivPosition(2, 65, 8), phase = BuildingPhase.ACTIVE,
+            bounds = CivBox(CivPosition(1, 64, 4), CivPosition(4, 71, 7)), control = CivPosition(2, 65, 6))
+        val city = original.copy(buildings = original.buildings + forester)
+        val b = terraceBuilder(city, 68)
+        val access = CivAutonomousAccess()
+        val protected = access.standing(city, b.id)
+        val surface = terraceSurface { x, z -> protected[civsTerrainKey(x, z)]?.y?.minus(1)
+            ?: (64 + (z.coerceAtLeast(0) / 3).coerceAtMost(4)) }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(b, 0), surface, access)
+        val plan = CivsAutonomousTerraform.materialize(draft, terraceCapture(draft, surface))
+        plan.route.last() shouldBe b.entrance
+        (plan.fillCount + plan.cutCount > 0) shouldBe true
+        plan.blocks.none { civsTerrainKey(it.position.x, it.position.z) in protected } shouldBe true
+        draft.columns.filter { civsTerrainKey(it.x, it.z) in protected }.all { it.preserve } shouldBe true
+        plan.route.filter { civsTerrainKey(it.x, it.z) in protected }.forEach { point ->
+            point shouldBe protected.getValue(civsTerrainKey(point.x, point.z))
+        }
+    }
+
+    test("an established road can be crossed only at its existing grade without altering its support") {
+        val original = terraceCity()
+        val forester = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = CivPosition(44, 64, 10), entrance = CivPosition(44, 65, 10), phase = BuildingPhase.ACTIVE,
+            bounds = CivBox(CivPosition(45, 64, 7), CivPosition(48, 71, 13)), control = CivPosition(46, 65, 10),
+            rotation = 90)
+        val city = original.copy(buildings = original.buildings + forester)
+        val b = terraceBuilder(city, 68)
+        // This retained spine crosses the entire finite search field, so a detour cannot avoid it.
+        val road = (-48..44).map { CivPosition(it, 65, 10) }
+        val access = CivAutonomousAccess(mapOf(forester.id to road))
+        val protected = access.standing(city, b.id)
+        val surface = terraceSurface { x, z -> protected[civsTerrainKey(x, z)]?.y?.minus(1)
+            ?: if (z > 10) 68 else 64 }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(b, 0), surface, access)
+        val plan = CivsAutonomousTerraform.materialize(draft, terraceCapture(draft, surface))
+        plan.route.filter { it.z == 10 }.isNotEmpty() shouldBe true
+        plan.route.filter { it.z == 10 }.all { it.y == 65 } shouldBe true
+        plan.blocks.none { civsTerrainKey(it.position.x, it.position.z) in protected } shouldBe true
+        checkTerrace(plan, draft, terraceCapture(draft, surface))
+    }
+
+    test("a footprint cannot consume an older retained road even outside every existing building") {
+        val city = terraceCity()
+        val b = terraceBuilder(city)
+        val road = (0..24).map { CivPosition(0, 65, it) }
+        val access = CivAutonomousAccess(mapOf(city.buildings.single().id to road))
+        shouldThrow<CivsRejection> {
+            CivsAutonomousTerraform.draft(city, CivTerraformOption(b, 0), terraceSurface { _, _ -> 64 }, access)
+        }.reason shouldBe "building-overlap"
+    }
 })
 
 private fun terraceCity(): Settlement {

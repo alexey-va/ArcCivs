@@ -90,6 +90,15 @@ and aggregate wood/stone/food production rates are unchanged. Source tests cover
 uneven terrain and replay safety, and are separate from native-client visual
 acceptance of a constructed village.
 
+Completed building captures retain the executed terrain journal, including a SITE
+recaptured before its first payment. Later roads preserve these earlier route
+columns and entrance grades; their shoulders cannot bury them, and new footprints
+cannot cover them. A bounded legacy repair derives exact inverse writes from
+later retained journals that obstruct older completed approaches. It runs before
+growth even with empty stock, changes at most 512 cells and one block per tick,
+and skips changed, occupied or protected cells. It neither grants resources nor
+counts as resident construction; `autonomous_access_repaired` reports its counts.
+
 `civs debug autonomy [city UUID]` reads cached goal, stock, retry and placement
 progress and the last bounded placement result without starting work. `autonomous_goal_selected`,
 `autonomous_goal_queued`, `autonomous_resource_delivered` and bounded

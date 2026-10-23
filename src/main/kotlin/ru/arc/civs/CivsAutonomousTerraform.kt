@@ -20,7 +20,7 @@ internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int,
     val surfaceY: Int, val preserve: Boolean = false)
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
-    val route: List<CivPosition>, val groundY: Int)
+    val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess())
 
 /** Exact state plus native collision/safety classification, captured by the world budget. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
@@ -67,13 +67,17 @@ internal object CivsAutonomousTerraform {
     }.sortedWith(compareBy<CivTerraformOption> { it.effort }.thenBy { it.building.entrance.x }
         .thenBy { it.building.entrance.z }.thenBy { it.building.anchor.y })
 
-    fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface): CivTerraformDraft {
+    fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
+        access: CivAutonomousAccess = CivAutonomousAccess()): CivTerraformDraft {
         val building = option.building
+        val standing = access.standing(city, building.id)
+        if (standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
+            throw CivsRejection("building-overlap")
         val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
             .filter { it.id != building.id }.distinctBy { it.id }
             .map { CivsAutonomousGeometry.futureBounds(city, it) }
         val route = sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, obstacles, it)
+            route(city, building, surface, obstacles, standing, it)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
@@ -82,15 +86,18 @@ internal object CivsAutonomousTerraform {
                 throw CivsRejection("building-overlap")
             val native = surface.at(x, z) ?: throw CivsRejection("autonomy-no-path")
             if (!native.loaded) throw CivsRejection("chunks-unloaded")
-            val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
-            if (!preserve && !native.natural && !control) throw CivsRejection("autonomy-terrain")
-            if (!preserve && abs(native.groundY - ground) > MAXIMUM_CHANGE) throw CivsRejection("autonomy-slope")
-            if (floor <= surface.minHeight || ground + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
             val key = civsTerrainKey(x, z)
+            val protected = standing[key]
+            if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path")
+            val retained = preserve || protected != null
+            val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
+            if (!retained && !native.natural && !control) throw CivsRejection("autonomy-terrain")
+            if (!retained && abs(native.groundY - ground) > MAXIMUM_CHANGE) throw CivsRejection("autonomy-slope")
+            if (floor <= surface.minHeight || ground + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
             val existing = columns[key]
-            // The source support and clearance are immutable throughout all batches.
+            // Existing entrances and roads keep their whole column, including support below the surface.
             if (existing?.preserve == true) return
-            columns[key] = CivTerraformColumn(x, z, ground, floor, native.topY, preserve)
+            columns[key] = CivTerraformColumn(x, z, ground, floor, native.topY, retained)
         }
         // Centreline first establishes the exact grade; shoulders follow the nearest route cell.
         // Both are interleaved by progress, so a worker never needs a future terrace to start work.
@@ -101,7 +108,7 @@ internal object CivsAutonomousTerraform {
                 if (dx == 0 && dz == 0) continue
                 val x = point.x + dx; val z = point.z + dz
                 val key = civsTerrainKey(x, z)
-                if (key in centerline || key in columns ||
+                if (key in centerline || key in columns || key in standing ||
                     CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) ||
                     obstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
@@ -122,7 +129,7 @@ internal object CivsAutonomousTerraform {
             (maxOf(it.surfaceY, it.groundY) + 2 - maxOf(surface.minHeight, it.floorY - MAXIMUM_CHANGE) + 1).toLong()
         }
         if (count > MAXIMUM_CAPTURE_CELLS) throw CivsRejection("autonomy-search-budget")
-        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y)
+        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access)
     }
 
     /** Exact before-images, ordered approach-first, with cuts top-down and fill from real support up. */
@@ -184,7 +191,7 @@ internal object CivsAutonomousTerraform {
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
 
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
-        from: CivPosition): List<CivPosition>? {
+        standing: Map<Long, CivPosition>, from: CivPosition): List<CivPosition>? {
         val start = Node(from.x, from.y - 1, from.z)
         val to = building.entrance
         val target = Node(to.x, to.y - 1, to.z)
@@ -195,8 +202,10 @@ internal object CivsAutonomousTerraform {
             val p = CivPosition(x, y, z)
             if (CivsAutonomousGeometry.horizontalContains(building.bounds, p) ||
                 obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }) return false
-            if (civsTerrainKey(x, z) in goalApproach && y != target.y) return false
+            val key = civsTerrainKey(x, z)
+            if (key in goalApproach && y != target.y) return false
             val native = surface.at(x, z) ?: return false
+            standing[key]?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }
         if (start == target) return listOf(from)

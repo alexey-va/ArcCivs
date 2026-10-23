@@ -447,6 +447,119 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("access repair restores only exact inverse cells and all repair scans share one changed block per tick") {
+        worldScenario { s ->
+            val city = worldAccessCity(s)
+            val feet = CivPosition(0, 64, 0)
+            val support = CivPosition(1, 63, 0)
+            s.world.getBlockAt(feet.x, feet.y, feet.z).type = Material.DIRT
+            val repairs = listOf(
+                worldAccessRepair(city, feet, CivPlanBlock(feet, "minecraft:dirt", "minecraft:air")),
+                worldAccessRepair(city, support.copy(y = 64), CivPlanBlock(support, "minecraft:air", "minecraft:stone")))
+            val repaired = s.subject.repairAutonomousAccess(city, repairs)
+            s.scheduler.tick()
+            repaired.isDone shouldBe false
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(1, 63, 0).type shouldBe Material.AIR
+            s.scheduler.tick()
+            completed(repaired) shouldBe mapOf("changed" to 2, "unchanged" to 0, "conflicts" to 0, "denied" to 0)
+            s.world.getBlockAt(1, 63, 0).type shouldBe Material.STONE
+            val replay = s.subject.repairAutonomousAccess(city, repairs)
+            s.scheduler.tick()
+            completed(replay) shouldBe mapOf("changed" to 0, "unchanged" to 2, "conflicts" to 0, "denied" to 0)
+            s.cities.single() shouldBe city
+
+            val concurrent = (0..1).map { x ->
+                val point = CivPosition(x, 64, 0)
+                s.world.getBlockAt(x, 64, 0).type = Material.DIRT
+                s.subject.repairAutonomousAccess(city, listOf(worldAccessRepair(city, point,
+                    CivPlanBlock(point, "minecraft:dirt", "minecraft:air"))))
+            }
+            s.scheduler.tick()
+            (0..1).count { s.world.getBlockAt(it, 64, 0).type == Material.AIR } shouldBe 1
+            s.scheduler.tick()
+            concurrent.forEach { completed(it).getValue("changed") shouldBe 1 }
+        }
+    }
+
+    for (obstacle in listOf("player-edit", "liquid", "container", "lands", "registered", "falling-support", "solid-head"))
+    test("access repair preserves $obstacle and never turns it into a journal reward") {
+        worldScenario { s ->
+            var city = worldAccessCity(s)
+            val standing = CivPosition(0, 64, 0)
+            val point = standing.copy(y = when (obstacle) { "falling-support" -> 63; "solid-head" -> 65; else -> 64 })
+            val block = s.world.getBlockAt(point.x, point.y, point.z)
+            block.type = when (obstacle) {
+                "player-edit" -> Material.COARSE_DIRT
+                "liquid" -> Material.WATER
+                "container" -> Material.CHEST
+                "falling-support" -> Material.AIR
+                else -> Material.DIRT
+            }
+            if (obstacle == "container") (block.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 2))
+            if (obstacle == "lands") {
+                val lands = s.paper.createSimplePlugin("Lands")
+                s.paper.server.pluginManager.disablePlugin(lands)
+            }
+            if (obstacle == "registered") {
+                city = city.copy(inventory = CivInventory(CivStorageMode.VIRTUAL, containers = listOf(point)))
+                s.cities.clear(); s.cities += city
+            }
+            val before = if (obstacle == "player-edit") "minecraft:dirt" else block.blockData.asString
+            val after = when (obstacle) { "falling-support" -> "minecraft:sand"; "solid-head" -> "minecraft:stone"; else -> "minecraft:air" }
+            val original = block.blockData.asString
+            val repaired = s.subject.repairAutonomousAccess(city, listOf(worldAccessRepair(city, standing,
+                CivPlanBlock(point, before, after))))
+            s.scheduler.tick()
+            completed(repaired) shouldBe mapOf("changed" to 0, "unchanged" to 0,
+                "conflicts" to if (obstacle == "player-edit") 1 else 0, "denied" to if (obstacle == "player-edit") 0 else 1)
+            block.blockData.asString shouldBe original
+            s.cities.single() shouldBe city
+            if (obstacle == "container") (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+        }
+    }
+
+    for (drift in listOf("mode", "deletion", "protected-building", "offending-building", "construction"))
+    test("access repair stops its unfinished suffix after $drift changes") {
+        worldScenario { s ->
+            val city = worldAccessCity(s)
+            val repairs = (0..1).map { x ->
+                val point = CivPosition(x, 64, 0)
+                s.world.getBlockAt(x, 64, 0).type = Material.DIRT
+                worldAccessRepair(city, point, CivPlanBlock(point, "minecraft:dirt", "minecraft:air"))
+            }
+            val repaired = s.subject.repairAutonomousAccess(city, repairs)
+            s.scheduler.tick()
+            repaired.isDone shouldBe false
+            val changed = when (drift) {
+                "mode" -> city.copy(autonomy = null)
+                "deletion" -> city.copy(pendingDeletion = CivDeletion(null))
+                "construction" -> city.copy(construction = CivConstruction(UUID.randomUUID(), city.buildings[1].id,
+                    2, 1, 0, ConstructionPhase.CONSTRUCTING, Stock()))
+                else -> city.copy(buildings = city.buildings.mapIndexed { index, building ->
+                    if (index == if (drift == "protected-building") 0 else 1) building.copy(level = 2) else building
+                })
+            }
+            s.cities.clear(); s.cities += changed
+            s.scheduler.tick()
+            failureReason(repaired) shouldBe "stale-building"
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.DIRT
+        }
+    }
+
+    test("access repair rejects duplicate or oversized native requests before mutating terrain") {
+        worldScenario { s ->
+            val city = worldAccessCity(s)
+            val point = CivPosition(0, 64, 0)
+            val repair = worldAccessRepair(city, point, CivPlanBlock(point, "minecraft:dirt", "minecraft:air"))
+            failureReason(s.subject.repairAutonomousAccess(city, listOf(repair, repair))) shouldBe "invalid-plan"
+            val oversized = List(513) { x -> repair.copy(standing = point.copy(x = x),
+                cell = repair.cell.copy(position = point.copy(x = x))) }
+            failureReason(s.subject.repairAutonomousAccess(city, oversized)) shouldBe "invalid-plan"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+        }
+    }
+
     test("warehouse repair preserves books inside an authored chiseled bookshelf") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 0)).copy(type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE)
@@ -843,6 +956,45 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("native autonomous capture and apply cannot rewrite another existing entrance column") {
+        worldScenario { s ->
+            val point = CivPosition(2, 64, 0)
+            val cell = CivPlanBlock(point, "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val older = worldBuilding(worldBox(10, 10)).copy(type = BuildingType.HOUSE,
+                phase = BuildingPhase.ACTIVE, entrance = point)
+            s.cities.clear(); s.cities += city.copy(buildings = city.buildings + older)
+            val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(apply) shouldBe "building-overlap"
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, plan.building,
+                listOf(worldCell(0, 64, "minecraft:stone")), plan.terrain, city.buildings.single())
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "building-overlap"
+            s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.AIR
+        }
+    }
+
+    test("native terrain capture marks a nonpreserved retained road column unsafe") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val older = worldBuilding(worldBox(10, 10)).copy(type = BuildingType.HOUSE,
+                phase = BuildingPhase.ACTIVE, entrance = CivPosition(5, 64, 0))
+            val city = worldCity(s.world.uid, older).copy(autonomy = CivAutonomy())
+            s.cities += city
+            s.world.getBlockAt(0, 65, 0).type = Material.DIRT
+            val access = CivAutonomousAccess(mapOf(older.id to (0..5).map { CivPosition(it, 64, 0) }))
+            val draft = CivTerraformDraft(building, listOf(
+                CivTerraformColumn(-1, 0, 63, 63, 63, preserve = true),
+                CivTerraformColumn(0, 0, 64, 63, 65)), listOf(building.entrance), 64, access)
+            val captured = s.subject.captureTerraform(city, draft, java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(captured) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.DIRT
+        }
+    }
+
     test("route standing cells use future fill and the source support remains unchanged") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(2, 2)).copy(entrance = CivPosition(1, 65, 0))
@@ -925,11 +1077,12 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("terrain materialization receives detached bounded cells and native completion waits for the owning tick") {
+    test("terrain materialization preserves a dirt path and native completion waits for the owning tick") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(0, 0))
             val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
             s.cities += city
+            s.world.getBlockAt(-1, 63, 0).type = Material.DIRT_PATH
             s.world.getBlockAt(0, 65, 0).type = Material.DIRT
             val draft = CivTerraformDraft(building, listOf(
                 CivTerraformColumn(-1, 0, 63, 63, 63, preserve = true),
@@ -949,6 +1102,7 @@ class CivsWorldTest : FunSpec({
             )
             s.world.getBlockAt(0, 65, 0).type shouldBe Material.DIRT
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(-1, 63, 0).type shouldBe Material.DIRT_PATH
         }
     }
 
@@ -1115,6 +1269,16 @@ private fun worldTerraformCity(s: WorldScenario, plan: CivPlacementPlan): Settle
     s.cities += city
     return city
 }
+private fun worldAccessCity(s: WorldScenario): Settlement {
+    val older = worldBuilding(worldBox(-10, -8)).copy(type = BuildingType.HOUSE, phase = BuildingPhase.ACTIVE,
+        entrance = CivPosition(0, 64, 0))
+    val newer = worldBuilding(worldBox(8, 10)).copy(type = BuildingType.FORESTER, phase = BuildingPhase.ACTIVE,
+        entrance = CivPosition(0, 66, 0))
+    return worldCity(s.world.uid, older).copy(autonomy = CivAutonomy(), buildings = listOf(older, newer),
+        stock = Stock(9, 7, 5)).also(s.cities::add)
+}
+private fun worldAccessRepair(city: Settlement, standing: CivPosition, cell: CivPlanBlock) =
+    CivAutonomousAccessRepair(city.buildings[0].id, city.buildings[1].id, standing, cell)
 private fun <T> completed(future: CompletableFuture<T>): T { future.isDone shouldBe true; return future.join() }
 private fun rejection(future: CompletableFuture<*>): CivsRejection {
     future.isDone shouldBe true

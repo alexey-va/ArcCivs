@@ -39,6 +39,33 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    test("candidate footprints reserve retained roads beyond the existing building envelopes") {
+        val city = spatialCity(UUID.randomUUID())
+        val local = spatialBlueprint(UUID.randomUUID(), city.worldId, CivPosition(0, 0, 0), 0, 1).building
+        val choices = CivsAutonomousGeometry.candidates(city, local, local)
+        val first = choices.first().building.bounds
+        val retained = CivPosition(first.min.x, 65, first.min.z)
+        val access = CivAutonomousAccess(mapOf(city.buildings.single().id to listOf(retained)))
+        val reserved = CivsAutonomousGeometry.candidates(city, local, local, access)
+        reserved.isNotEmpty() shouldBe true
+        (reserved.size < choices.size) shouldBe true
+        reserved.none { CivsAutonomousGeometry.horizontalContains(it.building.bounds, retained) } shouldBe true
+    }
+
+    test("search waits for its retained road snapshot and cancellation cancels the pending load") {
+        spatialScenario { s ->
+            s.access = CompletableFuture()
+            val search = s.planner.search(s.city, BuildingType.HOUSE, 1, UUID.randomUUID())
+            s.scheduler.tick()
+            search.isDone shouldBe false
+            @Suppress("UNCHECKED_CAST")
+            val entries = s.planner.debug()["entries"] as List<Map<String, Any?>>
+            entries.single()["phase"] shouldBe "access"
+            search.cancel(false)
+            s.access.isCancelled shouldBe true
+        }
+    }
+
     test("search chooses and fully captures a connected native plot without changing a block") {
         spatialScenario { s ->
             val future = s.planner.search(s.city, BuildingType.HOUSE, 1, UUID.randomUUID())
@@ -241,7 +268,8 @@ private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoClos
     private val tasks = LifecycleTaskScope(scheduler, true)
     val worldAccess = CivsWorld(paper.createSimplePlugin("CivsAutonomousPlacementTest"), tasks, { 0L }) { listOf(city) }
     private val blueprints = mockk<CivsBlueprints>()
-    val planner = CivsAutonomousPlacement(blueprints, worldAccess, Executor(Runnable::run))
+    var access = CompletableFuture.completedFuture(CivAutonomousAccess())
+    val planner = CivsAutonomousPlacement(blueprints, worldAccess, Executor(Runnable::run)) { access }
     init {
         for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
         for (x in -40..40) for (z in -40..40) {

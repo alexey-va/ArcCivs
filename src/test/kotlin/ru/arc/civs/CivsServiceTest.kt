@@ -48,6 +48,45 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("historical access repair precedes growth with empty stock and publishes no construction or resource credit") {
+        serviceScenario { h ->
+            val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), workers = emptyList())
+            val older = city.buildings.first()
+            val offender = city.buildings.last()
+            val write = CivPlanBlock(older.entrance, "minecraft:air", "minecraft:coarse_dirt")
+            val plan = CivPlacementPlan(offender.id, city.id, city.worldId, offender, emptyList(),
+                terrain = CivTerraformPlan(offender.bounds, listOf(write), listOf(offender.entrance), 63, 0, 1))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.loadPlan(offender.id) } returns CompletableFuture.completedFuture(plan)
+            var repair = CompletableFuture<Map<String, Int>>()
+            every { h.worldAdapter.repairAutonomousAccess(city, any()) } answers { repair }
+            h.start()
+            h.paper.addPlayer("AccessOwner").teleport(Location(h.world, 0.5, 65.0, 0.5))
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutonomousAccessRepair").also { it.isAccessible = true }
+            val ready = CivsService::class.java.getDeclaredMethod("autonomousAccessReady", Settlement::class.java)
+                .also { it.isAccessible = true }
+            pulse.invoke(h.service); h.tick()
+            ready.invoke(h.service, city) shouldBe false
+            verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(city, listOf(
+                CivAutonomousAccessRepair(older.id, offender.id, older.entrance,
+                    write.copy(before = write.after, after = write.before)))) }
+            h.saves shouldBe emptyList()
+            repair.complete(mapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "denied" to 1)); h.tick()
+            ready.invoke(h.service, city) shouldBe false
+            pulse.invoke(h.service)
+            verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
+            repair = CompletableFuture()
+            h.time += 30_001
+            pulse.invoke(h.service); h.tick()
+            repair.complete(mapOf("changed" to 1, "unchanged" to 0, "conflicts" to 0, "denied" to 0)); h.tick()
+            ready.invoke(h.service, city) shouldBe true
+            pulse.invoke(h.service); h.tick()
+            verify(exactly = 2) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
+            h.service.settlements().single().stock shouldBe Stock()
+            h.saves shouldBe emptyList()
+        }
+    }
+
     test("autonomous production requires entrance arrival and a durable unique trip receipt without physical inventory") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
@@ -2457,6 +2496,103 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    for ((autonomous, earthworks) in listOf(true to true, true to false, false to false))
+    test("order admission refreshes only autonomous terrain captures before reserving stock autonomous=$autonomous terrain=$earthworks") {
+        serviceScenario { h ->
+            val queued = h.queuedUpgrade()
+            val existing = queued.building.copy(phase = if (earthworks) BuildingPhase.SITE else BuildingPhase.ACTIVE)
+            val city = queued.city.copy(autonomy = if (autonomous) CivAutonomy(paused = true) else null,
+                inventory = if (autonomous) null else queued.city.inventory,
+                stock = if (autonomous) h.city.stock else Stock(),
+                buildings = queued.city.buildings.map { if (it.id == existing.id) existing else it })
+            val terrain = CivTerraformPlan(CivBox(CivPosition(4, 63, -1), CivPosition(10, 64, 3)),
+                listOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air")),
+                listOf(CivPosition(5, 64, 0), CivPosition(6, 64, 0)), 63, 1, 0)
+            val target = if (earthworks) existing.copy(phase = BuildingPhase.CONSTRUCTING) else queued.fresh.building
+            val plan = queued.fresh.copy(building = target, terrain = terrain.takeIf { earthworks })
+            val old = plan.copy(id = existing.id, terrain = terrain.copy(route = listOf(CivPosition(2, 64, 0))))
+            val unrelated = old.copy(id = UUID.randomUUID(), cityId = UUID.randomUUID())
+            val captures = mutableMapOf(old.id to old, unrelated.id to unrelated)
+            val writes = mutableListOf<String>()
+            val retained = CompletableFuture<CivPlacementPlan>()
+            val bytes = byteArrayOf(2)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveSchematic(any(), any()) } answers {
+                secondArg<ByteArray>().toList() shouldBe bytes.toList()
+                writes += "schematic:${firstArg<UUID>()}"
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.store.savePlan(any()) } answers {
+                val capture = firstArg<CivPlacementPlan>()
+                writes += "plan:${capture.id}"
+                if (capture.id == existing.id) retained.thenApply { captures[it.id] = it; it }
+                else CompletableFuture.completedFuture(capture).thenApply { captures[it.id] = it; it }
+            }
+            h.start()
+            val startOrder = CivsService::class.java.getDeclaredMethod("startOrder", UUID::class.java,
+                Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
+            val starting = startOrder.invoke(h.service, city.owner, city, plan, bytes) as CompletableFuture<*>
+            if (autonomous && earthworks) {
+                h.saves shouldBe emptyList()
+                starting.isDone shouldBe false
+                captures[existing.id] shouldBe old
+                retained.complete(plan.copy(id = existing.id)); h.tick()
+            } else h.tick()
+
+            val expectedWrites = listOf("schematic:${plan.id}", "plan:${plan.id}") +
+                if (autonomous && earthworks) listOf("schematic:${existing.id}", "plan:${existing.id}") else emptyList()
+            writes shouldBe expectedWrites
+            captures[existing.id] shouldBe if (autonomous && earthworks) plan.copy(id = existing.id) else old
+            captures[unrelated.id] shouldBe unrelated
+            val reserved = h.saves.single().first
+            reserved.construction!!.id shouldBe plan.id
+            reserved.construction!!.plannedBuilding shouldBe target
+            val cost = if (autonomous) CivsAutonomy.cost(target.type, target.level) else Stock()
+            reserved.construction!!.cost shouldBe cost
+            reserved.stock shouldBe city.stock - cost
+            h.service.settlements().single().stock shouldBe city.stock
+            h.commit(); starting.join()
+            h.service.settlements().single().stock shouldBe city.stock - cost
+            h.saves.size shouldBe 1
+        }
+    }
+
+    for (failedCapture in listOf("schematic", "plan"))
+    test("a retained autonomous $failedCapture failure prevents city reservation and a second charge") {
+        serviceScenario { h ->
+            val queued = h.queuedUpgrade()
+            val existing = queued.building.copy(phase = BuildingPhase.SITE)
+            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = null, stock = h.city.stock,
+                buildings = queued.city.buildings.map { if (it.id == existing.id) existing else it })
+            val terrain = CivTerraformPlan(CivBox(CivPosition(4, 63, -1), CivPosition(10, 64, 3)),
+                listOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air")),
+                listOf(CivPosition(5, 64, 0)), 63, 1, 0)
+            val plan = queued.fresh.copy(building = existing.copy(phase = BuildingPhase.CONSTRUCTING), terrain = terrain)
+            val failure = IllegalStateException("retained $failedCapture failed")
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveSchematic(any(), any()) } answers {
+                if (firstArg<UUID>() == existing.id && failedCapture == "schematic") CompletableFuture.failedFuture(failure)
+                else CompletableFuture.completedFuture(Unit)
+            }
+            every { h.store.savePlan(any()) } answers {
+                if (firstArg<CivPlacementPlan>().id == existing.id && failedCapture == "plan") CompletableFuture.failedFuture(failure)
+                else CompletableFuture.completedFuture(firstArg())
+            }
+            h.start()
+            val startOrder = CivsService::class.java.getDeclaredMethod("startOrder", UUID::class.java,
+                Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
+            val starting = startOrder.invoke(h.service, city.owner, city, plan, byteArrayOf(2)) as CompletableFuture<*>
+            h.tick()
+
+            CivsDiagnostics.cause(shouldThrow<CompletionException> { starting.join() }) shouldBe failure
+            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe city
+            verify(exactly = 1) { h.store.savePlan(plan) }
+            verify(exactly = if (failedCapture == "plan") 1 else 0) { h.store.savePlan(plan.copy(id = existing.id)) }
+            verify(exactly = 0) { h.store.save(any()) }
+        }
+    }
+
     test("direct upgrade persists its own design behind active construction and duplicate requests keep it immutable") {
         serviceScenario { h ->
             val active = h.incrementalPlacement(ConstructionPhase.CONSTRUCTING)
@@ -3988,6 +4124,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         city = CivsRules.validate(Settlement(UUID.randomUUID(), owner, "Oak Town", world.uid, CivPosition(0, 64, 0), 96,
             "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }, createdAt = time))
         every { store.load() } returns CompletableFuture.completedFuture(if (empty) emptyList() else listOf(city))
+        every { store.loadPlan(any()) } returns CompletableFuture.completedFuture(null)
         every { store.homeServer() } returns null
         every { store.lookup(any()) } returns CompletableFuture.completedFuture(null)
         every { store.save(any()) } answers {

@@ -16,6 +16,9 @@ internal class CivsAutonomousPlacement(
     private val blueprints: CivsBlueprints,
     private val world: CivsWorld,
     private val executor: Executor,
+    private val loadAccess: (Settlement) -> CompletableFuture<CivAutonomousAccess> = {
+        CompletableFuture.completedFuture(CivAutonomousAccess())
+    },
 ) : AutoCloseable {
     private val jobs = linkedMapOf<UUID, Search>()
     private val terminal = linkedMapOf<UUID, Map<String, Any?>>()
@@ -79,6 +82,7 @@ internal class CivsAutonomousPlacement(
         @Volatile var phase = "catalog"
         @Volatile var selected: CivBuilding? = null
         private lateinit var surface: CivTerrainSurface
+        private var access = CivAutonomousAccess()
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
 
         fun debug(): Map<String, Any?> = mapOf("city" to city.id.toString(), "building" to buildingId.toString(),
@@ -87,6 +91,12 @@ internal class CivsAutonomousPlacement(
             "selected_anchor" to selected?.anchor, "fixed" to (pinned != null))
 
         fun start() {
+            phase = "access"
+            await(loadAccess(city)) { snapshot -> access = snapshot; catalog() }
+        }
+
+        private fun catalog() {
+            phase = "catalog"
             if (pinned != null) {
                 candidates = listOf(CivsAutonomousCandidate(pinned.building.copy(bounds =
                     CivsAutonomousGeometry.futureBounds(city, pinned.building))))
@@ -98,7 +108,7 @@ internal class CivsAutonomousPlacement(
             val future = if (level == 3) current else blueprints.prepare(city.style, type, 3, buildingId,
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
             await(current.thenCombineAsync(future, { a, b ->
-                CivsAutonomousGeometry.candidates(city, a.building, b.building)
+                CivsAutonomousGeometry.candidates(city, a.building, b.building, access)
             }, executor)) { choices -> candidates = choices; captureSurface() }
         }
 
@@ -131,7 +141,7 @@ internal class CivsAutonomousPlacement(
             val option = options[next++]
             selected = option.building
             phase = "grading"
-            val draft = try { CivsAutonomousTerraform.draft(city, option, surface) }
+            val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
             await(world.captureTerraform(city, draft, executor, previous), ::retry) { terrain ->
@@ -197,11 +207,13 @@ internal data class CivsAutonomousCandidate(val building: CivBuilding)
 
 /** Authored entrances face the centre; footprints grow outward around an open central approach. */
 internal object CivsAutonomousGeometry {
-    fun candidates(city: Settlement, current: CivBuilding, future: CivBuilding): List<CivsAutonomousCandidate> {
+    fun candidates(city: Settlement, current: CivBuilding, future: CivBuilding,
+        access: CivAutonomousAccess = CivAutonomousAccess()): List<CivsAutonomousCandidate> {
         val bounds = union(withField(current.bounds, current), withField(future.bounds, future))
         val occupied = city.buildings.map { futureBounds(city, it) } + listOfNotNull(city.construction?.plannedBuilding?.bounds)
         val entries = city.buildings.flatMap(::approach)
         val fields = city.buildings.flatMap { CivsWorksiteLayouts.field(it) + CivsWorksiteLayouts.irrigation(it) }
+        val roads = access.standing(city, current.id).values
         val result = mutableListOf<CivsAutonomousCandidate>()
         // ponytail: 64 compact candidates; add terrain-aware infill only if this finite profile cannot fit.
         for (radius in listOf(18, 32, 46, 60)) for (sector in 0 until 16) {
@@ -222,7 +234,7 @@ internal object CivsAutonomousGeometry {
                 entrance = point(current.entrance), control = current.control?.let(::point))
             if (!city.contains(box.min.x, box.min.z) || !city.contains(box.max.x, box.max.z) ||
                 approach(building).any { !city.contains(it.x, it.z) } ||
-                occupied.any { overlaps(box, it, 2) } || (entries + fields).any { horizontalContains(box, it) } ||
+                occupied.any { overlaps(box, it, 2) } || (entries + fields + roads).any { horizontalContains(box, it) } ||
                 approach(building).any { p -> occupied.any { horizontalContains(it, p) } } ||
                 !CivsRules.workRouteWithinReach(city, building.entrance)) continue
             result += CivsAutonomousCandidate(building)
