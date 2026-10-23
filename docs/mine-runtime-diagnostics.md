@@ -48,6 +48,23 @@ blocker bypasses the informational cooldown; exact repeats are deduplicated.
 These include the persisted mine version/step, point and material, so a blocked
 planner with no active actor route is still visible.
 
+`ARC_CIVS event=mine_search_slow` is a separate WARN after 1,200 active
+server ticks spent searching for mine work, repeated at most once per 1,200
+active ticks. At 20 TPS this is approximately one minute. `active_ms` is
+nominal simulation time (`active_ticks * 50`), not wall-clock elapsed time.
+Night, receipt pauses and resource/tool or explicit worksite blockers do not
+accrue search time. Worker removal, assignment/cycle/persisted-plan changes
+and admission of work reset the episode; advancing an inspection cursor alone
+does not.
+
+The warning includes persisted version/committed step, inspected scan step,
+frontier target/excavation/index/deferred count and candidate target/index/aim.
+It describes slow planning and does not label a finite advancing scan as an
+unreachable route. After a warned search admits work,
+`mine_search_work_selected` records that selection at INFO. Selection does not
+prove a world receipt or walking recovery. `civs debug worksites` exposes the
+same episode's active tick and warning counters without advancing the search.
+
 If a terminal `line-of-sight-blocked` seal is an AIR cell hidden by the current
 solid, non-gravity excavation, that single cut may complete first. Its previous
 frontier is then repaired before another cut, also after save/load or restart.

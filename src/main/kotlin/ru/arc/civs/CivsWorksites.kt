@@ -59,6 +59,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private val rejectedMineSpots = hashMapOf<UUID, RejectedMineSpots>()
     private data class ReportedNeed(val need: Need, val tick: Int)
     private val reportedNeeds = hashMapOf<UUID, ReportedNeed>()
+    private data class MineSearch(val city: UUID, val building: CivBuilding, val cycle: Long,
+        val plan: CivMinePlanState?, val legacyStep: Long?, var activeTicks: Long = 0, var sampledAt: Long? = null,
+        var warnedAt: Long? = null)
+    private val mineSearches = hashMapOf<UUID, MineSearch>()
     private var spotChecksRemaining = 0
     private var spotRaysRemaining = 0
     private var mineChecksRemaining = 0
@@ -85,7 +89,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
             "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
         val ids = (cached.keys + needs.keys + workSpots.keys + farmScans.keys + mineSafety.keys +
-            rejectedMineSpots.keys + cursors.keys).filter { workerIds == null || it in workerIds }
+            rejectedMineSpots.keys + cursors.keys + mineSearches.keys).filter { workerIds == null || it in workerIds }
         val buildings = buildingIds ?: ids.mapNotNullTo(hashSetOf()) { id -> cached[id]?.building?.id ?: needs[id]?.building?.id ?:
             workSpots[id]?.buildingId ?: farmScans[id]?.building?.id ?: mineSafety[id]?.building?.id ?:
             rejectedMineSpots[id]?.key?.building?.id }
@@ -110,6 +114,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     "status" to it.status, "reason" to it.reason, "material" to it.material,
                     "amount" to it.amount, "point" to point(it.point), "blockMaterial" to it.blockMaterial) },
                 "lastStatusAgeTicks" to reportedNeeds[id]?.let { (tick - it.tick).coerceAtLeast(0) },
+                "mineSearch" to mineSearches[id]?.let { mapOf("activeTicks" to it.activeTicks, "activeMillis" to it.activeTicks * 50,
+                    "lastWarningActiveMillis" to it.warnedAt?.times(50), "lastSampleTick" to it.sampledAt) },
                 "candidateSearch" to spot?.let { mapOf("building" to it.buildingId.toString(),
                     "target" to point(it.target), "candidate" to it.next, "aim" to it.nextAim,
                     "sawStanding" to it.sawStanding, "ladder" to it.ladder, "allowOwn" to it.allowOwn) },
@@ -185,8 +191,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         farmScans.keys.retainAll(workerIds)
         reportedFarmSelections.keys.retainAll(workerIds)
         reportedMineSelections.keys.retainAll(workerIds)
+        mineSearches.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
         mineSafety.keys.retainAll(workerIds)
+        jobs.forEach { (city, worker, building) -> tickMineSearch(city, worker, building) }
         // A persistence pause stops admission, not resident liveness or its bounded scan progress.
         val availableJobs = jobs.filterNot { isPaused(it.first.id) }
         if (availableJobs.isEmpty()) return
@@ -357,6 +365,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     private fun reportWorksite(city: Settlement, worker: CivWorker, building: CivBuilding, work: CivWorldWork?) {
+        reportMineSearch(city, worker, building, work)
         val previous = reportedNeeds[worker.id]
         if (work != null) {
             farmScans[worker.id]?.takeIf { building.type == BuildingType.FARM &&
@@ -402,6 +411,64 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             "mine_step" to city.minePlans?.get(building.id.toString())?.nextStep)
         if (structural) plugin.logger.warning(line)
         else plugin.logger.info(line)
+    }
+
+    private fun mineSearchEligible(city: Settlement, worker: CivWorker): Boolean =
+        !isPaused(city.id) && city.inventory != null &&
+            plugin.server.getWorld(city.worldId)?.time?.let { it !in 12_000L..23_000L } == true &&
+            plan(city, worker) == null && currentNeed(city, worker)?.status == "searching-work" &&
+            CivsEquipment.slots(worker)[4]?.material?.endsWith("_PICKAXE") == true &&
+            CivsLogistics.QUARRY_SUPPLIES.keys.all { CivsEquipment.plainCount(worker, it) > 0 }
+
+    /** Only consecutive eligible samples accrue time; a missed global pulse contributes at most one second. */
+    private fun tickMineSearch(city: Settlement, worker: CivWorker, building: CivBuilding) {
+        val search = mineSearches[worker.id] ?: return
+        if (search.city != city.id || search.building != building || search.cycle != worker.completedCycles ||
+            search.plan != city.minePlans?.get(building.id.toString()) ||
+            search.legacyStep != city.mineProgress?.get(building.id.toString())) {
+            mineSearches.remove(worker.id)
+            return
+        }
+        if (!mineSearchEligible(city, worker)) { search.sampledAt = null; return }
+        val tick = Bukkit.getCurrentTick().toLong()
+        search.sampledAt?.let { search.activeTicks += (tick - it).coerceIn(0, 20) }
+        search.sampledAt = tick
+        if (search.activeTicks >= 1_200 && search.activeTicks - (search.warnedAt ?: 0) >= 1_200) {
+            search.warnedAt = search.activeTicks
+            plugin.logger.warning(mineSearchLine("mine_search_slow", city, worker, building, search))
+        }
+    }
+
+    private fun reportMineSearch(city: Settlement, worker: CivWorker, building: CivBuilding, work: CivWorldWork?) {
+        if (building.type != BuildingType.QUARRY) return
+        if (work != null) {
+            mineSearches.remove(worker.id)?.takeIf { it.warnedAt != null }?.let { search ->
+                plugin.logger.info(mineSearchLine("mine_search_work_selected", city, worker, building, search, work))
+            }
+        } else if (mineSearchEligible(city, worker)) {
+            mineSearches.getOrPut(worker.id) { MineSearch(city.id, building, worker.completedCycles,
+                city.minePlans?.get(building.id.toString()), city.mineProgress?.get(building.id.toString())) }
+                .sampledAt = Bukkit.getCurrentTick().toLong()
+        } else mineSearches[worker.id]?.sampledAt = null
+    }
+
+    private fun mineSearchLine(event: String, city: Settlement, worker: CivWorker, building: CivBuilding,
+        search: MineSearch, work: CivWorldWork? = null): String {
+        val safety = mineSafety[worker.id]
+        val candidate = workSpots[worker.id]
+        val plan = city.minePlans?.get(building.id.toString())
+        return CivsDiagnostics.line(event, "city" to city.id, "worker" to worker.id, "building" to building.id,
+            "cycle" to worker.completedCycles, "mine_version" to plan?.version, "committed_step" to plan?.nextStep,
+            "legacy_step" to city.mineProgress?.get(building.id.toString()),
+            "search_version" to CivsMinePlan.VERSION, "scan_step" to mineCursors[building.id]?.third,
+            "active_ticks" to search.activeTicks, "active_ms" to search.activeTicks * 50, "active_time_source" to "server-ticks",
+            "frontier_target" to safety?.target?.let { CivsWorksiteLayouts.point(building, it) },
+            "frontier_excavation" to safety?.excavation?.let { CivsWorksiteLayouts.point(building, it) },
+            "frontier_next" to safety?.next, "frontier_deferred" to safety?.deferredAirWalls?.size,
+            "candidate_target" to candidate?.target, "candidate" to candidate?.next, "aim" to candidate?.nextAim,
+            "outcome" to if (work == null) "searching-work" else "work_selected",
+            "selected_status" to work?.status, "selected_step" to work?.miningStep,
+            "selected_focus" to work?.let(::citizenWorkFocus), "selected_standing" to work?.standing)
     }
 
     private fun equipTool(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
