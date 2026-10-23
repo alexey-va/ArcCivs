@@ -53,3 +53,13 @@ A paid lining block is consumed once and its later native cut returns its
 ordinary one cobblestone; replay remains idempotent. No generator quantity,
 probability, rate, price or monetary conversion changes. Existing legacy paid
 cobblestone floors replaced with STONE continue to be rejected.
+
+## 0.1.57: hidden AIR boundary ordering
+
+An AIR seal hidden by the current solid excavation can be paid immediately
+after that single cut. The durable previous-step check must finish it before
+another excavation, including after restart. This changes task order, not the
+number of paid blocks or the native cut output. Existing carried-cobblestone
+admission, liquid/protection checks, tool wear and receipt replay remain in
+force. Direct deltas are separately0 Vault/0 tokens/0 player XP. Generator
+probabilities, action rates, prices and the SELL/contract model are unchanged.

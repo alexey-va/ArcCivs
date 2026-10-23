@@ -998,11 +998,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     blocked(worker, "searching-work")
                     return@repeat
                 }
-                // A one-high cut can expose a far corner before a resident can
-                // enter it. Only empty shaft shell may await its ordered lower row.
+                // A solid current cut can hide an AIR shell from every native ray.
+                // Finish that single cut, then the durable previous-step check repairs
+                // its frontier before another cut, including after a restart.
+                val failure = currentNeed(city, worker)
+                val hiddenByCurrentCut = task.exposed in excavations && task.block != task.exposed &&
+                    opening.type.isOccluding && !opening.type.hasGravity() && failure?.reason == "line-of-sight-blocked"
+                // A one-high shaft cut can also expose a far corner before its ordered lower row.
                 val lowerRowEnd = geometry.lowerClearanceEnd(task.exposed)
-                if (!spotSearchPending && currentNeed(city, worker)?.status == "worksite-no-access" &&
-                    task.material == Material.COBBLESTONE && block.type.isAir && effectiveProgress < lowerRowEnd) {
+                if (!spotSearchPending && failure?.status == "worksite-no-access" &&
+                    task.material == Material.COBBLESTONE && block.type.isAir &&
+                    (hiddenByCurrentCut || effectiveProgress < lowerRowEnd)) {
                     scan.deferredAirWalls += task.block
                     scan.next++
                     blocked(worker, "searching-work")

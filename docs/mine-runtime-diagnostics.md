@@ -47,3 +47,9 @@ Structural quarry worksite blockers (`worksite-no-access`, `worksite-obstacle`,
 blocker bypasses the informational cooldown; exact repeats are deduplicated.
 These include the persisted mine version/step, point and material, so a blocked
 planner with no active actor route is still visible.
+
+If a terminal `line-of-sight-blocked` seal is an AIR cell hidden by the current
+solid, non-gravity excavation, that single cut may complete first. Its previous
+frontier is then repaired before another cut, also after save/load or restart.
+Already open boundaries and liquids do not receive this exemption. Native rays,
+protection and receipt-time liquid checks remain authoritative.
