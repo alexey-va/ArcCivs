@@ -10,6 +10,7 @@ import org.bukkit.SoundCategory
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.TileState
+import org.bukkit.inventory.InventoryHolder
 import org.bukkit.block.data.BlockData
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
@@ -20,7 +21,8 @@ import java.util.concurrent.CompletableFuture
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
  * Requests may arrive on any thread. All Bukkit reads run in one lifecycle-owned timer,
- * sharing a time-bounded 2048-cell budget across at most four scans. No scan loads a chunk or changes a block.
+ * sharing a time-bounded 2048-cell budget across at most four scans. No scan loads a chunk.
+ * Explicit warehouse repair is the guarded maintenance mutation in the same native budget.
  * Final revalidation must follow publication of the durable, protected construction footprint.
  */
 class CivsWorld(
@@ -49,6 +51,11 @@ class CivsWorld(
         cells: List<ArcSchematicBlock>, previous: CivBuilding?): CompletableFuture<CivPlacementPlan> = admit {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
         Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true)
+    }
+
+    internal fun repairWarehouse(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
+        requireCivs(cells.size in 1..512 && cells.map { it.position }.distinct().size == cells.size, "invalid-plan")
+        WarehouseRepair(city.id, city.owner, city.worldId, building, cells.toList())
     }
 
     fun revalidate(plan: CivPlacementPlan, owner: UUID): CompletableFuture<Unit> = admit {
@@ -239,6 +246,34 @@ class CivsWorld(
                 synchronized(monitor) { pending.remove(this) }
                 future.completeExceptionally(failure)
             }
+        }
+    }
+
+    private inner class WarehouseRepair(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+        private val cells: List<CivPlanBlock>) : Scan<Map<String, Int>>(cityId, owner, worldId, building) {
+        private val counts = linkedMapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "occupied" to 0, "denied" to 0)
+        override fun validateIdentity(city: Settlement?) {
+            requireCivs(city?.pendingDeletion == null && city?.building(building.id) == building &&
+                building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE &&
+                city.construction?.buildingId != building.id, "stale-building")
+        }
+        override fun step() {
+            if (index == cells.size) return finish(counts.toMap())
+            val cell = cells[index++]
+            checkCell(cell.position)
+            requireCivs(cell.before.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
+                cell.after.substringBefore('[') in setOf("minecraft:chest", "minecraft:air"), "invalid-plan")
+            val block = read(cell.position)
+            fun count(key: String) { counts[key] = counts.getValue(key) + 1 }
+            if (block.blockData.asString == parse(cell.after).asString) { count("unchanged"); return }
+            if (block.blockData.asString != parse(cell.before).asString) { count("conflicts"); return }
+            val state = block.state
+            if ((state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true ||
+                (state as? TileState)?.persistentDataContainer?.keys?.isNotEmpty() == true) { count("occupied"); return }
+            val after = parse(cell.after)
+            if (!canModify(owner, block, after.material)) { count("denied"); return }
+            block.setBlockData(after, false)
+            count("changed")
         }
     }
 

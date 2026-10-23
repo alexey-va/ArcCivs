@@ -103,6 +103,6 @@ internal class CivsSupplyPlanning(
         }.orEmpty()
         return CivSupplySnapshot(city.id, CivSupplyObservation(civSupplyInputs(city), requireNotNull(capture.result)), requireNotNull(stores),
             requests, couriers.toList(), workerSources.toList(), existing.toMap(), materials.mapValues { it.value.maxStackSize },
-            constructionTargets, craftWorkers.toList(), crafts.toMap(), constructionId = city.construction?.id)
+            constructionTargets, craftWorkers.toList(), crafts.toMap(), constructionId = city.construction?.id, stockTargets = CivsCarpentry.stockTargets(city))
     }
 }

@@ -20,7 +20,7 @@ production. Disabling or losing the permission stops new issuance. Console-only
 `civs settings <city UUID> <setting> <on|off>` supports bounded operational setup;
 the service still checks the owner's testing permission when enabling a setting.
 
-ArcCore host 0.1.19 and bundled Core helpers 2.7.54 are mandatory; the shared
+ArcCore host 0.1.19 and bundled Core helpers 2.7.55 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
@@ -95,6 +95,9 @@ centres the actor before climbing. Door opening remains owner-thread movement.
 Movement revalidates live collision and support before accepting a step and
 spends a tick's remaining distance across clear waypoints, without
 banking time behind an obstruction or cutting through a step or corner.
+On descending terrain, horizontal walking speed and bounded falling velocity
+advance independently. Swept feet and the actual packet chord still validate
+collision; reaching a lower intermediate cell does not insert a landing pause.
 An interrupted ladder route can settle onto real support in its current column.
 Preparation and replanning never consume the walking timeout or stall clock.
 Capacity, capture and search-budget failures back off and retry without safe
@@ -245,7 +248,13 @@ Ordinary hall workers are scribes: one observed 60-second work session at the
 workplace converts three plain PAPER and one LEATHER into one BOOK. Inputs,
 output, cycle token and internal profession point commit in the same receipt.
 SAWMILL accepts finite orders from unpaid active construction and operating
-supply demand. The existing city-wide async supply snapshot allocates one
+supply demand, followed by a small style-specific warehouse stock target.
+One staffed active warehouse per city holds at most97 target items across11
+kinds; level-two container targets retain their recipe unlock. Existing
+warehouse/workshop/bag/cargo stock is counted once. Real demand and its raw
+ingredients take priority; an optional batch needs its actual next inputs and
+both workshop and destination space. No buffer work issues free materials.
+The existing city-wide async supply snapshot allocates one
 native-sized recipe batch per carpenter, including real intermediate batches.
 Level one unlocks structural woodwork, level two containers and equipment,
 and level three advanced workstations. Generic native ingredient tags accept

@@ -424,6 +424,46 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("warehouse rack maintenance changes only exact authored empty shelves and is idempotent") {
+        worldScenario { s ->
+            val building = worldBuilding(worldBox(0, 3)).copy(type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, building); s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.BOOKSHELF
+            s.world.getBlockAt(1, 64, 0).type = Material.GOLD_BLOCK
+            s.world.getBlockAt(2, 64, 0).type = Material.CHEST
+            val chest = s.world.getBlockAt(2, 64, 0).state as org.bukkit.block.Chest
+            chest.blockInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val cells = (0..2).map { x -> CivPlanBlock(CivPosition(x, 64, 0), "minecraft:bookshelf",
+                "minecraft:chest[facing=north,type=single,waterlogged=false]") }
+            val repaired = s.subject.repairWarehouse(city, building, cells)
+            s.scheduler.tick()
+            completed(repaired) shouldBe mapOf("changed" to 1, "unchanged" to 1, "conflicts" to 1, "occupied" to 0, "denied" to 0)
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.CHEST
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.GOLD_BLOCK
+            chest.blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+            val again = s.subject.repairWarehouse(city, building, cells)
+            s.scheduler.tick()
+            completed(again).getValue("changed") shouldBe 0
+        }
+    }
+
+    test("warehouse repair preserves books inside an authored chiseled bookshelf") {
+        worldScenario { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, building); s.cities += city
+            val block = s.world.getBlockAt(0, 64, 0); block.type = Material.CHISELED_BOOKSHELF
+            val shelf = block.state as org.bukkit.block.ChiseledBookshelf
+            shelf.inventory.setItem(0, ItemStack(Material.BOOK))
+            shelf.update(true, false)
+            val repair = s.subject.repairWarehouse(city, building, listOf(CivPlanBlock(CivPosition(0, 64, 0),
+                block.blockData.asString, "minecraft:chest[facing=north,type=single,waterlogged=false]")))
+            s.scheduler.tick()
+            completed(repair).getValue("occupied") shouldBe 1
+            block.type shouldBe Material.CHISELED_BOOKSHELF
+            (block.state as org.bukkit.block.ChiseledBookshelf).inventory.getItem(0) shouldBe ItemStack(Material.BOOK)
+        }
+    }
+
     test("site capture and construction allow blocked unsupported and wet approaches without changing them") {
         worldScenario { s ->
             val building = worldBuilding(worldBox(0, 0))

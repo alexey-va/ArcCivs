@@ -89,10 +89,21 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     route.searching shouldBe false
                     route.failure shouldBe null
                 }
+                var previousFall = 0.0
                 repeat(800) {
                     route.move(at, .172) { true }?.let { next ->
-                        withClue("from=$at next=$next") { (at.distance(next) <= .172001) shouldBe true }
-                        citizenPacketBodyClear(world, CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                        withClue("from=$at next=$next") {
+                            // Gravity is independent of walking; the speed argument is a stride multiplier.
+                            val walking = next.clone().also { if (it.y < at.y) it.y = at.y }
+                            (at.distance(walking) <= .215 * .172 + .000001) shouldBe true
+                            val fall = (at.y - next.y).coerceAtLeast(0.0)
+                            (fall <= maxOf(.215 * .172, minOf(1.0, (previousFall + .08) * .98)) + .000001) shouldBe true
+                            for (sample in 0..16) {
+                                val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 16.0))
+                                citizenPacketBodyClear(world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                            }
+                            previousFall = fall
+                        }
                         at = next
                         reached += next
                     }

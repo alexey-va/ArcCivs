@@ -19,6 +19,39 @@ class CivsCitizenAppearanceTest : FunSpec({
         }
     }
 
+    test("reviewed signed skin identities stay in the matching visual pool") {
+        val skins = loadCitizenSkins()
+        skins.filter { it.sex == CivSex.MALE }.map { it.name } shouldBe
+            listOf("civs-citizen-1", "civs-citizen-2", "civs-citizen-4")
+        skins.filter { it.sex == CivSex.FEMALE }.map { it.name } shouldBe
+            listOf("civs-citizen-3", "civs-citizen-female-1")
+        // The historical "Лука / Medieval Boy" label did not describe this signed asset.
+        val fairHair = skins.single { it.name == "civs-citizen-3" }
+        val texture = JsonParser.parseString(String(Base64.getDecoder().decode(fairHair.texture), Charsets.UTF_8))
+        URI.create(texture.asJsonObject.getAsJsonObject("textures").getAsJsonObject("SKIN").get("url").asString)
+            .path shouldBe "/texture/7d2b48a91b2e1f4387a45981023cf9d7da88c7cbd67d99eee4cbbf8ce0face35"
+        fairHair.sex shouldBe CivSex.FEMALE
+    }
+
+    test("existing named residents with explicit or legacy sex select the corrected deterministic pool") {
+        val skins = loadCitizenSkins()
+        val residents = listOf(
+            Triple("Вячеслав", "c4302bcb-3060-436c-9eed-4b4a9a017a57", "civs-citizen-1"),
+            Triple("Дмитрий", "9e0dab98-8258-49ec-930c-10a3a320a2fd", "civs-citizen-4"),
+        )
+        for ((name, id, skin) in residents) for (sex in listOf(null, CivSex.MALE)) {
+            val worker = CivWorker(UUID.fromString(id), name, null, sex = sex)
+            citizenSkin(skins, worker).name shouldBe skin
+            citizenSkin(skins, worker).sex shouldBe CivSex.MALE
+            citizenSkin(loadCitizenSkins(), worker.copy(assignment = UUID(0, 7))) shouldBe citizenSkin(skins, worker)
+        }
+        for (sex in listOf(null, CivSex.FEMALE)) {
+            val worker = CivWorker(UUID.fromString("71c4eaae-8a08-45d4-9537-b58ec387006a"), "Валерия", null, sex = sex)
+            citizenSkin(skins, worker).name shouldBe "civs-citizen-3"
+            citizenSkin(skins, worker).sex shouldBe CivSex.FEMALE
+        }
+    }
+
     test("bundled skins have signed texture snapshots and stable varied resident selection") {
         val skins = loadCitizenSkins()
         (skins.size >= 2) shouldBe true

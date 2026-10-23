@@ -19,6 +19,8 @@ class CivsCommand(
     private val debugState: (String, UUID?, UUID?) -> Map<String, Any?> = { _, _, _ -> mapOf("available" to false) },
     private val configureSetting: (UUID, CivSettlementSetting, Boolean) -> java.util.concurrent.CompletableFuture<Unit> = { _, _, _ ->
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
+    private val repairWarehouse: (UUID, UUID) -> java.util.concurrent.CompletableFuture<Map<String, Int>> = { _, _ ->
+        java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (!sender.hasPermission("arccivs.use")) {
@@ -28,6 +30,20 @@ class CivsCommand(
         if (args.firstOrNull() == "debug") {
             if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
             else CivsDebug.lines(args.drop(1), debugState).forEach(sender::sendMessage)
+            return true
+        }
+        if (args.firstOrNull() == "repair-warehouse") {
+            if (sender is Player || !sender.hasPermission("arccivs.admin")) {
+                sender.sendMessage(text.error(sender as? Player, "reason.not-authorized")); return true
+            }
+            val city = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val building = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            if (args.size != 3 || city == null || building == null) sender.sendMessage("Usage: civs repair-warehouse <city UUID> <building UUID>")
+            else repairWarehouse(city, building).whenCompleteSync(tasks) { counts, failure ->
+                sender.sendMessage("ARCCIVS_WAREHOUSE_REPAIR " + Gson().toJson(mapOf("city" to city, "building" to building,
+                    "completed" to (failure == null), "counts" to counts,
+                    "failure" to failure?.let { CivsDiagnostics.rejection(it)?.reason ?: it.javaClass.simpleName })))
+            }
             return true
         }
         if (args.firstOrNull() == "settings") {

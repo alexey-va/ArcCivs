@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "title": "ArcCivs warehouse capacity and bounded carpentry stock buffer",
+  "assumptions": [
+    "Low/base/high sensitivity: 1/5/10 owners, one supplied carpenter, 0.25/1/4 active hours per day; not measured sessions.",
+    "Existing 60000 ms interval and native recipes remain unchanged: at most60 batches per carpenter-hour; hunger, route, stock capacity and ingredient availability reduce this.",
+    "Without outstanding demand baseline idle production is0. The buffer after change may use15/60/240 paid batches per operator-day only while a threshold is missing. Native planks4 per consumed log are the output envelope, not a mix of every recipe at once.",
+    "At most one warehouse per city holds a style-specific target:32planks,16sticks,12ladders,12slabs,8stairs,6fences,2gates,3doors,2trapdoors; level2 adds2chests+2barrels.97items total across11kinds; no lifetime grant or free material.",
+    "Stock on hand, in carpenter inventories, existing outputs and durable cargo is counted once. Ordinary/construction requests take priority. Missing source ingredients or destination capacity prevent buffer production.",
+    "Warehouse rack replacement increases physical slot capacity but does not create stocked items. A one-time bounded authored-rack migration must preserve nonempty/custom blocks.",
+    "Current SELL remains active; intended SELL-to-contract is a separate unchanged future scenario. No item-to-currency exchange or price change is inferred.",
+    "Verified warehouse added physical slots (levels1/2/3): Nordic486/1512/3078, Medievaloak324/378/486, Caledonia351/405/405; existing27-slot control barrel unchanged.339 authored rack cells become275 empty chests and64 air; no non-rack changes. MedievaloakL1:27→351 slots,0 stocked items issued."
+  ],
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "carpentry_direct_vault",
+          "kind": "mint",
+          "source": "CivsCarpentry stock intents using existing paid inventory receipts",
+          "basis": "No Vault API, price or payout is introduced",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "carpentry_direct_tokens",
+          "kind": "mint",
+          "source": "CivsCarpentry stock intents using existing paid inventory receipts",
+          "basis": "No premium token grant or charge",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "carpentry_direct_player_xp",
+          "kind": "mint",
+          "source": "CivsCarpentry stock intents using existing paid inventory receipts",
+          "basis": "No Minecraft player XP grant; resident profession skill remains a separate capped statistic",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "plank_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "idle_buffer_native_plank_upper_envelope",
+          "kind": "item",
+          "source": "CivsCarpentry stock intents using existing paid inventory receipts",
+          "basis": "No idle-demand batches before; buffer may perform unchanged4-plank/log batches until finite targets are satisfied.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

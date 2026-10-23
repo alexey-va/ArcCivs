@@ -57,6 +57,7 @@ internal class CitizenPacketRoute(
     private var directSearch: CitizenNavigationSearch? = null
     private var directCapture: CitizenNavigationCapture? = null
     private val directTerrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
+    private var fallingSpeed = 0.0
     var preparationPhase = "queued"
         private set
     var capturedBlocks = 0
@@ -187,16 +188,30 @@ internal class CitizenPacketRoute(
         // A large handoff turns in place first. Translating backwards while the body
         // catches up makes the native humanoid renderer reverse its own body heading.
         val stride = .215 * speed.coerceIn(.1, 5.0)
+        // Route gravity has its own budget; a full-block drop must not consume the
+        // horizontal walk. Bound each fall to one route level and the player sweep.
+        val fallStride = ((fallingSpeed + .08) * .98).coerceAtMost(1.0)
+        fun fallInPlace(): Location? {
+            val entry = path.firstOrNull() ?: return null
+            if (fallingSpeed == 0.0 || !gravityStep(entry, from.y)) return null
+            val candidate = fall(from, from.clone().also { it.y = max(entry.point.y, from.y - fallStride) }) ?: return null
+            val end = CitizenPoint(candidate.x, candidate.y, candidate.z)
+            return candidate.takeIf { it.y < from.y - .000001 && permits(observed, end) &&
+                citizenPacketSegmentClear(world, observed, end, false, observed, null) && movementAllowed(from, it) }
+        }
         val heading = heading(from, stride)
         val pitch = from.pitch + (-from.pitch).coerceIn(-CITIZEN_TURN_PER_TICK, CITIZEN_TURN_PER_TICK)
         if (heading != null && abs(citizenAngleChange(from.yaw, heading)) > 65f) {
             turning = true
-            return from.clone().also { it.yaw = citizenTurn(from.yaw, heading, CITIZEN_TURN_PER_TICK); it.pitch = pitch }
+            val point = fallInPlace() ?: from.clone()
+            fallingSpeed = if (abs(from.y - point.y - fallStride) < .000001) fallStride else 0.0
+            return point.also { it.yaw = citizenTurn(from.yaw, heading, CITIZEN_TURN_PER_TICK); it.pitch = pitch }
         }
         var point = from.clone()
         var remaining = stride
         var moved = false
         var earned = 0.0
+        var usedGravity = false
         var previousDirection: org.bukkit.util.Vector? = null
         // A normal step can cross a cell centre. Spend its remainder in this same tick,
         // never save it for a later tick or accelerate after an obstruction clears.
@@ -211,8 +226,9 @@ internal class CitizenPacketRoute(
                 !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite() || !openDoor(to)) {
                 fail("path-changed"); break
             }
-            // Lift before crossing an ascending step, and centre ladder entry before climbing.
-            // Descending steps can keep moving forward once the actual packet chord clears the edge.
+            // Lift before ascending and centre ladder entry. Ordinary downhill travel
+            // follows the horizontal route while gravity settles onto native support.
+            val descending = gravityStep(entry, point.y)
             val waypoint = to.clone()
             if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
                 (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
@@ -220,38 +236,38 @@ internal class CitizenPacketRoute(
             } else if (to.y > point.y + .0001) {
                 waypoint.x = point.x
                 waypoint.z = point.z
-            } else if (to.y < point.y - .0001 &&
-                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
-                val descent = to.toVector().subtract(point.toVector())
-                val candidate = point.clone().add(descent.multiply(min(1.0, remaining / descent.length())))
-                val a = CitizenPoint(point.x, point.y, point.z)
-                val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
-                // The route's raised L-shaped step test alone cannot validate a diagonal packet.
-                if (entry.action != CitizenRouteAction.STEP ||
-                    !citizenPacketSegmentClear(world, a, b, false, a, null)) waypoint.y = point.y
-            }
+            } else if (descending || to.y < point.y - .0001 &&
+                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) waypoint.y = point.y
             val delta = waypoint.toVector().subtract(point.toVector())
             val distance = delta.length()
             if (distance < .0001) {
                 if (point.distanceSquared(to) < .000001) { path.removeFirst(); continue }
-                break
+                if (!descending) break
             }
-            val direction = delta.clone().multiply(1.0 / distance)
+            val direction = if (distance < .0001) org.bukkit.util.Vector() else delta.clone().multiply(1.0 / distance)
             if (previousDirection?.let { previous ->
                     (abs(previous.y) > .0001 || abs(direction.y) > .0001) &&
                         previous.clone().crossProduct(direction).lengthSquared() > .000001
                 } == true) break
             val advance = min(distance, remaining)
-            val candidate = if (advance == distance) waypoint else point.clone().add(direction.clone().multiply(advance))
+            var candidate = if (advance == distance) waypoint else point.clone().add(direction.clone().multiply(advance))
+            if (descending) {
+                val lowered = fall(from, candidate.clone().also { it.y = max(to.y, from.y - fallStride) })
+                if (lowered == null) { fail("movement-blocked"); break }
+                candidate = lowered
+                usedGravity = true
+            }
+            if (point.distanceSquared(candidate) < .000000000001) break
             val a = CitizenPoint(point.x, point.y, point.z)
             val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
-            if (!permits(a, b) || !citizenPacketStepClear(world, a, b, false)) {
+            if (!permits(a, b) || !(if (descending) citizenPacketSegmentClear(world, a, b, false, a, null)
+                    else citizenPacketStepClear(world, a, b, false))) {
                 fail("movement-blocked"); break
             }
             // A client interpolates one straight segment between packets. Adjacent path legs
             // may each be clear while their shortcut clips a corner; stop at that corner then.
             val origin = CitizenPoint(from.x, from.y, from.z)
-            if (moved && (!permits(origin, b) || !citizenPacketStepClear(world, origin, b, false))) break
+            if (moved && (!permits(origin, b) || !citizenPacketSegmentClear(world, origin, b, false, origin, null))) break
             if (!movementAllowed(from, candidate)) {
                 waitingForCollision = true
                 break
@@ -261,11 +277,22 @@ internal class CitizenPacketRoute(
             moved = true
             remaining -= advance
             previousDirection = direction
-            if (point.distanceSquared(to) < .000001) path.removeFirst()
+            // A supported lower node still constrains the route, but its centre is
+            // not a stop in mid-air. Keep the last landing and every climb boundary.
+            val nextEntry = path.elementAtOrNull(1)
+            if (point.distanceSquared(to) < .000001 || descending &&
+                abs(point.x - to.x) < .000001 && abs(point.z - to.z) < .000001 &&
+                nextEntry != null && nextEntry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
+                nextEntry.point.y <= to.y + .0001) path.removeFirst()
             if (path.isEmpty()) { finished = true; break }
-            if (remaining < .000001) break
+            if (remaining < .000001 || advance < .000001) break
         }
-        if (!moved) return null
+        if (!moved) {
+            point = fallInPlace() ?: return null
+            earned += path.firstOrNull()?.walked(observed, CitizenPoint(point.x, point.y, point.z)) ?: 0.0
+            usedGravity = true
+        }
+        fallingSpeed = if (usedGravity && abs(from.y - point.y - fallStride) < .000001) fallStride else 0.0
         forwardProgress += min(earned, from.distance(point))
         val dx = point.x - from.x
         val dz = point.z - from.z
@@ -278,6 +305,32 @@ internal class CitizenPacketRoute(
         }
         point.pitch = pitch
         return point
+    }
+
+    private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.point.y < y - .0001 &&
+        entry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
+        (floor(entry.start.x) != floor(entry.point.x) || floor(entry.start.z) != floor(entry.point.z))
+
+    /** Clip gravity against the swept feet, then validate the actual packet chord above. */
+    private fun fall(from: Location, candidate: Location): Location? {
+        val floors = mutableListOf<BoundingBox>()
+        for (x in floor(min(from.x, candidate.x) - .299).toInt()..floor(max(from.x, candidate.x) + .299).toInt())
+            for (z in floor(min(from.z, candidate.z) - .299).toInt()..floor(max(from.z, candidate.z) + .299).toInt()) {
+                if (!citizenChunkReady(world, x shr 4, z shr 4)) return null
+                for (y in floor(candidate.y).toInt() - 1..floor(from.y).toInt()) {
+                    if (y !in minimumY until maximumY) return null
+                    floors += citizenCollisionSnapshot(world, x, y, z).boxes.filter {
+                        it.maxY <= from.y + .000001 && it.maxY >= candidate.y
+                    }
+                }
+            }
+        val clipped = citizenSlideBody(from.toVector(), candidate.toVector(), .299, 1.8, .299, floors)
+        if (clipped != null) {
+            candidate.y = max(candidate.y, clipped.position.y)
+            // The collision solver leaves a tiny separation; feet/arrival use the exact native top.
+            floors.firstOrNull { abs(it.maxY - candidate.y) < .000001 }?.let { candidate.y = it.maxY }
+        }
+        return candidate
     }
 
     /**

@@ -32,6 +32,99 @@ class CivsCarpentryTest : FunSpec({
         craft(input) shouldBe emptyMap()
     }
 
+    test("idle buffer uses paid native batches and counts warehouse and workshop stock once") {
+        val initial = carpenterSnapshot("OAK_PLANKS", 4, mapOf("OAK_LOG" to 2L)).copy(requests = emptyList(),
+            stockTargets = mapOf(WAREHOUSE to mapOf("OAK_PLANKS" to 8L)))
+        val first = craft(initial).values.single()
+        first.targetBuildingId shouldBe WAREHOUSE
+        first.inputs shouldBe mapOf("OAK_LOG" to 1L)
+        first.amount shouldBe 4L
+        // A finite stock goal is replenished one funded batch at a time.
+        craft(initial.copy(stores = initial.stores + (CARPENTER to initial.stores.getValue(CARPENTER)
+            .copy(stock = mapOf("OAK_LOG" to 1L))))).values.single().inputs shouldBe mapOf("OAK_LOG" to 1L)
+        val supplied = initial.copy(stores = initial.stores +
+            (WAREHOUSE to initial.stores.getValue(WAREHOUSE).copy(stock = mapOf("OAK_PLANKS" to 4L))) +
+            (CARPENTER to initial.stores.getValue(CARPENTER).copy(stock = mapOf("OAK_PLANKS" to 4L))))
+        craft(supplied) shouldBe emptyMap()
+        val short = supplied.copy(stores = supplied.stores +
+            (CARPENTER to supplied.stores.getValue(CARPENTER).copy(stock = mapOf("OAK_LOG" to 1L))))
+        craft(short).values.single().amount shouldBe 4L
+    }
+
+    test("stock work stops for missing inputs or full destination and respects recipe level") {
+        val base = carpenterSnapshot("CHEST", 2, mapOf("OAK_PLANKS" to 16L)).copy(requests = emptyList(),
+            stockTargets = mapOf(WAREHOUSE to mapOf("CHEST" to 2L)))
+        craft(base) shouldBe emptyMap()
+        val unlocked = base.copy(craftWorkers = base.craftWorkers.map { it.copy(level = 2) })
+        craft(unlocked).values.single().material shouldBe "CHEST"
+        val oneBatch = unlocked.copy(stores = unlocked.stores + (CARPENTER to unlocked.stores.getValue(CARPENTER)
+            .copy(stock = mapOf("OAK_PLANKS" to 8L))))
+        craft(oneBatch).values.single().let { job ->
+            job.material shouldBe "CHEST"
+            job.amount shouldBe 1L
+            job.inputs shouldBe mapOf("OAK_PLANKS" to 8L)
+        }
+        val ladders = oneBatch.copy(stockTargets = mapOf(WAREHOUSE to mapOf("LADDER" to 12L)))
+        craft(ladders).values.single().let { job ->
+            job.material shouldBe "STICK"
+            job.inputs shouldBe mapOf("OAK_PLANKS" to 2L)
+        }
+        craft(unlocked.copy(stores = unlocked.stores + (WAREHOUSE to unlocked.stores.getValue(WAREHOUSE)
+            .copy(capacity = CivSupplyCapacity(0, emptyMap()))))) shouldBe emptyMap()
+        craft(unlocked.copy(stores = unlocked.stores.mapValues { it.value.copy(stock = emptyMap()) })) shouldBe emptyMap()
+    }
+
+    test("real demand preempts a retained optional stock batch without minting its promised output") {
+        val base = carpenterSnapshot("OAK_PLANKS", 4, mapOf("OAK_LOG" to 4L, "STICK" to 14L)).copy(
+            requests = emptyList(), stockTargets = mapOf(WAREHOUSE to mapOf("OAK_PLANKS" to 8L)))
+        val optional = craft(base)
+        optional.values.single().material shouldBe "OAK_PLANKS"
+        val urgent = base.copy(craftJobs = optional, requests = listOf(CivSupplyRequest(CONSUMER, "LADDER", 3, 0, true)),
+            constructionId = UUID(0, 77))
+        val replacement = craft(urgent).values.single()
+        replacement.material shouldBe "LADDER"
+        replacement.targetBuildingId shouldBe CONSUMER
+        replacement.constructionId shouldBe UUID(0, 77)
+        base.stores.getValue(CARPENTER).stock.getValue("OAK_LOG") shouldBe 4L
+    }
+
+    test("raw construction inputs are reserved before optional conversion to buffer products") {
+        val one = carpenterSnapshot("OAK_LOG", 2, mapOf("OAK_LOG" to 2L)).copy(
+            requests = listOf(CivSupplyRequest(CONSUMER, "OAK_LOG", 2, 0, true)),
+            stockTargets = mapOf(WAREHOUSE to mapOf("OAK_PLANKS" to 4L)))
+        craft(one) shouldBe emptyMap()
+        val spare = one.copy(stores = one.stores + (CARPENTER to one.stores.getValue(CARPENTER)
+            .copy(stock = mapOf("OAK_LOG" to 3L))))
+        craft(spare).values.single().inputs shouldBe mapOf("OAK_LOG" to 1L)
+    }
+
+    test("buffer promises and durable warehouse cargo suppress duplicate batches across residents") {
+        val one = carpenterSnapshot("OAK_PLANKS", 4, mapOf("OAK_LOG" to 3L)).copy(requests = emptyList(),
+            stockTargets = mapOf(WAREHOUSE to mapOf("OAK_PLANKS" to 4L)))
+        val two = one.copy(craftWorkers = one.craftWorkers + one.craftWorkers.single().copy(workerId = UUID(0, 11)))
+        val accepted = craft(two)
+        accepted.size shouldBe 1
+        craft(two.copy(craftJobs = accepted)) shouldBe accepted
+        val cargo = CivCargo(UUID(0, 21), WAREHOUSE, CARPENTER, WAREHOUSE, CivPosition(0, 64, 0), "OAK_PLANKS", 4, true)
+        craft(two.copy(retained = mapOf(UUID(0, 20) to CivCourierPlan(cargo, WAREHOUSE,
+            CivPosition(10, 64, 0), true)))) shouldBe emptyMap()
+    }
+
+    test("buffer output remains physical workshop excess and is carried to the warehouse") {
+        val one = carpenterSnapshot("OAK_PLANKS", 4).copy(requests = emptyList(),
+            stockTargets = mapOf(WAREHOUSE to mapOf("OAK_PLANKS" to 4L)),
+            couriers = listOf(CivSupplyCourier(UUID(0, 20), WAREHOUSE, 0, CivPosition(10, 64, 0), mapOf("OAK_PLANKS" to 64L))))
+        val produced = one.copy(stores = one.stores + (CARPENTER to one.stores.getValue(CARPENTER)
+            .copy(stock = mapOf("OAK_PLANKS" to 4L))))
+        val next = allocateCivSupplies(produced)
+        next.crafts shouldBe emptyMap()
+        next.plans.values.single().cargo.let { cargo ->
+            cargo.sourceBuildingId shouldBe CARPENTER
+            cargo.targetBuildingId shouldBe WAREHOUSE
+            cargo.amount shouldBe 4L
+        }
+    }
+
     test("mixed native wood groups are pinned without substituting species specific recipes") {
         val chest = craft(carpenterSnapshot("CHEST", 1, mapOf("OAK_PLANKS" to 4L, "SPRUCE_PLANKS" to 4L), level = 2)).values.single()
         chest.material shouldBe "CHEST"

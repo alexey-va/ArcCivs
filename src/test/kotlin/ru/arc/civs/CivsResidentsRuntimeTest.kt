@@ -1037,12 +1037,25 @@ class CivsResidentsRuntimeTest : FunSpec({
             val destination = Location(h.world, control.x + .5, control.y.toDouble(), control.z + .5)
             // Drain the real 1ms search budget without advancing the recovery timeout.
             // Cold mock block reads may need more calls, but every movement must stay continuous.
+            var previousFall = 0.0
             for (index in 0 until 2_000) {
                 val before = actor.location
                 h.navigate()
                 if ((index + 1) % 20 == 0) h.owner.pulse(2_000L)
-                (before.distance(actor.location) <= .215001) shouldBe true
-                if (actor.location.distanceSquared(destination) <= 8.0 * 8.0) break
+                val after = actor.location
+                withClue("tick=$index from=$before next=$after ${h.navigationState()}") {
+                    // Descending the ingress keeps the walk stride while gravity settles onto support.
+                    val walking = after.clone().also { if (it.y < before.y) it.y = before.y }
+                    (before.distance(walking) <= .215001) shouldBe true
+                    val fall = (before.y - after.y).coerceAtLeast(0.0)
+                    (fall <= maxOf(.215, minOf(1.0, (previousFall + .08) * .98)) + .000001) shouldBe true
+                    for (sample in 0..16) {
+                        val point = before.clone().add(after.toVector().subtract(before.toVector()).multiply(sample / 16.0))
+                        citizenPacketBodyClear(h.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                    }
+                    previousFall = fall
+                }
+                if (after.distanceSquared(destination) <= 8.0 * 8.0) break
             }
             val at = actor.location
             (at.distanceSquared(destination) <= 8.0 * 8.0) shouldBe true

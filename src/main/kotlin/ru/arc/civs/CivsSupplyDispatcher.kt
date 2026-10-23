@@ -34,7 +34,8 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
     val retained: Map<UUID, CivCourierPlan>, val stackSizes: Map<String, Int>,
     val constructionTargets: Map<UUID, UUID> = emptyMap(),
     val craftWorkers: List<CivCraftWorker> = emptyList(), val craftJobs: Map<UUID, CivCraftJob> = emptyMap(),
-    val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null) {
+    val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null,
+    val stockTargets: Map<UUID, Map<String, Long>> = emptyMap()) {
     internal fun detached() = copy(inputKey = Unit,
         stores = stores.mapValues { (_, value) -> value.copy(stock = value.stock.toMap(), desiredStock = value.desiredStock.toMap(),
             capacity = value.capacity.copy(partialRoom = value.capacity.partialRoom.toMap())) },
@@ -42,7 +43,8 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
         workerSources = workerSources.map { it.copy(excess = it.excess.toMap()) }, retained = retained.toMap(),
         stackSizes = stackSizes.toMap(), constructionTargets = constructionTargets.toMap(),
         craftWorkers = craftWorkers.map { it.copy(carried = it.carried.toMap()) },
-        craftJobs = craftJobs.mapValues { it.value.copy(inputs = it.value.inputs.toMap()) })
+        craftJobs = craftJobs.mapValues { it.value.copy(inputs = it.value.inputs.toMap()) },
+        stockTargets = stockTargets.mapValues { it.value.toMap() })
 }
 
 /**

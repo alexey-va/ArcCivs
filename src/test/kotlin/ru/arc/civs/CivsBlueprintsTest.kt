@@ -34,6 +34,27 @@ class CivsBlueprintsTest : FunSpec({
         shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("nordic", BuildingType.HOUSE, 4) }
     }
 
+    test("warehouse maintenance derives private rotated rack differences and rejects unrelated changes") {
+        val at = ArcSchematicPoint(0, 0, 0)
+        val before = BlueprintCellsSnapshot(at, at, at, mapOf(at to "minecraft:bookshelf"))
+        val after = BlueprintCellsSnapshot(at, at, at, mapOf(at to "minecraft:chest[facing=south,type=single,waterlogged=false]"))
+        val libraries = BlueprintLibraries()
+        val id = CivsBlueprints.schematicId("medievaloak", BuildingType.WAREHOUSE, 1)
+        every { libraries.source.load("civs/legacy-warehouse-racks/medievaloak/warehouse1", any()) } returns CompletableFuture.completedFuture(before)
+        every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(after)
+        every { libraries.source.transform(any(), any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        val building = blueprintBuilding(before, CivPosition(12, 64, -10), at).copy(type = BuildingType.WAREHOUSE,
+            phase = BuildingPhase.ACTIVE, schematicId = id, rotation = 180)
+        libraries.subject.use { subject ->
+            subject.warehouseStorageRepair(building).join() shouldBe listOf(CivPlanBlock(CivPosition(12, 64, -10),
+                "minecraft:bookshelf", "minecraft:chest[facing=south,type=single,waterlogged=false]"))
+            verify(exactly = 2) { libraries.source.transform(any(), ArcSchematicTransform(2, false)) }
+            every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(
+                BlueprintCellsSnapshot(at, at, at, mapOf(at to "minecraft:diamond_block")))
+            shouldThrow<java.util.concurrent.CompletionException> { subject.warehouseStorageRepair(building).join() }
+        }
+    }
+
     test("arrival uses the curated ground pivot without scanning doors or selecting a balcony") {
         // This fixture refuses all block reads: a doorless workshop and a hall
         // with an elevated door must both use the documented ground approach.

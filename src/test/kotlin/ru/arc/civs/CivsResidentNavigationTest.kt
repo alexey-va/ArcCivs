@@ -448,7 +448,9 @@ class CivsResidentNavigationTest : FunSpec({
             var moved = 0
             repeat(100) {
                 route.move(at, 1.0) { true }?.let { next ->
-                    (at.distance(next) <= .215001) shouldBe true
+                    val walking = next.clone().also { if (it.y < at.y) it.y = at.y }
+                    (at.distance(walking) <= .215001) shouldBe true
+                    (at.y - next.y <= 1.000001) shouldBe true
                     for (sample in 0..10) {
                         val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
                         citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
@@ -464,7 +466,7 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
-    test("descending native stair shapes keep forward movement while lowering at the ordinary packet stride") {
+    test("descending native stair shapes keep forward movement at the ordinary horizontal packet stride") {
         MockBukkitTestRuntime.open().use {
             for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (speed in listOf(.55, .8, 1.0, 1.3)) {
                 val terrain = ResidentRouteTerrain()
@@ -495,14 +497,17 @@ class CivsResidentNavigationTest : FunSpec({
                         val next = requireNotNull(route.move(at, speed) { true }) {
                             "direction=$dx,$dz speed=$speed tick=$tick failure=${route.failure}"
                         }
-                        (at.distance(next) <= .215 * speed + .000001) shouldBe true
+                        val walking = next.clone().also { it.y = at.y }
+                        (at.distance(walking) <= .215 * speed + .000001) shouldBe true
+                        (at.y - next.y <= 1.000001) shouldBe true
                         for (sample in 0..10) {
                             val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
                             citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
                         }
                         if (next.y < at.y - .000001) {
                             descended++
-                            if ((next.x - at.x) * dx + (next.z - at.z) * dz <= .000001)
+                            if ((target.x - at.x) * dx + (target.z - at.z) * dz > .000001 &&
+                                (next.x - at.x) * dx + (next.z - at.z) * dz <= .000001)
                                 verticalOnly += "$tick: ${at.x},${at.y},${at.z} -> ${next.x},${next.y},${next.z}"
                         }
                         at = next
@@ -515,6 +520,123 @@ class CivsResidentNavigationTest : FunSpec({
                     (descended > 0) shouldBe true
                     verticalOnly shouldBe emptyList()
                 }
+            }
+        }
+    }
+
+    test("full-block downhill packet frames preserve horizontal stride through native gravity and quantization") {
+        MockBukkitTestRuntime.open().use {
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
+                for (speed in listOf(.55, 1.3)) for (surface in listOf(Material.STONE, Material.DIRT_PATH)) {
+                    val terrain = ResidentRouteTerrain()
+                    val inset = if (surface == Material.DIRT_PATH) .0625 else 0.0
+                    for (column in 0..5) {
+                        val top = 66 - minOf(column, 3)
+                        for (y in 63..top) terrain.blocks[CivPosition(dx * column, y, dz * column)] =
+                            if (y == top) surface else Material.STONE
+                    }
+                    var at = Location(terrain.world, .5, 67.0 - inset, .5,
+                        Math.toDegrees(kotlin.math.atan2(-dx.toDouble(), dz.toDouble())).toFloat(), 0f)
+                    val target = Location(terrain.world, dx * 5 + .5, 64.0 - inset, dz * 5 + .5)
+                    val route = CitizenPacketRoute(terrain.world, at, target,
+                        { p -> (0..5).any { p.x == dx * it && p.z == dz * it } && p.y in 63..67 },
+                        { _, _ -> true }, { 1.0 })
+                    route.prepare()
+                    route.failure shouldBe null
+                    fun frame(at: Location) = at.clone().also {
+                        // PacketPlayerNpc keeps precise XYZ and quantizes absolute wire endpoints.
+                        it.x = kotlin.math.round(it.x * 4096.0) / 4096.0
+                        it.y = kotlin.math.round(it.y * 4096.0) / 4096.0
+                        it.z = kotlin.math.round(it.z * 4096.0) / 4096.0
+                    }
+                    var previousFall = 0.0
+                    var fallingFrames = 0
+                    repeat(100) { tick ->
+                        if (!route.finished) {
+                            val before = frame(at)
+                            val next = requireNotNull(route.move(at, speed) { true }) {
+                                "surface=$surface direction=$dx,$dz speed=$speed tick=$tick failure=${route.failure}"
+                            }
+                            val after = frame(next)
+                            val forward = (after.x - before.x) * dx + (after.z - before.z) * dz
+                            val remaining = (target.x - at.x) * dx + (target.z - at.z) * dz
+                            val fall = (before.y - after.y).coerceAtLeast(0.0)
+                            withClue("surface=$surface direction=$dx,$dz speed=$speed tick=$tick $before -> $after") {
+                                // A straight open route spends its horizontal stride even during a full-block fall.
+                                (kotlin.math.abs(forward - minOf(.215 * speed, remaining)) <= 1.0 / 2048) shouldBe true
+                                (fall <= (previousFall + .08) * .98 + 1.0 / 1024) shouldBe true
+                                (kotlin.math.abs(citizenAngleChange(at.yaw, next.yaw)) <= CITIZEN_TURN_PER_TICK) shouldBe true
+                                for (sample in 0..16) {
+                                    val point = before.clone().add(after.toVector().subtract(before.toVector()).multiply(sample / 16.0))
+                                    citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                                }
+                            }
+                            if (fall > 1.0 / 4096) fallingFrames++
+                            previousFall = fall
+                            at = next
+                        }
+                    }
+                    route.failure shouldBe null
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    citizenPacketSupported(terrain.world, CitizenPoint(at.x, at.y, at.z)) shouldBe true
+                    (fallingFrames > 3) shouldBe true
+                }
+        }
+    }
+
+    test("a downhill resident settles while yielding and follows a walled corner without cutting its packet chord") {
+        MockBukkitTestRuntime.open().use {
+            for (corner in listOf(false, true)) {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(0, 64, 0)] = Material.STONE
+                if (corner) {
+                    for (z in -1..4) for (y in 64..66) terrain.blocks[CivPosition(2, y, z)] = Material.STONE
+                    for (y in 64..66) terrain.blocks[CivPosition(0, y, 1)] = Material.STONE
+                }
+                var at = Location(terrain.world, .5, 65.0, .5, -90f, 0f)
+                val target = if (corner) Location(terrain.world, 1.5, 64.0, 3.5)
+                    else Location(terrain.world, 5.5, 64.0, .5)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> p.y in 64..65 && if (corner) p.x in 0..1 && p.z == 0 || p.x == 1 && p.z in 0..3
+                        else p.x in 0..5 && p.z == 0 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe null
+                var yielded = false
+                var fellWhileTurning = false
+                repeat(120) { tick ->
+                    if (!route.finished) {
+                        if (!corner && !yielded && at.y in 64.0001..64.9999) {
+                            val stopped = at.clone()
+                            repeat(10) {
+                                route.move(at, 1.3, { a, b -> a.x == b.x && a.z == b.z }) { true }?.let { at = it }
+                                at.x shouldBe stopped.x
+                                at.z shouldBe stopped.z
+                                citizenPacketBodyClear(terrain.world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
+                            }
+                            at.y shouldBe 64.0
+                            route.finished shouldBe false
+                            route.waitingForCollision shouldBe true
+                            yielded = true
+                        }
+                        val next = requireNotNull(route.move(at, 1.3) { true }) { "corner=$corner tick=$tick failure=${route.failure}" }
+                        withClue("corner=$corner tick=$tick $at -> $next") {
+                            val walking = next.clone().also { it.y = at.y }
+                            (at.distance(walking) <= .279501) shouldBe true
+                            (kotlin.math.abs(citizenAngleChange(at.yaw, next.yaw)) <= CITIZEN_TURN_PER_TICK) shouldBe true
+                            for (sample in 0..16) {
+                                val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 16.0))
+                                citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                            }
+                        }
+                        if (route.turning && next.y < at.y) fellWhileTurning = true
+                        at = next
+                    }
+                }
+                route.failure shouldBe null
+                route.finished shouldBe true
+                at.distanceSquared(target) shouldBe 0.0
+                if (corner) fellWhileTurning shouldBe true else yielded shouldBe true
             }
         }
     }

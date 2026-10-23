@@ -15,7 +15,7 @@ Reviewed on 2026-10-19 against the exact signed textures supplied from the
 | --- | --- | --- | --- | --- |
 | `civs-citizen-1` | 349 — Мастер Эдгар | classic | [Medieval Blacksmith](https://www.minecraftskins.net/medievalblacksmith), Treaty | Dark beard, pale work shirt, burgundy leather apron and gloves; a clear adult craftsman. |
 | `civs-citizen-2` | 358 — Молотобоец Доран | classic | [Blacksmith](https://www.minecraftskins.net/blacksmith), Laxbax | Dark hair and beard, muted teal work shirt and brown apron; a second craftsman with a distinct face and clothing. |
-| `civs-citizen-3` | 354 — Подмастерье Лука | slim | [Medieval Boy](https://www.minecraftskins.net/medievalboy), Allykaty | Fair hair, brown work clothes and a slimmer silhouette; a younger everyday resident. |
+| `civs-citizen-3` | 354 — historical label Подмастерье Лука | slim | Historical catalog label [Medieval Boy](https://www.minecraftskins.net/medievalboy), Allykaty | Fair hair with long front strands and a feminine appearance in the exact signed texture; FEMALE pool after the 2026-10-23 visual correction below. |
 | `civs-citizen-4` | 373 — Архивариус Эдвин | classic | [Medieval Guy](https://www.minecraftskins.net/medievalguy), deginech | Brown hair, white sleeves and an olive-brown vest; an ordinary townsman. |
 
 The cast shares subdued leather, cloth and earth colors, with exposed human
@@ -84,3 +84,24 @@ Resident selection now uses the persisted sex (`CivsResidents.sex`, including it
 The female pool adds existing classic Citizens 350, Счётчица Мила: [Female Wanderer](https://www.minecraftskins.net/femalewanderer) by Oblivion, using its exact signed slim texture `6dd4b61d5b7ffbe0bd5014d3655e72838be84263c6978f6cba0b79574c7e996e`. The live source was read on 2026-10-21; texture and signature were copied byte-identically. Its front and back were inspected in the same 275×250 Prismarine fixture: pale hair, a visibly feminine face, brown/burgundy cloth and leather, with coherent slim arms and outer layers.
 
 Reproducible fixture and exact PNG: `task-artifacts/civs-resident-recovery-20261021/skins/`. This is local static skin verification; it does not establish native-client acceptance.
+
+## Corrected visual pool — 2026-10-23
+
+All five exact PNGs were inspected, including the existing front/back and
+three-quarter Prismarine renders. `civs-citizen-3` has a feminine appearance;
+its historical NPC and catalog names were an incorrect basis for assigning it
+to male residents. The resource now marks that signed asset `FEMALE`.
+The male pool contains `civs-citizen-1`, `civs-citizen-2`, and `civs-citizen-4`;
+the female pool contains `civs-citizen-3` and `civs-citizen-female-1`.
+
+The five texture/signature pairs, resource keys and overall order are unchanged.
+Resident names and persisted sex remain authoritative. The same deterministic
+UUID selection selects the corrected pool on the next NPC creation, including
+existing residents and corpse appearances; no resident-data migration is needed.
+The observed male resident IDs for Вячеслав and Дмитрий selected
+`civs-citizen-3` in the old four-entry male pool; they now select
+`civs-citizen-1` and `civs-citizen-4`, respectively. Regression coverage pins the
+reviewed asset mapping and these selections with both explicit and legacy sex.
+
+This is source and static asset verification. Runtime activation and native
+Minecraft client acceptance remain separate.

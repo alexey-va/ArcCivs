@@ -143,6 +143,24 @@ internal object CivsCarpentry {
             (job.constructionId == null || city.construction?.id == job.constructionId)
     }
 
+    /** A single shared buffer, below real requests. Native batches and level unlocks still apply. */
+    fun stockTargets(city: Settlement): Map<UUID, Map<String, Long>> {
+        if (city.inventory == null || city.pendingDeletion != null) return emptyMap()
+        val workshops = city.buildings.filter { it.type == BuildingType.SAWMILL && it.control != null &&
+            CivsRules.productionAvailable(city, it) && city.workers.any { worker ->
+                worker.assignment == it.id && worker.cargo == null && !CivsResidents.isChild(worker) } }
+        val level = workshops.maxOfOrNull { it.level } ?: return emptyMap()
+        val warehouse = city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE &&
+            it.control != null && city.workers.any { worker -> worker.assignment == it.id && !CivsResidents.isChild(worker) } }
+            .minByOrNull { it.id.toString() } ?: return emptyMap()
+        val wood = when (city.style) { "nordic", "caledonia" -> "SPRUCE"; else -> "OAK" }
+        val desired = linkedMapOf("${wood}_PLANKS" to 32L, "STICK" to 16L, "LADDER" to 12L,
+            "${wood}_SLAB" to 12L, "${wood}_STAIRS" to 8L, "${wood}_FENCE" to 6L,
+            "${wood}_FENCE_GATE" to 2L, "${wood}_DOOR" to 3L, "${wood}_TRAPDOOR" to 2L)
+        if (level >= 2) desired += mapOf("CHEST" to 2L, "BARREL" to 2L)
+        return mapOf(warehouse.id to desired)
+    }
+
     /** One capture, one finite catalog, at most one paid batch per resident. Intermediate
      * outputs are real later receipts, never virtual ingredients of a collapsed recipe. */
     fun allocate(snapshot: CivSupplySnapshot, cancelled: AtomicBoolean): CivCraftAllocation {
@@ -150,7 +168,9 @@ internal object CivsCarpentry {
         require(snapshot.craftWorkers.size <= 48 && snapshot.requests.size <= 2_048)
         val workers = snapshot.craftWorkers.associateBy(CivCraftWorker::workerId)
         val roots = snapshot.requests.filter { it.needed > it.inTransit && it.material in byMaterial }
-            .sortedWith(compareByDescending<CivSupplyRequest> { it.construction }.thenBy { it.buildingId.toString() }.thenBy { it.material })
+            .sortedWith(compareByDescending<CivSupplyRequest> { it.construction }.thenBy { it.buildingId.toString() }.thenBy { it.material }) + snapshot.stockTargets.toSortedMap(compareBy(UUID::toString)).flatMap { (target, desired) ->
+                desired.map { (material, count) -> CivSupplyRequest(target, material, count, 0) }
+            }
         val stock = linkedMapOf<String, Long>()
         fun add(target: MutableMap<String, Long>, material: String, amount: Long) {
             if (amount > 0) target[material] = Math.addExact(target[material] ?: 0, amount)
@@ -190,6 +210,12 @@ internal object CivsCarpentry {
                 }
             }
             return batches.all { job ->
+                // A buffer batch must fit both its workshop and its eventual warehouse.
+                if (job.targetBuildingId in snapshot.stockTargets) {
+                    val destination = rooms[job.targetBuildingId] ?: return@all false
+                    if (destination.fits(job.material) < job.amount) return@all false
+                    destination.take(job.material, job.amount)
+                }
                 val room = rooms[job.buildingId]
                 if (room == null || room.fits(job.material) < job.amount) false
                 else { room.take(job.material, job.amount); true }
@@ -229,7 +255,7 @@ internal object CivsCarpentry {
                 }
             }
             // Null recipe with pending=true means another accepted batch must finish first.
-            fun need(material: String, amount: Long, depth: Int = 0): Pair<CivCraftRecipe?, Boolean> {
+            fun need(material: String, amount: Long, depth: Int = 0, oneBatch: Boolean = false): Pair<CivCraftRecipe?, Boolean> {
                 budget(); check(depth <= 8)
                 val used = minOf(amount, actual[material] ?: 0)
                 actual[material] = (actual[material] ?: 0) - used
@@ -242,17 +268,38 @@ internal object CivsCarpentry {
                 }.minWithOrNull(compareBy<CivCraftRecipe> {
                     it.inputs.entries.sumOf { (input, count) -> cost(input, count) }
                 }.thenBy { it.id }) ?: return null to false
-                val batches = (missing - 1) / recipe.amount + 1
+                val batches = if (oneBatch) 1 else (missing - 1) / recipe.amount + 1
                 var pending = false
                 for ((input, count) in recipe.inputs) {
-                    val child = need(input, Math.multiplyExact(count, batches), depth + 1)
+                    val child = need(input, Math.multiplyExact(count, batches), depth + 1, oneBatch)
                     child.first?.let { return it to false }
                     pending = pending || child.second
                 }
                 return (if (pending) null else recipe) to pending
             }
+            var bufferInputsReserved = false
             for (root in roots) {
-                val next = need(root.material, root.needed - root.inTransit).first
+                if (root.buildingId in snapshot.stockTargets) {
+                    if (!bufferInputsReserved) {
+                        // Raw construction/consumer inputs have no recipe root, but still
+                        // outrank optional conversion of those same logs or planks.
+                        snapshot.requests.filter { it.material !in byMaterial }.forEach { demand ->
+                            actual[demand.material] = ((actual[demand.material] ?: 0L) -
+                                (demand.needed - demand.inTransit).coerceAtLeast(0)).coerceAtLeast(0)
+                        }
+                        bufferInputsReserved = true
+                    }
+                    costCache.clear()
+                    val room = CivSupplyRoom(snapshot.stores[root.buildingId]?.capacity ?: continue, snapshot.stackSizes)
+                    // Do not make optional intermediates when the final buffer cannot be stored.
+                    if (room.fits(root.material) <= 0) continue
+                }
+                val bufferInputs = actual.toMap().takeIf { root.buildingId in snapshot.stockTargets }
+                val next = need(root.material, root.needed - root.inTransit, oneBatch = bufferInputs != null).first
+                if (next != null && bufferInputs != null && next.inputs.any { (material, count) ->
+                        (bufferInputs[material] ?: 0L) < count }) continue
+                if (next != null && only?.targetBuildingId in snapshot.stockTargets && root.buildingId !in snapshot.stockTargets)
+                    return null
                 if (next != null && (only == null || root.buildingId == only.targetBuildingId && root.material == only.demandMaterial &&
                         next.id == only.recipeId)) return root to next
             }

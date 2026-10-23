@@ -14,6 +14,26 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("warehouse maintenance accepts only console administrators and exact city building UUIDs") {
+        val calls = mutableListOf<Pair<UUID, UUID>>()
+        val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), repairWarehouse = { city, building ->
+            calls += city to building; java.util.concurrent.CompletableFuture<Map<String, Int>>()
+        })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val city = UUID.randomUUID(); val building = UUID.randomUUID(); val command = mockk<Command>()
+        val args = arrayOf("repair-warehouse", city.toString(), building.toString())
+        router.onCommand(player, command, "civs", args)
+        router.onCommand(console, command, "civs", args + "extra")
+        router.onCommand(console, command, "civs", arrayOf("repair-warehouse", "bad", building.toString()))
+        every { console.hasPermission("arccivs.admin") } returns false
+        router.onCommand(console, command, "civs", args)
+        calls shouldBe emptyList()
+        every { console.hasPermission("arccivs.admin") } returns true
+        router.onCommand(console, command, "civs", args)
+        calls shouldBe listOf(city to building)
+    }
+
     test("console settings route has a closed grammar and never accepts player authority") {
         val city = UUID.randomUUID()
         val requests = mutableListOf<Triple<UUID, CivSettlementSetting, Boolean>>()

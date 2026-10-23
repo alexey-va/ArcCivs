@@ -223,6 +223,44 @@ class CivsService(
             }
         }
 
+    /** Explicit console maintenance only; never restores a chest again after a player removes it. */
+    internal fun repairWarehouseStorage(cityId: UUID, buildingId: UUID): CompletableFuture<Map<String, Int>> =
+        action("warehouse_storage_repair", null, "city" to cityId, "building" to buildingId) {
+            afterCityAvailable(cityId) {
+                val city = cities[cityId] ?: throw CivsRejection("no-city")
+                val building = city.building(buildingId)?.takeIf { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE }
+                    ?: throw CivsRejection("invalid-building")
+                val result = tracked<Map<String, Int>>()
+                blueprints.warehouseStorageRepair(building).whenCompleteSync(tasks) { cells, failure ->
+                    if (failure != null) { result.completeExceptionally(failure); return@whenCompleteSync }
+                    runCatching {
+                        afterCityAvailable<Map<String, Int>>(cityId) {
+                            rejectIf(cities[cityId]?.building(buildingId) != building, "stale-building")
+                            busy += cityId
+                            val repair = runCatching {
+                                world.repairWarehouse(requireNotNull(cities[cityId]), building, requireNotNull(cells))
+                            }.onFailure { busy -= cityId }.getOrThrow()
+                            repair.whenCompleteSync(tasks) { counts, repairFailure ->
+                                busy -= cityId
+                                val refreshFailure = runCatching {
+                                    cities[cityId]?.let { storage.refreshBuilding(it, building) }
+                                    supply.request(cityId)
+                                }.exceptionOrNull()
+                                if (repairFailure != null || refreshFailure != null)
+                                    result.completeExceptionally(repairFailure ?: refreshFailure!!)
+                                else {
+                                    CivsDiagnostics.event("warehouse_storage_repaired", "city" to cityId, "building" to buildingId,
+                                        "counts" to counts)
+                                    result.complete(counts)
+                                }
+                            }.toCompletableFuture()
+                        }.exceptionally { result.completeExceptionally(it); null }
+                    }.onFailure(result::completeExceptionally)
+                }
+                result
+            }
+        }
+
     private fun changedSettlementSetting(city: Settlement, setting: CivSettlementSetting, enabled: Boolean): Settlement {
         val before = city.settings ?: CivSettlementSettings()
         val after = before.with(setting, enabled)

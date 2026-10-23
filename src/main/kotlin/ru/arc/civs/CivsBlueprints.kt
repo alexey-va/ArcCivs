@@ -128,6 +128,30 @@ class CivsBlueprints(
         }, executor)
     }
 
+    /** Explicit maintenance compares the delivered legacy racks with the corrected private library.
+     * Geometry remains private; neither arbitrary blocks nor library bookshelves are repair targets. */
+    internal fun warehouseStorageRepair(building: CivBuilding): CompletableFuture<List<CivPlanBlock>> {
+        require(building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE)
+        val style = STYLES.singleOrNull { building.schematicId == schematicId(it, BuildingType.WAREHOUSE, building.level) }
+            ?: return CompletableFuture.failedFuture(CivsRejection("invalid-building"))
+        val legacy = source.load("civs/legacy-warehouse-racks/$style/warehouse${building.level}", ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        val current = source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        fun transformed(snapshot: ArcSchematicSnapshot) = source.transform(snapshot, ArcSchematicTransform(building.rotation / 90, false))
+        return legacy.thenCompose(::transformed).thenCombineAsync(current.thenCompose(::transformed), { before, after ->
+            requireVolume(before); requireVolume(after)
+            if (before.minimum != after.minimum || before.maximum != after.maximum || before.origin != after.origin)
+                throw CivsRejection("control-location-changed")
+            val replacements = worldCells(after, building.anchor).associateBy { it.position }
+            worldCells(before, building.anchor).mapNotNull { cell ->
+                val target = replacements.getValue(cell.position)
+                if (cell.blockData == target.blockData) return@mapNotNull null
+                require(cell.blockData.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
+                    target.blockData.substringBefore('[') in setOf("minecraft:chest", "minecraft:air")) { "Warehouse repair contains non-rack changes" }
+                CivPlanBlock(CivPosition(cell.position.x, cell.position.y, cell.position.z), cell.blockData, target.blockData)
+            }.also { require(it.size in 1..512) { "Warehouse repair must contain at most512 authored rack cells" } }
+        }, executor)
+    }
+
     /** A committed construction replays captured bytes, never a newer mutable library file. */
     fun recover(plan: CivPlacementPlan): CompletableFuture<ArcSchematicSnapshot> =
         captured.loadVerified(plan.id.toString(), requireNotNull(plan.capturedSha256) { "Construction capture digest is missing" }, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)

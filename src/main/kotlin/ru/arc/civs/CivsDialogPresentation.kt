@@ -5,6 +5,7 @@ import net.kyori.adventure.text.Component
 import ru.arc.paper.menu.DialogDecoration
 import ru.arc.paper.menu.DialogTextLayout
 import ru.arc.paper.menu.PaperDialogBody
+import ru.arc.paper.menu.PaperDialogButton
 import ru.arc.text.TextAlignment
 
 /** Optional text ornaments from the installed dialogue font, with native text fallback. */
@@ -21,6 +22,23 @@ internal class CivsDialogPresentation(font: String) {
         decoration?.openCorners(text, width, corners) ?: PaperDialogBody(text, width)
 
     fun divider(width: Int = 320): PaperDialogBody? = decoration?.let { PaperDialogBody(it.divider(width, rule), width) }
+
+    /** IDs and advances from the installed dialogue-ui/library.json; labels stay native. */
+    enum class Action(val base: Int, val icon: Int? = null, val iconOnRight: Boolean = false) {
+        CONFIRM(0xF9000, 0xF9060), CLOSE(0xF9050), ADD(0xF9008, 0xF9062),
+        PREVIOUS(0xF900C, 0xF9063), NEXT(0xF9010, 0xF9064, true), SETTINGS(0xF9024, 0xF9069),
+        TAKE(0xF9030, 0xF906C), DELETE(0xF9044, 0xF9071), RESET(0xF9048, 0xF9072),
+        START(0xF904C, 0xF9073), BACK(0xF9050, 0xF9063),
+        FOUND(0xF9080), UPGRADE(0xF9088),
+    }
+
+    fun button(button: PaperDialogButton, action: Action?): PaperDialogButton {
+        if (decoration == null || action == null) return button
+        val frame = DialogDecoration.ButtonFrame(DialogDecoration.Glyph(action.base, 16),
+            DialogDecoration.Glyph(action.base + 1, 17), DialogDecoration.Glyph(action.base + 3, 15))
+        return button.copy(label = decoration.buttonLabel(button.label, button.width, frame,
+            action.icon?.let { DialogDecoration.Glyph(it, if (it in setOf(0xF906C, 0xF9071, 0xF9073)) 10 else 11) }, action.iconOnRight))
+    }
 
     private fun piece(point: Int) = DialogDecoration.Glyph(point, 13)
 }

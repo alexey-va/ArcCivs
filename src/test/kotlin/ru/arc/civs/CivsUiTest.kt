@@ -65,7 +65,35 @@ class CivsUiTest : FunSpec({
                     exportUiScreen(directory, "dialog-$name-$suffix", h.screen, listOf(640, 360))
                 }
                 export("overview")
-                h.city = h.city!!.copy(name = "Александровское поселение 123456")
+                // Follow actual callbacks: each family keeps its native controls and typed action IDs.
+                h.click("management"); export("management")
+                h.click("stock"); export("stock")
+                h.click("materials"); export("materials")
+                h.open(); h.click("buildings"); export("buildings")
+                h.click("building_0"); export("building")
+                h.click("production"); export("production")
+                h.open(); h.click("workers"); export("workers")
+                h.click("worker_1"); export("worker")
+                h.click("skills"); export("skills")
+                h.click("next"); export("skills-last")
+                var permitted = CivSettlementSetting.entries.toSet()
+                every { h.host.canChangeSettlementSetting(h.player, any()) } answers { secondArg<CivSettlementSetting>() in permitted }
+                h.open(); h.click("management"); h.click("testing_settings"); export("settings")
+                h.screen.body.none { plainText(it.text).any { character -> character.code in 0xE540..0xE59F } } shouldBe true
+                h.screen.buttons.map { it.id.value } shouldBe listOf("chunk_loading", "immortal_residents", "auto_construction_materials")
+                permitted = permitted - CivSettlementSetting.IMMORTAL_RESIDENTS
+                h.click("immortal_residents"); export("settings-denied")
+                h.screen.buttons.map { it.id.value } shouldNotContain "immortal_residents"
+                h.open(); h.click("management"); h.click("delete_city"); export("delete")
+                h.city = h.city!!.copy(workers = emptyList(), inventory = h.city!!.inventory!!.copy(materials = emptyMap()))
+                h.open(); h.click("workers"); export("workers-empty")
+                h.screen.buttons.isEmpty() shouldBe true
+                h.open(); h.click("management"); h.click("stock"); h.click("materials"); export("materials-empty")
+                h.city = null
+                h.open(); export("welcome")
+                h.click("found"); export("styles")
+                h.click("style_0"); export("name")
+                h.city = settlement(h.player).copy(name = "Александровское поселение 123456")
                 h.open()
                 export("overview-long")
                 h.click("guide")
@@ -832,7 +860,7 @@ class CivsUiTest : FunSpec({
             view = view.copy(orders = emptyList(), planning = true)
             h.click("refresh"); h.body() shouldContain "Подбираем изделия"
             view = view.copy(planning = false)
-            h.click("refresh"); h.body() shouldContain "нет подходящих заказов"
+            h.click("refresh"); h.body() shouldContain "Подходящих заказов пока нет"
             export("carpentry-waiting-ru")
             view = view.copy(paused = true)
             h.click("refresh"); h.body() shouldContain "Работа приостановлена"
@@ -1197,7 +1225,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Булыжные ступеньки"
             materialTableCells(h.screen).single { it.first() == "Булыжник" } shouldBe listOf("Булыжник", "68")
             materialTableCells(h.screen).single { it.first() == "Земля" } shouldBe listOf("Земля", "516")
-            h.body() shouldContain "\uE570"
+            h.body() shouldContain "\uE580"
             h.body().contains("Cobblestone") shouldBe false
             h.body().contains("Еловые доски") shouldBe false
             h.body().contains("9000001") shouldBe false
@@ -1251,7 +1279,7 @@ class CivsUiTest : FunSpec({
                 editMeta { it.displayName(Component.text("Сувенир")) }
             })
             fun openMaterials() { h.ui.openBuilding(h.player, base.id, hut.id); h.paper.performTicks(2) }
-            fun tableText() = plainText(h.screen.body.single { plainText(it.text).contains('\uE570') }.text)
+            fun tableText() = plainText(h.screen.body.single { plainText(it.text).contains('\uE580') }.text)
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
 
             openMaterials()
@@ -2908,11 +2936,13 @@ private fun materialEstimate() = mapOf("COBBLESTONE" to 73L, "COBBLESTONE_STAIRS
     "COBBLESTONE_WALL" to 28L, "DIRT" to 516L, "OAK_PLANKS" to 48L, "RED_BED" to 1L,
     "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 90L, "SPRUCE_PLANKS" to 2_000_003L)
 
-private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> = screen.body
-    .single { plainText(it.text).contains('\uE570') }.let { plainText(it.text) }.lineSequence()
-    .filter { it.contains('\uE574') }.map { line -> line.split('\uE575').map { cell -> buildString {
-        cell.codePoints().filter { it !in 0xE570..0xE57E && it !in 0xF0F01..0xF0F11 }.forEach(::appendCodePoint)
-    } } }.toList()
+private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> {
+    val base = listOf(0xE560, 0xE570, 0xE580).single { point -> screen.body.any { plainText(it.text).contains(point.toChar()) } }
+    return screen.body.single { plainText(it.text).contains(base.toChar()) }.let { plainText(it.text) }.lineSequence()
+        .filter { it.contains((base + 4).toChar()) }.map { line -> line.split((base + 5).toChar()).map { cell -> buildString {
+            cell.codePoints().filter { it !in base..base + 14 && it !in 0xF0F01..0xF0F11 }.forEach(::appendCodePoint)
+        } } }.toList()
+}
 
 private fun builderMaterialEstimate() = mapOf("CHISELED_BOOKSHELF" to 2L, "COBBLESTONE" to 4L,
     "CRAFTING_TABLE" to 1L, "DIRT" to 161L, "GRAVEL" to 47L, "SPRUCE_DOOR" to 2L, "SPRUCE_FENCE" to 83L,

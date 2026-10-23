@@ -48,6 +48,53 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("warehouse maintenance completes exceptionally when a delayed schematic outlives its building") {
+        serviceScenario { h ->
+            val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE,
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.WAREHOUSE, 1), control = CivPosition(10, 63, 0))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = listOf(h.city.buildings.first(), warehouse))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val schematic = CompletableFuture<List<CivPlanBlock>>()
+            every { h.blueprints.warehouseStorageRepair(warehouse) } returns schematic
+            h.start()
+            val repair = h.service.repairWarehouseStorage(city.id, warehouse.id)
+            repair.isDone shouldBe false
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city.copy(
+                buildings = listOf(city.buildings.first(), warehouse.copy(phase = BuildingPhase.SITE)))))
+            val reload = h.service.reload(h.player)
+            h.tick(); reload.join()
+            schematic.complete(listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:bookshelf", "minecraft:air")))
+            h.tick()
+            repair.isCompletedExceptionally shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { repair.join() })?.reason shouldBe "stale-building"
+            verify(exactly = 0) { h.worldAdapter.repairWarehouse(any(), any(), any()) }
+        }
+    }
+
+    test("warehouse maintenance releases its city reservation when world admission throws") {
+        serviceScenario { h ->
+            val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE,
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.WAREHOUSE, 1), control = CivPosition(10, 63, 0))
+            val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = listOf(h.city.buildings.first(), warehouse))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.blueprints.warehouseStorageRepair(warehouse) } returns CompletableFuture.completedFuture(
+                listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:bookshelf", "minecraft:air")))
+            every { h.worldAdapter.repairWarehouse(any(), any(), any()) } throws CivsRejection("world-closed")
+            h.start()
+            val repair = h.service.repairWarehouseStorage(city.id, warehouse.id)
+            h.tick()
+            repair.isCompletedExceptionally shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { repair.join() })?.reason shouldBe "world-closed"
+            h.service.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true).let { changed ->
+                h.saves.size shouldBe 1
+                h.commit(); changed.join()
+            }
+            h.service.city(h.player)!!.settings?.immortalResidents shouldBe true
+        }
+    }
+
     test("testing settings require the current owner's permission and only appear after the save") {
         serviceScenario { h ->
             h.start()
