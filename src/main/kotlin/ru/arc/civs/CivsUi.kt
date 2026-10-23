@@ -1306,13 +1306,13 @@ class CivsUi internal constructor(
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(tint(text.literal(worker.name), PEOPLE)),
             body(text.residentVitals(player, CivsResidents.health(worker), CivsResidents.maxHealth(worker), CivsResidents.hunger(worker))),
-            presentation.summary(Component.join(Component.newline(), listOfNotNull(
-                tr(player, "profession.${if (CivsResidents.isChild(worker)) "child"
+            presentation.summary(listOfNotNull(
+                tr(player, "label.profession") to tr(player, "profession.${if (CivsResidents.isChild(worker)) "child"
                     else building?.let { CivsRules.profession(city, it) } ?: "unassigned"}").color(PEOPLE),
-                building?.let { buildingName(player, it.type, it.level) },
-                workerStatus(player, worker),
-                if (worker.completedCycles > 0) detail(player, "label.deliveries", text.literal(worker.completedCycles)) else null,
-            ))), request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
+                building?.let { tr(player, "label.workplace") to buildingName(player, it.type, it.level) },
+                tr(player, "label.state") to workerStatus(player, worker),
+                if (worker.completedCycles > 0) tr(player, "label.deliveries") to text.literal(worker.completedCycles) else null,
+            )), request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
             worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to materialName(player, cargo.material),
                 "amount" to cargo.amount, "target" to (CivsLogistics.destination(city, cargo)?.let {

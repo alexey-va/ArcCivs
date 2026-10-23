@@ -53,6 +53,34 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("worker card keeps native vitals and actions while naming each fact") {
+        for (locale in listOf("ru", "en")) for (font in listOf("", "arc:dialog_ui")) withUi(decorationFont = font) { h ->
+            h.player.setLocale(Locale.forLanguageTag(locale))
+            val base = settlement(h.player)
+            for ((sample, type, status) in listOf(Triple("worker-card", BuildingType.FARM, "moving-to-work"),
+                Triple("worker-long", BuildingType.STONEMASON, "retreating"))) {
+                val workplace = base.buildings.last().copy(type = type, level = 3)
+                val worker = base.workers.first().copy(name = "Вячеслав", assignment = workplace.id,
+                    health = 20.0, hunger = 0, skills = mapOf("FARM" to 40L), completedCycles = 453)
+                h.city = base.copy(buildings = base.buildings.dropLast(1) + workplace, workers = listOf(worker))
+                every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
+                h.ui.openWorker(h.player, base.id, worker.id)
+                h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "assign", "unassign")
+                val labels = if (locale == "ru") listOf("Профессия", "Место работы", "Состояние", "Завершено заданий")
+                    else listOf("Profession", "Workplace", "Status", "Completed jobs")
+                val facts = plainText(h.screen.body[2].text).replace(Regex("\\p{Co}"), "").replace(Regex("\\s+"), " ")
+                labels.forEach { facts shouldContain it }
+                facts shouldContain "453"
+                val expectedVitals = CivsText.fromYaml(civsLocaleSource()).residentVitals(h.player, 20.0, 28.0, 0)
+                h.screen.body[1].text shouldBe expectedVitals
+                h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0xFA300..0xFAF1B } } shouldBe
+                    if (font.isEmpty()) 0 else 1
+                val suffix = if (font.isEmpty()) "plain-$locale" else locale
+                System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "$sample-$suffix", h.screen, listOf(640, 360)) }
+            }
+        }
+    }
+
     test("dialogue library keeps overview facts and actions with explicit font opt in and native fallback") {
         for (locale in listOf("ru", "en")) {
             for (font in listOf("", "arc:dialog_ui")) withUi(realHistory = true, decorationFont = font) { h ->

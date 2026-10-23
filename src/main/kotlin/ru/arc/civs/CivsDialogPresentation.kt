@@ -27,6 +27,12 @@ internal class CivsDialogPresentation(font: String) {
         if (decoration == null) PaperDialogBody(text, width)
         else DialogTables.filledBody(listOf(listOf(text)), null, width, listOf(1))
 
+    fun summary(rows: List<Pair<Component, Component>>, width: Int = 320): PaperDialogBody =
+        if (decoration == null) PaperDialogBody(Component.join(Component.newline(), rows.map { (label, value) ->
+            label.append(Component.text(": ")).append(value)
+        }), width)
+        else DialogTables.filledBody(rows.map { (label, value) -> listOf(label, value) }, null, width, listOf(1, 1))
+
     fun divider(width: Int = 320): PaperDialogBody? = decoration?.let { PaperDialogBody(it.divider(width, rule), width) }
 
     /** IDs and advances from the installed dialogue-ui/library.json; labels stay native. */
