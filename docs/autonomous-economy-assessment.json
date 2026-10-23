@@ -1,0 +1,494 @@
+{
+  "version": 1,
+  "title": "ArcCivs autonomous settlement finite stock and generic production",
+  "assumptions": [
+    "Before the admin-created autonomous settlement mode is absent; after includes only autonomous settlements. Existing personal settlements are unchanged.",
+    "Low/base/high are 1/10/500 autonomous cities under one administrator, with an assumed 0.25/1/4 hours per day for the network production pool. These are sensitivity assumptions, not measured sessions. participants=[1,1,1] therefore counts one admin in each case; city scaling is already in item-flow event counts.",
+    "All assessed cities use the completed level-2 profile. Each city has two worker slots at each of Forester, Quarry and Farm, for six producers; level-2 delivery is 8 wood or 6 stone/food per completed producer trip. Level 1 is 4/3/3.",
+    "The low case has two active producer workers per resource for 15 minutes (30 deliveries/resource/day). Base/high assume the shared global cap is fully allocated to production: up to 48 active NPCs, evenly split as 16 producers/resource; for 60/240 minutes this is 960/3840 deliveries/resource/day. Personal-settlement NPC use reduces autonomous headroom. The 48 limit is concurrency, not a measured per-day total.",
+    "Delivery quantities are gross, theoretical upper bounds at one completed delivery per worker per 60 seconds. The autonomous branch requires real storage arrival; path/travel, night shelter, hunger work slowdown, unavailable chunks/depot, and the 640-per-resource stock capacity reduce or stop realized deliveries. Item flows are not net stock accumulation.",
+    "Each new autonomous city receives one-time abstract non-transferable stock: 96 wood, 96 stone, 24 food. This lifecycle amount is listed separately because the evaluator models recurring per-player-day events.",
+    "Construction reserves and consumes the exact finite stock cost once per building/upgrade. Costs and full-profile totals are included separately; no construction cadence is assumed as a daily burn. Five initial immigrant admissions are a separate free budget; later recruitment costs 12 food, at most one resident per two active minutes, subject to room and food.",
+    "Food stock can be consumed for hunger: one food restores six hunger. Resident hunger/recruitment cadence and city occupancy are conditional, so food sinks are not fabricated as daily event counts.",
+    "Physical city stock has capacity 128 plus the active Warehouse level addition; the completed level-2 profile therefore holds at most 640 of each resource per city. This is an inventory ceiling, not a lifetime or weekly cap.",
+    "No Vault, premium-token or Minecraft player-XP flow is added. Abstract village stock is not a player item grant or a currency proxy. Real schematic blocks are placed by the builder; privileged admins can alter/mine their own build, while ordinary players receive no repeatable free item grant through this feature.",
+    "No item-to-currency conversion or price change is assumed. Current item SELL behavior and the planned SELL-to-contract transition remain separate, unchanged scenarios; prices are intentionally empty.",
+    "The 168-hour ledger observation is network-wide background and cannot be attributed to ArcCivs or these autonomous settlements; see the sanitized observation file. Currency totals remain separate and mixed legacy totals are not used.",
+    "Generic resource production is committed by CivsService.deliver only after real storage arrival; the separate one-minute population activeMinute path covers resident hunger/recruitment and is not counted as a passive stock-production tick."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "autonomous_direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "The feature does not call Vault or grant currency.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "The feature does not grant or burn premium tokens.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "The feature does not grant Minecraft player experience.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "wood_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_wood_delivery",
+          "kind": "item",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "One completed Forester delivery in the level-2 profile yields 8 abstract city-stock wood; at most 2 Foresters per city and the network event counts are capped by the shared 48 active-NPC sensitivity.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          }
+        }
+      ]
+    },
+    "stone_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_stone_delivery",
+          "kind": "item",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "One completed Quarry delivery in the level-2 profile yields 6 abstract city-stock stone; at most 2 Quarries per city and the network event counts are capped by the shared 48 active-NPC sensitivity.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          }
+        }
+      ]
+    },
+    "food_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_food_delivery",
+          "kind": "item",
+          "source": "ArcCivs implementation: CivsService.deliver autonomous branch and CivsRules.deliver/deliveryAmount; source pointers are recorded in the document.",
+          "basis": "One completed Farm delivery in the level-2 profile yields 6 abstract city-stock food; at most 2 Farms per city and the network event counts are capped by the shared 48 active-NPC sensitivity. Hunger and recruitment drains are conditional and excluded from gross flow.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              960,
+              3840
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "autonomous_city_scenarios": [
+    {
+      "scenario": "low",
+      "cities": 1,
+      "participants": 1,
+      "assumed_network_pool_active_hours_per_day": 0.25,
+      "active_producers_per_resource": 2,
+      "delivery_events_per_resource_per_owner_day": 30
+    },
+    {
+      "scenario": "base",
+      "cities": 10,
+      "participants": 1,
+      "assumed_network_pool_active_hours_per_day": 1,
+      "active_producers_per_resource": 16,
+      "delivery_events_per_resource_per_owner_day": 960
+    },
+    {
+      "scenario": "high",
+      "cities": 500,
+      "participants": 1,
+      "assumed_network_pool_active_hours_per_day": 4,
+      "active_producers_per_resource": 16,
+      "delivery_events_per_resource_per_owner_day": 3840
+    }
+  ],
+  "lifetime_per_city": {
+    "starting_abstract_stock": {
+      "wood": 96,
+      "stone": 96,
+      "food": 24
+    },
+    "level_1_profile_build_costs": {
+      "wood": 168,
+      "stone": 100,
+      "food": 4
+    },
+    "level_2_build_and_upgrade_costs": {
+      "wood": 672,
+      "stone": 400,
+      "food": 24
+    },
+    "completed_level_2_profile_total_costs": {
+      "wood": 840,
+      "stone": 500,
+      "food": 28
+    },
+    "additional_generic_output_required_after_starting_stock_before_hunger_or_recruitment": {
+      "wood": 744,
+      "stone": 404,
+      "food": 4
+    },
+    "cost_rows_level_1": [
+      {
+        "building": "Town Hall",
+        "wood": 32,
+        "stone": 24,
+        "food": 4
+      },
+      {
+        "building": "Builder Hut",
+        "wood": 16,
+        "stone": 8,
+        "food": 0
+      },
+      {
+        "building": "Forester",
+        "wood": 20,
+        "stone": 12,
+        "food": 0
+      },
+      {
+        "building": "Quarry",
+        "wood": 20,
+        "stone": 20,
+        "food": 0
+      },
+      {
+        "building": "Farm",
+        "wood": 24,
+        "stone": 8,
+        "food": 0
+      },
+      {
+        "building": "Warehouse",
+        "wood": 32,
+        "stone": 16,
+        "food": 0
+      },
+      {
+        "building": "House",
+        "wood": 24,
+        "stone": 12,
+        "food": 0
+      }
+    ],
+    "cost_rows_level_2": [
+      {
+        "building": "Town Hall",
+        "wood": 128,
+        "stone": 96,
+        "food": 24
+      },
+      {
+        "building": "Builder Hut",
+        "wood": 64,
+        "stone": 32,
+        "food": 0
+      },
+      {
+        "building": "Forester",
+        "wood": 80,
+        "stone": 48,
+        "food": 0
+      },
+      {
+        "building": "Quarry",
+        "wood": 80,
+        "stone": 80,
+        "food": 0
+      },
+      {
+        "building": "Farm",
+        "wood": 96,
+        "stone": 32,
+        "food": 0
+      },
+      {
+        "building": "Warehouse",
+        "wood": 128,
+        "stone": 64,
+        "food": 0
+      },
+      {
+        "building": "House",
+        "wood": 96,
+        "stone": 48,
+        "food": 0
+      }
+    ],
+    "note": "Town Hall level 1 is captured as the founding site and then constructed; its 32/24/4 cost is included. CivsRules.cost applies targetLevel squared, so the level-2 target cost is four times the level-1 base, not merely the incremental difference."
+  },
+  "network_constraints": {
+    "configured_maximum_settlements_total": 500,
+    "configured_maximum_active_npcs": 48,
+    "active_npc_pool_shared_with_personal_settlements": true,
+    "level_1_city_population_limit": 5,
+    "level_2_city_population_limit": 8,
+    "level_1_auto_staffed_jobs": [
+      "builder",
+      "forester",
+      "quarry",
+      "farm"
+    ],
+    "level_1_auto_staff_count": 4,
+    "level_2_producer_slots_per_resource": 2,
+    "level_2_producer_workers_if_fully_staffed": 6,
+    "level_2_per_minute_delivery_ceiling_per_city": {
+      "wood": 16,
+      "stone": 12,
+      "food": 12
+    },
+    "level_2_warehouse_capacity_per_resource_per_city": 640,
+    "initial_headroom_per_resource": {
+      "wood": 544,
+      "stone": 544,
+      "food": 616
+    },
+    "maximum_autonomous_cities_if_one_personal_city_also_exists": 499,
+    "high_500_city_sensitivity_note": "500 total city slots is the configured ceiling; a 500-autonomous-city sensitivity assumes no additional personal city. With one personal settlement, at most 499 autonomous cities fit."
+  },
+  "unmodeled_conditional_flows": [
+    {
+      "flow": "construction costs",
+      "known": "per-city exact lifecycle total is 840 wood, 500 stone, 28 food through the level-2 profile; timing and settlement distribution are not daily event counts."
+    },
+    {
+      "flow": "hunger and later recruitment",
+      "known": "1 food restores 6 hunger; later resident recruitment costs 12 food and is limited to one per 2 active minutes, subject to beds/population and food."
+    },
+    {
+      "flow": "stock ceiling and turnover",
+      "known": "640 of each resource per completed level-2 city at a time; production pauses at capacity, while construction/hunger/recruitment consume stock."
+    },
+    {
+      "flow": "admin mining/remodeling of structures",
+      "known": "privileged admin can alter or mine own placed schematics; no ordinary-player item grant or safe item-to-currency conversion is inferred."
+    }
+  ],
+  "source_contracts": [
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsAutonomy.kt",
+      "lines": "18-40",
+      "fact": "Abstract stock is non-transferable; profile, target-level costs and 96/96/24 opening stock."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsRules.kt",
+      "lines": "30-61",
+      "fact": "Fixed cost formulas, 128+warehouse capacity and population level cap."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsRules.kt",
+      "lines": "63-70,119-148,152-156",
+      "fact": "Building slots, resource-producing buildings, amounts per level and 60-second production interval."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsService.kt",
+      "lines": "1510-1528",
+      "fact": "Autonomous delivery requires storage arrival before CivsRules.deliver adds resource to stock."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsRules.kt",
+      "lines": "407-453",
+      "fact": "Construction reserves fixed stock cost once; retries do not charge it again."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsSettings.kt",
+      "lines": "28-35",
+      "fact": "Configured total settlement ceiling 500 and active NPC ceiling 48."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsCitizens.kt",
+      "lines": "2644-2644",
+      "fact": "Active NPC spawn budget is bounded by the configured maximum, itself at most 48."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsService.kt",
+      "lines": "3499-3500",
+      "fact": "Founding checks total existing plus pending cities against configured maximumCities."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsService.kt",
+      "lines": "2918-2923",
+      "fact": "The separate population activeMinute clock advances hunger and recruitment; it is not generic production."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsRules.kt",
+      "lines": "77-84, 356-375",
+      "fact": "Autonomous cities staff the builder and three essential producers first; level-2 auto-assignment fills a second producer slot for each resource, then the second builder slot."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsResidents.kt",
+      "lines": "17-22",
+      "fact": "A worker with hunger at or below 6 gets a doubled work interval."
+    },
+    {
+      "file": "src/main/kotlin/ru/arc/civs/CivsCitizens.kt",
+      "lines": "967-971",
+      "fact": "Workers shelter at night outside the delivery/pickup phases."
+    },
+    {
+      "file": "src/test/kotlin/ru/arc/civs/CivsAutonomyTest.kt",
+      "lines": "109-124,127-172",
+      "fact": "Tests confirm the four essential jobs, six producer workers at level 2, and a simulated full profile sustained by autonomous stock deliveries."
+    }
+  ],
+  "observation_file": "autonomous-economy-observation.json"
+}

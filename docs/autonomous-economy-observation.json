@@ -1,0 +1,92 @@
+{
+  "source": "Supported read-only mcserver economy observation; no mutation performed.",
+  "captured_at": "2026-10-23T16:51:48.477Z",
+  "request": {
+    "economy_hours": 168,
+    "economy_limit": 20,
+    "economy_server": "all"
+  },
+  "window": {
+    "requested_since_utc": "2026-10-16T16:51:48.149000Z",
+    "generated_at_utc": "2026-10-23T16:51:48.150000Z",
+    "oldest_event_utc": "2026-10-16T16:52:15.650000Z",
+    "newest_event_utc": "2026-10-23T15:07:43.719000Z",
+    "exact": false,
+    "excluded_crossing_records": 2,
+    "excluded_crossing_operations": 84,
+    "excluded_crossing_absolute_amount": 319.56,
+    "excluded_future_records": 0,
+    "excluded_future_operations": 0,
+    "excluded_future_absolute_amount": 0.0
+  },
+  "coverage": {
+    "oldest": 1792169535650,
+    "newest": 1792768063719,
+    "records": 3329,
+    "operations": 32992,
+    "players": 29,
+    "attempts": 246,
+    "enrichedRecords": 3329
+  },
+  "currencies_separately": {
+    "tokens": {
+      "minted": 81.0,
+      "burned": 15.0,
+      "mint_burn_net": 66.0,
+      "transfer_net": 0.0,
+      "records": 53,
+      "operations": 53,
+      "players": 17,
+      "source_coverage": {
+        "unclassifiedOperations": 3,
+        "unclassifiedAbsoluteAmount": 15.0,
+        "classifiedOperationRatio": 0.9433962264150944,
+        "classifiedAmountRatio": 0.84375
+      }
+    },
+    "vault": {
+      "minted": 67928741.36870807,
+      "burned": 2440753.22,
+      "mint_burn_net": 65487988.148708075,
+      "transfer_net": -110.59999999403954,
+      "records": 3276,
+      "operations": 32939,
+      "players": 29,
+      "source_coverage": {
+        "unclassifiedOperations": 276,
+        "unclassifiedAbsoluteAmount": 224138.3599999999,
+        "classifiedOperationRatio": 0.9916208749506664,
+        "classifiedAmountRatio": 0.9989329773337494
+      }
+    }
+  },
+  "vault_admin_command_aggregate": {
+    "income": 67000000.0,
+    "operations": 1,
+    "records": 1,
+    "players": 1
+  },
+  "overall_source_coverage": {
+    "unclassifiedOperations": 279,
+    "unclassifiedRecords": 279,
+    "unclassifiedAbsoluteAmount": 224153.36000000007,
+    "classifiedOperationRatio": 0.9915434044616876,
+    "classifiedRecordRatio": 0.9161910483628717,
+    "classifiedAmountRatio": 0.9989329064131218
+  },
+  "legacy_mixed_currency_aggregation": true,
+  "audit_storage": {
+    "mode": "SQL",
+    "ready": true,
+    "schemaVersion": 1,
+    "eventCount": 36863,
+    "pendingEvents": 0
+  },
+  "stock_audit_complete": false,
+  "limitations": [
+    "Network-wide background only; no ArcCivs or autonomous-city attribution.",
+    "Currency aggregates are separate; do not use the legacy mixed-currency total.",
+    "Window excludes events crossing its exact boundary; top-N player detail was not copied.",
+    "No player names, balances, private identifiers, or item-price table are included."
+  ]
+}
