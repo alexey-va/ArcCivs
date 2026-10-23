@@ -11,6 +11,8 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
+import java.nio.file.Files
+import java.util.concurrent.Executor
 
 class CivsMineWorkStandingTest : FunSpec({
     test("mine standing space contains its shaft and galleries but never the reported outside cave or paid shell") {
@@ -155,7 +157,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     val old = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
                     val current = requireNotNull(CivsMinePlan.forBuilding(mine))
                     val worker = spatialWorker(mine, "IRON_PICKAXE")
-                    val city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
+                    var city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
                         minePlans = mapOf(mine.id.toString() to CivMinePlanState(3, 83)))
                     for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
                     val top = CivsWorksiteLayouts.point(mine, old.bottom)
@@ -172,7 +174,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     world.getBlockAt(reported.x, reported.y - 1, reported.z).type = Material.COBBLESTONE
                     for (y in reported.y..reported.y + 1) world.getBlockAt(reported.x, y, reported.z).type = Material.AIR
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
                         val work = nextMineWork(runtime, city, worker)
                         work.miningPlanVersion shouldBe 4
                         (work.standing != reported) shouldBe true
@@ -182,6 +184,49 @@ class CivsMineWorkStandingTest : FunSpec({
                         runtime.validate(city, work)
                         city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(3, 83)
                         CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+                        CivsStorage(plugin) { emptyArray() }.use { storage ->
+                            var removedLining = false
+                            var restarted = false
+                            val paidLining = hashSetOf<CivPosition>()
+                            val directory = Files.createTempDirectory("mine-v4-paid-lining-restart")
+                            CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
+                            repeat(40) { action ->
+                                val currentWorker = city.workers.single()
+                                val next = nextMineWork(runtime, city, currentWorker)
+                                runtime.validate(city, next)
+                                val change = next.changes.single()
+                                if (next.status == "securing-mine" && change.after == "minecraft:cobblestone")
+                                    paidLining += change.position
+                                if (change.position in paidLining && change.before == "minecraft:cobblestone" &&
+                                    change.after == "minecraft:air") {
+                                    next.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+                                    removedLining = true
+                                }
+                                val id = UUID.randomUUID()
+                                storage.reserve(city, id)
+                                val native = storage.prepareWork(city, mine.id, next.storageInputs(currentWorker), emptyMap(), next.changes)
+                                val after = CivsRules.finishWorldWork(city, next, 100_000 + action * 5_000L)
+                                    .copy(inventory = native.inventoryAfter)
+                                val receipt = CivInventoryTransaction(id, city.id, city.revision, after, native.changes,
+                                    worldChanges = native.worldChanges).validated()
+                                storage.seal(receipt, keepViewersOpen = true)
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.unlock(id)
+                                city = receipt.after
+                                CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
+                                if (!restarted && paidLining.isNotEmpty() && !removedLining) {
+                                    restarted = true
+                                    city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
+                                    runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                                }
+                                city.minePlans!!.getValue(mine.id.toString()).v3Step shouldBe 83L
+                                runtime.invalidate(currentWorker.id)
+                            }
+                            restarted shouldBe true
+                            removedLining shouldBe true
+                            (city.minePlans!!.getValue(mine.id.toString()).nextStep > 22) shouldBe true
+                        }
                     }
                 } finally { tasks.close() }
             }

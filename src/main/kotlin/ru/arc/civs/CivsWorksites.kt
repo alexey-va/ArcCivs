@@ -389,12 +389,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
         val need = needs[worker.id]?.takeIf { it.reason != null } ?: return
         val tick = Bukkit.getCurrentTick()
+        val structural = building.type == BuildingType.QUARRY && need.status in
+            setOf("worksite-no-access", "worksite-obstacle", "worksite-layout")
         if (previous != null && (previous.need.status == need.status && previous.need.point == need.point &&
-                previous.need.reason == need.reason && previous.need.blockMaterial == need.blockMaterial || tick - previous.tick < 100)) return
+                previous.need.reason == need.reason && previous.need.blockMaterial == need.blockMaterial ||
+                !structural && tick - previous.tick < 100)) return
         reportedNeeds[worker.id] = ReportedNeed(need, tick)
-        plugin.logger.info(CivsDiagnostics.line("worksite_blocked", "city" to city.id, "worker" to worker.id,
+        val line = CivsDiagnostics.line("worksite_blocked", "city" to city.id, "worker" to worker.id,
             "building" to building.id, "cycle" to worker.completedCycles, "status" to need.status,
-            "reason" to need.reason, "point" to need.point, "material" to (need.blockMaterial ?: "unknown")))
+            "reason" to need.reason, "point" to need.point, "material" to (need.blockMaterial ?: "unknown"),
+            "mine_version" to city.minePlans?.get(building.id.toString())?.version,
+            "mine_step" to city.minePlans?.get(building.id.toString())?.nextStep)
+        if (structural) plugin.logger.warning(line)
+        else plugin.logger.info(line)
     }
 
     private fun equipTool(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -744,7 +751,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 // cobblestone. Only that final completed support step carries this
                 // historical permission; paid floors and later replacements do not.
                 val previousV2 = v2Plan?.steps.orEmpty().asSequence().take(v2Step.toInt()).lastOrNull { it.point == local }
-                if (previousV2?.shaftSupport != true || previousV2.after != "minecraft:cobblestone" || !soundSupport)
+                // Cobblestone lining is also placed by our paid safety frontier in
+                // formerly empty legacy cells. The new ordered cut may remove that
+                // ordinary lining; block entities, protection and native receipts
+                // are still checked. Other changed legacy materials remain blocked.
+                val mineLining = after == null && legacy[local] == null && block.type == Material.COBBLESTONE
+                if (!mineLining && (previousV2?.shaftSupport != true || previousV2.after != "minecraft:cobblestone" || !soundSupport))
                     return blocked(worker, "worksite-obstacle", point = point, reason = "legacy-cell-changed", blockMaterial = block.type.name)
             }
             if (block.isLiquid) return blocked(worker, "worksite-liquid", point = point,

@@ -41,3 +41,15 @@ sale price, new redemption flow or combined item/currency total is assumed.
 Acceptance requires paid native work and actual walking after activation.
 Teleport recovery does not establish walking. Source, tests, delivered JAR,
 active runtime and native-client feel are recorded separately.
+
+## 0.1.56: temporary lining during migration
+
+An ordinary COBBLESTONE block at an old AIR cell may be removed by the new
+canonical clearance. This includes paid safety lining installed by the miner
+earlier in V4. The condition does not prove ownership: player cobblestone at
+that exact canonical clearance can also be mined. Block entities, protection,
+liquid/unbreakable checks and native before/after receipts remain authoritative.
+A paid lining block is consumed once and its later native cut returns its
+ordinary one cobblestone; replay remains idempotent. No generator quantity,
+probability, rate, price or monetary conversion changes. Existing legacy paid
+cobblestone floors replaced with STONE continue to be rejected.

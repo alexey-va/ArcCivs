@@ -41,3 +41,9 @@ Correlate failures with actual positions, `miningAccessStep`, retained version
 prefixes, physical receipts and subsequent route progress. A selected stance,
 changed status or successful teleport is insufficient evidence of a usable
 walked route. Duplicate logger copies of the same event are one observation.
+
+Structural quarry worksite blockers (`worksite-no-access`, `worksite-obstacle`,
+`worksite-layout`) also emit `ARC_CIVS event=worksite_blocked` at WARN. A new
+blocker bypasses the informational cooldown; exact repeats are deduplicated.
+These include the persisted mine version/step, point and material, so a blocked
+planner with no active actor route is still visible.
