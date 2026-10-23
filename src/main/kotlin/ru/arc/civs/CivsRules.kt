@@ -622,7 +622,8 @@ object CivsRules {
                 next in (previous?.takeIf { it.version == version }?.nextStep ?: 0)..plan.steps.size.toLong(), "stale-worksite")
             city.minePlans.orEmpty() + (key to CivMinePlanState(version, next,
                 previous?.legacyStep ?: city.mineProgress?.get(key),
-                previous?.takeIf { it.version == 2 && version == CivsMinePlan.VERSION }?.nextStep ?: previous?.v2Step))
+                previous?.takeIf { it.version == 2 && version >= 3 }?.nextStep ?: previous?.v2Step,
+                previous?.takeIf { it.version == 3 && version >= 4 }?.nextStep ?: previous?.v3Step))
         } ?: city.minePlans
         return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
             mineProgress = progress, minePlans = plans))
@@ -700,9 +701,11 @@ object CivsRules {
                 val building = city.building(buildingId)
                 val size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, plan.version) }?.steps?.size
                 val v2Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 2) }?.steps?.size
+                val v3Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 3) }?.steps?.size
                 buildingId.toString() == id && size != null && present(plan) &&
                     plan.version in 2..CivsMinePlan.VERSION && plan.nextStep in 0..size.toLong() &&
-                    (plan.v2Step == null || plan.version == CivsMinePlan.VERSION && v2Size != null && plan.v2Step in 0..v2Size.toLong()) &&
+                    (plan.v2Step == null || plan.version >= 3 && v2Size != null && plan.v2Step in 0..v2Size.toLong()) &&
+                    (plan.v3Step == null || plan.version >= 4 && v3Size != null && plan.v3Step in 0..v3Size.toLong()) &&
                     plan.legacyStep == city.mineProgress?.get(id)
             }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }

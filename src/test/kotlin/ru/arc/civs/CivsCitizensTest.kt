@@ -22,9 +22,9 @@ import java.util.UUID
 
 class CivsCitizensTest : FunSpec({
     for (rotation in listOf(0, 90, 180, 270))
-    test("mine waypoints at rotation $rotation cross the upper transfer before using the separate corner ladder in either direction") {
+    test("V4 mine waypoints at rotation $rotation keep every vertical leg on the original ladder column") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-            val world = CivsWorksiteWorldFixture("corner-ladder-waypoints").also(paper.server::addWorld)
+            val world = CivsWorksiteWorldFixture("single-ladder-waypoints").also(paper.server::addWorld)
             val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 80, 0), rotation)
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
             fun data(spec: String) = org.bukkit.Bukkit.createBlockData(spec).also { if (!it.material.isAir) it.rotate(when (rotation) {
@@ -34,31 +34,75 @@ class CivsCitizensTest : FunSpec({
                 else -> org.bukkit.block.structure.StructureRotation.NONE
             }) }
             for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
-            for (step in geometry.steps) {
+            for (step in geometry.steps.take(geometry.shaftEnd)) {
                 val point = CivsWorksiteLayouts.point(mine, step.point)
                 world.getBlockAt(point.x, point.y, point.z).blockData =
                     data(step.after ?: "minecraft:air")
             }
             val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
             val upperTransfer = bottom.copy(y = mine.anchor.y + geometry.transferFeetY)
-            val cornerTransfer = CivsWorksiteLayouts.point(mine, geometry.extensionLadder)
-            val lower = cornerTransfer.copy(y = mine.anchor.y + geometry.floors.last().feetY)
-            val above = bottom.copy(y = bottom.y + 4)
+            val lower = bottom.copy(y = mine.anchor.y + geometry.floors.last().feetY)
+            val above = bottom.copy(y = bottom.y + 2)
             for (y in bottom.y..above.y) {
                 val backing = CivsWorksiteLayouts.point(mine, geometry.backing).copy(y = y)
                 world.getBlockAt(backing.x, y, backing.z).type = Material.COBBLESTONE
                 world.getBlockAt(bottom.x, y, bottom.z).blockData = data(
                     "minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
             }
-            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
+                minePlans = mapOf(mine.id.toString() to CivMinePlanState(4, geometry.shaftEnd.toLong())))
             fun at(point: CivPosition) = Location(world, point.x + .5, point.y.toDouble(), point.z + .5)
-            citizenMineWaypoint(city, world, at(bottom), lower) shouldBe upperTransfer
-            citizenMineWaypoint(city, world, at(upperTransfer), lower) shouldBe cornerTransfer
-            // The actual destination needs no intermediate waypoint; startRoute goes there directly.
-            citizenMineWaypoint(city, world, at(cornerTransfer), lower) shouldBe null
-            citizenMineWaypoint(city, world, at(lower), above) shouldBe cornerTransfer
+            val extension = CivsWorksiteLayouts.point(mine, geometry.extensionLadder)
+            extension.x shouldBe bottom.x
+            extension.z shouldBe bottom.z
+            citizenMineWaypoint(city, world, at(above), lower) shouldBe bottom
+            citizenMineWaypoint(city, world, at(bottom), lower) shouldBe null
+            citizenMineWaypoint(city, world, at(upperTransfer), lower) shouldBe null
+            citizenMineWaypoint(city, world, at(lower), above) shouldBe bottom
+            citizenMineWaypoint(city, world, at(bottom), above) shouldBe null
+            val firstFloor = geometry.floors.first()
+            val offColumn = CivsWorksiteLayouts.point(mine, firstFloor.cells.first().copy(y = firstFloor.feetY))
+            citizenMineWaypoint(city, world, at(offColumn), lower) shouldBe bottom.copy(y = offColumn.y)
+        }
+    }
+
+    test("a retained V3 step 83 escapes through its built corner transfer without entering the future lower stance") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("retained-v3-waypoints").also(paper.server::addWorld)
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40), 270)
+            val old = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
+            fun data(spec: String) = org.bukkit.Bukkit.createBlockData(spec).also {
+                if (!it.material.isAir) it.rotate(org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90)
+            }
+            for (x in -8..-3) for (z in -5..-1) world.loadChunk(x, z)
+            for (step in old.steps.take(83)) {
+                val point = CivsWorksiteLayouts.point(mine, step.point)
+                world.getBlockAt(point.x, point.y, point.z).blockData = data(step.after ?: "minecraft:air")
+            }
+            val bottom = CivsWorksiteLayouts.point(mine, old.bottom)
+            val upperTransfer = bottom.copy(y = mine.anchor.y + old.transferFeetY)
+            val cornerTransfer = CivsWorksiteLayouts.point(mine, old.extensionLadder)
+            val above = bottom.copy(y = bottom.y + 2)
+            for (y in bottom.y..above.y) {
+                val backing = CivsWorksiteLayouts.point(mine, old.backing).copy(y = y)
+                world.getBlockAt(backing.x, y, backing.z).type = Material.COBBLESTONE
+                world.getBlockAt(bottom.x, y, bottom.z).blockData = data(
+                    "minecraft:ladder[facing=${old.facing},waterlogged=false]")
+            }
+            val state = CivMinePlanState(3, 83)
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
+                minePlans = mapOf(mine.id.toString() to state))
+            fun at(point: CivPosition) = Location(world, point.x + .5, point.y.toDouble(), point.z + .5)
+            val observed = Location(world, -95.6805, 59.312, -46.3006)
+            citizenPacketBodyClear(world, CitizenPoint(observed.x, observed.y, observed.z), false) shouldBe true
+            citizenMineWorkRouteAllowed(mine, CitizenPoint(observed.x, observed.y, observed.z), 0, state) shouldBe true
+            citizenMineWaypoint(city, world, observed, above) shouldBe cornerTransfer
             citizenMineWaypoint(city, world, at(cornerTransfer), above) shouldBe upperTransfer
             citizenMineWaypoint(city, world, at(upperTransfer), above) shouldBe bottom
+            val future = CivPosition(-96, 55, -47)
+            citizenMineWorkRouteAllowed(mine, CitizenPoint(future.x + .5, future.y.toDouble(), future.z + .5),
+                0, state) shouldBe false
+            citizenMineWaypoint(city, world, at(future), above) shouldBe null
         }
     }
 

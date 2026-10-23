@@ -21,6 +21,8 @@ data class CivWorldWork(
     val focus: CivPosition? = null,
     val miningPlanVersion: Int? = null,
     val miningGenerator: Boolean = false,
+    /** Already inspected passage prefix, distinct from the cursor this receipt will commit. */
+    val miningAccessStep: Long? = null,
 ) {
     val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
 
@@ -51,8 +53,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private data class WorkSpotSearch(val buildingId: UUID, val target: CivPosition, val allowOwn: Boolean,
         val ladder: Boolean, var next: Int = 0, var nextAim: Int = 0, var sawStanding: Boolean = false)
     private val workSpots = hashMapOf<UUID, WorkSpotSearch>()
-    private data class MineSpotKey(val building: CivBuilding, val cycle: Long, val focus: CivPosition, val step: Long)
-    private data class RejectedMineSpots(val key: MineSpotKey, val positions: LinkedHashMap<CivPosition, Long> = linkedMapOf())
+    private data class MineSpotKey(val building: CivBuilding, val cycle: Long, val step: Long)
+    private data class RejectedMineSpots(val key: MineSpotKey, var lastFocus: CivPosition,
+        val positions: LinkedHashMap<CivPosition, Long> = linkedMapOf())
     private val rejectedMineSpots = hashMapOf<UUID, RejectedMineSpots>()
     private data class ReportedNeed(val need: Need, val tick: Int)
     private val reportedNeeds = hashMapOf<UUID, ReportedNeed>()
@@ -97,7 +100,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 "cachedWork" to item?.work?.let { work -> mapOf("building" to work.buildingId.toString(),
                     "cycle" to work.cycle, "status" to work.status, "focus" to point(citizenWorkFocus(work)),
                     "standing" to point(work.standing), "miningStep" to work.miningStep,
-                    "minePlanVersion" to work.miningPlanVersion, "generator" to work.miningGenerator,
+                    "minePlanVersion" to work.miningPlanVersion, "accessStep" to work.miningAccessStep,
+                    "generator" to work.miningGenerator,
                     "changes" to sample(work.changes) { mapOf("position" to point(it.position),
                         "before" to it.before, "after" to it.after) },
                     "inputs" to sample(work.inputs.entries) { mapOf("material" to it.key, "amount" to it.value) },
@@ -116,7 +120,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     "target" to point(it.target), "progress" to it.progress, "next" to it.next,
                     "excavation" to point(it.excavation), "deferredAirWalls" to it.deferredAirWalls.size) },
                 "failedStances" to rejected?.let { state -> mapOf("building" to state.key.building.id.toString(),
-                    "cycle" to state.key.cycle, "focus" to point(state.key.focus), "miningStep" to state.key.step,
+                    "cycle" to state.key.cycle, "focus" to point(state.lastFocus), "miningStep" to state.key.step,
+                    "exhausted" to (state.positions.size >= 16),
                     "positions" to sample(state.positions.entries) { mapOf("standing" to point(it.key),
                         "expiresAtTick" to it.value, "remainingTicks" to (it.value - tick).coerceAtLeast(0)) }) })
         } + mapOf("source" to "owner-cache", "tick" to tick,
@@ -143,24 +148,23 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val focus = citizenWorkFocus(work) ?: return false
         val step = work.miningStep ?: return false
         if (building.type != BuildingType.QUARRY || city.workers.none { it == worker } || plan(city, worker) != work) return false
-        val key = MineSpotKey(building, worker.completedCycles, focus, step)
+        val key = MineSpotKey(building, worker.completedCycles, step)
         val rejected = rejectedMineSpots[worker.id]?.takeIf { it.key == key }
-            ?: RejectedMineSpots(key).also { rejectedMineSpots[worker.id] = it }
+            ?: RejectedMineSpots(key, focus).also { rejectedMineSpots[worker.id] = it }
+        rejected.lastFocus = focus
         rejected.positions.entries.removeIf { it.value <= Bukkit.getCurrentTick().toLong() }
-        if (work.standing !in rejected.positions && rejected.positions.size >= 16)
-            rejected.positions.remove(rejected.positions.keys.first())
-        rejected.positions[work.standing] = Bukkit.getCurrentTick().toLong() + 1_200
+        if (work.standing in rejected.positions || rejected.positions.size < 16)
+            rejected.positions[work.standing] = Bukkit.getCurrentTick().toLong() + 1_200
         invalidate(worker.id)
         return true
     }
 
-    private fun rejectedStanding(worker: CivWorker, building: CivBuilding, focus: CivPosition,
-        step: Long?, standing: CivPosition): Boolean {
+    private fun rejectedStanding(worker: CivWorker, building: CivBuilding, step: Long?, standing: CivPosition): Boolean {
         val rejected = rejectedMineSpots[worker.id] ?: return false
         rejected.positions.entries.removeIf { it.value <= Bukkit.getCurrentTick().toLong() }
         if (rejected.positions.isEmpty()) { rejectedMineSpots.remove(worker.id); return false }
-        return step != null && rejected.key == MineSpotKey(building, worker.completedCycles, focus, step) &&
-            standing in rejected.positions
+        return step != null && rejected.key == MineSpotKey(building, worker.completedCycles, step) &&
+            (rejected.positions.size >= 16 || standing in rejected.positions)
     }
 
     /** One worker, 16 field observations/candidate checks each, 32 standing probes and eight short rays per shared pulse. */
@@ -221,7 +225,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             fieldScan?.lastFocus = work.focus
             cached[worker.id] = Cached(building, worker, work)
             rejectedMineSpots[worker.id]?.takeIf {
-                it.key != MineSpotKey(building, worker.completedCycles, citizenWorkFocus(work) ?: work.standing, work.miningStep ?: -1)
+                it.key != MineSpotKey(building, worker.completedCycles, work.miningStep ?: -1)
             }?.let { rejectedMineSpots.remove(worker.id) }
         }
         if (current == null || work != null) reportWorksite(city, worker, building, work)
@@ -231,6 +235,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val focus = citizenWorkFocus(work) ?: return true
         val p = work.standing
         if (work.miningStep != null && (!CivsMinePlan.workStandingAllowed(building, p) ||
+                !mineBuiltStanding(building, p, work.miningAccessStep ?: work.miningStep) ||
                 !mineStandingConnected(building, world, focus, p))) return false
         spotChecksRemaining--
         if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
@@ -285,7 +290,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val excavations = work.changes.filter { Bukkit.createBlockData(it.after).material.isAir }
                 .mapTo(hashSetOf()) { CivsMinePlan.localPoint(building, it.position) }
             requireCivs(scan.target == step.point && scan.excavation == excavations.singleOrNull(), "stale-worksite")
-            for (task in mineFrontier(city, building, world, geometry, step.point, excavations)
+            for (task in mineFrontier(city, building, world, geometry, step.point, excavations, accessStep = work.miningAccessStep ?: scan.progress)
                 ?: throw CivsRejection("protected-area")) {
                 // Early transfer footing supplies a stance; the required shell/liquid
                 // frontier remains the admission condition for an actual excavation.
@@ -306,7 +311,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 work.miningStep == geometry.steps.size.toLong() &&
                 work.focus == CivsWorksiteLayouts.point(building, requireNotNull(geometry.generator)) &&
                 quarryWorkAccessible(city, building, world, work), "stale-worksite")
-            for (task in mineFrontier(city, building, world, geometry, standing.copy(y = standing.y - 1), emptySet())
+            for (task in mineFrontier(city, building, world, geometry, standing.copy(y = standing.y - 1), emptySet(), accessStep = geometry.steps.size.toLong())
                 ?: throw CivsRejection("protected-area")) {
                 val block = read(city, building, world, CivsWorksiteLayouts.point(building, task.block))
                     ?: throw CivsRejection("protected-area")
@@ -666,8 +671,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val geometry = CivsMinePlan.forBuilding(building)
             ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "mine-layout-missing")
         val steps = geometry.steps
-        // Each geometry has its own ordinal. The first real V3 receipt preserves
-        // both older prefixes and commits the independent inspected V3 cursor.
+        // A geometry's ordinal is never reinterpreted as another version's cursor.
+        // The first real receipt preserves the older prefixes and starts the new plan.
         val state = city.minePlans?.get(building.id.toString())
         val progress = state?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
         if (state?.version?.let { it !in 2..CivsMinePlan.VERSION } == true || progress !in 0..steps.size.toLong())
@@ -678,7 +683,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val v2Plan = CivsMinePlan.forBuilding(building, 2)
         val v2 = v2Plan?.completed(v2Step)
             ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v2-mine-progress-invalid")
-        val legacy = v1 + v2
+        val v3Step = state?.takeIf { it.version == 3 }?.nextStep ?: state?.v3Step ?: 0L
+        val v3 = CivsMinePlan.forBuilding(building, 3)?.completed(v3Step)
+            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v3-mine-progress-invalid")
+        val legacy = v1 + v2 + v3
         val scan = mineCursors[building.id]?.takeIf { it.first == building.level && it.second == progress }
         val scanStart = (scan?.third ?: progress.toInt()).coerceAtMost(steps.size)
         // Take a useful batch before descending, then use it until a supply runs out.
@@ -716,7 +724,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val shaftSupport = step.shaftSupport
             val soundSupport = block.type.isOccluding && !block.type.hasGravity() && block.type !in UNBREAKABLE
             val soundWall = shaftSupport && target?.material == Material.COBBLESTONE && soundSupport
-            val retainedLight = block.type == Material.TORCH && geometry.floors.any { local in it.torches }
+            val retainedLight = block.type == Material.TORCH &&
+                (listOfNotNull(geometry.entranceLanding) + geometry.floors).any { local in it.torches }
             if (soundWall || target?.matches(block.blockData) == true || target == null && (block.type.isAir || retainedLight)) {
                 // Already-dug/legacy cells and unchanged-cursor prerequisites still
                 // need their currently open frontier secured before skipping ahead.
@@ -766,9 +775,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val protection = secureMine(city, worker, building, world, geometry, step, next - 1, excavations)
             if (protection != null || spotSearchPending || currentNeed(city, worker)?.status != "searching-work") return protection
             if (prerequisite != null) {
-                val standing = beside(city, worker, building, world, position(prerequisite), ladder = true, miningStep = next - 1) ?: return null
+                val standing = beside(city, worker, building, world, position(prerequisite), ladder = true,
+                    miningStep = next - 1, preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }) ?: return null
                 return work(worker, building, standing, listOf(change(prerequisite, "minecraft:air")),
-                    outputs = drops(prerequisite, tool(worker)), status = "digging-mine", duration = 2_000, miningStep = next - 1)
+                    outputs = drops(prerequisite, tool(worker)), status = "digging-mine", duration = 2_000,
+                    miningStep = next - 1, miningAccessStep = next - 1)
             }
             val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
             // Keep the same durable step until the paid ladder is installed.
@@ -778,10 +789,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 return blocked(worker, "waiting-${material.lowercase()}", material)
             }
             val standing = beside(city, worker, building, world, point, ladder = true,
-                miningStep = if (excavating) next - 1 else next) ?: return null
+                miningStep = if (excavating) next - 1 else next, miningAccessStep = next - 1,
+                preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }) ?: return null
             val outputs = if (block.type.isAir) emptyMap() else drops(block, tool(worker))
             return work(worker, building, standing, listOf(change(block, if (excavating) "minecraft:air" else target?.asString ?: "minecraft:air")), costs, outputs,
-                "digging-mine", duration = 2_000, miningStep = if (excavating) next - 1 else next)
+                "digging-mine", duration = 2_000, miningStep = if (excavating) next - 1 else next,
+                miningAccessStep = next - 1)
         }
         if (mineCursors[building.id]?.third == steps.size) return generateStone(city, worker, building, world, geometry, progress)
         return null
@@ -829,10 +842,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     /** Fixed-size shaft/access frontier; native checks are still shared across bounded pulses. */
     private fun mineFrontier(city: Settlement, building: CivBuilding, world: World,
         geometry: CivsMinePlan, around: CivPosition, excavations: Set<CivPosition>,
-        worker: CivWorker? = null): List<MineProtection>? {
+        worker: CivWorker? = null, accessStep: Long): List<MineProtection>? {
         val sides = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
         val effect = excavations.singleOrNull() ?: around
         val connected = hashSetOf<CivPosition>()
+        val landings = listOfNotNull(geometry.entranceLanding) + geometry.floors
         if ((effect.x to effect.z) in geometry.shaftColumns) {
             val open = hashSetOf<CivPosition>()
             // Only the current two-row air component belongs to this frontier. A
@@ -885,24 +899,25 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                         for ((dx, dz) in sides) {
                             val wall = CivPosition(x + dx, y, z + dz)
                             if ((wall.x to wall.z) in geometry.shaftColumns) continue
-                            if (geometry.floors.any { floor -> floor.cells.any {
-                                    it.x == wall.x && it.z == wall.z && wall.y in it.y + 1..it.y + 3
-                                } }) continue
+                            if (landings.any { floor -> floor.cells.any {
+                                    it.x == wall.x && it.z == wall.z && wall.y in it.y + 1..it.y + floor.height
+                                } } && (geometry.builtStanding(wall, accessStep) ||
+                                    geometry.builtStanding(wall.copy(y = wall.y - 1), accessStep))) continue
                             add(MineProtection(CivPosition(x, y, z), wall, Material.COBBLESTONE))
                         }
                     }
                 }
             } else {
-                for (floor in geometry.floors) {
-                    val support = floor.cells.firstOrNull { it.x == effect.x && it.z == effect.z && effect.y in it.y..it.y + 3 }
+                for (floor in landings) {
+                    val support = floor.cells.firstOrNull { it.x == effect.x && it.z == effect.z && effect.y in it.y..it.y + floor.height }
                         ?: continue
                     val feet = support.copy(y = support.y + 1)
                     add(MineProtection(feet, support, Material.COBBLESTONE))
-                    add(MineProtection(support.copy(y = support.y + 3), support.copy(y = support.y + 4), Material.COBBLESTONE))
+                    add(MineProtection(support.copy(y = support.y + floor.height), support.copy(y = support.y + floor.height + 1), Material.COBBLESTONE))
                     for ((dx, dz) in sides) {
                         val x = support.x + dx; val z = support.z + dz
                         if ((x to z) in geometry.shaftColumns || floor.cells.any { it.x == x && it.z == z }) continue
-                        for (height in 1..3) add(MineProtection(support.copy(y = support.y + height),
+                        for (height in 1..floor.height) add(MineProtection(support.copy(y = support.y + height),
                             CivPosition(x, support.y + height, z), Material.COBBLESTONE))
                     }
                     if (feet in floor.torches) add(MineProtection(feet, feet, Material.TORCH))
@@ -939,7 +954,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         geometry: CivsMinePlan, step: CivsMinePlan.Step, progress: Long, excavations: Set<CivPosition>,
         effectiveProgress: Long = progress): CivWorldWork? {
         val around = step.point
-        val tasks = mineFrontier(city, building, world, geometry, around, excavations, worker) ?: return null
+        val tasks = mineFrontier(city, building, world, geometry, around, excavations, worker, effectiveProgress) ?: return null
         val scan = mineSafety[worker.id]?.takeIf { it.building == building && it.target == around && it.progress == progress &&
             it.excavation == excavations.singleOrNull() }
             ?: MineSafetyScan(building, around, progress, excavations.singleOrNull()).also { mineSafety[worker.id] = it }
@@ -963,7 +978,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (CivsEquipment.plainCount(worker, task.material.name) == 0)
                 return prepareQuarry(city, worker, building, world)
             val miningStep = city.minePlans?.get(building.id.toString())?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
-            val standing = beside(city, worker, building, world, point, ladder = true, miningStep = miningStep) ?: run {
+            val standing = beside(city, worker, building, world, point, ladder = true, miningStep = miningStep,
+                miningAccessStep = effectiveProgress,
+                preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }) ?: run {
                 if (!spotSearchPending && task.transferFooting && currentNeed(city, worker)?.status == "worksite-no-access") {
                     scan.next++
                     blocked(worker, "searching-work")
@@ -983,7 +1000,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             return work(worker, building, standing, listOf(change(block, task.material.createBlockData().asString)),
                 inputs = mapOf(task.material.name to 1L), status = "securing-mine", duration = 2_000,
-                miningStep = miningStep)
+                miningStep = miningStep, miningAccessStep = effectiveProgress)
         }
         if (scan.next < tasks.size) { spotSearchPending = true; blocked(worker, "searching-work") }
         return null
@@ -1029,7 +1046,25 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     private fun mineStandingConnected(building: CivBuilding, world: World, target: CivPosition, standing: CivPosition): Boolean =
-        mineShaftApproach(building, target)?.let { shaftStandingConnected(world, standing, it) } ?: true
+        mineLadderConnected(building, world, standing) &&
+            (mineShaftApproach(building, target)?.let { shaftStandingConnected(world, standing, it) } ?: true)
+
+    /** A lower floor is usable only after its real ladder connects to the authored entrance. */
+    private fun mineLadderConnected(building: CivBuilding, world: World, standing: CivPosition,
+        checkedHeights: MutableMap<Int, Boolean> = hashMapOf()): Boolean {
+        val geometry = CivsMinePlan.forBuilding(building) ?: return false
+        val top = CivsWorksiteLayouts.point(building, geometry.bottom)
+        if (standing.y >= top.y) return true
+        return checkedHeights.getOrPut(standing.y) {
+            (standing.y..top.y).all { y ->
+                citizenChunkReady(world, top.x shr 4, top.z shr 4) &&
+                    world.getBlockAt(top.x, y, top.z).type == Material.LADDER
+            }
+        }
+    }
+
+    private fun mineBuiltStanding(building: CivBuilding, point: CivPosition, prefix: Long): Boolean =
+        CivsMinePlan.forBuilding(building)?.let { it.builtStanding(CivsMinePlan.localPoint(building, point), prefix) } == true
 
     private fun shaftStandingConnected(world: World, p: CivPosition, shaft: CivPosition,
         centralStanding: MutableMap<Int, Boolean> = hashMapOf()): Boolean {
@@ -1048,7 +1083,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun beside(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, target: CivPosition,
                        allowOwn: Boolean = true, ladder: Boolean = false, miningStep: Long? = null,
-                       preferred: CivPosition? = null): CivPosition? {
+                       preferred: CivPosition? = null, miningAccessStep: Long? = miningStep): CivPosition? {
         val search = workSpots[worker.id]?.takeIf {
             it.buildingId == building.id && it.target == target && it.allowOwn == allowOwn && it.ladder == ladder
         } ?: WorkSpotSearch(building.id, target, allowOwn, ladder).also { workSpots[worker.id] = it }
@@ -1064,6 +1099,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             offsets = central + other
         }
         val centralStanding = hashMapOf<Int, Boolean>()
+        val connectedHeights = hashMapOf<Int, Boolean>()
         val reach = citizenWorkReach(building.type)
         fun pending(): CivPosition? {
             spotSearchPending = true
@@ -1079,7 +1115,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) { nextPosition(); continue }
             val p = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
             if (building.type == BuildingType.QUARRY && (!CivsMinePlan.workStandingAllowed(building, p) ||
-                    rejectedStanding(worker, building, target, miningStep, p))) { nextPosition(); continue }
+                    miningAccessStep != null && !mineBuiltStanding(building, p, miningAccessStep) ||
+                    !mineLadderConnected(building, world, p, connectedHeights) ||
+                    rejectedStanding(worker, building, miningStep, p))) { nextPosition(); continue }
             val shaft = shaftApproach
             if (shaft != null && (kotlin.math.abs(p.x.toLong() - shaft.x) > 1 ||
                     kotlin.math.abs(p.z.toLong() - shaft.z) > 1)) { nextPosition(); continue }
@@ -1112,7 +1150,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
 
     private fun work(worker: CivWorker, building: CivBuilding, standing: CivPosition, changes: List<CivPlanBlock>,
         inputs: Map<String, Long> = emptyMap(), outputs: Map<String, Long> = emptyMap(), status: String,
-        duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null, miningGenerator: Boolean = false): CivWorldWork {
+        duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null, miningGenerator: Boolean = false,
+        miningAccessStep: Long? = miningStep): CivWorldWork {
         val slots = CivsEquipment.slots(worker)
         val hand = slots[4]?.stack()
         val meta = hand?.itemMeta as? org.bukkit.inventory.meta.Damageable
@@ -1135,7 +1174,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val dy = cell.position.y.toDouble() - standing.y
                 val dz = cell.position.z.toDouble() - standing.z
                 dx * dx + dy * dy + dz * dz
-            }?.position, miningPlanVersion = miningStep?.let { CivsMinePlan.VERSION }, miningGenerator = miningGenerator)
+            }?.position, miningPlanVersion = miningStep?.let { CivsMinePlan.VERSION }, miningGenerator = miningGenerator,
+            miningAccessStep = miningAccessStep)
     }
 
     private fun drops(block: Block, tool: ItemStack): Map<String, Long> = block.getDrops(tool).filter { !it.type.isAir }

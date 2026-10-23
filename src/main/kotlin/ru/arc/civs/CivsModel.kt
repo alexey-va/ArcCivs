@@ -123,7 +123,9 @@ data class CivDeletion(val buildingId: UUID?)
 /** Versioned physical construction cursor; legacyStep records the untouched pre-cutover ordinal. */
 data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep: Long? = null,
     /** V2's exact saved prefix is retained when a first real V3 receipt starts its independent cursor. */
-    val v2Step: Long? = null)
+    val v2Step: Long? = null,
+    /** V3's offset-shaft ordinal remains provenance when V4 starts its own single-shaft plan. */
+    val v3Step: Long? = null)
 
 data class Settlement(
     val id: UUID,

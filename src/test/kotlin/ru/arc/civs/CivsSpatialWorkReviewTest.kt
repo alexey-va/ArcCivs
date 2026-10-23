@@ -236,6 +236,21 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                     runtime = runtime()
                                 }
                                 var seal = nextWork()
+                                if (prerequisite) {
+                                    // V4 uses the same fixed column. Finish its paid backing
+                                    // and rung before the new lower stance can see the side
+                                    // cave through the still-solid head row. No deeper cut
+                                    // may overtake that sealing action.
+                                    repeat(2) {
+                                        if (seal.status != "securing-mine") {
+                                            seal.status shouldBe "digging-mine"
+                                            (seal.changes.single().after != "minecraft:air") shouldBe true
+                                            commit(seal)
+                                            committed = requireNotNull(seal.miningStep)
+                                            seal = nextWork()
+                                        }
+                                    }
+                                }
                                 if (farFace) {
                                     // The far face is hidden behind the intact ladder
                                     // backing. Only the next ordered lower cut supplies
@@ -390,6 +405,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     val face = CivsWorksiteLayouts.point(mine, requireNotNull(geometry.generator))
                     world.getBlockAt(face.x, face.y, face.z).type = Material.COBBLESTONE
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
+                    for (y in support.y + 1..top.y + 2) world.getBlockAt(top.x, y, top.z).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
                     world.getBlockAt(support.x, support.y, support.z).type = Material.COBBLESTONE
                     for (y in support.y + 1..support.y + 3) world.getBlockAt(support.x, y, support.z).type = Material.AIR
                     world.getBlockAt(wall.x, wall.y, wall.z).type = Material.AIR
@@ -1157,6 +1175,40 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
+    fun seedV4MinePrefix(world: CivsWorksiteWorldFixture, mine: CivBuilding, prefix: Long) {
+        val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+        require(mine.schematicId == "civs/minecolonies/medievaloak/fundamentals/miner1")
+        require(prefix in 0..geometry.steps.size.toLong())
+        fun data(spec: String) = Bukkit.createBlockData(spec).also { block ->
+            if (!block.material.isAir) block.rotate(when (Math.floorMod(mine.rotation / 90, 4)) {
+                1 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
+                2 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
+                3 -> org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90
+                else -> org.bukkit.block.structure.StructureRotation.NONE
+            })
+        }
+        for (step in geometry.steps.take(prefix.toInt())) {
+            val point = CivsWorksiteLayouts.point(mine, step.point)
+            world.getBlockAt(point.x, point.y, point.z).blockData = data(step.after ?: "minecraft:air")
+        }
+        val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+        // Hash-pinned medievaloak miner1 supplies exactly the three upper rungs
+        // at local -5..-3, two air rows above them and the dirt cap at local 0.
+        for (dy in 0..5) {
+            val point = bottom.copy(y = bottom.y + dy)
+            val block = world.getBlockAt(point.x, point.y, point.z)
+            when {
+                dy <= 2 -> block.blockData = data("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+                dy < 5 -> block.type = Material.AIR
+                else -> block.type = Material.DIRT
+            }
+            if (dy < 5) {
+                val backing = CivsWorksiteLayouts.point(mine, geometry.backing).copy(y = point.y)
+                world.getBlockAt(backing.x, backing.y, backing.z).type = Material.COBBLESTONE
+            }
+        }
+    }
+
     for (shaftMaterial in listOf(Material.AIR, Material.STONE)) {
         test("miner extends a continuous ladder into $shaftMaterial below an overhanging wall with paid support and ladder") {
             failOnUnsupportedMockBukkitOperation {
@@ -1236,7 +1288,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         (visible.distance(eye) <= CITIZEN_BLOCK_REACH) shouldBe true
                         repeat(12) { runtime.pulse(listOf(city)) }
                         val wall = requireNotNull(runtime.plan(city, city.workers.single()))
-                        wall.standing shouldBe if (shaftMaterial == Material.STONE) shaft else bottom
+                        wall.standing shouldBe bottom
                         citizenCanReachBlock(world, Location(world, wall.standing.x + .5, wall.standing.y + 1.62, wall.standing.z + .5), support) shouldBe true
                         wall.focus shouldBe support
                         wall.changes.single().position shouldBe support
@@ -1314,6 +1366,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val standing = target.copy(x = target.x + 2)
                 CivsMinePlan.workStandingAllowed(mine, standing) shouldBe true
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                seedV4MinePrefix(world, mine, step.toLong())
+                geometry.builtStanding(CivsMinePlan.localPoint(mine, standing), step.toLong()) shouldBe true
                 for (y in target.y..target.y + 2) world.getBlockAt(standing.x, y, standing.z).type = Material.AIR
                 // A gap permits the ray, but offers no floor for any of the old adjacent probes.
                 for (y in target.y - 4..target.y + 2) world.getBlockAt(target.x + 1, y, target.z).type = Material.AIR
@@ -1337,7 +1391,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
 
                     // Expanding the search radius must not turn a neighbour's footprint into a work position.
                     val protected = city.copy(buildings = city.buildings.map { building ->
-                        if (building.type == BuildingType.TOWN_HALL) building.copy(bounds = CivBox(standing, standing)) else building
+                        if (building.type == BuildingType.TOWN_HALL) building.copy(bounds = CivBox(
+                            standing.copy(x = target.x + 1, z = target.z - 4),
+                            standing.copy(x = target.x + 4, z = target.z + 4))) else building
                     })
                     runtime.invalidate(worker.id)
                     repeat(4) { runtime.pulse(listOf(protected)) }
@@ -1358,7 +1414,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     rotation = 270, bounds = CivBox(CivPosition(-102, 63, -50), CivPosition(-86, 82, -33)),
                     entrance = CivPosition(-85, 69, -40), control = CivPosition(-93, 69, -40))
                 val floor = CivPosition(-89, 56, -40)
-                val floorStep = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.indexOfFirst {
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                val floorStep = geometry.steps.indexOfFirst {
                     it.after == "minecraft:cobblestone" && CivsWorksiteLayouts.point(mine, it.point) == floor
                 }.also { (it >= 0) shouldBe true }.toLong()
                 var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
@@ -1366,6 +1423,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 val lower = floor.copy(y = 57)
                 val upper = floor.copy(y = 58)
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                seedV4MinePrefix(world, mine, floorStep)
                 // The saved production slice has a clear previous gallery and two fallen
                 // gravel blocks above this already-excavated, still-unpaid floor step.
                 for (y in 57..59) world.getBlockAt(-90, y, -40).type = Material.AIR
@@ -1388,6 +1446,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     }
                     fun commit(work: CivWorldWork) {
                         runtime.validate(city, work)
+                        geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
+                            city.minePlans!!.getValue(mine.id.toString()).nextStep) shouldBe true
                         work.changes.forEach { cell ->
                             val block = world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
                             block.blockData.asString shouldBe cell.before
@@ -1413,7 +1473,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         first.miningStep shouldBe floorStep
                         // This AIR effect belongs to a COBBLESTONE floor step. A final
                         // check must use the falling block's actual exposed side.
-                        val wall = lower.copy(z = lower.z - 1)
+                        val wall = lower.copy(x = lower.x + 1)
                         world.getBlockAt(wall.x, wall.y, wall.z).type shouldBe Material.STONE
                         world.getBlockAt(wall.x, wall.y, wall.z).type = Material.LAVA
                         shouldThrow<CivsRejection> { runtime.validate(city, first) }.reason shouldBe "stale-worksite"
@@ -1466,18 +1526,15 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     rotation = 270, bounds = CivBox(CivPosition(-102, 63, -50), CivPosition(-86, 82, -33)),
                     entrance = CivPosition(-85, 69, -40), control = CivPosition(-93, 69, -40))
                 val floor = CivPosition(-93, 56, -36)
-                val floorStep = requireNotNull(CivsMinePlan.forBuilding(mine)).steps.indexOfFirst {
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                val floorStep = geometry.steps.indexOfFirst {
                     it.after == "minecraft:cobblestone" && CivsWorksiteLayouts.point(mine, it.point) == floor
                 }.also { (it >= 0) shouldBe true }.toLong()
                 var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
                     .copy(radius = 200, minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, floorStep)))
                 val fallen = floor.copy(y = 57)
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
-                for (x in floor.x - 1..floor.x + 1) for (z in floor.z - 1..floor.z) {
-                    for (y in 57..59) world.getBlockAt(x, y, z).type = Material.AIR
-                    world.getBlockAt(x, 60, z).type = Material.COBBLESTONE
-                    if (x != floor.x || z != floor.z) world.getBlockAt(x, 56, z).type = Material.COBBLESTONE
-                }
+                seedV4MinePrefix(world, mine, floorStep)
                 var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
@@ -1494,6 +1551,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     }
                     fun commit(work: CivWorldWork) {
                         runtime.validate(city, work)
+                        geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
+                            city.minePlans!!.getValue(mine.id.toString()).nextStep) shouldBe true
                         work.changes.forEach { cell ->
                             world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
                                 .setBlockData(Bukkit.createBlockData(cell.after), false)
@@ -1505,6 +1564,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         val paidFloor = nextWork()
                         paidFloor.changes.single().position shouldBe floor
                         paidFloor.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        geometry.builtStanding(CivsMinePlan.localPoint(mine, paidFloor.standing), floorStep) shouldBe true
                         // The falling block was in flight when the floor ray was admitted.
                         world.getBlockAt(fallen.x, fallen.y, fallen.z).type = Material.GRAVEL
                         citizenCanReachBlock(world, Location(world, paidFloor.standing.x + .5,
@@ -1553,6 +1613,11 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, step.toLong())))
                 val target = CivsWorksiteLayouts.point(mine, local)
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                seedV4MinePrefix(world, mine, step.toLong())
+                // Reproduce a new obstruction in the built gallery, rather than
+                // borrowing empty future cells as unsupported work positions.
+                for (dx in -1..1) for (dz in -1..1) if (maxOf(kotlin.math.abs(dx), kotlin.math.abs(dz)) == 1)
+                    for (dy in 0..2) world.getBlockAt(target.x + dx, target.y + dy, target.z + dz).type = Material.STONE
                 // Supported outer positions surround a solid, three-block-high enclosure.
                 for (dx in -2..2) for (dz in -2..2) if (maxOf(kotlin.math.abs(dx), kotlin.math.abs(dz)) == 2) {
                     for (dy in 0..2) world.getBlockAt(target.x + dx, target.y + dy, target.z + dz).type = Material.AIR
@@ -1583,10 +1648,12 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         repeat(4) { runtime.pulse(listOf(city)) }
                         messages.count { "worksite_blocked" in it } shouldBe 1
 
-                        for (dy in 0..2) world.getBlockAt(target.x - 1, target.y + dy, target.z).type = Material.AIR
+                        for (dy in 0..2) world.getBlockAt(target.x + 1, target.y + dy, target.z).type = Material.AIR
                         runtime.invalidate(worker.id)
                         runtime.pulse(listOf(city))
-                        requireNotNull(runtime.plan(city, worker)).focus shouldBe target
+                        val recovered = requireNotNull(runtime.plan(city, worker))
+                        recovered.focus shouldBe target
+                        geometry.builtStanding(CivsMinePlan.localPoint(mine, recovered.standing), step.toLong()) shouldBe true
                         messages.count { "worksite_recovered" in it } shouldBe 1
                         runtime.pulse(listOf(city))
                         messages.count { "worksite_recovered" in it } shouldBe 1
@@ -1730,8 +1797,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 for (floor in geometry.floors) {
                                     var index = 0
                                     for ((branch, part) in floor.sections.withIndex()) {
-                                        for (support in floor.cells.subList(index, index + part.second)) for (height in 0..3)
-                                            put(CivsWorksiteLayouts.point(mine, support.copy(y = support.y + height)), floor.index * 5 + branch)
+                                        if (branch > 0) for (support in floor.cells.subList(index, index + part.second)) for (height in 0..3)
+                                            put(CivsWorksiteLayouts.point(mine, support.copy(y = support.y + height)), floor.index * 16 + branch)
                                         index += part.second
                                     }
                                 }
@@ -1801,7 +1868,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             }
                         }
                         // Fixed side lights are preserved by each level's independent scan.
-                        placedTorches shouldBe 220L
+                        placedTorches shouldBe 260L
                     }
                     tasks.close()
                 }

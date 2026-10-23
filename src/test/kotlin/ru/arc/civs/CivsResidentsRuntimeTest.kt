@@ -52,6 +52,107 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("a built V4 prefix traverses two native landings and returns through the complete authored ladder without teleport jumps") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("resident-v4-two-level-traversal").also(paper.server::addWorld)
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 80, 0))
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
+            val secondFloor = geometry.floors[1]
+            val prefix = geometry.steps.indexOfLast { it.floor == secondFloor.index && it.branch == "opening" } + 1
+            (prefix in 1 until geometry.shaftEnd) shouldBe true
+            for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
+            for (step in geometry.steps.take(prefix)) {
+                val point = CivsWorksiteLayouts.point(mine, step.point)
+                world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
+            }
+            val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+            // Curated miner1 SHA c54e00bc1c0d4034: the complete authored column has
+            // ladder rungs at local -5..-3, air at -2/-1, and a dirt cap at 0.
+            for (localY in -5..0) {
+                val point = bottom.copy(y = mine.anchor.y + localY)
+                world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(when {
+                    localY <= -3 -> "minecraft:ladder[facing=west,waterlogged=false]"
+                    localY < 0 -> "minecraft:air"
+                    else -> "minecraft:dirt"
+                })
+                if (localY < 0) {
+                    val backing = CivsWorksiteLayouts.point(mine, geometry.backing).copy(y = point.y)
+                    world.getBlockAt(backing.x, backing.y, backing.z).type = Material.COBBLESTONE
+                }
+            }
+            val state = CivMinePlanState(4, prefix.toLong())
+            val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
+                minePlans = mapOf(mine.id.toString() to state))
+            fun at(point: CivPosition) = Location(world, point.x + .5, point.y.toDouble(), point.z + .5)
+            fun passage(point: CitizenPoint) = citizenMineWorkRouteAllowed(mine, point, prefix.toLong(), state)
+            fun feet(floor: CivsMinePlan.Floor) = CivsWorksiteLayouts.point(mine, floor.cells.first().copy(y = floor.feetY))
+            val first = feet(geometry.floors[0])
+            val second = feet(secondFloor)
+            val top = bottom.copy(y = mine.anchor.y - 3)
+            val future = feet(geometry.floors[2])
+            passage(CitizenPoint(future.x + .5, future.y.toDouble(), future.z + .5)) shouldBe false
+            var position = at(top)
+            val start = position.clone()
+            val observedDistances = mutableListOf<Double>()
+            var walkedDistance = 0.0
+            var minimumY = position.y
+            var completedLegs = 0
+            // Production capture/solver/movement runs against the faithful native-geometry
+            // fixture. This driver never invokes the NPC lifecycle or recovery teleport.
+            for (destination in listOf(first, second, first, top)) {
+                var legs = 0
+                while (position.distanceSquared(at(destination)) > .000001 && legs++ < 6) {
+                    val waypoint = citizenMineWaypoint(city, world, position, destination) ?: destination
+                    val target = at(waypoint)
+                    val route = CitizenPacketRoute(world, position, target,
+                        { p -> city.contains(p.x, p.z) && passage(CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5)) },
+                        { _, to -> passage(to) }, { 1.0 })
+                    val operationLimit = CitizenNavigationCapture.MAXIMUM_BLOCKS + CitizenNavigationSearch.MAXIMUM_NODES * 64
+                    var operations = 0
+                    while (route.searching && operations++ < operationLimit) route.expand()
+                    withClue("from=$position waypoint=$waypoint destination=$destination prefix=$prefix " +
+                        "nodes=${route.nodeCount} captured=${route.capturedBlocks} phase=${route.preparationPhase}") {
+                        route.searching shouldBe false
+                        route.failure shouldBe null
+                    }
+                    val frameLimit = 128 + 4 * kotlin.math.ceil(position.distance(target) / .172).toInt()
+                    var frames = 0
+                    while (!route.finished && route.failure == null && frames++ < frameLimit) {
+                        val before = position
+                        route.move(before, .8) { true }?.let { next ->
+                            observedDistances += before.distance(next)
+                            for (sample in 0..10) {
+                                val point = before.clone().add(next.toVector().subtract(before.toVector()).multiply(sample / 10.0))
+                                citizenPacketBodyClear(world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                            }
+                            passage(CitizenPoint(next.x, next.y, next.z)) shouldBe true
+                            position = next
+                            minimumY = minOf(minimumY, position.y)
+                        }
+                    }
+                    withClue("from=$position target=$target destination=$destination prefix=$prefix frames=$frames " +
+                        "nodes=${route.nodeCount} remaining=${route.remainingNodes}") {
+                        route.failure shouldBe null
+                        route.finished shouldBe true
+                        position.distanceSquared(target) shouldBe 0.0
+                    }
+                    walkedDistance += route.forwardProgress
+                    completedLegs++
+                }
+                position.distanceSquared(at(destination)) shouldBe 0.0
+            }
+            val teleportJumps = observedDistances.count { it > .215001 }
+            withClue("moves=${observedDistances.size} legs=$completedLegs walked=$walkedDistance " +
+                "minimumY=$minimumY teleportJumps=$teleportJumps") {
+                observedDistances.isNotEmpty() shouldBe true
+                teleportJumps shouldBe 0
+                (minimumY <= second.y) shouldBe true
+                (walkedDistance >= 2 * (start.y - second.y)) shouldBe true
+                position.distanceSquared(start) shouldBe 0.0
+            }
+        }
+    }
+
     test("a permitted loaded city spawns and completes physical field work without viewers then retires on revoke") {
         residentRuntime { h ->
             Bukkit.getOnlinePlayers().forEach { it.teleport(Location(h.world, 1_000.5, 64.0, .5)) }
@@ -721,7 +822,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("a failed final mine approach selects another inside stance for the same block and delivers once without recovery") {
         residentRuntime { h ->
             val first = h.prepareMineWork(CivPosition(26, 64, 0))
-            val alternative = first.copy(standing = CivPosition(24, 64, 0))
+            val alternative = first.copy(standing = CivPosition(22, 64, 0))
             val quarry = requireNotNull(h.city.building(first.buildingId))
             CivsMinePlan.workStandingAllowed(quarry, first.standing) shouldBe true
             CivsMinePlan.workStandingAllowed(quarry, alternative.standing) shouldBe true
@@ -789,7 +890,7 @@ class CivsResidentsRuntimeTest : FunSpec({
 
     test("a transient mine planner rejection preserves the selected standing position") {
         residentRuntime { h ->
-            val work = h.prepareMineWork(CivPosition(24, 64, 0))
+            val work = h.prepareMineWork(CivPosition(22, 64, 0))
             val actor = h.owner.collisionActors().single()
             val origin = actor.location
             h.onWorkPositionFailed = { _, _, _ -> true }
@@ -813,7 +914,7 @@ class CivsResidentsRuntimeTest : FunSpec({
 
     test("a player collision preserves the mine stance and work resumes after the player leaves") {
         residentRuntime { h ->
-            val work = h.prepareMineWork(CivPosition(24, 64, 0))
+            val work = h.prepareMineWork(CivPosition(22, 64, 0))
             val actor = h.owner.collisionActors().single()
             val origin = actor.location
             var blockedSteps = 0
@@ -866,6 +967,14 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.deliveries shouldBe 1
             h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
             actor.teleport(outside)
+            citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe true
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            val future = Location(h.world, 24.5, 64.0, 5.5)
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(quarry))
+            CivsMinePlan.workStandingAllowed(quarry, CivPosition(24, 64, 5)) shouldBe true
+            geometry.builtStanding(CivsMinePlan.localPoint(quarry, CivPosition(24, 64, 5)),
+                requireNotNull(work.miningAccessStep)) shouldBe false
+            actor.teleport(future)
             citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe true
             shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
             actor.teleport(inside)
@@ -2198,14 +2307,17 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         for (x in 18..27) for (z in -1..1) for (y in 64..66)
             if (x == 18 || x == 27 || z != 0 || y == 66) world.getBlockAt(x, y, z).type = Material.STONE
         for (y in focus.y..focus.y + 2) world.getBlockAt(focus.x, y, focus.z).type = Material.STONE
-        owner.collisionActors().single().teleport(Location(world, 19.5, 64.0, .5))
+        owner.collisionActors().single().teleport(Location(world, 20.5, 64.0, .5))
         val geometry = requireNotNull(CivsMinePlan.forBuilding(quarry))
         val localFocus = CivsMinePlan.localPoint(quarry, focus)
         val step = geometry.steps.indexOfFirst { it.point == localFocus && it.after == null }
         check(step >= 0) { "Missing canonical mine step for $localFocus" }
         return CivWorldWork(workerId, 0, quarry.id, standing,
             listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")), durationMillis = 1_500,
-            status = "digging-mine", miningStep = step.toLong(), focus = focus, miningPlanVersion = geometry.version)
+            status = "digging-mine", miningStep = step.toLong(), focus = focus, miningPlanVersion = geometry.version,
+            // Controller-only fixture: the shaft/landings are already inspected;
+            // the separate faithful-prefix traversal above proves their geometry.
+            miningAccessStep = maxOf(step, geometry.shaftEnd).toLong())
             .also { work = it }
     }
     fun commitHit() {

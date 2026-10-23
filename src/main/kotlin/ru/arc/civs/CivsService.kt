@@ -186,7 +186,7 @@ class CivsService(
 
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
-    /** Manual operator reads use current memory only; no plans, native captures or writes are started. */
+    /** Cached snapshots by default; explicit terrain alone captures a bounded loaded native neighbourhood. */
     fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())
         val selected = if (cityId == null) cities.values.take(8) else listOfNotNull(cities[cityId])
@@ -200,6 +200,12 @@ class CivsService(
         fun rows(transform: (Settlement) -> Map<String, Any?>): Map<String, Any?> = mapOf(
             "total" to total, "truncated" to (total > selected.size), "entries" to selected.map(transform))
         return when (system) {
+            "terrain" -> {
+                if (cityId == null || workerId == null) return mapOf("error" to "terrain-requires-city-and-worker")
+                val city = selected.single()
+                val worker = city.workers.first { it.id == workerId }
+                CivsTerrainDebug.capture(city, worker, citizens.residentFeet(workerId), worksites.plan(city, worker), now())
+            }
             "citizens" -> citizens.debug(cityId, workerId)
             "worksites" -> worksites.debug(selectedWorkers?.mapTo(hashSetOf()) { it.id },
                 selectedWorkers?.mapNotNullTo(hashSetOf()) { it.assignment })

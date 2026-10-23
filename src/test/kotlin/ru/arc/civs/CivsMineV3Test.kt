@@ -18,10 +18,10 @@ import java.nio.file.Path
 import java.util.UUID
 
 class CivsMineV3Test : FunSpec({
-    test("the authored central opening stays clear through every aligned three-wide mining floor") {
+    test("the historical V3 central opening stays clear through every aligned three-wide mining floor") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
             val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
             val center = CivsWorksiteLayouts.vector(CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")["shaftCenter"])
             val hole = (-1..1).flatMap { x -> (-1..1).map { z -> center.x + x to center.z + z } }.toSet()
             plan.floors.size shouldBe level + 2
@@ -68,10 +68,10 @@ class CivsMineV3Test : FunSpec({
             mapOf("COBBLESTONE" to 96, "COAL" to 4)
     }
 
-    test("a deferred access wall expires before transfer work and cannot borrow a later central opening row") {
+    test("a historical V3 deferred access wall expires before transfer work and cannot borrow a later central opening row") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) {
             val mine = spatialBuilding(style, "miner", 1, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
             val exposed = plan.steps.first { it.after == null && it.point.y == plan.bottom.y - 1 &&
                 (it.point.x to it.point.z) !in plan.openingColumns }.point
             val deadline = plan.lowerClearanceEnd(exposed)
@@ -92,21 +92,21 @@ class CivsMineV3Test : FunSpec({
         val old = spatialCity(UUID.randomUUID(), listOf(mine), worker).copy(mineProgress = mapOf(key to 214L),
             minePlans = mapOf(key to CivMinePlanState(2, 281, 214)))
         CivsRules.validate(Gson().fromJson(Gson().toJson(old), Settlement::class.java)) shouldBe old
-        val target = requireNotNull(CivsMinePlan.forBuilding(mine)).center
+        val target = requireNotNull(CivsMinePlan.forBuilding(mine, 3)).center
         val cell = CivPlanBlock(CivsWorksiteLayouts.point(mine, target), "minecraft:stone", "minecraft:air")
         val oldReceipt = CivInventoryTransaction(UUID.randomUUID(), old.id, old.revision,
             old.copy(revision = old.revision + 1), emptyList(), worldChanges = listOf(cell)).validated()
         Gson().fromJson(Gson().toJson(oldReceipt), CivInventoryTransaction::class.java).validated().after.minePlans shouldBe old.minePlans
         val work = CivWorldWork(worker.id, 49, mine.id, mine.entrance, listOf(cell), status = "digging-mine",
-            miningStep = 3, miningPlanVersion = CivsMinePlan.VERSION)
+            miningStep = 3, miningPlanVersion = 3)
         val after = CivsRules.finishWorldWork(old, work, 100_000)
-        after.minePlans shouldBe mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, 3, 214, 281))
+        after.minePlans shouldBe mapOf(key to CivMinePlanState(3, 3, 214, 281))
         after.mineProgress shouldBe old.mineProgress
         after.workers.single().completedCycles shouldBe 50L
         CivsRules.validate(Gson().fromJson(Gson().toJson(after), Settlement::class.java)) shouldBe after
         shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, work, 100_001) }.reason shouldBe "stale-delivery"
         shouldThrow<CivsRejection> { CivsRules.validate(after.copy(minePlans = mapOf(key to
-            CivMinePlanState(CivsMinePlan.VERSION, 3, 214, 282)))) }.reason shouldBe "invalid-state"
+            CivMinePlanState(3, 3, 214, 282)))) }.reason shouldBe "invalid-state"
         }
         }
     }
@@ -121,76 +121,19 @@ class CivsMineV3Test : FunSpec({
         CivsMinePlan.belowFoundation(building.copy(type = BuildingType.QUARRY), -60, 1) shouldBe false
     }
 
-    test("a genuinely completed V2 mine retains natural backing and physically opens it during V3 migration") {
-        failOnUnsupportedMockBukkitOperation {
-            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-                val world = CivsWorksiteWorldFixture("mine-v2-natural-backing").also(paper.server::addWorld)
-                val plugin = paper.createSimplePlugin("MineV2NaturalBacking")
-                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-                try {
-                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
-                    val old = requireNotNull(CivsMinePlan.forBuilding(mine, 2))
-                    val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
-                    old.steps.size shouldBe 281
-                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
-                    val bottom = CivsWorksiteLayouts.point(mine, old.bottom)
-                    for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
-                        Bukkit.createBlockData("minecraft:ladder[facing=${old.facing},waterlogged=false]")
-                    // V2 deliberately retained sound native STONE at shaftSupport
-                    // steps. Its completed prefix is not an all-COBBLESTONE world.
-                    for (step in old.steps) {
-                        val p = CivsWorksiteLayouts.point(mine, step.point)
-                        val block = world.getBlockAt(p.x, p.y, p.z)
-                        if (step.shaftSupport && block.type == Material.STONE) continue
-                        block.blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
-                    }
-                    val local = CivPosition(8, -9, -8)
-                    old.steps.last { it.point == local }.shaftSupport shouldBe true
-                    plan.steps.any { it.point == local && it.after == null } shouldBe true
-                    val target = CivsWorksiteLayouts.point(mine, local)
-                    world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
-                    val key = mine.id.toString()
-                    var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "NETHERITE_PICKAXE").copy(completedCycles = 49))
-                        .copy(mineProgress = mapOf(key to 214L), minePlans = mapOf(key to CivMinePlanState(2, 281, 214)))
-                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                        var opened = false
-                        var blocked = false
-                        repeat(4_096) {
-                            if (!opened && !blocked) {
-                                runtime.pulse(listOf(city))
-                                val worker = city.workers.single()
-                                val work = runtime.plan(city, worker)
-                                if (work == null) blocked = runtime.idleReason(city, worker) != "searching-work"
-                                else {
-                                    runtime.validate(city, work)
-                                    val change = work.changes.single()
-                                    if (change.position == target) {
-                                        change.before shouldBe "minecraft:stone"
-                                        change.after shouldBe "minecraft:air"
-                                        work.outputs shouldBe mapOf("COBBLESTONE" to 1L)
-                                        opened = true
-                                    }
-                                    world.getBlockAt(change.position.x, change.position.y, change.position.z)
-                                        .blockData = Bukkit.createBlockData(change.after)
-                                    city = CivsRules.finishWorldWork(city, work, 100_000 + worker.completedCycles * 5_000)
-                                    city.minePlans!!.getValue(key).v2Step shouldBe 281L
-                                    city.mineProgress!!.getValue(key) shouldBe 214L
-                                    // Geometry fixture collects real bag output after each
-                                    // committed action so carried capacity stays realistic.
-                                    city = city.copy(workers = city.workers.map { CivsEquipment.consumeInputs(it, work.outputs) })
-                                    runtime.invalidate(worker.id)
-                                }
-                            }
-                        }
-                        withClue("V2 natural backing blocked at ${city.minePlans}: ${runtime.idleReason(city, city.workers.single())}") {
-                            opened shouldBe true
-                        }
-                        world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.AIR
-                    }
-                } finally { tasks.close() }
-            }
-        }
+    test("V4 retains the original V2 natural backing column instead of cutting it for an offset ladder") {
+        val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+        val old = requireNotNull(CivsMinePlan.forBuilding(mine, 2))
+        val previous = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        old.steps.size shouldBe 281
+        val local = CivPosition(8, -9, -8)
+        old.steps.last { it.point == local }.shaftSupport shouldBe true
+        previous.steps.any { it.point == local && it.after == null } shouldBe true
+        plan.steps.any { it.point == local && it.after == null } shouldBe false
+        plan.steps.last { it.point == local }.shaftSupport shouldBe true
+        plan.bottom shouldBe old.bottom
+        plan.backing shouldBe old.backing
     }
 
     test("V2 compatibility still rejects a paid cobblestone floor replaced with stone") {
@@ -379,6 +322,9 @@ class CivsMineV3Test : FunSpec({
                         val p = CivsWorksiteLayouts.point(mine, step.point)
                         world.getBlockAt(p.x, p.y, p.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
                     }
+                    val top = CivsWorksiteLayouts.point(mine, plan.bottom)
+                    for (y in top.y..top.y + 3) world.getBlockAt(top.x, y, top.z).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=${plan.facing},waterlogged=false]")
                     val target = CivsWorksiteLayouts.point(mine, plan.steps[index].point)
                     world.getBlockAt(target.x, target.y, target.z).type = Material.TORCH
                     val worker = spatialWorker(mine, "IRON_PICKAXE")
@@ -410,7 +356,7 @@ class CivsMineV3Test : FunSpec({
         for (style in listOf("nordic", "medievaloak", "caledonia")) {
             for (level in 1..3) {
                 val upgraded = spatialBuilding(style, "miner", level, CivPosition(0, 63, 0))
-                val geometry = requireNotNull(CivsMinePlan.forBuilding(upgraded))
+                val geometry = requireNotNull(CivsMinePlan.forBuilding(upgraded, 3))
                 if (level == 1 || level == 3) {
                     val name = if (level == 1) "$style-v3.json" else "$style-l3-v3.json"
                     Files.writeString(directory.resolve(name), Gson().toJson(mapOf(
