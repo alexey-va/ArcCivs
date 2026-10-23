@@ -8,6 +8,25 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    test("legacy snapshots keep testing off and settings survive the durable codec") {
+        val city = activeCity()
+        val legacy = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
+        legacy.settings shouldBe null
+        (legacy.settings ?: CivSettlementSettings()) shouldBe CivSettlementSettings(true, false, false)
+        val configured = city.copy(settings = CivSettlementSettings(false, true, true))
+        CivsRules.validate(Gson().fromJson(Gson().toJson(configured), Settlement::class.java)).settings shouldBe configured.settings
+    }
+
+    test("authorized immortality preserves resident belongings and ends when the permission decision is false") {
+        val city = activeCity()
+        val worker = city.workers.first()
+        val protected = CivsRules.hurtResident(city, owner, worker.id, 100.0, immortal = true)
+        protected.workers.first() shouldBe worker.copy(health = 1.0)
+        protected.corpses shouldBe city.corpses
+        val repeated = CivsRules.hurtResident(protected, owner, worker.id, 100.0, immortal = true)
+        repeated shouldBe protected
+        CivsRules.hurtResident(repeated, owner, worker.id, 100.0).workers.any { it.id == worker.id } shouldBe false
+    }
     test("resident injuries and permanent deaths survive decoding even below four residents") {
         val city = activeCity()
         val worker = city.workers.first()

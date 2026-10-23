@@ -7,6 +7,19 @@ The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
 footprints at every phase; unrelated players and environmental changes remain guarded.
 
+Owners with `arccivs.testing` can persist three per-settlement testing switches in
+the management menu. Chunk loading defaults on for legacy cities and still requires
+`arccivs.chunkload`; immortality and automatic construction supplies default off.
+The latter two require the owner's current world permission through the existing
+15-second refresh / 30-second allowance cache. Immortality clamps accepted damage
+to one remaining health; it does not resurrect dead residents. Automatic supplies
+cover only the deficit of the current captured construction row after local hut
+stock and builder bags, fit real builder bag slots, and commit through the same
+inventory journal. They are explicit administrative item issuance, not ordinary
+production. Disabling or losing the permission stops new issuance. Console-only
+`civs settings <city UUID> <setting> <on|off>` supports bounded operational setup;
+the service still checks the owner's testing permission when enabling a setting.
+
 ArcCore host 0.1.19 and bundled Core helpers 2.7.54 are mandatory; the shared
 API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous

@@ -75,6 +75,9 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 
 /** Main-thread UI port. Every mutation validates authority in its owning service. */
 interface CivsUiHost {
+    fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean = false
+    fun setSettlementSetting(player: Player, setting: CivSettlementSetting, enabled: Boolean): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun ready(): Boolean
     fun unavailableReason(): String?
     fun cityBusy(player: Player): Boolean

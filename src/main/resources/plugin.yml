@@ -22,3 +22,6 @@ permissions:
   arccivs.chunkload:
     description: Keep the owner's settlement loaded and residents active without nearby players
     default: false
+  arccivs.testing:
+    description: Configure testing settings for the owner's settlement, including resident immortality and construction material grants
+    default: false

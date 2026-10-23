@@ -58,17 +58,24 @@ class CivsText private constructor(
 
     fun literal(value: Any?): Component = renderer.literal(value).color(BODY).decoration(TextDecoration.ITALIC, false)
 
-    /** Existing pack glyphs: spectra_aurelium_skills:stat_hearts and betterranks:mc_hunger. */
+    /** Pack glyphs arc:resident_{health,food}_{full,half,empty}; shared by dialogs and nameplates. */
     fun residentVitals(player: Player?, health: Double, maximum: Double, hunger: Int): Component {
         fun number(value: Double) = String.format(Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')
+        fun state(value: Double, max: Double, full: String, half: String, empty: String) = when {
+            value <= 0 -> empty
+            value >= max -> full
+            else -> half
+        }
         fun icon(value: String, label: String) = Component.text(value, TextColor.color(0xFFFFFF))
             .font(Key.key("minecraft:default")).decoration(TextDecoration.BOLD, false).hoverEvent(render(player, label))
+        val currentHealth = health.coerceIn(0.0, maximum)
+        val currentHunger = hunger.coerceIn(0, 20)
         return render(player, "hologram.health",
-            "heart" to icon("\uE322", "workers.health-label"),
-            "food" to icon("\uD83C\uDF56", "workers.hunger-label"),
-            "health" to literal(number(health)).color(if (health <= maximum / 2) ERROR else SUCCESS),
+            "heart" to icon(state(currentHealth, maximum, "\uE600", "\uE601", "\uE602"), "workers.health-label"),
+            "food" to icon(state(currentHunger.toDouble(), 20.0, "\uE603", "\uE604", "\uE605"), "workers.hunger-label"),
+            "health" to literal(number(currentHealth)).color(if (currentHealth <= maximum / 2) ERROR else SUCCESS),
             "max" to number(maximum),
-            "hunger" to literal(hunger).color(if (hunger <= 6) ERROR else WARNING))
+            "hunger" to literal(currentHunger).color(if (currentHunger <= 6) ERROR else WARNING))
     }
 
     fun success(player: Player?, key: String, vararg values: Pair<String, Any?>): Component =

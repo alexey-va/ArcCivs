@@ -18,6 +18,23 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsChunkLoadingTest : FunSpec({
+    test("city switch releases tickets while permission remains granted and can admit again") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            h.cities = listOf(city)
+            repeat(30) { h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            h.cities = listOf(city.copy(settings = CivSettlementSettings(chunkLoading = false)))
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.runtime.retainedChunks shouldBe 0
+            h.cities = listOf(city)
+            repeat(30) { h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+        }
+    }
     test("full territory and route margin include negative boundaries and all town hall levels") {
         val city = chunkCity(UUID.randomUUID())
         for ((radius, chunks) in listOf(96 to 225L, 128 to 361L, 160 to 529L)) {

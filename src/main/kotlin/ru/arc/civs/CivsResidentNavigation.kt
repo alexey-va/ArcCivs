@@ -211,8 +211,8 @@ internal class CitizenPacketRoute(
                 !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite() || !openDoor(to)) {
                 fail("path-changed"); break
             }
-            // Keep vertical and horizontal legs in separate packets: interpolating diagonally
-            // from below a step to its top would cut through the solid support's side.
+            // Lift before crossing an ascending step, and centre ladder entry before climbing.
+            // Descending steps can keep moving forward once the actual packet chord clears the edge.
             val waypoint = to.clone()
             if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
                 (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
@@ -222,7 +222,13 @@ internal class CitizenPacketRoute(
                 waypoint.z = point.z
             } else if (to.y < point.y - .0001 &&
                 (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
-                waypoint.y = point.y
+                val descent = to.toVector().subtract(point.toVector())
+                val candidate = point.clone().add(descent.multiply(min(1.0, remaining / descent.length())))
+                val a = CitizenPoint(point.x, point.y, point.z)
+                val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
+                // The route's raised L-shaped step test alone cannot validate a diagonal packet.
+                if (entry.action != CitizenRouteAction.STEP ||
+                    !citizenPacketSegmentClear(world, a, b, false, a, null)) waypoint.y = point.y
             }
             val delta = waypoint.toVector().subtract(point.toVector())
             val distance = delta.length()

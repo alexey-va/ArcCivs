@@ -86,6 +86,7 @@ class CivsService(
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
     private val constructionFocus = mutableMapOf<UUID, ConstructionFocus>()
     private val constructionSupplyNeeds = mutableMapOf<UUID, ConstructionSupplyNeed>()
+    private var testingSupplyCursor = 0
     private val supplyNoopDiagnostics = linkedMapOf<UUID, String>()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
     private val populationPending = mutableSetOf<UUID>()
@@ -143,6 +144,7 @@ class CivsService(
         storage::isWorldLocked, { it in busy || it in unhealthy })
     private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
         permissions = CivsChunkPermissions(plugin, clock), clock = clock)
+    private val testingPermissions = CivsChunkPermissions(plugin, clock, CIVS_TESTING_PERMISSION)
     private val citizens = (citizenRuntime ?: CivsCitizens(plugin, { if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList() },
         ::deliver, { player, cityId, workerId ->
             if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
@@ -170,6 +172,9 @@ class CivsService(
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
         tasks.runTimer(1, 1) {
             chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList())
+            testingPermissions.pulse(if (ready()) cities.values.filter { it.pendingDeletion == null }.mapNotNull { city ->
+                plugin.server.getWorld(city.worldId)?.let { city.owner to it.name }
+            } else emptyList())
             resumeCityActions()
             if (ready()) supply.pulse()
             if (ready()) citizens.activateNavigating()
@@ -186,6 +191,47 @@ class CivsService(
 
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
+
+    override fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean =
+        ready() && city(player)?.owner == player.uniqueId && player.hasPermission(CIVS_TESTING_PERMISSION) &&
+            (setting != CivSettlementSetting.CHUNK_LOADING || player.hasPermission(CIVS_CHUNK_PERMISSION))
+
+    override fun setSettlementSetting(player: Player, setting: CivSettlementSetting, enabled: Boolean): CompletableFuture<Unit> =
+        cityAction("settlement_setting", player, "setting" to setting, "enabled" to enabled) { city ->
+            mutate(city.id) { current ->
+                rejectIf(!player.isOnline || current.owner != player.uniqueId || !canChangeSettlementSetting(player, setting), "not-authorized")
+                changedSettlementSetting(current, setting, enabled)
+            }.thenApply { saved ->
+                CivsDiagnostics.event("settlement_setting_changed", "city" to saved.id, "owner" to saved.owner,
+                    "player" to player.uniqueId, "setting" to setting, "enabled" to enabled, "revision" to saved.revision)
+                Unit
+            }
+        }
+
+    /** Console routing supplies administrator authority; the city's owner must still hold the feature permission. */
+    internal fun configureSettlementSetting(cityId: UUID, setting: CivSettlementSetting, enabled: Boolean): CompletableFuture<Unit> =
+        action("settlement_setting_console", null, "city" to cityId, "setting" to setting, "enabled" to enabled) {
+            afterCityAvailable(cityId) {
+                mutate(cityId) { city ->
+                    rejectIf(enabled && !testingAllowed(city), "not-authorized")
+                    changedSettlementSetting(city, setting, enabled)
+                }.thenApply { saved ->
+                    CivsDiagnostics.event("settlement_setting_changed", "city" to saved.id, "owner" to saved.owner,
+                        "source" to "console", "setting" to setting, "enabled" to enabled, "revision" to saved.revision)
+                    Unit
+                }
+            }
+        }
+
+    private fun changedSettlementSetting(city: Settlement, setting: CivSettlementSetting, enabled: Boolean): Settlement {
+        val before = city.settings ?: CivSettlementSettings()
+        val after = before.with(setting, enabled)
+        return if (before == after) city else CivsRules.validate(city.copy(settings = after, revision = Math.addExact(city.revision, 1)))
+    }
+
+    private fun testingAllowed(city: Settlement): Boolean = plugin.server.getWorld(city.worldId)?.let {
+        testingPermissions.allowed(city.owner, it.name)
+    } == true
     /** Cached snapshots by default; explicit terrain alone captures a bounded loaded native neighbourhood. */
     fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())
@@ -241,7 +287,8 @@ class CivsService(
             }
             "residents" -> rows { city ->
                 val workers = city.workers.filter { workerId == null || it.id == workerId }
-                mapOf("city" to city.id, "population_pending" to (city.id in populationPending),
+                mapOf("city" to city.id, "settings" to (city.settings ?: CivSettlementSettings()),
+                    "testing_permissions" to testingPermissions.debug(setOf(city.owner)), "population_pending" to (city.id in populationPending),
                     "last_population_minute" to populationMinuteAt[city.id], "immigration" to city.immigration,
                     "total_workers" to workers.size, "truncated_workers" to (workers.size > 8),
                     "workers" to workers.take(8).map { mapOf("worker" to it.id, "name" to it.name,
@@ -1120,7 +1167,8 @@ class CivsService(
         return action("resident_injury", null, "city" to cityId, "worker" to workerId, "damage" to damage,
             "damage_cause" to death.cause, "source" to death.killerType, "position" to death.position) {
             afterCityAvailable(cityId) {
-                mutate(cityId) { CivsRules.hurtResident(it, it.owner, workerId, damage, death) }.thenApply { saved ->
+                mutate(cityId) { CivsRules.hurtResident(it, it.owner, workerId, damage, death,
+                    immortal = it.settings?.immortalResidents == true && testingAllowed(it)) }.thenApply { saved ->
                     saved.corpses.orEmpty().firstOrNull { it.worker.id == workerId }?.let { corpse ->
                         CivsDiagnostics.event("resident_death", "city" to cityId, "worker" to workerId,
                             "cause" to corpse.cause, "killer" to corpse.killerType, "position" to corpse.position,
@@ -2510,10 +2558,50 @@ class CivsService(
             pulsePopulation()
             pulseMemberNames()
             pulseStorage()
+            pulseTestingSupplies()
             pulseQueue()
         }
         pulseConstruction()
         updateHealth()
+    }
+
+    private fun testingConstructionNeed(city: Settlement): Map<String, Long>? {
+        val order = city.construction ?: return null
+        return order.payment?.awaiting ?: constructionSupplyNeeds[city.id]?.takeIf {
+            it.orderId == order.id && it.batch == order.workDone
+        }?.materials
+    }
+
+    /** One bounded journal per pulse. Recovery replays this saved receipt, never a second issuance. */
+    internal fun prepareTestingConstructionSupplies(cityId: UUID): CompletableFuture<Settlement> {
+        var grant: CivTestingConstructionGrant? = null
+        return inventoryMutation(cityId, { city ->
+            if (city.settings?.autoConstructionMaterials != true || !testingAllowed(city)) return@inventoryMutation null
+            val required = testingConstructionNeed(city) ?: return@inventoryMutation null
+            val order = city.construction ?: return@inventoryMutation null
+            grant = civsTestingConstructionGrant(city, required, storage.constructionAvailable(city, order.buildingId))
+            if (grant == null) null else CivStoragePlan(requireNotNull(city.inventory), emptyList())
+        }, keepViewersOpen = true) { before, inventory ->
+            before.copy(workers = requireNotNull(grant).workers, inventory = inventory, revision = Math.addExact(before.revision, 1))
+        }.thenApply { saved ->
+            grant?.issued?.forEach { (worker, materials) ->
+                CivsDiagnostics.event("testing_construction_materials_granted", "city" to saved.id, "worker" to worker,
+                    "order" to saved.construction?.id, "batch" to saved.construction?.workDone, "materials" to materials,
+                    "revision" to saved.revision)
+            }
+            saved
+        }
+    }
+
+    private fun pulseTestingSupplies() {
+        val candidates = cities.values.filter { city -> city.settings?.autoConstructionMaterials == true &&
+            city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && city.inventory != null &&
+            settlementActive(city) && testingAllowed(city) && testingConstructionNeed(city) != null }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(testingSupplyCursor++, candidates.size)]
+        runCatching { prepareTestingConstructionSupplies(city.id) }.onSuccess { future ->
+            future.whenComplete { _, failure -> if (failure != null) log("issue testing construction supplies ${city.id}", failure) }
+        }.onFailure { log("issue testing construction supplies ${city.id}", it) }
     }
 
     private fun pulseCorpses() {
@@ -3236,6 +3324,7 @@ class CivsService(
         citizenDrain = runCatching { citizens.closeAsync() }
             .getOrElse { CompletableFuture.failedFuture(it) }
         runCatching { chunkLoading.close() }.onFailure { log("release settlement chunks", it) }
+        testingPermissions.close()
         physics.close()
         world.close()
         HandlerList.unregisterAll(protection)

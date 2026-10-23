@@ -48,6 +48,59 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("testing settings require the current owner's permission and only appear after the save") {
+        serviceScenario { h ->
+            h.start()
+            every { h.player.hasPermission("arccivs.testing") } returns false
+            h.service.canChangeSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS) shouldBe false
+            val denied = h.service.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true)
+            h.tick()
+            (shouldThrow<CompletionException> { denied.join() }.cause as CivsRejection).reason shouldBe "not-authorized"
+            h.saves shouldBe emptyList()
+            every { h.player.hasPermission("arccivs.testing") } returns true
+            val changed = h.service.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true)
+            h.service.city(h.player)!!.settings shouldBe null
+            changed.isDone shouldBe false
+            h.commit(); changed.join()
+            h.service.city(h.player)!!.settings shouldBe CivSettlementSettings(immortalResidents = true)
+            val writes = h.saves.size
+            h.service.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true).join()
+            h.saves.size shouldBe writes
+            every { h.player.hasPermission("arccivs.chunkload") } returns false
+            h.service.canChangeSettlementSetting(h.player, CivSettlementSetting.CHUNK_LOADING) shouldBe false
+        }
+    }
+
+    test("testing construction issuance journals the exact carried deficit once and stops on permission revocation") {
+        mockkConstructor(CivsChunkPermissions::class)
+        try {
+            every { anyConstructed<CivsChunkPermissions>().allowed(any(), any()) } returns true
+            serviceScenario { h ->
+                val placement = h.incrementalPlacement()
+                val order = placement.city.construction!!
+                val configured = placement.city.copy(settings = CivSettlementSettings(autoConstructionMaterials = true),
+                    construction = order.copy(phase = ConstructionPhase.WAITING_MATERIALS,
+                        payment = CivConstructionPayment(awaiting = mapOf("STONE" to 1L))))
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(configured))
+                every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+                every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+                h.start()
+                every { anyConstructed<CivsChunkPermissions>().allowed(any(), any()) } returns false
+                h.service.prepareTestingConstructionSupplies(configured.id).join()
+                CivsEquipment.usableCount(h.service.city(h.player)!!.workers.first(), "STONE") shouldBe 0L
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                every { anyConstructed<CivsChunkPermissions>().allowed(any(), any()) } returns true
+                val grant = h.service.prepareTestingConstructionSupplies(configured.id)
+                h.tick()
+                h.service.city(h.player)!!.workers.first().items shouldBe null
+                h.commit(); grant.join()
+                val carried = h.service.city(h.player)!!.workers.first()
+                CivsEquipment.usableCount(carried, "STONE") shouldBe 1L
+                h.service.prepareTestingConstructionSupplies(configured.id).join()
+                verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            }
+        } finally { unmockkConstructor(CivsChunkPermissions::class) }
+    }
     test("global worksite debug includes the ninth city's cached need beyond the city row sample") {
         serviceScenario { h ->
             val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,

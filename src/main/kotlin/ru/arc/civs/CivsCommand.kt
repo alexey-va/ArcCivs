@@ -17,6 +17,8 @@ class CivsCommand(
     private val text: CivsText,
     private val tasks: LifecycleTaskScope,
     private val debugState: (String, UUID?, UUID?) -> Map<String, Any?> = { _, _, _ -> mapOf("available" to false) },
+    private val configureSetting: (UUID, CivSettlementSetting, Boolean) -> java.util.concurrent.CompletableFuture<Unit> = { _, _, _ ->
+        java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (!sender.hasPermission("arccivs.use")) {
@@ -26,6 +28,24 @@ class CivsCommand(
         if (args.firstOrNull() == "debug") {
             if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
             else CivsDebug.lines(args.drop(1), debugState).forEach(sender::sendMessage)
+            return true
+        }
+        if (args.firstOrNull() == "settings") {
+            if (sender is Player || !sender.hasPermission("arccivs.admin")) {
+                sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+                return true
+            }
+            val cityId = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val setting = args.getOrNull(2)?.let { name -> CivSettlementSetting.entries.firstOrNull {
+                it.name.lowercase().replace('_', '-') == name
+            } }
+            val enabled = when (args.getOrNull(3)) { "on" -> true; "off" -> false; else -> null }
+            if (args.size != 4 || cityId == null || setting == null || enabled == null) {
+                sender.sendMessage("Usage: civs settings <city UUID> <chunk-loading|immortal-residents|auto-construction-materials> <on|off>")
+            } else configureSetting(cityId, setting, enabled).whenCompleteSync(tasks) { _, failure ->
+                sender.sendMessage("ARCCIVS_SETTING " + Gson().toJson(mapOf("city" to cityId.toString(), "setting" to setting.name,
+                    "enabled" to enabled, "committed" to (failure == null), "failure" to failure?.let { CivsDiagnostics.rejection(it)?.reason ?: it.javaClass.simpleName })))
+            }
             return true
         }
         if (args.firstOrNull() == "status" && args.size <= 2 && sender.hasPermission("arccivs.admin")) {

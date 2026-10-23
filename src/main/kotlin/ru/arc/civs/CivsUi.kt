@@ -345,9 +345,39 @@ class CivsUi internal constructor(
             add(button(player, "stock", "stock.open", STOCK) { showStock(player) })
             add(button(player, "upgrades", "upgrades.open", PERSONAL) { showUpgrades(player) })
             add(button(player, "members", "members.open", PEOPLE) { showMembers(player) })
+            if (CivSettlementSetting.entries.any { host.canChangeSettlementSetting(player, it) })
+                add(button(player, "testing_settings", "testing-settings.open", PERSONAL) { showTestingSettings(player) })
             if (city.owner == player.uniqueId) add(button(player, "delete_city", "delete.open", DANGER) { showDeleteCity(player, city.id) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
         }, reopen = { showManagement(player) })
+    }
+
+    private fun showTestingSettings(player: Player, error: Component? = null) {
+        val city = city(player) ?: return
+        val allowed = CivSettlementSetting.entries.filter { host.canChangeSettlementSetting(player, it) }
+        if (allowed.isEmpty()) return showManagement(player)
+        val settings = city.settings ?: CivSettlementSettings()
+        fun key(setting: CivSettlementSetting) = "testing-settings.${setting.name.lowercase(Locale.ROOT).replace('_', '-')}"
+        present(player, "civs.testing-settings", "testing-settings.title", listOfNotNull(
+            body(player, "testing-settings.help"),
+            table(CivSettlementSetting.entries.map { setting ->
+                val enabled = settings.enabled(setting)
+                tr(player, key(setting)) to tint(tr(player, if (enabled) "testing-settings.enabled" else "testing-settings.disabled"),
+                    if (enabled) COMMIT else WHITE)
+            }, DialogTables.Columns.AUTO), error?.let(::body),
+        ), allowed.map { setting ->
+            val enabled = settings.enabled(setting)
+            valueButton(player, setting.name.lowercase(Locale.ROOT), if (enabled) "common.selected" else "testing-settings.choice",
+                tr(player, key(setting)), if (enabled) COMMIT else WHITE,
+                Component.newline().append(tr(player, "${key(setting)}-help")).append(Component.newline()).append(Component.newline())
+                    .append(tr(player, if (enabled) "testing-settings.disable" else "testing-settings.enable")).append(Component.newline())) {
+                if (host.city(player)?.id != city.id || !host.canChangeSettlementSetting(player, setting))
+                    showTestingSettings(player, text.reason(player, "not-authorized"))
+                else perform(player, "civs.testing-settings", "testing-settings.title",
+                    { host.setSettlementSetting(player, setting, !enabled) },
+                    success = { showTestingSettings(player) }, failure = { showTestingSettings(player, it) }, workingKey = null)
+            }
+        }, reopen = { showTestingSettings(player) })
     }
 
     private fun showDeleteCity(player: Player, expectedCityId: UUID, initial: String = "", error: Component? = null) {
@@ -1653,9 +1683,9 @@ class CivsUi internal constructor(
         tr(player, "common.detail", "label" to tr(player, label), "value" to value)
     private fun card(lines: List<Component>, width: Int = 320): PaperDialogBody =
         DialogTables.framedBody(Component.join(Component.newline(), lines), DialogTables.Frame.EPIC, width)
-    private fun table(rows: List<Pair<Component, Component>>): PaperDialogBody = DialogTables.body(
+    private fun table(rows: List<Pair<Component, Component>>, columns: DialogTables.Columns = DialogTables.Columns.VALUE_WIDE): PaperDialogBody = DialogTables.body(
         rows.map { (label, value) -> label.color(CivsText.BODY) to value.colorIfAbsent(WHITE) },
-        null, DialogTables.Frame.EPIC, 320, DialogTables.Columns.VALUE_WIDE,
+        null, DialogTables.Frame.EPIC, 320, columns,
     )
     private fun busyBody(player: Player): PaperDialogBody? = if (host.cityBusy(player)) body(tint(tr(player, "reason.city-busy"), STOCK)) else null
     private fun materialName(player: Player, material: String): Component = text.material(player, material)
@@ -1670,7 +1700,7 @@ class CivsUi internal constructor(
         "civs.workers", "civs.worker", "civs.members", "civs.member", "civs.member-add", "civs.building-workers" -> PEOPLE
         "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
         "civs.containers", "civs.container" -> STOCK
-        "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode" -> PERSONAL
+        "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings" -> PERSONAL
         "civs.guide", "civs.remote" -> NAVIGATION
         "civs.delete-city", "civs.delete-building" -> DANGER
         else -> LAND

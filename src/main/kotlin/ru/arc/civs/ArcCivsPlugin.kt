@@ -137,7 +137,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 nativeDrains += controls.drained()
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
-            val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState)
+            val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState, service::configureSettlementSetting)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

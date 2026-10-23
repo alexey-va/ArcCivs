@@ -7,17 +7,19 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
 
 internal const val CIVS_CHUNK_PERMISSION = "arccivs.chunkload"
+internal const val CIVS_TESTING_PERMISSION = "arccivs.testing"
 
 /** Main-thread cache; provider IO and late replies never admit a city by themselves. */
 internal class CivsChunkPermissions(
     private val available: () -> Boolean,
     private val check: (UUID, String) -> CompletableFuture<Boolean>,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val permission: String = CIVS_CHUNK_PERMISSION,
 ) : AutoCloseable {
-    constructor(plugin: Plugin, clock: () -> Long = System::currentTimeMillis) : this(
+    constructor(plugin: Plugin, clock: () -> Long = System::currentTimeMillis, permission: String = CIVS_CHUNK_PERMISSION) : this(
         { plugin.server.pluginManager.isPluginEnabled("LuckPerms") && civsChunkPermissionApiPresent(plugin) &&
             CivsLuckPermsChunkPermission.available(plugin) },
-        { owner, world -> checkCivsChunkPermission(plugin, owner, world) }, clock)
+        { owner, world -> checkCivsChunkPermission(plugin, owner, world, permission) }, clock, permission)
 
     private data class Subject(val owner: UUID, val world: String)
     private class State(var nextCheck: Long = 0, var allowedUntil: Long = 0)
@@ -33,7 +35,7 @@ internal class CivsChunkPermissions(
         check(Thread.currentThread() === owner) { "Chunk permissions debug requires its owning thread" }
         val now = clock()
         val selected = states.entries.filter { ownerIds == null || it.key.owner in ownerIds }
-        return mapOf("source" to "permission-cache", "providerChecked" to false, "closed" to closed,
+        return mapOf("source" to "permission-cache", "permission" to permission, "providerChecked" to false, "closed" to closed,
             "total" to selected.size, "truncated" to (selected.size > 8),
             "pending" to if (ownerIds == null) pending.size else selected.count { it.value in pending },
             "unattributedPending" to if (ownerIds == null) pending.count { it !in states.values } else null,
@@ -78,9 +80,9 @@ internal class CivsChunkPermissions(
     override fun close() { closed = true; states.clear(); replies.clear() }
 }
 
-private fun checkCivsChunkPermission(plugin: Plugin, owner: UUID, world: String): CompletableFuture<Boolean> {
+private fun checkCivsChunkPermission(plugin: Plugin, owner: UUID, world: String, permission: String): CompletableFuture<Boolean> {
     if (!civsChunkPermissionApiPresent(plugin)) return CompletableFuture.completedFuture(false)
-    return CivsLuckPermsChunkPermission.check(plugin, owner, world)
+    return CivsLuckPermsChunkPermission.check(plugin, owner, world, permission)
 }
 
 private fun civsChunkPermissionApiPresent(plugin: Plugin): Boolean =
@@ -90,7 +92,7 @@ private fun civsChunkPermissionApiPresent(plugin: Plugin): Boolean =
 internal object CivsLuckPermsChunkPermission {
     fun available(plugin: Plugin): Boolean = plugin.server.servicesManager.load(net.luckperms.api.LuckPerms::class.java) != null
 
-    fun check(plugin: Plugin, owner: UUID, world: String): CompletableFuture<Boolean> {
+    fun check(plugin: Plugin, owner: UUID, world: String, permission: String = CIVS_CHUNK_PERMISSION): CompletableFuture<Boolean> {
         val api = plugin.server.servicesManager.load(net.luckperms.api.LuckPerms::class.java)
             ?: return CompletableFuture.completedFuture(false)
         val context = api.contextManager.staticContext.mutableCopy().apply {
@@ -99,7 +101,7 @@ internal object CivsLuckPermsChunkPermission {
         }.immutableCopy()
         val options = api.contextManager.staticQueryOptions.toBuilder().context(context).build()
         return api.userManager.loadUser(owner).thenApply { user ->
-            try { user.cachedData.getPermissionData(options).checkPermission(CIVS_CHUNK_PERMISSION).asBoolean() }
+            try { user.cachedData.getPermissionData(options).checkPermission(permission).asBoolean() }
             finally { api.userManager.cleanupUser(user) }
         }
     }

@@ -14,6 +14,37 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("console settings route has a closed grammar and never accepts player authority") {
+        val city = UUID.randomUUID()
+        val requests = mutableListOf<Triple<UUID, CivSettlementSetting, Boolean>>()
+        val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), configureSetting = { id, setting, enabled ->
+            requests += Triple(id, setting, enabled)
+            java.util.concurrent.CompletableFuture<Unit>()
+        })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) {
+            every { hasPermission("arccivs.use") } returns true
+            every { hasPermission("arccivs.admin") } returns true
+        }
+        val command = mockk<Command>()
+        for (args in listOf(arrayOf("settings", city.toString(), "immortal-residents", "yes"),
+            arrayOf("settings", "bad-uuid", "immortal-residents", "on"),
+            arrayOf("settings", city.toString(), "other", "on"),
+            arrayOf("settings", city.toString(), "immortal-residents", "on", "extra")))
+            router.onCommand(console, command, "civs", args)
+        requests shouldBe emptyList()
+        val player = mockk<Player>(relaxed = true) {
+            every { hasPermission(any<String>()) } returns true
+        }
+        val valid = arrayOf("settings", city.toString(), "immortal-residents", "on")
+        router.onCommand(player, command, "civs", valid)
+        requests shouldBe emptyList()
+        every { console.hasPermission("arccivs.admin") } returns false
+        router.onCommand(console, command, "civs", valid)
+        requests shouldBe emptyList()
+        every { console.hasPermission("arccivs.admin") } returns true
+        router.onCommand(console, command, "civs", valid)
+        requests shouldBe listOf(Triple(city, CivSettlementSetting.IMMORTAL_RESIDENTS, true))
+    }
     test("the bundled city alias opens the same settlement menu as civs") {
         val definition = requireNotNull(CivsCommandTest::class.java.getResourceAsStream("/plugin.yml"))
             .bufferedReader(Charsets.UTF_8).use(YamlConfiguration::loadConfiguration)

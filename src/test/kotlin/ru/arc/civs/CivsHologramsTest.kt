@@ -104,10 +104,16 @@ class CivsHologramsTest : FunSpec({
             val label = civsNpcHologramText(text, npc)
             plainText(label) shouldContain "Василий\n"
             plainText(label) shouldContain "\nФермер\n"
-            plainText(label) shouldContain "\n\uE322 18.5/20   🍖 20/20"
-            plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "🍖 6/20"
+            plainText(label) shouldContain "\n\uE601 18.5/20   \uE603 20/20"
+            plainText(civsNpcHologramText(text, npc.copy(hunger = 6))) shouldContain "\uE604 6/20"
+            plainText(civsNpcHologramText(text, npc.copy(health = 28.0, maxHealth = 28.0))) shouldContain
+                "\uE600 28/28   \uE603 20/20"
+            plainText(civsNpcHologramText(text, npc.copy(health = 4.0, maxHealth = 28.0, hunger = 0))) shouldContain
+                "\uE601 4/28   \uE605 0/20"
+            plainText(civsNpcHologramText(text, npc.copy(health = 0.0, hunger = 0))) shouldContain
+                "\uE602 0/20   \uE605 0/20"
             fun components(value: Component): List<Component> = listOf(value) + value.children().flatMap(::components)
-            val icons = components(label).filterIsInstance<TextComponent>().filter { it.content() in setOf("\uE322", "🍖") }
+            val icons = components(label).filterIsInstance<TextComponent>().filter { it.content() in setOf("\uE601", "\uE603") }
             icons.size shouldBe 2
             icons.forEach {
                 it.color() shouldBe TextColor.color(0xFFFFFF)
@@ -145,6 +151,15 @@ class CivsHologramsTest : FunSpec({
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
                     "courier" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
                         npc.copy(profession = "courier", status = "carrying-cargo"))), "scale" to CIVS_NPC_TEXT_SCALE,
+                        "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
+                    "vitalsFull" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
+                        npc.copy(health = 28.0, maxHealth = 28.0, hunger = 20))), "scale" to CIVS_NPC_TEXT_SCALE,
+                        "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
+                    "vitalsPartial" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
+                        npc.copy(health = 4.0, maxHealth = 28.0, hunger = 7))), "scale" to CIVS_NPC_TEXT_SCALE,
+                        "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
+                    "vitalsEmpty" to mapOf("text" to serializer.serialize(civsNpcHologramText(text,
+                        npc.copy(health = 0.0, maxHealth = 28.0, hunger = 0))), "scale" to CIVS_NPC_TEXT_SCALE,
                         "lineWidth" to CIVS_NPC_TEXT_WIDTH, "offset" to CIVS_NPC_TEXT_OFFSET),
                     "building" to mapOf("text" to serializer.serialize(text.buildingHologram(player, city, building)),
                         "scale" to CIVS_CONTROL_TEXT_SCALE, "lineWidth" to CIVS_CONTROL_TEXT_WIDTH,

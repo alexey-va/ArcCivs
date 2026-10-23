@@ -464,6 +464,61 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("descending native stair shapes keep forward movement while lowering at the ordinary packet stride") {
+        MockBukkitTestRuntime.open().use {
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (speed in listOf(.55, .8, 1.0, 1.3)) {
+                val terrain = ResidentRouteTerrain()
+                terrain.blocks[CivPosition(0, 67, 0)] = Material.OAK_PLANKS
+                for (step in 1..3) {
+                    val stair = CivPosition(dx * step, 67 - step, dz * step)
+                    terrain.blocks[stair] = Material.OAK_STAIRS
+                    // Bottom straight stair, with its upper half facing the higher landing.
+                    terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                        dx > 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                        dx < 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                        dz > 0 -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                        else -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                    })
+                }
+                var at = Location(terrain.world, .5, 68.0, .5,
+                    Math.toDegrees(kotlin.math.atan2(-dx.toDouble(), dz.toDouble())).toFloat(), 0f)
+                val target = Location(terrain.world, dx * 4 + .5, 64.0, dz * 4 + .5)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 64..68 },
+                    { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe null
+                val verticalOnly = mutableListOf<String>()
+                var descended = 0
+                repeat(200) { tick ->
+                    if (!route.finished) {
+                        val next = requireNotNull(route.move(at, speed) { true }) {
+                            "direction=$dx,$dz speed=$speed tick=$tick failure=${route.failure}"
+                        }
+                        (at.distance(next) <= .215 * speed + .000001) shouldBe true
+                        for (sample in 0..10) {
+                            val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
+                            citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                        }
+                        if (next.y < at.y - .000001) {
+                            descended++
+                            if ((next.x - at.x) * dx + (next.z - at.z) * dz <= .000001)
+                                verticalOnly += "$tick: ${at.x},${at.y},${at.z} -> ${next.x},${next.y},${next.z}"
+                        }
+                        at = next
+                    }
+                }
+                withClue("direction=$dx,$dz speed=$speed verticalOnly=$verticalOnly") {
+                    route.failure shouldBe null
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    (descended > 0) shouldBe true
+                    verticalOnly shouldBe emptyList()
+                }
+            }
+        }
+    }
+
     test("a lowered path transition still respects a swept head obstacle and a protected destination") {
         MockBukkitTestRuntime.open().use {
             for (obstacle in listOf("headroom", "protected")) {

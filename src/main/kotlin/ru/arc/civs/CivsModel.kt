@@ -127,6 +127,26 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     /** V3's offset-shaft ordinal remains provenance when V4 starts its own single-shaft plan. */
     val v3Step: Long? = null)
 
+enum class CivSettlementSetting { CHUNK_LOADING, IMMORTAL_RESIDENTS, AUTO_CONSTRUCTION_MATERIALS }
+
+/** Existing towns retain permission-controlled chunk loading; testing never turns on by migration. */
+data class CivSettlementSettings(
+    val chunkLoading: Boolean = true,
+    val immortalResidents: Boolean = false,
+    val autoConstructionMaterials: Boolean = false,
+) {
+    fun enabled(setting: CivSettlementSetting): Boolean = when (setting) {
+        CivSettlementSetting.CHUNK_LOADING -> chunkLoading
+        CivSettlementSetting.IMMORTAL_RESIDENTS -> immortalResidents
+        CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS -> autoConstructionMaterials
+    }
+    fun with(setting: CivSettlementSetting, enabled: Boolean): CivSettlementSettings = when (setting) {
+        CivSettlementSetting.CHUNK_LOADING -> copy(chunkLoading = enabled)
+        CivSettlementSetting.IMMORTAL_RESIDENTS -> copy(immortalResidents = enabled)
+        CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS -> copy(autoConstructionMaterials = enabled)
+    }
+}
+
 data class Settlement(
     val id: UUID,
     val owner: UUID,
@@ -153,6 +173,7 @@ data class Settlement(
     val memberNames: Map<String, String>? = null,
     val corpses: List<CivCorpse>? = null,
     val minePlans: Map<String, CivMinePlanState>? = null,
+    val settings: CivSettlementSettings? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

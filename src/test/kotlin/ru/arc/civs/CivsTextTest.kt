@@ -7,6 +7,10 @@ import io.kotest.matchers.string.shouldContain
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import net.kyori.adventure.text.TranslatableComponent
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.TextComponent
+import net.kyori.adventure.text.format.TextColor
+import net.kyori.adventure.text.format.TextDecoration
+import net.kyori.adventure.key.Key
 import io.mockk.every
 import io.mockk.mockk
 import org.bukkit.entity.Player
@@ -68,6 +72,43 @@ class CivsTextTest : FunSpec({
         shouldThrow<IllegalArgumentException> {
             CivsText.fromYaml("ru:\n  title: 'Город'\nen:\n  different: 'Town'\n")
         }
+    }
+
+    test("resident vital glyphs follow full partial and empty values against the actual maximum") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        fun components(value: Component): List<Component> = listOf(value) + value.children().flatMap(::components)
+        data class Case(val health: Double, val maximum: Double, val hunger: Int, val expected: String)
+        val cases = listOf(
+            Case(20.0, 20.0, 20, "\uE600 20/20   \uE603 20/20"),
+            Case(4.0, 20.0, 4, "\uE601 4/20   \uE604 4/20"),
+            Case(4.0, 28.0, 19, "\uE601 4/28   \uE604 19/20"),
+            Case(20.0, 28.0, 20, "\uE601 20/28   \uE603 20/20"),
+            Case(28.0, 28.0, 20, "\uE600 28/28   \uE603 20/20"),
+            Case(19.99, 20.0, 1, "\uE601 19.99/20   \uE604 1/20"),
+            Case(0.0, 28.0, 0, "\uE602 0/28   \uE605 0/20"),
+            Case(-1.0, 20.0, -1, "\uE602 0/20   \uE605 0/20"),
+            Case(30.0, 28.0, 21, "\uE600 28/28   \uE603 20/20"),
+        )
+        for (locale in listOf("ru", "en")) {
+            val player = mockk<Player> { every { locale() } returns Locale.forLanguageTag(locale) }
+            for (case in cases) {
+                val value = text.residentVitals(player, case.health, case.maximum, case.hunger)
+                plainText(value) shouldBe case.expected
+                val icons = components(value).filterIsInstance<TextComponent>()
+                    .filter { it.content().length == 1 && it.content()[0] in '\uE600'..'\uE605' }
+                icons.size shouldBe 2
+                icons.forEach {
+                    it.color() shouldBe TextColor.color(0xFFFFFF)
+                    it.font() shouldBe Key.key("minecraft:default")
+                    it.decoration(TextDecoration.BOLD) shouldBe TextDecoration.State.FALSE
+                }
+                icons.map { plainText(it.hoverEvent()!!.value() as Component) } shouldBe
+                    if (locale == "ru") listOf("Здоровье", "Сытость") else listOf("Health", "Hunger")
+            }
+        }
+        val legacy = CivWorker(UUID(0, 1), "Resident", null)
+        plainText(text.residentVitals(null, CivsResidents.health(legacy), CivsResidents.maxHealth(legacy),
+            CivsResidents.hunger(legacy))) shouldBe "\uE600 20/20   \uE603 20/20"
     }
 
     test("a wrapped shared-protection rejection gives a localized action without leaking diagnostics") {

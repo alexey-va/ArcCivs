@@ -511,6 +511,29 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("resident dialog refreshes vital glyphs with current health maximum and hunger") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val original = base.workers.first()
+            val trained = original.copy(skills = mapOf("FARM" to 40L))
+            val cases = listOf(
+                Triple("full", original, "\uE600 20/20   \uE603 20/20"),
+                Triple("partial", trained.copy(health = 4.0, hunger = 7), "\uE601 4/28   \uE604 7/20"),
+                Triple("trained-full", trained.copy(health = 28.0, hunger = 20), "\uE600 28/28   \uE603 20/20"),
+                Triple("empty-food", original.copy(health = 4.0, hunger = 0), "\uE601 4/20   \uE605 0/20"),
+            )
+            for ((id, worker, expected) in cases) {
+                h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
+                h.ui.openWorker(h.player, base.id, worker.id)
+                h.body() shouldContain expected
+                System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                    exportUiScreen(it, "resident-vitals-$id-ru", h.screen, listOf(588, 380))
+                }
+            }
+        }
+    }
+
     test("resident health skills and carried items use fresh state and real dialog history") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -519,8 +542,8 @@ class CivsUiTest : FunSpec({
                 inventory = mapOf("BREAD" to 2L, "IRON_SHOVEL" to 1L, "IRON_CHESTPLATE" to 1L))
             h.city = base.copy(workers = base.workers.map { if (it.id == worker.id) worker else it })
             h.ui.openWorker(h.player, base.id, worker.id)
-            h.body() shouldContain "\uE322 11.5/28"
-            h.body() shouldContain "🍖 20/20"
+            h.body() shouldContain "\uE601 11.5/28"
+            h.body() shouldContain "\uE603 20/20"
             h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "feed", "assign", "unassign")
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-detail-ru", h.screen, listOf(588, 380)) }
             h.click("skills")
@@ -845,7 +868,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, base.id, worker.id)
             val before = h.screen
             h.click("feed"); h.click("feed", screen = before); h.paper.performTicks(2)
-            h.body() shouldContain "\uE322 14/20"
+            h.body() shouldContain "\uE601 14/20"
             h.screen.buttons.map { it.id.value } shouldNotContain "feed"
             verify(exactly = 1) { h.host.feedWorker(h.player, worker.id) }
         }
@@ -1706,7 +1729,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, base.id, child.id)
             h.body() shouldContain "Ребёнок"
             h.body() shouldContain "Играет"
-            h.body() shouldContain "🍖 7/20"
+            h.body() shouldContain "\uE604 7/20"
             h.screen.buttons.map { it.id.value } shouldNotContain "assign"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "resident-child-ru", h.screen, listOf(588, 380)) }
             val builder = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
@@ -1825,6 +1848,104 @@ class CivsUiTest : FunSpec({
             h.selection shouldBe null
             h.screen.id shouldBe "civs.overview"
             verify(exactly = 2) { h.host.cancelSelection(h.player, "menu-reopened") }
+        }
+    }
+
+    test("testing settings show normal defaults and only permitted toggles in both locales") {
+        withUi { h ->
+            h.city = settlement(h.player)
+            h.open(); h.click("management")
+            h.screen.buttons.map { it.id.value } shouldNotContain "testing_settings"
+            var allowed = CivSettlementSetting.entries.toSet()
+            every { h.host.canChangeSettlementSetting(h.player, any()) } answers { secondArg<CivSettlementSetting>() in allowed }
+            for (locale in listOf("ru", "en")) {
+                h.player.setLocale(Locale.forLanguageTag(locale))
+                h.open(); h.click("management"); h.click("testing_settings")
+                h.screen.id shouldBe "civs.testing-settings"
+                h.screen.buttons.map { it.id.value } shouldBe listOf("chunk_loading", "immortal_residents", "auto_construction_materials")
+                h.screen.buttons.map { plainText(it.label).first() } shouldBe listOf('✔', '○', '○')
+                h.screen.buttons.map { it.label.color() } shouldBe
+                    listOf(TextColor.color(0x9BD48D), TextColor.color(0xFFFFFF), TextColor.color(0xFFFFFF))
+                h.screen.buttons.forEach {
+                    plainText(it.tooltip).startsWith('\n') shouldBe true
+                    plainText(it.tooltip).endsWith('\n') shouldBe true
+                    plainText(it.tooltip).contains("\n\n") shouldBe true
+                }
+                System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "testing-settings-defaults-$locale", h.screen, listOf(588, 380)) }
+            }
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            h.city = h.city!!.copy(settings = CivSettlementSettings(immortalResidents = true, autoConstructionMaterials = true))
+            h.open(); h.click("management"); h.click("testing_settings")
+            h.screen.buttons.all { plainText(it.label).startsWith("✔ ") } shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "testing-settings-enabled-ru", h.screen, listOf(588, 380)) }
+            allowed = allowed - CivSettlementSetting.CHUNK_LOADING
+            h.open(); h.click("management"); h.click("testing_settings")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("immortal_residents", "auto_construction_materials")
+            h.body() shouldContain "Загрузка чанков"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "testing-settings-restricted-ru", h.screen, listOf(588, 380)) }
+            verify(exactly = 0) { h.host.setSettlementSetting(any(), any(), any()) }
+        }
+    }
+
+    test("testing toggles retain the page while saving and show only committed state without duplicate history") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            h.city = settlement(h.player)
+            every { h.host.canChangeSettlementSetting(h.player, any()) } returns true
+            val pending = CompletableFuture<Unit>()
+            every { h.host.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true) } returns pending
+            h.open(); h.click("management"); h.click("testing_settings")
+            val before = h.screen
+            val count = h.screens.size
+            h.click("immortal_residents"); h.click("immortal_residents", screen = before)
+            h.screens.size shouldBe count
+            plainText(h.screen.buttons.single { it.id.value == "immortal_residents" }.label) shouldBe "○ Бессмертие жителей"
+            verify(exactly = 1) { h.host.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true) }
+            h.city = h.city!!.copy(settings = CivSettlementSettings(immortalResidents = true))
+            pending.complete(Unit); h.paper.performTicks(2)
+            h.screens.size shouldBe count + 1
+            plainText(h.screen.buttons.single { it.id.value == "immortal_residents" }.label) shouldBe "✔ Бессмертие жителей"
+            for ((setting, enabled) in listOf(CivSettlementSetting.CHUNK_LOADING to false, CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS to true)) {
+                every { h.host.setSettlementSetting(h.player, setting, enabled) } answers {
+                    h.city = h.city!!.copy(settings = h.city!!.settings!!.with(setting, enabled))
+                    CompletableFuture.completedFuture(Unit)
+                }
+                h.click(setting.name.lowercase(Locale.ROOT)); h.paper.performTicks(2)
+                plainText(h.screen.buttons.single { it.id.value == setting.name.lowercase(Locale.ROOT) }.label).first() shouldBe
+                    if (enabled) '✔' else '○'
+                verify(exactly = 1) { h.host.setSettlementSetting(h.player, setting, enabled) }
+            }
+            h.click("history")
+            h.screen.id shouldBe "civs.management"
+            h.click("history")
+            h.screen.id shouldBe "civs.overview"
+            verify(exactly = 0) { h.player.closeDialog() }
+        }
+    }
+
+    test("testing toggle rejection retains its saved state and revoked permission blocks a stale action") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            h.city = settlement(h.player)
+            var allowed = CivSettlementSetting.entries.toSet()
+            every { h.host.canChangeSettlementSetting(h.player, any()) } answers { secondArg<CivSettlementSetting>() in allowed }
+            every { h.host.setSettlementSetting(h.player, CivSettlementSetting.IMMORTAL_RESIDENTS, true) } returns
+                CompletableFuture.failedFuture(CivsRejection("city-busy"))
+            h.open(); h.click("management"); h.click("testing_settings")
+            h.click("immortal_residents"); h.paper.performTicks(2)
+            h.screen.id shouldBe "civs.testing-settings"
+            plainText(h.screen.buttons.single { it.id.value == "immortal_residents" }.label) shouldBe "○ Бессмертие жителей"
+            h.body() shouldContain plainText(CivsText.fromYaml(civsLocaleSource()).reason(h.player, "city-busy"))
+            val before = h.screen
+            allowed = allowed - CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS
+            h.click("auto_construction_materials", screen = before)
+            h.screen.buttons.map { it.id.value } shouldNotContain "auto_construction_materials"
+            h.body() shouldContain "У вас нет доступа к этому действию."
+            verify(exactly = 0) { h.host.setSettlementSetting(h.player, CivSettlementSetting.AUTO_CONSTRUCTION_MATERIALS, any()) }
+            allowed = emptySet()
+            h.click("chunk_loading")
+            h.screen.id shouldBe "civs.management"
+            h.screen.buttons.map { it.id.value } shouldNotContain "testing_settings"
         }
     }
 
@@ -2659,6 +2780,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.ready() } returns true
         every { host.unavailableReason() } returns null
         every { host.cityBusy(any()) } returns false
+        every { host.canChangeSettlementSetting(any(), any()) } returns false
         every { host.availableMaterials(any()) } answers {
             city?.inventory?.materials.orEmpty().toMutableMap().also { total ->
                 city?.inventory?.buildingMaterials.orEmpty().values.forEach { stock ->

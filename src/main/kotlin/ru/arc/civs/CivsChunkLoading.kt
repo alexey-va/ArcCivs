@@ -109,7 +109,7 @@ internal class CivsChunkLoading(
 
     fun pulse(settlements: Collection<Settlement>) {
         if (closed || failed) return
-        val available = settlements.filter { it.pendingDeletion == null && it.worldId !in unloading }
+        val available = settlements.filter { it.pendingDeletion == null && it.worldId !in unloading && it.settings?.chunkLoading != false }
             .mapNotNull { city -> plugin.server.getWorld(city.worldId)?.let { city to it.name } }
         permissions.pulse(available.map { it.first.owner to it.second })
         val byId = available.associateBy { it.first.id }
