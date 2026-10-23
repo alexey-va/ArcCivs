@@ -63,3 +63,8 @@ number of paid blocks or the native cut output. Existing carried-cobblestone
 admission, liquid/protection checks, tool wear and receipt replay remain in
 force. Direct deltas are separately0 Vault/0 tokens/0 player XP. Generator
 probabilities, action rates, prices and the SELL/contract model are unchanged.
+
+The accompanying optional IDLE-route change only abandons an unreachable leisure
+destination from safe actual feet. It does not advance a worker cycle or move
+inventory, and retains the existing eight-second retry delay. Direct currency
+deltas remain separately0 Vault/0 tokens/0 player XP.

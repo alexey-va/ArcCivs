@@ -1517,7 +1517,9 @@ class CivsCitizens(
                     arrived(actor.npc.location, route.target),
                     route.timing.elapsed(now), route.timeoutMillis, route.motion.navigating, route.motion.searching)
             if (outcome == CitizenNavigationOutcome.PENDING) return
-            if (outcome != CitizenNavigationOutcome.ARRIVED && recoverNavigation(actor, route.target, now, idleAnchor = anchor)) {
+            if (outcome != CitizenNavigationOutcome.ARRIVED &&
+                !citizenSafeIdlePosition(world, anchor, actor.npc.location.point(), city.buildings) &&
+                recoverNavigation(actor, route.target, now, idleAnchor = anchor)) {
                 actor.wander.finish(now, true)
                 return
             }
@@ -3009,6 +3011,16 @@ private fun citizenWithinIdleArea(anchor: CivPosition, at: CitizenPoint): Boolea
     (at.x - (anchor.x + .5)) * (at.x - (anchor.x + .5)) +
         (at.z - (anchor.z + .5)) * (at.z - (anchor.z + .5)) <= CITIZEN_IDLE_RADIUS * CITIZEN_IDLE_RADIUS &&
         at.y in anchor.y - 2.0..anchor.y + 2.0
+
+/** An unreachable optional destination does not displace a safely standing resident. */
+internal fun citizenSafeIdlePosition(world: World, anchor: CivPosition, at: CitizenPoint,
+    buildings: Collection<CivBuilding> = emptyList()): Boolean {
+    if (!citizenWithinIdleArea(anchor, at) || !citizenPacketSupported(world, at) ||
+        !citizenPacketBodyClear(world, at, false)) return false
+    val feet = Location(world, at.x, at.y, at.z)
+    return citizenIdleTerrain(world, CivPosition(feet.blockX, feet.blockY, feet.blockZ), buildings) &&
+        citizenSleepClear(world, citizenStandingBounds(feet, 1.0))
+}
 
 /** A displaced resident may walk back, but a new idle path cannot extend its original distance or height. */
 internal fun citizenIdleRouteAllowed(anchor: CivPosition, from: CitizenPoint, point: CivPosition): Boolean {

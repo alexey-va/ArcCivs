@@ -53,3 +53,9 @@ solid, non-gravity excavation, that single cut may complete first. Its previous
 frontier is then repaired before another cut, also after save/load or restart.
 Already open boundaries and liquids do not receive this exemption. Native rays,
 protection and receipt-time liquid checks remain authoritative.
+
+Optional IDLE wandering abandons an unreachable destination when the resident's
+exact actual feet remain supported, body-clear and safe within its idle area.
+It then uses the existing eight-second retry delay and another destination.
+Unsafe or displaced residents retain recovery; mandatory work routes are unchanged.
+This does not establish a physical exit from a disconnected upper floor.

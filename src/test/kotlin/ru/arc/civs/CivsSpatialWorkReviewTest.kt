@@ -1715,18 +1715,47 @@ class CivsSpatialWorkReviewTest : FunSpec({
         }
     }
 
-    for (style in listOf("nordic", "medievaloak", "caledonia")) {
-        test("$style miner physically completes three then four then five aligned floors") {
+    for ((style, legacy) in listOf("nordic" to false, "medievaloak" to false, "caledonia" to false, "medievaloak" to true)) {
+        val scenario = if (legacy) "$style legacy miner physically migrates V3 step83 and completes its first V4 level"
+            else "$style miner physically completes three then four then five aligned floors"
+        test(scenario) {
             failOnUnsupportedMockBukkitOperation {
                 MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-                    val world = CivsWorksiteWorldFixture("mine-$style").also(paper.server::addWorld)
+                    val world = CivsWorksiteWorldFixture("mine-$style-${if (legacy) "legacy" else "fresh"}").also(paper.server::addWorld)
                     val plugin = paper.createSimplePlugin("SpatialMine")
                     val messages = mutableListOf<String>()
                     plugin.logger.addHandler(worksiteLogHandler(messages))
                     val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-                    val rotation = mapOf("nordic" to 0, "medievaloak" to 90, "caledonia" to 180).getValue(style)
-                    var mine = spatialBuilding(style, "miner", 1, CivPosition(0, 63, 0), rotation)
+                    val rotation = if (legacy) 270 else mapOf("nordic" to 0, "medievaloak" to 90, "caledonia" to 180).getValue(style)
+                    var mine = spatialBuilding(style, "miner", 1, if (legacy) CivPosition(-85, 68, -40) else CivPosition(0, 63, 0), rotation)
+                    if (legacy) mine = mine.copy(control = CivPosition(-93, 69, -40))
                     var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "NETHERITE_PICKAXE"))
+                    val oldPlan = if (legacy) requireNotNull(CivsMinePlan.forBuilding(mine, 3)) else null
+                    val oldPrefix = oldPlan?.completed(83).orEmpty()
+                    val oldNative = if (legacy) requireNotNull(oldPlan!!.legacyCompleted(214)) + oldPrefix else emptyMap()
+                    val oldRungs = oldPrefix.filter { (point, after) ->
+                        after?.startsWith("minecraft:ladder[") == true &&
+                            point.x == oldPlan!!.extensionLadder.x && point.z == oldPlan.extensionLadder.z
+                    }.keys
+                    if (legacy) {
+                        city = CivsRules.validate(city.copy(center = CivPosition(-25, 64, -20), radius = 200,
+                            mineProgress = mapOf(mine.id.toString() to 214L),
+                            minePlans = mapOf(mine.id.toString() to CivMinePlanState(3, 83, legacyStep = 214))))
+                        // Confirmed retained subset, not a reconstruction of the whole live world.
+                        for ((local, after) in oldNative) {
+                            val point = CivsWorksiteLayouts.point(mine, local)
+                            world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(after ?: "minecraft:air").also {
+                                if (after != null) it.rotate(org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90)
+                            }
+                        }
+                        (oldRungs.isNotEmpty()) shouldBe true
+                        for (local in oldRungs) {
+                            val point = CivsWorksiteLayouts.point(mine, local)
+                            world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.LADDER
+                        }
+                        world.getBlockAt(-89, 62, -40).type shouldBe Material.STONE
+                        world.getBlockAt(-88, 62, -40).type = Material.AIR
+                    }
                     val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
                     val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
                     val facing = layout["ladderFacing"].asString
@@ -1736,12 +1765,25 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             it.rotate(when (rotation) {
                                 90 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
                                 180 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
+                                270 -> org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90
                                 else -> org.bukkit.block.structure.StructureRotation.NONE
                             })
                         }
-                    for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    val chunkX = mine.anchor.x shr 4
+                    val chunkZ = mine.anchor.z shr 4
+                    for (x in chunkX - 3..chunkX + 3) for (z in chunkZ - 3..chunkZ + 2) world.loadChunk(x, z)
                     val control = requireNotNull(mine.control)
+                    if (legacy) {
+                        // Curated miner1 (c54e00bc...) has oak flooring at local (0,0,-9..-7)
+                        // beside its heart (0,1,-8), supplying native access above this fixture's stone plane.
+                        for (dx in -1..1) world.getBlockAt(control.x + dx, control.y - 1, control.z).type = Material.OAK_PLANKS
+                    }
                     world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+                    if (legacy) {
+                        val standing = requireNotNull(citizenStorageTarget(city, mine, world))
+                        citizenCanReachBlock(world, Location(world, standing.x + .5, standing.y + 1.62,
+                            standing.z + .5), control) shouldBe true
+                    }
                     val counts = mutableMapOf("COBBLESTONE" to 1_000L, "LADDER" to 1_000L, "TORCH" to 1_000L,
                         "IRON_PICKAXE" to 100L)
                     if (style == "nordic") {
@@ -1756,9 +1798,11 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     }
                     var actions = 0
                     var placedTorches = 0L
+                    var boundaryCut = false
+                    var boundarySealed = false
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false })
-                        for (unlocked in 1..3) {
+                        for (unlocked in 1..(if (legacy) 1 else 3)) {
                             if (unlocked > 1) {
                                 val next = mine.copy(level = unlocked, schematicId = mine.schematicId.dropLast(1) + unlocked,
                                     phase = BuildingPhase.CONSTRUCTING)
@@ -1826,6 +1870,25 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 }
                                 runtime.validate(city, work)
                                 work.miningGenerator shouldBe false
+                                if (legacy) {
+                                    work.changes.singleOrNull()?.let { change ->
+                                        if (change.position == CivPosition(-89, 62, -40) && change.after == "minecraft:air") {
+                                            change.before shouldBe "minecraft:stone"
+                                            work.miningStep shouldBe 216L
+                                            world.getBlockAt(-88, 62, -40).type shouldBe Material.AIR
+                                            boundaryCut = true
+                                        }
+                                        if (change.position == CivPosition(-88, 62, -40)) {
+                                            boundaryCut shouldBe true
+                                            change.before shouldBe "minecraft:air"
+                                            change.after shouldBe "minecraft:cobblestone"
+                                            work.status shouldBe "securing-mine"
+                                            work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                                            work.miningStep shouldBe 216L
+                                            boundarySealed = true
+                                        }
+                                    }
+                                }
                                 work.changes.singleOrNull()?.position?.takeIf {
                                     (it.x to it.z) !in shaftColumns
                                 }?.let { point -> galleryOrder[point]?.let { phase ->
@@ -1854,6 +1917,29 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 finished shouldBe true
                             }
                             assertWideShaft()
+                            if (legacy) {
+                                boundaryCut shouldBe true
+                                boundarySealed shouldBe true
+                                city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(4,
+                                    geometry.steps.size.toLong(), legacyStep = 214, v3Step = 83)
+                                for (local in oldRungs) {
+                                    val point = CivsWorksiteLayouts.point(mine, local)
+                                    (world.getBlockAt(point.x, point.y, point.z).type != Material.LADDER) shouldBe true
+                                }
+                                val authoredRungs = (0..2).mapTo(hashSetOf()) { bottom.copy(y = bottom.y + it) }
+                                val expectedRungs = geometry.completed(geometry.steps.size.toLong())!!.filterValues {
+                                    it?.startsWith("minecraft:ladder[") == true
+                                }.keys.mapTo(hashSetOf()) { CivsWorksiteLayouts.point(mine, it) } + authoredRungs
+                                val nativeCells = (geometry.steps.map { it.point } + oldNative.keys)
+                                    .mapTo(hashSetOf()) { CivsWorksiteLayouts.point(mine, it) } + authoredRungs
+                                nativeCells.filterTo(hashSetOf()) { point ->
+                                    world.getBlockAt(point.x, point.y, point.z).type == Material.LADDER
+                                } shouldBe expectedRungs
+                                expectedRungs.all { it.x == bottom.x && it.z == bottom.z } shouldBe true
+                                for (point in expectedRungs)
+                                    world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe
+                                        "minecraft:ladder[facing=south,waterlogged=false]"
+                            }
                             for (floor in geometry.floors) {
                                 for (cell in floor.cells) {
                                     val support = CivsWorksiteLayouts.point(mine, cell)
@@ -1868,7 +1954,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             }
                         }
                         // Fixed side lights are preserved by each level's independent scan.
-                        placedTorches shouldBe 260L
+                        if (!legacy) placedTorches shouldBe 260L
                     }
                     tasks.close()
                 }

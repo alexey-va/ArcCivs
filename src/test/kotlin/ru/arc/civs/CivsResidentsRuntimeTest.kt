@@ -1442,6 +1442,84 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("an unreachable optional wander keeps safe actual feet then tries another destination without recovery teleport") {
+        residentRuntime { h ->
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            for (x in -8..8) for (z in -8..8) h.world.getBlockAt(x, 65, z).type = Material.STONE
+            for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
+                for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.STONE
+            val actor = h.owner.collisionActors().single()
+            val origin = Location(h.world, .5, 66.0, .5)
+            actor.teleport(origin)
+            // A new token cancels the pre-fixture idle route without moving the resident.
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(nextDeliveryAt = 2) })
+            val city = h.city
+            h.navigationNow = 2_000
+            val messages = mutableListOf<String>()
+            val handler = object : java.util.logging.Handler() {
+                override fun publish(record: java.util.logging.LogRecord) { messages += record.message }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            h.logger.addHandler(handler)
+            try {
+                h.owner.pulse(2_000)
+                val teleports = h.teleports
+                var failedAt: Long? = null
+                for (tick in 1..240) {
+                    h.navigate()
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    if (messages.any { "ARCCIVS_NAVIGATION_FAILED" in it && "reason=no-path" in it } &&
+                        h.routeIdentity() == null) {
+                        failedAt = h.navigationNow
+                        break
+                    }
+                }
+                withClue("position=${actor.location} diagnostics=${messages.takeLast(8)}") {
+                    (failedAt != null) shouldBe true
+                    actor.location.toVector() shouldBe origin.toVector()
+                    h.teleports shouldBe teleports
+                }
+                // Make the next optional destination reachable; the existing eight-second delay still applies.
+                for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
+                    for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.AIR
+                var walked = false
+                for (tick in 1..600) {
+                    val before = actor.location
+                    h.navigate()
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    (before.distance(actor.location) <= .118251) shouldBe true
+                    if (requireNotNull(h.navigationNow) < requireNotNull(failedAt) + 8_000)
+                        actor.location.toVector() shouldBe origin.toVector()
+                    if (actor.location.distance(origin) >= .5) { walked = true; break }
+                }
+                withClue("position=${actor.location} diagnostics=${messages.takeLast(8)}") { walked shouldBe true }
+                h.city shouldBe city
+                h.deliveries shouldBe 0
+                h.steps shouldBe emptyList()
+            } finally { h.logger.removeHandler(handler) }
+        }
+    }
+
+    test("optional wander safety uses exact lowered feet and retains recovery for hazards void and displacement") {
+        residentRuntime { h ->
+            val anchor = CivPosition(0, 64, 0)
+            val at = CitizenPoint(2.5, 64.0, 2.5)
+            citizenSafeIdlePosition(h.world, anchor, at) shouldBe true
+            citizenSafeIdlePosition(h.world, anchor, at.copy(x = 9.5)) shouldBe false
+            h.world.getBlockAt(2, 63, 2).type = Material.MAGMA_BLOCK
+            citizenSafeIdlePosition(h.world, anchor, at) shouldBe false
+            h.world.getBlockAt(2, 63, 2).type = Material.AIR
+            citizenSafeIdlePosition(h.world, anchor, at) shouldBe false
+            h.world.getBlockAt(2, 63, 2).type = Material.DIRT_PATH
+            val lowered = at.copy(y = 63.9375)
+            citizenStandable(h.world, CivPosition(2, 63, 2)) shouldBe false
+            citizenSafeIdlePosition(h.world, anchor, lowered) shouldBe true
+            h.world.getBlockAt(2, 64, 2).type = Material.STONE
+            citizenSafeIdlePosition(h.world, anchor, lowered) shouldBe false
+        }
+    }
+
     test("idle wandering stays slow and never wears roads even on a faster surface") {
         residentRuntime { h ->
             // Negative wander offsets cross chunk zero and need the route's extra loaded margin.
