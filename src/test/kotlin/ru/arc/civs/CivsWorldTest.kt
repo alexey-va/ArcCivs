@@ -18,6 +18,60 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
 class CivsWorldTest : FunSpec({
+    for (type in listOf(BuildingType.ROAD, BuildingType.GATE))
+    test("a planned $type containing its depot source permits a validated route through its own footprint") {
+        worldScenario(collisionWorld = true) { s ->
+            val source = CivPosition(0, 64, 0)
+            val depot = worldBuilding(worldBox(-5, -3)).copy(type = BuildingType.WAREHOUSE,
+                phase = BuildingPhase.ACTIVE, entrance = source)
+            val columns = (-1..3).flatMap { x -> (-1..1).map { z -> CivPosition(x, 64, z) } }
+            val road = worldBuilding(CivBox(CivPosition(-1, 63, -1), CivPosition(3, 66, 1))).copy(type = type,
+                anchor = CivPosition(-1, 63, -1), entrance = CivPosition(4, 64, 0), transit = columns)
+            val city = worldCity(s.world.uid, depot).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val surface = CivTerrainSurface(-64, 320, (-10..10).flatMap { x -> (-5..5).map { z ->
+                civsTerrainKey(x, z) to CivTerrainSurfaceColumn(63, true)
+            } }.toMap())
+            val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(road, 0), surface,
+                infrastructureFloors = columns.associate { civsTerrainKey(it.x, it.z) to 63 })
+            draft.route.first() shouldBe source
+            draft.route.last() shouldBe road.entrance
+            val path = s.subject.autonomousRoute(city, road, source, java.util.concurrent.Executor { it.run() })
+            repeat(100) { if (!path.isDone) s.scheduler.tick() }
+            completed(path) shouldBe Unit
+        }
+    }
+
+    test("autonomous construction tolerates only neighbour-derived stair shape and reports real drift") {
+        worldScenario { s ->
+            val position = CivPosition(0, 64, 0)
+            val before = "minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=false]"
+            val after = "minecraft:stone_bricks"
+            s.world.getBlockAt(0, 64, 0).blockData = Bukkit.createBlockData(before)
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val plan = CivPlacementPlan(UUID.randomUUID(), city.id, s.world.uid, building,
+                listOf(CivPlanBlock(position, before, after)))
+            for (state in listOf(before.replace("straight", "outer_left"), before.replace("straight", "inner_right"), after)) {
+                s.world.getBlockAt(0, 64, 0).blockData = Bukkit.createBlockData(state)
+                val result = s.subject.revalidate(plan, city.owner)
+                s.scheduler.tick()
+                completed(result) shouldBe Unit
+            }
+            for (state in listOf(before.replace("north", "south"), before.replace("top", "bottom"),
+                before.replace("false", "true"), before.replace("oak_stairs", "stone_brick_stairs"), "minecraft:air")) {
+                s.world.getBlockAt(0, 64, 0).blockData = Bukkit.createBlockData(state)
+                val result = s.subject.revalidate(plan, city.owner)
+                s.scheduler.tick()
+                val failure = rejection(result)
+                failure.reason shouldBe "autonomy-terrain"
+                failure.values["actual"] shouldBe state
+                failure.values["before"] shouldBe before
+            }
+        }
+    }
+
     test("site capture reserves an empty authored marker without placing a barrel and construction still requires it") {
         worldScenario { s ->
             val marker = CivPosition(1, 64, 0)
@@ -435,15 +489,38 @@ class CivsWorldTest : FunSpec({
             chest.blockInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
             val cells = (0..2).map { x -> CivPlanBlock(CivPosition(x, 64, 0), "minecraft:bookshelf",
                 "minecraft:chest[facing=north,type=single,waterlogged=false]") }
-            val repaired = s.subject.repairWarehouse(city, building, cells)
+            val repaired = s.subject.repairStorageRacks(city, building, cells)
             s.scheduler.tick()
             completed(repaired) shouldBe mapOf("changed" to 1, "unchanged" to 1, "conflicts" to 1, "occupied" to 0, "denied" to 0)
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.CHEST
             s.world.getBlockAt(1, 64, 0).type shouldBe Material.GOLD_BLOCK
             chest.blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
-            val again = s.subject.repairWarehouse(city, building, cells)
+            val again = s.subject.repairStorageRacks(city, building, cells)
             s.scheduler.tick()
             completed(again).getValue("changed") shouldBe 0
+        }
+    }
+
+    test("ordinary workshop rack repair admits barrels and retains an occupied resulting container") {
+        worldScenario { s ->
+            val building = worldBuilding(worldBox(0, 1)).copy(type = BuildingType.SAWMILL, phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, building); s.cities += city
+            s.world.getBlockAt(0, 64, 0).type = Material.BOOKSHELF
+            val occupied = s.world.getBlockAt(1, 64, 0).also { it.type = Material.BARREL }
+            val barrel = occupied.state as org.bukkit.block.Barrel
+            barrel.inventory.setItem(0, ItemStack(Material.OAK_LOG, 17))
+            val cells = listOf(
+                CivPlanBlock(CivPosition(0, 64, 0), "minecraft:bookshelf", "minecraft:barrel[facing=north,open=false]"),
+                CivPlanBlock(CivPosition(1, 64, 0), "minecraft:bookshelf", occupied.blockData.asString))
+            val repaired = s.subject.repairStorageRacks(city, building, cells)
+            s.scheduler.tick()
+            completed(repaired).getValue("changed") shouldBe 1
+            completed(repaired).getValue("unchanged") shouldBe 1
+            s.world.getBlockAt(0, 64, 0).blockData.asString shouldBe cells.first().after
+            val repeated = s.subject.repairStorageRacks(city, building, cells)
+            s.scheduler.tick()
+            completed(repeated).getValue("unchanged") shouldBe 2
+            barrel.inventory.getItem(0) shouldBe ItemStack(Material.OAK_LOG, 17)
         }
     }
 
@@ -568,7 +645,7 @@ class CivsWorldTest : FunSpec({
             val shelf = block.state as org.bukkit.block.ChiseledBookshelf
             shelf.inventory.setItem(0, ItemStack(Material.BOOK))
             shelf.update(true, false)
-            val repair = s.subject.repairWarehouse(city, building, listOf(CivPlanBlock(CivPosition(0, 64, 0),
+            val repair = s.subject.repairStorageRacks(city, building, listOf(CivPlanBlock(CivPosition(0, 64, 0),
                 block.blockData.asString, "minecraft:chest[facing=north,type=single,waterlogged=false]")))
             s.scheduler.tick()
             completed(repair).getValue("occupied") shouldBe 1

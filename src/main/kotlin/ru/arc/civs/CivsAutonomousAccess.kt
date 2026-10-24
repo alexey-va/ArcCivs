@@ -4,15 +4,17 @@ import java.util.UUID
 import kotlin.math.abs
 
 /** Retained completed approaches; this is a detached view of existing journals, not a second registry. */
-internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>> = emptyMap()) {
+internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>> = emptyMap(),
+    val infrastructure: List<CivSettlementPiece> = emptyList()) {
     /** Earlier roads win when an older release recorded incompatible heights at the same column. */
     fun standing(city: Settlement, exceptBuildingId: UUID): Map<Long, CivPosition> = buildMap {
-        require(city.buildings.size <= CivsRules.MAX_BUILDINGS)
+        require(city.buildings.size <= CivsRules.MAX_SITES)
         city.buildings.filter { it.id != exceptBuildingId }.forEach { building ->
             // A pinned SITE prepares only its entrance column; its wider terrace does not exist yet.
             val approach = if (building.phase == BuildingPhase.ACTIVE) CivsAutonomousGeometry.approach(building)
                 else listOf(building.entrance)
-            (approach + routes[building.id].orEmpty()).forEach { feet ->
+            (approach + routes[building.id].orEmpty() +
+                building.transit.orEmpty().takeIf { building.phase == BuildingPhase.ACTIVE }.orEmpty()).forEach { feet ->
                 putIfAbsent(civsTerrainKey(feet.x, feet.z), feet)
             }
         }
@@ -20,7 +22,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
 
     companion object {
         fun from(city: Settlement, plans: List<CivPlacementPlan>): CivAutonomousAccess {
-            require(city.buildings.size <= CivsRules.MAX_BUILDINGS && plans.size <= CivsRules.MAX_BUILDINGS)
+            require(city.buildings.size <= CivsRules.MAX_SITES && plans.size <= CivsRules.MAX_SITES)
             val retained = plans.associateBy { it.building.id }
             return CivAutonomousAccess(buildMap {
                 city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.forEach { building ->
@@ -37,7 +39,7 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                         }) return@forEach
                     put(building.id, route.toList())
                 }
-            })
+            }, CivsSettlementLayout.accepted(city, plans))
         }
     }
 }

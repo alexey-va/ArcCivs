@@ -29,6 +29,11 @@ data class CivSupplyRequest(val buildingId: UUID, val material: String, val need
 object CivsLogistics {
     const val MAX_CARGO = 64L
     internal val QUARRY_SUPPLIES = mapOf("LADDER" to 16L, "TORCH" to 8L, "COBBLESTONE" to 32L)
+    internal fun quarrySupplies(building: CivBuilding): Map<String, Long> = QUARRY_SUPPLIES +
+        CivsMinePlan.forBuilding(building)?.structuralMaterials.orEmpty().associateWith {
+            if (it.endsWith("_FENCE")) 16L else 32L
+        }
+
     private val MATERIAL = Regex("[A-Z][A-Z0-9_]{0,63}")
 
     fun validCargo(city: Settlement, cargo: CivCargo?): Boolean = cargo == null || runCatching {
@@ -88,7 +93,7 @@ object CivsLogistics {
         return (CivsProduction.inputs(building) + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
-            BuildingType.QUARRY -> QUARRY_SUPPLIES + ("IRON_PICKAXE" to 1L)
+            BuildingType.QUARRY -> quarrySupplies(building) + ("IRON_PICKAXE" to 1L)
             else -> emptyMap()
         }).filterValues { it > 0 }.mapValues { (_, amount) ->
             Math.multiplyExact(amount, workers.toLong())
@@ -158,20 +163,29 @@ object CivsLogistics {
         if (worker.cargo != null || CivsResidents.isChild(worker) || CivsRules.isBuilder(city, building) ||
             building.type !in setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.SAWMILL,
                 BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TOWN_HALL)) return emptyMap()
-        val reserve = (if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(building)) + when (building.type) {
-            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) {
-                "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
-            }) to (CivsWorksiteLayouts.field(building).size.toLong().takeIf { it > 0 } ?: 16L), "BONE_MEAL" to 16L)
-            BuildingType.QUARRY -> QUARRY_SUPPLIES
-            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L)
-            else -> emptyMap()
-        } + ("BREAD" to 16L)
+        val reserve = workerReserve(city, worker, craftInputs)
         return CivsEquipment.slots(worker).drop(CivsEquipment.BAG).filterNotNull().filter { item ->
             val type = org.bukkit.Material.valueOf(item.material)
             item.data == null && type.maxDurability.toInt() == 0 && CivsEquipment.armorSlot(item.material) == null
         }.groupingBy(CivResidentItem::material).fold(0L) { count, item -> count + item.amount }
             .mapValues { (material, count) -> (count - (reserve[material] ?: 0L)).coerceAtLeast(0) }
             .filterValues { it > 0 }.toSortedMap()
+    }
+
+    /** The same personal food and profession supplies stay with a worker on a home visit. */
+    internal fun workerReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
+        val building = worker.assignment?.let(city::building)
+        if (building == null) return mapOf("BREAD" to 16L)
+        val inputs = if (CivsRules.isBuilder(city, building)) CivsMaterials.unpaid(city.construction?.materials.orEmpty())
+            else if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(building)
+        return inputs + when (building.type) {
+            BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) {
+                "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
+            }) to (CivsWorksiteLayouts.field(building).size.toLong().takeIf { it > 0 } ?: 16L), "BONE_MEAL" to 16L)
+            BuildingType.QUARRY -> quarrySupplies(building)
+            BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L)
+            else -> emptyMap()
+        } + ("BREAD" to 16L)
     }
 
     private fun job(city: Settlement, worker: CivWorker, warehouse: CivBuilding, source: CivBuilding,

@@ -42,7 +42,7 @@ internal fun citizenTool(plan: CitizenPlan): Material? = when (plan.type) {
 }
 
 internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
-    plan.type != BuildingType.BUILDER_HUT && plan.idleReason == null &&
+    plan.type != BuildingType.BUILDER_HUT && plan.type != BuildingType.GUARD_TOWER && plan.idleReason == null &&
         (phase == CitizenPhase.WORKING || plan.worldWork != null && phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING))
 
 /** A watering prop represents the farm's irrigation; fertilizer must belong to the accepted work inputs. */
@@ -57,7 +57,8 @@ internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
 }
 
 internal fun citizenWorkStatus(plan: CitizenPlan, phase: CitizenPhase): String? =
-    plan.worldWork?.status?.takeIf { phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING) }
+    if (plan.type == BuildingType.GUARD_TOWER && plan.idleReason == null && phase == CitizenPhase.WORKING) "guarding"
+    else plan.worldWork?.status?.takeIf { phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING) }
 
 internal fun citizenConstructionWorking(plan: CitizenPlan, phase: CitizenPhase, orderId: UUID): Boolean =
     plan.type == BuildingType.BUILDER_HUT && plan.token.constructionId == orderId &&

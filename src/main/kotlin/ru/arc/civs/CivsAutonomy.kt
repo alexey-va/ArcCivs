@@ -3,7 +3,8 @@ package ru.arc.civs
 import java.util.UUID
 
 /** Only active minutes advance recruitment; pausing or restarting never catches up offline time. */
-data class CivAutonomy(val paused: Boolean = false, val recruitmentMinutes: Int = 0)
+data class CivAutonomy(val paused: Boolean = false, val recruitmentMinutes: Int = 0,
+    val layoutHalfWidth: Int? = null)
 
 data class CivAutonomyGoal(
     val type: BuildingType,
@@ -19,12 +20,14 @@ data class CivAutonomyGoal(
 object CivsAutonomy {
     const val RECRUITMENT_MINUTES = 2
     val profile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
-        BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE)
+        BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE,
+        BuildingType.TAVERN, BuildingType.GUARD_TOWER)
+    val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD)
     private val upgrades = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
-        BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT)
+        BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.TAVERN, BuildingType.GUARD_TOWER)
 
     fun cost(type: BuildingType, targetLevel: Int): Stock {
-        if (type !in profile) throw CivsRejection("invalid-building")
+        if (type !in allowedTypes || targetLevel !in 1..type.maxLevel) throw CivsRejection("invalid-building")
         if (type == BuildingType.TOWN_HALL && targetLevel == 1) return Stock(32, 24, 4)
         val regular = CivsRules.cost(type, targetLevel)
         return if (type == BuildingType.BUILDER_HUT) {
@@ -60,21 +63,29 @@ object CivsAutonomy {
             if (existing == null) return goal(city, type, 1, null)
             if (existing.phase == BuildingPhase.SITE) return goal(existing)
         }
+        if (city.buildings.count { it.type == BuildingType.HOUSE } < 3 && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
+            return goal(city, BuildingType.HOUSE, 1, null)
         val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
         if (hall.level < 2) return goal(city, BuildingType.TOWN_HALL, 2, hall.id)
         for (type in upgrades) {
-            val building = city.buildings.first { it.type == type }
-            if (building.level < 2) return goal(city, type, 2, building.id)
+            val building = city.buildings.firstOrNull { it.type == type && it.level < 2 } ?: continue
+            return goal(city, type, 2, building.id)
         }
         return null
     }
 
-    private fun goal(city: Settlement, type: BuildingType, level: Int, id: UUID?): CivAutonomyGoal {
+    internal fun goal(city: Settlement, type: BuildingType, level: Int, id: UUID?): CivAutonomyGoal {
         val price = cost(type, level)
         val missing = Stock((price.wood - city.stock.wood).coerceAtLeast(0),
             (price.stone - city.stock.stone).coerceAtLeast(0), (price.food - city.stock.food).coerceAtLeast(0))
         return CivAutonomyGoal(type, level, id, price, missing)
     }
+
+    internal fun infrastructureDue(city: Settlement, ordinary: CivAutonomyGoal?): Boolean =
+        city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
+            (ordinary == null || ordinary.targetLevel > 1) && profile.all { type ->
+                city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
+            }
 
     fun setPaused(city: Settlement, paused: Boolean): Settlement {
         CivsRules.validate(city)
@@ -104,7 +115,7 @@ object CivsAutonomy {
         var minutes = if (!initialAdmissionsPending && room) minOf(RECRUITMENT_MINUTES, autonomy.recruitmentMinutes + 1) else 0
         if (minutes == RECRUITMENT_MINUTES && stock.food >= CivsRules.RECRUIT_FOOD) {
             val home = city.buildings.filter { it.type == BuildingType.TOWN_HALL ||
-                it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }.firstOrNull { building ->
+                it.type.isResidence && it.phase == BuildingPhase.ACTIVE }.firstOrNull { building ->
                 residents.count { it.homeId == building.id } < if (building.type == BuildingType.TOWN_HALL)
                     CivsPopulation.IMMIGRANT_POPULATION else CivsPopulation.houseBeds(building)
             }

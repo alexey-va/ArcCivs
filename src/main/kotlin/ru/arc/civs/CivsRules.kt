@@ -5,6 +5,8 @@ import java.util.UUID
 /** Pure transitions. The caller persists the returned revision before publishing it or placing blocks. */
 object CivsRules {
     const val MAX_BUILDINGS = 16
+    const val MAX_INFRASTRUCTURE = 96
+    const val MAX_SITES = MAX_BUILDINGS + MAX_INFRASTRUCTURE
     const val MAX_POPULATION = 12
     const val MAX_WORK_ROUTE_DISTANCE = 88
     const val RECRUIT_FOOD = 12L
@@ -28,7 +30,7 @@ object CivsRules {
     private val ESSENTIAL_BUILDINGS = setOf(BuildingType.WAREHOUSE, BuildingType.FARM, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY)
 
     fun cost(type: BuildingType, targetLevel: Int): Stock {
-        check(targetLevel in 1..3, "invalid-level")
+        check(targetLevel in 1..type.maxLevel, "invalid-level")
         if (type == BuildingType.TOWN_HALL) return when (targetLevel) {
             1 -> Stock()
             2 -> Stock(128, 96, 24)
@@ -36,12 +38,17 @@ object CivsRules {
         }
         val base = when (type) {
             BuildingType.BUILDER_HUT, BuildingType.SAWMILL, BuildingType.BLACKSMITH,
-            BuildingType.STONEMASON, BuildingType.LIBRARY -> Stock() // New construction reserves exact materials, never an abstract price.
+            BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.BAKERY -> Stock() // Native construction reserves exact materials.
             BuildingType.WAREHOUSE -> Stock(32, 16)
             BuildingType.HOUSE -> Stock(24, 12)
             BuildingType.FORESTER -> Stock(20, 12)
             BuildingType.QUARRY -> Stock(20, 20)
             BuildingType.FARM -> Stock(24, 8)
+            BuildingType.TAVERN -> Stock(32, 16)
+            BuildingType.GUARD_TOWER -> Stock(24, 24)
+            BuildingType.WALL -> Stock(8, 16)
+            BuildingType.GATE -> Stock(12, 16)
+            BuildingType.ROAD -> Stock(0, 8)
             BuildingType.TOWN_HALL -> error("handled above")
         }
         val multiplier = targetLevel.toLong() * targetLevel
@@ -55,7 +62,7 @@ object CivsRules {
     }
 
     fun beds(city: Settlement): Int = CivsPopulation.IMMIGRANT_POPULATION + city.buildings.sumOf {
-        if (it.phase == BuildingPhase.ACTIVE && it.type == BuildingType.HOUSE) CivsPopulation.houseBeds(it) else 0
+        if (it.phase == BuildingPhase.ACTIVE && it.type.isResidence) CivsPopulation.houseBeds(it) else 0
     }
 
     fun populationLimit(city: Settlement): Int = minOf(MAX_POPULATION, maxOf(CivsPopulation.IMMIGRANT_POPULATION, city.level() * 4))
@@ -65,18 +72,20 @@ object CivsRules {
     }
     else if (building.phase != BuildingPhase.ACTIVE) 0 else when (building.type) {
         BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
-        BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY -> building.level
+        BuildingType.SAWMILL, BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY,
+        BuildingType.BAKERY -> building.level
+        BuildingType.GUARD_TOWER -> 1
         else -> 0
     }
 
     /** Old full cities have no spare plot for the newly introduced builder hut. New sites reserve that plot. */
-    fun legacyHallBuilder(city: Settlement): Boolean = city.inventory != null && city.buildings.size == MAX_BUILDINGS &&
+    fun legacyHallBuilder(city: Settlement): Boolean = city.inventory != null && buildingCount(city) == MAX_BUILDINGS &&
         city.buildings.none { it.type == BuildingType.BUILDER_HUT } &&
         city.buildings.any { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
 
     fun slots(city: Settlement, building: CivBuilding): Int =
         if (city.autonomy != null) {
-            if (building.type == BuildingType.BUILDER_HUT || resource(building.type) != null) slots(building) else 0
+            if (building.type in setOf(BuildingType.BUILDER_HUT, BuildingType.GUARD_TOWER) || resource(building.type) != null) slots(building) else 0
         }
         else if (building.type == BuildingType.WAREHOUSE && city.inventory == null) 0
         else if (building.type == BuildingType.TOWN_HALL && isBuilder(city, building)) {
@@ -138,6 +147,8 @@ object CivsRules {
         BuildingType.STONEMASON -> "stonemason"
         BuildingType.LIBRARY -> "librarian"
         BuildingType.WAREHOUSE -> "courier"
+        BuildingType.BAKERY -> "baker"
+        BuildingType.GUARD_TOWER -> "guard"
         else -> "unassigned"
     }
 
@@ -156,7 +167,7 @@ object CivsRules {
         else deliveryInterval(effectiveWorkType(city, building))
 
     fun workRequired(type: BuildingType, targetLevel: Int): Int {
-        check(targetLevel in 1..3, "invalid-level")
+        check(targetLevel in 1..type.maxLevel, "invalid-level")
         return if (type == BuildingType.TOWN_HALL && targetLevel == 1) 0 else 3 * targetLevel
     }
 
@@ -203,10 +214,7 @@ object CivsRules {
         val site = building.copy(phase = BuildingPhase.SITE)
         city.building(site.id)?.let { check(it == site, "invalid-building"); return city }
         check(site.type != BuildingType.TOWN_HALL && site.level == 1, "invalid-level")
-        check(city.buildings.size < MAX_BUILDINGS, "building-limit")
-        val essential = ESSENTIAL_BUILDINGS + BuildingType.BUILDER_HUT
-        val missing = essential.count { type -> type != site.type && city.buildings.none { it.type == type } }
-        check(MAX_BUILDINGS - city.buildings.size - 1 >= missing, "resources.bootstrap-slots")
+        requireBuildingSlot(city, site.type, ESSENTIAL_BUILDINGS + BuildingType.BUILDER_HUT)
         check(!intersectsApproach(city, site), "building-overlap")
         check(validBuilding(city, site) && city.buildings.none { it.bounds.overlaps(site.bounds) } &&
             city.construction?.plannedBuilding?.bounds?.overlaps(site.bounds) != true, "invalid-building")
@@ -226,7 +234,7 @@ object CivsRules {
     fun enqueue(city: Settlement, actor: UUID, buildingId: UUID): Settlement {
         authorized(city, actor)
         val building = city.building(buildingId) ?: reject("invalid-building")
-        check(building.phase == BuildingPhase.SITE || building.phase == BuildingPhase.ACTIVE && building.level < 3, "invalid-building")
+        check(building.phase == BuildingPhase.SITE || building.phase == BuildingPhase.ACTIVE && building.level < building.type.maxLevel, "invalid-building")
         check(city.construction?.buildingId != buildingId, "construction-busy")
         check(building.phase == BuildingPhase.SITE || building.type == BuildingType.TOWN_HALL || building.level < city.level(), "town-hall-level-required")
         if (buildingId in city.constructionQueue.orEmpty()) return city
@@ -336,7 +344,7 @@ object CivsRules {
     internal fun resurrectedWorker(city: Settlement, corpse: CivCorpse): CivWorker = corpse.worker.copy(
         assignment = null, cargo = null, nextDeliveryAt = 0, health = CivsResidents.maxHealth(corpse.worker),
         homeId = corpse.worker.homeId?.takeIf { id -> city.buildings.any {
-            it.id == id && it.type in setOf(BuildingType.TOWN_HALL, BuildingType.HOUSE)
+            it.id == id && (it.type == BuildingType.TOWN_HALL || it.type.isResidence)
         } })
 
     /** The caller includes the exact town-storage debit/credit in this same revision's receipt. */
@@ -450,15 +458,13 @@ object CivsRules {
         check(plan.type == BuildingType.TOWN_HALL || plan.level <= city.level(), "town-hall-level-required")
         if (existing == null) {
             check(plan.type != BuildingType.TOWN_HALL && plan.level == 1, "invalid-level")
-            check(city.buildings.size < MAX_BUILDINGS, "building-limit")
-            val missing = ESSENTIAL_BUILDINGS.count { type -> type != plan.type && city.buildings.none { it.type == type } }
-            check(MAX_BUILDINGS - city.buildings.size - 1 >= missing, "resources.bootstrap-slots")
+            requireBuildingSlot(city, plan.type, ESSENTIAL_BUILDINGS)
         } else if (existing.phase == BuildingPhase.SITE) {
             check(order.batches != null && existing.copy(phase = BuildingPhase.CONSTRUCTING) == plan, "invalid-building")
         } else {
             check(existing.phase == BuildingPhase.ACTIVE && existing.type == plan.type &&
                 existing.entrance == plan.entrance && existing.rotation == plan.rotation, "invalid-building")
-            check(plan.level == existing.level + 1 && plan.level <= 3, "invalid-level")
+            check(plan.level == existing.level + 1 && plan.level <= plan.type.maxLevel, "invalid-level")
         }
         check(!intersectsApproach(city, plan), "building-overlap")
         check(validBuilding(city, plan) && city.buildings.none { it.id != plan.id && it.bounds.overlaps(plan.bounds) }, "invalid-building")
@@ -675,7 +681,8 @@ object CivsRules {
             city.minePlans.orEmpty() + (key to CivMinePlanState(version, next,
                 previous?.legacyStep ?: city.mineProgress?.get(key),
                 previous?.takeIf { it.version == 2 && version >= 3 }?.nextStep ?: previous?.v2Step,
-                previous?.takeIf { it.version == 3 && version >= 4 }?.nextStep ?: previous?.v3Step))
+                previous?.takeIf { it.version == 3 && version >= 4 }?.nextStep ?: previous?.v3Step,
+                previous?.takeIf { it.version == 4 && version >= 5 }?.nextStep ?: previous?.v4Step))
         } ?: city.minePlans
         return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
             mineProgress = progress, minePlans = plans))
@@ -690,7 +697,8 @@ object CivsRules {
             city.autonomy?.let { autonomy ->
                 snapshot(city.inventory == null && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)
-                snapshot(city.buildings.all { it.type in CivsAutonomy.profile })
+                snapshot(autonomy.layoutHalfWidth?.let { it in 24..56 } != false)
+                snapshot(city.buildings.all { it.type in CivsAutonomy.allowedTypes })
             }
             city.memberNames?.let { names ->
                 val participants = (city.members + city.owner).mapTo(hashSetOf(), UUID::toString)
@@ -698,16 +706,18 @@ object CivsRules {
                     it.isNotBlank() && it.length <= 32 && it.none(Char::isISOControl)
                 })
             }
-            snapshot(city.buildings.size in 1..MAX_BUILDINGS && city.buildings.map { it.id }.distinct().size == city.buildings.size)
+            snapshot(city.buildings.size in 1..MAX_SITES && buildingCount(city) <= MAX_BUILDINGS &&
+                city.buildings.count { it.type.isInfrastructure } <= MAX_INFRASTRUCTURE &&
+                city.buildings.map { it.id }.distinct().size == city.buildings.size)
             snapshot(city.buildings.count { it.type == BuildingType.TOWN_HALL } == 1)
             snapshot(city.buildings.all { validBuilding(city, it) })
             snapshot(city.buildings.all { it.type == BuildingType.TOWN_HALL || it.level <= city.level() })
             snapshot(city.buildings.withIndex().all { (index, building) -> city.buildings.drop(index + 1).none { it.bounds.overlaps(building.bounds) } })
             val order = city.construction
             city.constructionQueue?.let { queue ->
-                snapshot(queue.size <= MAX_BUILDINGS && queue.distinct().size == queue.size &&
+                snapshot(queue.size <= MAX_SITES && queue.distinct().size == queue.size &&
                     queue.all { id -> present(id) && city.building(id)?.let {
-                        it.phase == BuildingPhase.SITE || it.phase == BuildingPhase.ACTIVE && it.level < 3
+                        it.phase == BuildingPhase.SITE || it.phase == BuildingPhase.ACTIVE && it.level < it.type.maxLevel
                     } == true && id != order?.buildingId })
             }
             city.pendingDeletion?.buildingId?.let { id -> snapshot(city.building(id)?.type?.let { it != BuildingType.TOWN_HALL } == true) }
@@ -763,10 +773,12 @@ object CivsRules {
                 val size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, plan.version) }?.steps?.size
                 val v2Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 2) }?.steps?.size
                 val v3Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 3) }?.steps?.size
+                val v4Size = building?.takeIf { it.type == BuildingType.QUARRY }?.let { CivsMinePlan.forBuilding(it, 4) }?.steps?.size
                 buildingId.toString() == id && size != null && present(plan) &&
                     plan.version in 2..CivsMinePlan.VERSION && plan.nextStep in 0..size.toLong() &&
                     (plan.v2Step == null || plan.version >= 3 && v2Size != null && plan.v2Step in 0..v2Size.toLong()) &&
                     (plan.v3Step == null || plan.version >= 4 && v3Size != null && plan.v3Step in 0..v3Size.toLong()) &&
+                    (plan.v4Step == null || plan.version >= 5 && v4Size != null && plan.v4Step in 0..v4Size.toLong()) &&
                     plan.legacyStep == city.mineProgress?.get(id)
             }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }
@@ -832,13 +844,23 @@ object CivsRules {
     }
 
     private fun validBuilding(city: Settlement, building: CivBuilding): Boolean =
-        present(building.id, building.type, building.phase, building.anchor, building.bounds, building.entrance) && building.level in 1..3 &&
+        present(building.id, building.type, building.phase, building.anchor, building.bounds, building.entrance) && building.level in 1..building.type.maxLevel &&
             building.rotation in listOf(0, 90, 180, 270) && validText(building.schematicId, 512) &&
             building.bounds.min.x <= building.bounds.max.x && building.bounds.min.y <= building.bounds.max.y && building.bounds.min.z <= building.bounds.max.z &&
             city.contains(building.bounds.min.x, building.bounds.min.z) && city.contains(building.bounds.max.x, building.bounds.max.z) &&
             city.contains(building.anchor.x, building.anchor.z) && city.contains(building.entrance.x, building.entrance.z) &&
             (building.phase != BuildingPhase.SITE || building.level == 1) &&
             (building.control?.let { city.contains(it.x, it.z) } != false) &&
+            (!building.type.isInfrastructure || building.control == null) &&
+            (building.transit?.let { cells ->
+                building.type in setOf(BuildingType.ROAD, BuildingType.GATE) && cells.size in 1..256 &&
+                    cells.map { civsTerrainKey(it.x, it.z) }.distinct().size == cells.size &&
+                    cells.size.toLong() == (building.bounds.max.x.toLong() - building.bounds.min.x + 1) *
+                        (building.bounds.max.z.toLong() - building.bounds.min.z + 1) && cells.all { point ->
+                        building.bounds.contains(point.x, point.y, point.z)
+                    }
+            } != false) &&
+            (building.type !in setOf(BuildingType.ROAD, BuildingType.GATE) || building.transit != null) &&
             // Old farms may still store BREAD; their effective selection is now wheat.
             // Preserve the stored value and previously accepted receipts on reload.
             (building.production?.let { it in CivsProduction.options(building.type) ||
@@ -853,14 +875,15 @@ object CivsRules {
     private fun validConstructionPrice(city: Settlement, order: CivConstruction, building: CivBuilding): Boolean {
         if (city.autonomy != null) {
             val batches = order.batches ?: return false
-            return building.type in CivsAutonomy.profile && order.payment == null &&
+            return building.type in CivsAutonomy.allowedTypes && order.payment == null &&
                 batches.atomicPairs == true &&
                 batches.total in 1..75_000 && batches.size in 1..256 && order.workRequired == batches.total &&
                 order.cost == CivsAutonomy.cost(building.type, building.level) &&
                 order.materials?.let(::validMaterials) == true
         }
         if (building.type in setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH,
-                BuildingType.STONEMASON, BuildingType.LIBRARY) && order.payment == null) return false
+                BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TAVERN, BuildingType.BAKERY,
+                BuildingType.GUARD_TOWER, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD) && order.payment == null) return false
         val batches = order.batches
         if (batches == null) return order.payment == null && building.type in setOf(BuildingType.TOWN_HALL,
             BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM) &&
@@ -873,6 +896,19 @@ object CivsRules {
 
     private fun validMaterials(materials: Map<String, Long>): Boolean =
         runCatching { CivInventory(CivStorageMode.VIRTUAL, materials).validated() }.isSuccess
+
+    fun buildingCount(city: Settlement): Int = city.buildings.count { !it.type.isInfrastructure }
+
+    private fun requireBuildingSlot(city: Settlement, type: BuildingType, essential: Set<BuildingType>) {
+        if (type.isInfrastructure) {
+            check(city.buildings.count { it.type.isInfrastructure } < MAX_INFRASTRUCTURE, "building-limit")
+        } else {
+            val count = buildingCount(city)
+            check(count < MAX_BUILDINGS, "building-limit")
+            val missing = essential.count { it != type && city.buildings.none { building -> building.type == it } }
+            check(MAX_BUILDINGS - count - 1 >= missing, "resources.bootstrap-slots")
+        }
+    }
 
     private fun isFounding(city: Settlement): Boolean = city.buildings.size == 1 && city.buildings.single().let {
         it.type == BuildingType.TOWN_HALL && it.level == 1 && it.phase == BuildingPhase.CONSTRUCTING && city.construction?.buildingId == it.id

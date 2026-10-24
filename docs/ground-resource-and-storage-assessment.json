@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "title": "ArcCivs .68 native ground-item recovery and storage access",
+  "assumptions": [
+    "The final private asset manifest at artifacts/arccivs-068-building-chests/final-v2/building-chests-manifest.json (SHA-256 908fcf4f3cf5d27d64cf45f857533a28f135468f05c4f7a4e08e8fb0ece9b545) records 36 current schematics and their 36 exact legacy counterparts; 54 other non-warehouse schematics and all 9 warehouse schematics are unchanged. The 72 schematic payload files total 122,048 bytes. Of 102 authored rack cells in the transformed 36 schematics, 86 become single chests, 9 become barrels, and 7 are cleared for access. This yields 95 empty template containers and 2,565 nominal native slots at 27 slots each. This is catalog-template capacity, not verified installed, placed, available, or in-use live capacity. The manifest preserves 449 decorative bookshelves and 7 pre-existing rack-air cells. It is private-asset evidence only; native runtime readback and client acceptance are false/unverified.",
+    "A modeled pickup is one existing native ground Item entity preserved with its exact ItemStack metadata through the visible worker bag and delivery to a home container. Low/base/high are 1/10/100 completed pickup cycles per modeled worker-day with participants=[1,1,1]. This is a transfer-event sensitivity, not a measured activity rate, a stack/item quantity, or a daily maximum.",
+    "Each successful pickup cycle moves pre-existing native items; it does not mint items or abstract Auto stock. A durable receipt and flush acknowledgement make replay use the accepted transfer, not a second issuance. Only completed cycles are counted; failed, cancelled or unacknowledged work is not credited as a completed transfer.",
+    "Combat, hunger, sleep and work retain priority over pickup. The at-most-8-entities-per-operation and 5-seconds-per-world constraints bound concurrent work; they do not prove realized pickup frequency or imply a throughput forecast. The 1/10/100 scenarios are not derived from these concurrency bounds.",
+    "Ground-item recovery may reduce despawn losses when a resident actually completes the transfer. The final schematic catalog contains 95 empty template containers with 2,565 nominal slots, but current placed/available live capacity, utilization and despawn-loss reduction are unknown. The new containers are empty in the templates; no claim is made that the schematics are installed, built or used in-game.",
+    "New personal-build captures use the converted native materials in place of the former rack/shelf placeholders: the manifest maps 102 authored rack cells to 86 chests, 9 barrels and 7 air cells. This changes required building-material composition; it is not free player-item issuance. Auto retains its prior primitive stock-cost behavior and unchanged rates. Empty replacements in existing guarded repair are a one-time migration for erroneous imports, not recurring item supply or income. No monetary price is assigned.",
+    "The existing global index covers buildings. The scoped local-source expansion includes every ACTIVE building's bounds and foreign controls, so a recovered item can reach the intended home container. This discovery change is not an item grant or a capacity count.",
+    "Direct Vault, premium-token and Minecraft player-XP deltas are each zero. No item-to-currency conversion, SELL price, contract payout or other redemption is invented. Current item SELL behavior and the planned SELL-to-contract transition remain unchanged.",
+    "The existing 168-hour network-ledger context is referenced by date only in docs/autonomous-economy-assessment.md; it is background, not attributed to this feature, and is not refreshed for this zero-direct-currency assessment."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "ground_recovery_direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs .68 native ground-item transfer scope",
+          "basis": "The pickup path does not call Vault or add a price, fee, or payout; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "ground_recovery_direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs .68 native ground-item transfer scope",
+          "basis": "The pickup path does not grant or burn premium tokens; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "ground_recovery_direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs .68 native ground-item transfer scope",
+          "basis": "The pickup path grants no Minecraft player experience; direct delta is zero.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "ground_item_pickup_cycles": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "existing_ground_item_to_home_container",
+          "kind": "transfer",
+          "source": "ArcCivs .68 scoped ground-Item pickup, visible worker-bag transfer, durable home-container receipt and flush acknowledgement",
+          "basis": "One unit is one completed pickup cycle for one pre-existing native Item entity; its stack amount and exact metadata are preserved. Events are 1/10/100 per modeled worker-day, not material quantities. This is movement of existing items, never a new grant.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": { "value": "0", "unit": "major" },
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": { "value": "1", "unit": "major" },
+            "events_per_player_day": [1, 10, 100]
+          }
+        }
+      ]
+    }
+  },
+  "asset_capacity": {
+    "status": "catalog_manifest_ready_runtime_unverified",
+    "manifest_path": "artifacts/arccivs-068-building-chests/final-v2/building-chests-manifest.json",
+    "manifest_sha256": "908fcf4f3cf5d27d64cf45f857533a28f135468f05c4f7a4e08e8fb0ece9b545",
+    "payload_files": 72,
+    "payload_bytes": 122048,
+    "modified_current_schematics": 36,
+    "exact_legacy_schematics": 36,
+    "unchanged_nonwarehouse_schematics": 54,
+    "unchanged_warehouse_schematics": 9,
+    "authored_source_rack_cells": 102,
+    "cleared_source_rack_cells": 7,
+    "untouched_source_rack_air_cells": 7,
+    "native_bookshelves_preserved": 449,
+    "new_containers_empty": true,
+    "catalog_chest_count": 86,
+    "catalog_barrel_count": 9,
+    "catalog_container_count": 95,
+    "nominal_slots_per_container": 27,
+    "catalog_nominal_slots": 2565,
+    "native_readback_verified": false,
+    "runtime_client_acceptance": false,
+    "actual_live_available_slots": null,
+    "actual_live_utilization": null
+  },
+  "prices": []
+}

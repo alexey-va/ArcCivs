@@ -3,7 +3,14 @@ package ru.arc.civs
 import java.util.UUID
 
 enum class Resource { WOOD, STONE, FOOD }
-enum class BuildingType { TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY }
+enum class BuildingType {
+    TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY,
+    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD;
+
+    val isInfrastructure: Boolean get() = this == WALL || this == GATE || this == ROAD
+    val isResidence: Boolean get() = this == HOUSE || this == TAVERN
+    val maxLevel: Int get() = if (isInfrastructure) 1 else 3
+}
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }
 enum class CivSex { MALE, FEMALE }
@@ -42,6 +49,8 @@ data class CivBuilding(
     val phase: BuildingPhase,
     val control: CivPosition? = null,
     val production: String? = null,
+    /** Explicit public walking columns of a constructed road or gate. Native collisions still apply. */
+    val transit: List<CivPosition>? = null,
 )
 
 data class CivWorker(
@@ -66,6 +75,8 @@ data class CivWorker(
     val childMinutes: Int? = null,
     /** Twenty is fully fed. Legacy null is fully fed, without granting food items. */
     val hunger: Int? = null,
+    /** A real ground pickup requests a home visit; quantities remain solely in the native bag. */
+    val hasCollectedItems: Boolean? = null,
 )
 
 /** A stable pair occupies one house. Progress records active minutes, never wall-clock catch-up. */
@@ -127,7 +138,9 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     /** V2's exact saved prefix is retained when a first real V3 receipt starts its independent cursor. */
     val v2Step: Long? = null,
     /** V3's offset-shaft ordinal remains provenance when V4 starts its own single-shaft plan. */
-    val v3Step: Long? = null)
+    val v3Step: Long? = null,
+    /** Completed V4 geometry remains an escape/protection prefix after V5 starts. */
+    val v4Step: Long? = null)
 
 enum class CivSettlementSetting { CHUNK_LOADING, IMMORTAL_RESIDENTS, AUTO_CONSTRUCTION_MATERIALS }
 

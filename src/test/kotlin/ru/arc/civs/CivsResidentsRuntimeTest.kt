@@ -52,6 +52,60 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("idle collection walks into actual reach before one bounded pickup request") {
+        residentRuntime { h ->
+            h.collectionEnabled = true
+            h.navigationNow = 2_000
+            val start = h.owner.residentFeet(h.workerId)!!
+            val item = h.groundAt(start.clone().add(5.0, 0.0, 0.0))
+            h.owner.pulse(2_000)
+            h.groundRequests shouldBe emptyList()
+            (h.routeIdentity() != null) shouldBe true // A real leisure route owns the approach.
+            var largestStep = 0.0
+            for (frame in 1..160) {
+                val before = h.owner.residentFeet(h.workerId)!!
+                h.navigate()
+                val after = h.owner.residentFeet(h.workerId)!!
+                largestStep = maxOf(largestStep, before.distance(after))
+                if (frame % 5 == 0) h.owner.pulse(2_000L + frame * 50L)
+                if (h.groundRequests.isNotEmpty()) break
+            }
+            h.groundRequests.single() shouldBe listOf(item.uniqueId)
+            (h.owner.residentFeet(h.workerId)!!.distanceSquared(item.location) <= 4.0) shouldBe true
+            (largestStep <= .3) shouldBe true
+        }
+    }
+
+    test("near-feet collection batches at most eight and pending persistence prevents repeat pickup") {
+        residentRuntime { h ->
+            h.collectionEnabled = true
+            val feet = h.owner.residentFeet(h.workerId)!!
+            repeat(9) { h.groundAt(feet.clone().add(1.0, 0.0, 0.0)) }
+            h.owner.pulse(2_000)
+            h.groundRequests.single().size shouldBe 8
+            h.owner.pulse(3_000)
+            h.owner.pulse(8_000)
+            h.groundRequests.size shouldBe 1
+            h.owner.status(h.workerId) shouldBe "workers.status.loading-cargo"
+        }
+    }
+
+    for (atHome in listOf(false, true)) test("night shelter only permits unloading when already beside real home container atHome=$atHome") {
+        residentRuntime { h ->
+            h.collectionEnabled = true
+            val feet = h.owner.residentFeet(h.workerId)!!
+            val container = CivPosition(feet.blockX + if (atHome) 1 else 10, feet.blockY, feet.blockZ)
+            h.world.getBlockAt(container.x, container.y, container.z).type = Material.BARREL
+            h.collectionDestination = CivCollectedHome(h.city.buildings.single().id, container, true)
+            h.city = h.city.copy(workers = h.city.workers.map { worker -> worker.copy(hasCollectedItems = true,
+                items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null }) })
+            h.world.time = 13_000
+            h.owner.pulse(2_000)
+            h.groundRequests shouldBe emptyList()
+            h.homeDeposits shouldBe if (atHome) listOf(container) else emptyList()
+        }
+    }
+
     test("a built V4 prefix traverses two native landings and returns through the complete authored ladder without teleport jumps") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("resident-v4-two-level-traversal").also(paper.server::addWorld)
@@ -1153,7 +1207,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("a mining receipt requires observed feet inside the authored gallery even when the block stays in reach") {
         residentRuntime { h ->
             val focus = CivPosition(27, 64, 3)
-            val work = h.prepareMineWork(CivPosition(28, 64, 3), focus)
+            val work = h.prepareMineWork(CivPosition(28, 64, 3), focus, CivPosition(20, 75, 8))
             val quarry = requireNotNull(h.city.building(work.buildingId))
             val actor = h.owner.collisionActors().single()
             val inside = Location(h.world, 28.5, 64.0, 3.5)
@@ -1689,7 +1743,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 workers = h.city.workers.map { it.copy(assignment = null, nextDeliveryAt = 2) })
             val city = h.city
             citizenIdleAnchor(city, hall) shouldBe hall.entrance
-            citizenIdleAnchor(city.copy(autonomy = null), hall) shouldBe hall.control
+            citizenIdleAnchor(city.copy(autonomy = null), hall) shouldBe hall.entrance
             h.navigationNow = 2_000
             h.owner.pulse(2_000)
             val actor = h.owner.collisionActors().single()
@@ -2427,6 +2481,12 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var onDelivery: ((CitizenToken) -> Unit)? = null
     var unloads = 0
     var supplyRequests = 0
+    var collectionEnabled = false
+    var collectionDestination: CivCollectedHome? = null
+    val groundRequests = mutableListOf<List<UUID>>()
+    val homeDeposits = mutableListOf<CivPosition?>()
+    val pendingGroundCollection = CompletableFuture<Settlement>()
+    val pendingHomeDeposit = CompletableFuture<Settlement>()
     var workReady = true
     var foodSource: UUID? = null
     var workPlans = 0
@@ -2547,7 +2607,10 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)
-            }, constructionWorkplace = { _, _ -> constructionWorkplace })
+            }, constructionWorkplace = { _, _ -> constructionWorkplace },
+            collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
+            pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
+            depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -2567,6 +2630,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             every { target } returns null
         }.also(world.threatEntities::add)
     }
+
+    fun groundAt(at: Location) = civsGroundFixture(paper, world, at, ItemStack(Material.COAL)).also(world.threatEntities::add)
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
     fun navigate(advanceMillis: Long = 50L) {
@@ -2651,11 +2716,12 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     fun assignQuarry(): CivBuilding = assignFarm().copy(type = BuildingType.QUARRY, schematicId = "miner1", production = "COBBLESTONE").also { quarry ->
         city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
     }
-    fun prepareMineWork(standing: CivPosition, focus: CivPosition = CivPosition(25, 64, 0)): CivWorldWork {
+    fun prepareMineWork(standing: CivPosition, focus: CivPosition = CivPosition(25, 64, 0),
+                        anchor: CivPosition = CivPosition(19, 75, 12)): CivWorldWork {
         val previous = assignQuarry()
         requireNotNull(previous.control).let { world.getBlockAt(it.x, it.y, it.z).type = Material.AIR }
         // This anchor puts the authored first gallery on the fixture's supported y=64 plane.
-        val quarry = spatialBuilding("medievaloak", "miner", 1, CivPosition(20, 75, 8))
+        val quarry = spatialBuilding("medievaloak", "miner", 1, anchor)
             .copy(id = previous.id, production = "COBBLESTONE")
         city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
         for (x in 18..27) for (z in -1..1) for (y in 64..66)

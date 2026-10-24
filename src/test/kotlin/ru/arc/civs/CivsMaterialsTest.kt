@@ -21,6 +21,7 @@ class CivsMaterialsTest : FunSpec({
                 CivsProduction.amount(building) shouldBe amount
             }
         }
+        recipe(BuildingType.BAKERY, "BREAD", mapOf("WHEAT" to 3L), 1L)
         for (wood in listOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK"))
             recipe(BuildingType.SAWMILL, "${wood}_PLANKS", mapOf("${wood}_LOG" to 1L), 4)
         for ((tool, iron) in mapOf("SHOVEL" to 1L, "AXE" to 3L, "PICKAXE" to 3L, "HOE" to 2L))

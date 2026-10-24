@@ -19,6 +19,11 @@ internal class CivsAutonomousPlacement(
     private val loadAccess: (Settlement) -> CompletableFuture<CivAutonomousAccess> = {
         CompletableFuture.completedFuture(CivAutonomousAccess())
     },
+    private val writeCapture: (UUID, ByteArray) -> CompletableFuture<Unit> = { _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable"))
+    },
+    private val deleteCapture: (UUID) -> CompletableFuture<Boolean> = { CompletableFuture.completedFuture(false) },
+    private val dataVersion: Int = 0,
 ) : AutoCloseable {
     private val jobs = linkedMapOf<UUID, Search>()
     private val terminal = linkedMapOf<UUID, Map<String, Any?>>()
@@ -27,13 +32,17 @@ internal class CivsAutonomousPlacement(
     fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, type, level, buildingId))
 
+    fun infrastructure(city: Settlement): CompletableFuture<CivAutonomousDesign> =
+        admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
+
     /** Legacy, player-pinned SITE plans retain their exact anchor and receive the same durable earthworks. */
     fun prepareExisting(city: Settlement, blueprint: CivBlueprint): CompletableFuture<CivAutonomousDesign> {
         val previous = city.building(blueprint.building.id)
         if (previous?.phase != BuildingPhase.SITE || previous.entrance != blueprint.building.entrance ||
             previous.rotation != blueprint.building.rotation)
             return CompletableFuture.failedFuture(CivsRejection("stale-building"))
-        return admit(Search(city, blueprint.building.type, blueprint.building.level, blueprint.building.id, blueprint, previous))
+        return admit(Search(city, blueprint.building.type, blueprint.building.level, blueprint.building.id, blueprint, previous,
+            infrastructure = blueprint.building.type.isInfrastructure))
     }
 
     private fun admit(job: Search): CompletableFuture<CivAutonomousDesign> = synchronized(jobs) {
@@ -43,6 +52,7 @@ internal class CivsAutonomousPlacement(
         jobs[job.city.id] = job
         job.result.whenComplete { design, failure ->
             job.pending?.cancel(false)
+            if (job.temporaryCapture) deleteCapture(job.buildingId)
             synchronized(jobs) {
                 jobs.remove(job.city.id, job)
                 terminal.remove(job.city.id)
@@ -72,8 +82,10 @@ internal class CivsAutonomousPlacement(
     }
 
     private inner class Search(val city: Settlement, val type: BuildingType, val level: Int, val buildingId: UUID,
-        private val pinned: CivBlueprint? = null, private val previous: CivBuilding? = null) {
+        private val pinned: CivBlueprint? = null, private val previous: CivBuilding? = null,
+        private val infrastructure: Boolean = false) {
         val result = CompletableFuture<CivAutonomousDesign>()
+        @Volatile var temporaryCapture = false
         @Volatile var pending: CompletableFuture<*>? = null
         @Volatile var candidates = emptyList<CivsAutonomousCandidate>()
         @Volatile var options = emptyList<CivTerraformOption>()
@@ -83,12 +95,14 @@ internal class CivsAutonomousPlacement(
         @Volatile var selected: CivBuilding? = null
         private lateinit var surface: CivTerrainSurface
         private var access = CivAutonomousAccess()
+        private var pieces = emptyMap<UUID, CivSettlementPiece>()
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
+        @Volatile private var blockers = emptyList<CivSettlementBlocker>()
 
         fun debug(): Map<String, Any?> = mapOf("city" to city.id.toString(), "building" to buildingId.toString(),
             "type" to type.name, "candidate" to next, "candidates" to candidates.size, "options" to options.size,
             "surface_columns" to columns, "phase" to phase, "rejections" to rejections.toSortedMap(),
-            "selected_anchor" to selected?.anchor, "fixed" to (pinned != null))
+            "selected_anchor" to selected?.anchor, "fixed" to (pinned != null), "layout_blockers" to blockers)
 
         fun start() {
             phase = "access"
@@ -97,7 +111,38 @@ internal class CivsAutonomousPlacement(
 
         private fun catalog() {
             phase = "catalog"
+            if (infrastructure && pinned == null) {
+                val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
+                phase = "surface"
+                await(world.autonomousHeightField(city, hall, hall)) { field ->
+                    surface = field; columns = field.columns.size
+                    val plan = CivsSettlementLayout.infrastructure(city, CivsSettlementLayout.frame(city), field,
+                        access.routes.values.toList(), access.infrastructure)
+                    rejections.putAll(plan.rejected)
+                    blockers = plan.blockers
+                    if (blockers.isNotEmpty()) ru.arc.logging.ArcLogging.warn(ru.arc.logging.ArcLogging.escapeMM(
+                        CivsDiagnostics.line("autonomous_layout_obstructed", "city" to city.id,
+                            "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size)))
+                    val missing = plan.pieces.filter { city.building(it.id) == null }
+                        .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
+                            BuildingType.ROAD -> 0; BuildingType.GATE -> 1; else -> 2
+                        } }.thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z })
+                    if (missing.isEmpty()) {
+                        fail(if (plan.rejected.isEmpty()) "autonomy-layout-complete" else "autonomy-no-site")
+                        return@await
+                    }
+                    pieces = missing.associateBy { it.id }
+                    candidates = missing.map { CivsAutonomousCandidate(CivsInfrastructure.building(it)) }
+                    options = candidates.map { CivTerraformOption(it.building, 0) }.take(MAXIMUM_OPTIONS)
+                    attempt()
+                }
+                return
+            }
             if (pinned != null) {
+                if (infrastructure) pieces = mapOf(pinned.building.id to CivSettlementPiece(pinned.building.id,
+                    pinned.building.type, pinned.building.bounds, pinned.building.entrance,
+                    pinned.cells.filterNot { it.isBarrier }.map { CivSettlementBlock(
+                        CivPosition(it.position.x, it.position.y, it.position.z), it.blockData) }, pinned.building.transit.orEmpty()))
                 candidates = listOf(CivsAutonomousCandidate(pinned.building.copy(bounds =
                     CivsAutonomousGeometry.futureBounds(city, pinned.building))))
                 captureSurface()
@@ -108,7 +153,7 @@ internal class CivsAutonomousPlacement(
             val future = if (level == 3) current else blueprints.prepare(city.style, type, 3, buildingId,
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
             await(current.thenCombineAsync(future, { a, b ->
-                CivsAutonomousGeometry.candidates(city, a.building, b.building, access)
+                CivsSettlementLayout.candidates(city, a.building, b.building, access)
             }, executor)) { choices -> candidates = choices; captureSurface() }
         }
 
@@ -119,7 +164,8 @@ internal class CivsAutonomousPlacement(
                 surface = field
                 columns = field.columns.size
                 phase = "grading"
-                options = CivsAutonomousTerraform.options(city, candidates, field, pinned != null).take(MAXIMUM_OPTIONS)
+                options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
+                    else CivsAutonomousTerraform.options(city, candidates, field, pinned != null).take(MAXIMUM_OPTIONS)
                 if (options.isEmpty()) {
                     val reasons = if (field.columns.values.none { it.loaded }) "chunks-unloaded" else "autonomy-terrain"
                     rejections.merge(reasons, 1, Int::plus)
@@ -141,15 +187,29 @@ internal class CivsAutonomousPlacement(
             val option = options[next++]
             selected = option.building
             phase = "grading"
-            val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access) }
+            val piece = pieces[option.building.id]
+            val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access,
+                if (pinned != null && !infrastructure) emptyList() else CivsSettlementLayout.frame(city).wallObstacles,
+                piece?.blocks?.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+                    ?.mapValues { (_, cells) -> cells.minOf { it.position.y } }.orEmpty()) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
             await(world.captureTerraform(city, draft, executor, previous), ::retry) { terrain ->
                 phase = "route"
                 await(world.autonomousRoute(city, draft.building, terrain.route.first(), executor, terrain, previous), ::retry) {
                     phase = "blueprint"
-                    val prepared = pinned?.let { CompletableFuture.completedFuture(it) } ?: blueprints.prepare(city.style,
-                        type, level, buildingId, city.worldId, draft.building.anchor, 2, draft.building.rotation)
+                    val prepared = when {
+                        pinned != null -> CompletableFuture.completedFuture(pinned)
+                        piece != null -> {
+                            val bytes = CivsInfrastructure.schematic(piece, dataVersion)
+                            temporaryCapture = true
+                            writeCapture(buildingId, bytes).thenCompose {
+                                blueprints.prepareInfrastructure(piece, city.worldId, bytes, buildingId)
+                            }
+                        }
+                        else -> blueprints.prepare(city.style, type, level, buildingId, city.worldId,
+                            draft.building.anchor, 2, draft.building.rotation)
+                    }
                     await(prepared) { blueprint ->
                         if (!civsContainsBox(draft.building.bounds, blueprint.building.bounds) ||
                             blueprint.building.entrance != draft.building.entrance || blueprint.building.control != draft.building.control) {
@@ -250,6 +310,7 @@ internal object CivsAutonomousGeometry {
     }
 
     fun approach(building: CivBuilding): List<CivPosition> {
+        if (building.type.isInfrastructure) return listOf(building.entrance)
         val front = rotate(CivPosition(0, 0, 1), building.rotation / 90)
         return (0..3).flatMap { distance -> (-1..1).map { side ->
             CivPosition(building.entrance.x + front.x * distance + front.z * side, building.entrance.y,
@@ -258,6 +319,7 @@ internal object CivsAutonomousGeometry {
     }
 
     fun futureBounds(city: Settlement, building: CivBuilding): CivBox {
+        if (building.type.isInfrastructure) return building.bounds
         if (city.style !in CivsBlueprints.STYLES) return withField(building.bounds, building)
         val target = building.copy(schematicId = CivsBlueprints.schematicId(city.style, building.type, 3))
         val bounds = CivsWorksiteLayouts.site(target)?.getAsJsonObject("schematicBounds") ?: return withField(building.bounds, building)

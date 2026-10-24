@@ -13,12 +13,12 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
-    test("catalog selects all 99 levels only from the private upgrade-aligned namespace") {
+    test("catalog selects all 126 authored levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
-            BuildingType.entries.flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
+            BuildingType.entries.filterNot { it.isInfrastructure }.flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
-        ids.size shouldBe 99
-        ids.toSet().size shouldBe 99
+        ids.size shouldBe 126
+        ids.toSet().size shouldBe 126
         ids.all { it.startsWith("civs/minecolonies/") } shouldBe true
         CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 1) shouldBe
             "civs/minecolonies/nordic/fundamentals/townhall1"
@@ -26,7 +26,9 @@ class CivsBlueprintsTest : FunSpec({
             "civs/minecolonies/caledonia/agriculture/horticulture/farmer3"
         for ((type, family) in mapOf(BuildingType.SAWMILL to "craftsmanship/carpentry/sawmill",
             BuildingType.BLACKSMITH to "craftsmanship/metallurgy/blacksmith",
-            BuildingType.STONEMASON to "craftsmanship/masonry/stonemason", BuildingType.LIBRARY to "education/library")) {
+            BuildingType.STONEMASON to "craftsmanship/masonry/stonemason", BuildingType.LIBRARY to "education/library",
+            BuildingType.TAVERN to "fundamentals/tavern", BuildingType.BAKERY to "craftsmanship/luxury/baker",
+            BuildingType.GUARD_TOWER to "military/guardtower")) {
             for (style in CivsBlueprints.STYLES) for (level in 1..3)
                 CivsBlueprints.schematicId(style, type, level) shouldBe "civs/minecolonies/$style/$family$level"
         }
@@ -46,12 +48,35 @@ class CivsBlueprintsTest : FunSpec({
         val building = blueprintBuilding(before, CivPosition(12, 64, -10), at).copy(type = BuildingType.WAREHOUSE,
             phase = BuildingPhase.ACTIVE, schematicId = id, rotation = 180)
         libraries.subject.use { subject ->
-            subject.warehouseStorageRepair(building).join() shouldBe listOf(CivPlanBlock(CivPosition(12, 64, -10),
+            subject.buildingStorageRepair(building).join() shouldBe listOf(CivPlanBlock(CivPosition(12, 64, -10),
                 "minecraft:bookshelf", "minecraft:chest[facing=south,type=single,waterlogged=false]"))
             verify(exactly = 2) { libraries.source.transform(any(), ArcSchematicTransform(2, false)) }
             every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(
                 BlueprintCellsSnapshot(at, at, at, mapOf(at to "minecraft:diamond_block")))
-            shouldThrow<java.util.concurrent.CompletionException> { subject.warehouseStorageRepair(building).join() }
+            shouldThrow<java.util.concurrent.CompletionException> { subject.buildingStorageRepair(building).join() }
+        }
+    }
+
+    test("ordinary building rack repair uses its exact family baseline and preserves decorative bookshelves") {
+        val rack = ArcSchematicPoint(0, 0, 0)
+        val decor = ArcSchematicPoint(1, 0, 0)
+        val before = BlueprintCellsSnapshot(rack, decor, rack, mapOf(rack to "minecraft:chiseled_bookshelf", decor to "minecraft:bookshelf"))
+        val after = BlueprintCellsSnapshot(rack, decor, rack, mapOf(rack to "minecraft:barrel[facing=north,open=false]", decor to "minecraft:bookshelf"))
+        val libraries = BlueprintLibraries()
+        val id = CivsBlueprints.schematicId("nordic", BuildingType.FORESTER, 3)
+        every { libraries.source.load("civs/legacy-building-racks/nordic/fundamentals/lumberjack3", any()) } returns CompletableFuture.completedFuture(before)
+        every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(after)
+        every { libraries.source.transform(any(), any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        val building = blueprintBuilding(before, CivPosition(12, 64, -10), rack).copy(type = BuildingType.FORESTER,
+            level = 3, phase = BuildingPhase.ACTIVE, schematicId = id)
+        libraries.subject.use { subject ->
+            subject.buildingStorageRepair(building).join() shouldBe listOf(CivPlanBlock(CivPosition(12, 64, -10),
+                "minecraft:chiseled_bookshelf", "minecraft:barrel[facing=north,open=false]"))
+            val shifted = BlueprintCellsSnapshot(rack, decor, decor, mapOf(rack to "minecraft:barrel[facing=north,open=false]", decor to "minecraft:bookshelf"))
+            every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(shifted)
+            CivsDiagnostics.rejection(shouldThrow<java.util.concurrent.CompletionException> {
+                subject.buildingStorageRepair(building).join()
+            })?.reason shouldBe "control-location-changed"
         }
     }
 

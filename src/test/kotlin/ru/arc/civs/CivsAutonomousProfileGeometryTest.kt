@@ -19,7 +19,7 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
             var newSites = 0
             while (true) {
                 val goal = CivsAutonomy.nextGoal(city) ?: break
-                check(++goals <= 20) { "Autonomous profile did not finish" }
+                check(++goals <= 22) { "Autonomous profile did not finish" }
                 val existing = goal.buildingId?.let(city::building)
                 if (existing != null) {
                     val upgraded = profileBuilding(style, existing.type, goal.targetLevel, existing.anchor,
@@ -49,7 +49,7 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 newSites++
             }
 
-            newSites shouldBe 6
+            newSites shouldBe 10
             city.buildings.map { it.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
             city.buildings.all { it.level == 2 && it.phase == BuildingPhase.ACTIVE } shouldBe true
             city.buildings.forEach { building ->

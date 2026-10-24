@@ -68,16 +68,18 @@ internal object CivsAutonomousTerraform {
         .thenBy { it.building.entrance.z }.thenBy { it.building.anchor.y })
 
     fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
-        access: CivAutonomousAccess = CivAutonomousAccess()): CivTerraformDraft {
+        access: CivAutonomousAccess = CivAutonomousAccess(), additionalObstacles: List<CivBox> = emptyList(),
+        infrastructureFloors: Map<Long, Int> = emptyMap()): CivTerraformDraft {
         val building = option.building
         val standing = access.standing(city, building.id)
-        if (standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
+        if (!building.type.isInfrastructure && standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
             throw CivsRejection("building-overlap")
         val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
-            .filter { it.id != building.id }.distinctBy { it.id }
+            .filter { it.id != building.id && !civsPublicTransit(it) }.distinctBy { it.id }
             .map { CivsAutonomousGeometry.futureBounds(city, it) }
+        val routeObstacles = obstacles + additionalObstacles
         val route = sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, obstacles, standing, it)
+            route(city, building, surface, routeObstacles, standing, it)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
@@ -110,7 +112,7 @@ internal object CivsAutonomousTerraform {
                 val key = civsTerrainKey(x, z)
                 if (key in centerline || key in columns || key in standing ||
                     CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, ground, z)) ||
-                    obstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
+                    routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) }) continue
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
                 // left untouched; native body/step validation remains authoritative.
                 val native = surface.at(x, z)
@@ -124,7 +126,10 @@ internal object CivsAutonomousTerraform {
         }
         val floor = minOf(building.anchor.y, building.bounds.min.y - 1)
         for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
-            add(x, z, building.anchor.y, floor)
+            if (building.type.isInfrastructure) {
+                val ground = infrastructureFloors[civsTerrainKey(x, z)] ?: throw CivsRejection("invalid-plan")
+                add(x, z, ground, ground)
+            } else add(x, z, building.anchor.y, floor)
         val count = columns.values.sumOf {
             (maxOf(it.surfaceY, it.groundY) + 2 - maxOf(surface.minHeight, it.floorY - MAXIMUM_CHANGE) + 1).toLong()
         }
@@ -200,7 +205,7 @@ internal object CivsAutonomousTerraform {
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
             val p = CivPosition(x, y, z)
-            if (CivsAutonomousGeometry.horizontalContains(building.bounds, p) ||
+            if ((!civsPublicTransit(building, allowPlanned = true) && CivsAutonomousGeometry.horizontalContains(building.bounds, p)) ||
                 obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }) return false
             val key = civsTerrainKey(x, z)
             if (key in goalApproach && y != target.y) return false

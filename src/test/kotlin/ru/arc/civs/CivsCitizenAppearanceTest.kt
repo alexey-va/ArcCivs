@@ -92,6 +92,14 @@ class CivsCitizenAppearanceTest : FunSpec({
         citizenTool(appearancePlan(BuildingType.WAREHOUSE).copy(courier = courier.copy(carrying = false))) shouldBe null
     }
 
+    test("a guard watches the entrance without production swings") {
+        val guard = appearancePlan(BuildingType.GUARD_TOWER)
+        for (phase in CitizenPhase.entries) citizenWorking(guard, phase) shouldBe false
+        citizenWorkStatus(guard, CitizenPhase.WORKING) shouldBe "guarding"
+        citizenWorkStatus(guard, CitizenPhase.TO_WORK) shouldBe null
+        citizenWorkStatus(guard.copy(idleReason = "building-unavailable"), CitizenPhase.WORKING) shouldBe null
+    }
+
     test("children use half scale and retain the same signed skin after growing up") {
         val adult = CivWorker(UUID(0, 12), "Resident", null)
         val child = adult.copy(childMinutes = 0, parentIds = setOf(UUID(0, 10), UUID(0, 11)))

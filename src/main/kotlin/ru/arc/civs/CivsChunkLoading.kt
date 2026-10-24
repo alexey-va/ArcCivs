@@ -72,6 +72,17 @@ internal class CivsChunkLoading(
     }
 
     val retainedChunks: Int get() = registry.activeChunkCount
+    /** Shares the one plugin ticket registry; never creates or loads a missing source chunk. */
+    internal fun retainLoaded(key: PaperChunkKey): PaperChunkTicketLease {
+        check(org.bukkit.Bukkit.isPrimaryThread())
+        check(!closed && !failed && key.worldId !in unloading &&
+            plugin.server.getWorld(key.worldId)?.isChunkLoaded(key.x, key.z) == true) { "Persistence chunk unavailable" }
+        return when (val acquired = registry.acquire(key)) {
+            is PaperChunkTicketAcquireResult.Acquired -> acquired.lease
+            is PaperChunkTicketAcquireResult.Failed -> throw acquired.failure
+            else -> error("Persistence chunk lease unavailable: $acquired")
+        }
+    }
     fun active(cityId: UUID): Boolean = !closed && !failed && cities[cityId]?.let {
         it.ready && permissions.allowed(it.owner, it.worldName)
     } == true

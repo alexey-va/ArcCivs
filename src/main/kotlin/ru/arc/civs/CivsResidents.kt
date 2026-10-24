@@ -4,7 +4,7 @@ import java.util.UUID
 
 /** Personal stores are authoritative persisted items; native NPC equipment is only a view. */
 object CivsResidents {
-    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE")
+    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE", "BAKERY", "GUARD_TOWER")
     val catalog = listOf("BREAD", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE",
         "LEATHER_HELMET", "LEATHER_CHESTPLATE", "LEATHER_LEGGINGS", "LEATHER_BOOTS",
         "IRON_HELMET", "IRON_CHESTPLATE", "IRON_LEGGINGS", "IRON_BOOTS")

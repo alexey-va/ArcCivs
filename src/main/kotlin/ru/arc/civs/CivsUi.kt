@@ -1,7 +1,9 @@
 package ru.arc.civs
 
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.event.HoverEvent
 import net.kyori.adventure.text.format.TextColor
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer
 import org.bukkit.GameMode
 import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
@@ -288,7 +290,7 @@ class CivsUi internal constructor(
                 tr(player, "label.level") to text.literal(city.level()),
                 tr(player, "label.radius") to tr(player, "city.radius", "radius" to city.radius),
                 tr(player, "label.population") to tr(player, "common.fraction", "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)),
-                tr(player, "label.buildings") to text.literal(city.buildings.size),
+                tr(player, "label.buildings") to text.literal(CivsRules.buildingCount(city)),
                 tr(player, "label.construction") to constructionText(player, city),
             )),
             body(player, "network.snapshot-help"), feedback?.let(::body),
@@ -395,7 +397,7 @@ class CivsUi internal constructor(
                     "radius" to tint(tr(player, "city.radius", "radius" to city.radius), NAVIGATION)),
                 tr(player, "city.summary-residents", "population" to tint(tr(player, "common.fraction", "value" to city.workers.size,
                     "limit" to CivsRules.populationLimit(city)), PEOPLE), "beds" to tint(text.literal(CivsRules.beds(city)), PEOPLE)),
-                tr(player, "city.summary-activity", "buildings" to tint(tr(player, "common.fraction", "value" to city.buildings.size,
+                tr(player, "city.summary-activity", "buildings" to tint(tr(player, "common.fraction", "value" to CivsRules.buildingCount(city),
                     "limit" to CivsRules.MAX_BUILDINGS), LAND), "activity" to tint(tr(player, if (sleep) "city.sleeping" else "city.active"),
                     if (sleep) PERSONAL else COMMIT)),
                 detail(player, "label.construction", constructionText(player, city)),
@@ -526,7 +528,8 @@ class CivsUi internal constructor(
             notice(player, "civs.stock", "stock.title", text.reason(player, "materials-migration-pending")) { showOverview(player) }
             return
         }
-        val current = page.coerceIn(0, lastPage(city.buildings.size, BUILDINGS_PAGE_SIZE))
+        val buildings = city.buildings.filterNot { it.type.isInfrastructure }
+        val current = page.coerceIn(0, lastPage(buildings.size))
         val physical = inventory.mode == CivStorageMode.PHYSICAL
         val pending = inventory.materials.values.sum() + inventory.buildingMaterials.orEmpty().values.sumOf { it.values.sum() }
         val busy = host.cityBusy(player)
@@ -546,12 +549,12 @@ class CivsUi internal constructor(
                 perform(player, "civs.stock", "stock.title", { host.materializeStorage(player) },
                     success = { showStock(player, current) }, failure = { showStock(player, current, it) })
             })
-            if (!physical || !busy) city.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
+            if (!physical || !busy) buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
                 add(valueButton(player, "warehouse_$index", "common.destination", buildingName(player, building.type, building.level), STOCK) {
                     openWarehouse(player, building.id)
                 })
             }
-            pages(player, current, city.buildings.size) { showStock(player, it) }
+            pages(player, current, buildings.size) { showStock(player, it) }
         }, reopen = { showStock(player, current) })
     }
 
@@ -718,10 +721,11 @@ class CivsUi internal constructor(
 
     private fun showBuildings(player: Player, page: Int = 0) {
         val city = city(player) ?: return
-        val current = page.coerceIn(0, lastPage(city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE))
-        val buildings = city.buildings.drop(current * BUILDING_OVERVIEW_PAGE_SIZE).take(BUILDING_OVERVIEW_PAGE_SIZE)
+        val ordinary = city.buildings.filterNot { it.type.isInfrastructure }
+        val current = page.coerceIn(0, lastPage(ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE))
+        val buildings = ordinary.drop(current * BUILDING_OVERVIEW_PAGE_SIZE).take(BUILDING_OVERVIEW_PAGE_SIZE)
         present(player, "civs.buildings", "buildings.title", listOfNotNull(
-            body(player, "buildings.help"),
+            body(player, "buildings.help"), infrastructureSummary(player, city),
             if (buildings.isNotEmpty()) DialogTables.body(buildings.map { building -> listOf(
                 tint(text.building(player, building.type), buildingColor(building.type)),
                 tint(text.literal(building.level), PERSONAL),
@@ -737,9 +741,19 @@ class CivsUi internal constructor(
                     showBuilding(player, building.id)
                 })
             }
-            if (city.buildings.size < CivsRules.MAX_BUILDINGS) add(button(player, "catalog", "buildings.catalog", PERSONAL) { showCatalog(player) })
-            pages(player, current, city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE) { showBuildings(player, it) }
+            if (CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS) add(button(player, "catalog", "buildings.catalog", PERSONAL) { showCatalog(player) })
+            pages(player, current, ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE) { showBuildings(player, it) }
         }, reopen = { showBuildings(player, current) })
+    }
+
+    private fun infrastructureSummary(player: Player, city: Settlement): PaperDialogBody? {
+        val sections = city.buildings.filter { it.type.isInfrastructure }.groupBy(CivBuilding::type)
+        if (sections.isEmpty()) return null
+        return presentation.paragraph(Component.join(Component.newline(), listOf(tint(tr(player, "buildings.infrastructure"), LAND)) +
+            listOf(BuildingType.ROAD, BuildingType.WALL, BuildingType.GATE).mapNotNull { type -> sections[type]?.let { parts ->
+                tr(player, "buildings.infrastructure-count", "building" to text.building(player, type),
+                    "ready" to parts.count { it.phase == BuildingPhase.ACTIVE }, "total" to parts.size)
+            } }))
     }
 
     private fun showQueue(player: Player, page: Int = 0) {
@@ -771,7 +785,7 @@ class CivsUi internal constructor(
 
     private fun showCatalog(player: Player, page: Int = 0) {
         city(player) ?: return
-        val types = BuildingType.entries.filter { it != BuildingType.TOWN_HALL }
+        val types = BuildingType.entries.filter { it != BuildingType.TOWN_HALL && !it.isInfrastructure }
         val current = page.coerceIn(0, lastPage(types.size, BUILDINGS_PAGE_SIZE))
         present(player, "civs.catalog", "buildings.catalog-title", listOf(body(player, "buildings.catalog-help")),
             buildList {
@@ -784,13 +798,13 @@ class CivsUi internal constructor(
 
     private fun showOffer(player: Player, type: BuildingType, error: Component? = null) {
         val city = city(player) ?: return
-        val eligible = city.buildings.size < CivsRules.MAX_BUILDINGS
+        val eligible = CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS
         present(player, "civs.offer", "buildings.offer-title", listOfNotNull(
             body(buildingName(player, type, 1)), body(player, "building-purpose.${type.name.lowercase(Locale.ROOT)}"),
             if (type in setOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.SAWMILL) || CivsProduction.options(type).isNotEmpty())
                 body(player, "buildings.workplaces-levels") else null,
             body(player, "buildings.site-help"),
-            if (city.buildings.size >= CivsRules.MAX_BUILDINGS) body(player, "reason.building-limit") else null,
+            if (CivsRules.buildingCount(city) >= CivsRules.MAX_BUILDINGS) body(player, "reason.building-limit") else null,
             error?.let(::body),
         ), buildList {
             if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT, appearance = Action.FOUND) {
@@ -802,6 +816,15 @@ class CivsUi internal constructor(
     private fun showBuilding(player: Player, buildingId: UUID, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
+        if (building.type.isInfrastructure) {
+            present(player, "civs.building", "buildings.detail-title", listOf(
+                body(tint(text.building(player, building.type), buildingColor(building.type))),
+                body(player, "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
+                facts(player, listOf(tr(player, "label.state") to buildingSummaryStatus(player, city, building),
+                    tr(player, "label.position") to coordinates(player, building.entrance))),
+            ), emptyList(), reopen = { showBuilding(player, buildingId) })
+            return
+        }
         val assigned = city.workers.count { it.assignment == buildingId }
         val request = host.buildingRequest(player, buildingId)
         val requestTool = requestTool(request)
@@ -816,7 +839,8 @@ class CivsUi internal constructor(
                 add(tr(player, "label.level") to tint(text.literal(building.level), PERSONAL))
                 add(tr(player, "label.control") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")))
                 add(tr(player, "label.state") to buildingStatus(player, city, building))
-                add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
+                if (building.type.isResidence) add(tr(player, "label.beds") to text.literal(CivsPopulation.houseBeds(building)))
+                if (CivsRules.slots(city, building) > 0) add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
                 if (building.type == BuildingType.SAWMILL) add(tr(player, "label.output") to tr(player, "carpentry.automatic"))
                 CivsProduction.material(building)?.takeIf { !CivsRules.isBuilder(city, building) && building.type != BuildingType.SAWMILL }?.let { material ->
                     if (building.type != BuildingType.QUARRY) add(tr(player, "label.output") to
@@ -1263,7 +1287,8 @@ class CivsUi internal constructor(
             materialName(player, material).append(text.literal(" × $amount"))
         })
 
-    private fun showSupplyRequests(player: Player, warehouseId: UUID, page: Int = 0) {
+    private fun showSupplyRequests(player: Player, warehouseId: UUID, page: Int = 0,
+        materialPages: Map<UUID, Int> = emptyMap()) {
         val city = city(player) ?: return
         val warehouse = city.building(warehouseId) ?: return showBuildings(player)
         if (warehouse.type != BuildingType.WAREHOUSE) return showBuilding(player, warehouseId)
@@ -1271,14 +1296,18 @@ class CivsUi internal constructor(
         val requests = result.getOrDefault(emptyList())
         val available = if (requests.isNotEmpty()) runCatching { host.availableMaterials(player) }
             else Result.success(emptyMap<String, Long>())
-        val current = page.coerceIn(0, lastPage(requests.size, LOGISTICS_PAGE_SIZE))
-        val visible = requests.drop(current * LOGISTICS_PAGE_SIZE).take(LOGISTICS_PAGE_SIZE)
-        present(player, "civs.logistics", "logistics.title", buildList {
-            if (requests.isNotEmpty()) add(body(player, "logistics.board-help"))
-            result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
-            available.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
-            if (result.isSuccess && requests.isEmpty()) add(body(player, "logistics.empty"))
-            for (request in visible) {
+        data class SupplyCard(val id: UUID, val page: Int, val lastPage: Int, val body: PaperDialogBody, val lines: Int)
+        val cards = requests.groupBy(CivSupplyRequest::buildingId).map { (buildingId, orders) ->
+            val last = lastPage(orders.size, LOGISTICS_MATERIAL_PAGE_SIZE)
+            val materialPage = (materialPages[buildingId] ?: 0).coerceIn(0, last)
+            val building = city.building(buildingId)
+            var source = building?.let { buildingName(player, it.type, it.level)
+                .append(text.literal(" · ")).append(coordinates(player, it.control ?: it.entrance).color(CivsText.BODY)) }
+                ?: tr(player, "buildings.generic")
+            if (last > 0) source = source.append(text.literal(" · ")).append(tr(player, "logistics.material-page",
+                "page" to materialPage + 1, "pages" to last + 1).color(CivsText.BODY))
+            val table = DialogTables.body(orders.drop(materialPage * LOGISTICS_MATERIAL_PAGE_SIZE)
+                .take(LOGISTICS_MATERIAL_PAGE_SIZE).map { request ->
                 val remaining = (request.needed - request.inTransit).coerceAtLeast(0)
                 val stock = available.getOrNull()?.get(request.material) ?: 0
                 val state = when {
@@ -1288,24 +1317,55 @@ class CivsUi internal constructor(
                     stock == 0L -> "waiting-stock"
                     else -> "waiting-courier"
                 }
-                add(card(listOf(
-                    city.building(request.buildingId)?.let { buildingName(player, it.type, it.level) }
-                        ?: tr(player, "buildings.generic"),
-                    materialName(player, request.material).color(STOCK),
-                    tr(player, "logistics.card-amounts", "remaining" to remaining, "transit" to request.inTransit),
-                    tr(player, "logistics.card-stock", "stock" to if (available.isSuccess) text.literal(stock)
-                        else tr(player, "workers.stock-unknown")),
-                    tr(player, "logistics.state.$state").color(if (state == "waiting-stock") STOCK else NAVIGATION),
-                ), 360))
-            }
+                listOf(materialName(player, request.material).color(STOCK),
+                    text.literal(remaining).color(CivsText.BODY), text.literal(request.inTransit).color(CivsText.BODY),
+                    (if (available.isSuccess) text.literal(stock) else tr(player, "workers.stock-unknown")).color(CivsText.BODY),
+                    tr(player, "logistics.state.$state").color(if (state == "waiting-stock") STOCK else NAVIGATION))
+            }, listOf(tr(player, "materials.item")) + listOf("remaining", "transit", "stock", "state")
+                .map { tr(player, "logistics.column-$it").hoverEvent(HoverEvent.showText(tr(player, "logistics.board-help"))) },
+                DialogTables.Frame.COMMON, 520, listOf(16, 4, 4, 4, 8))
+            val body = PaperDialogBody(source.append(Component.newline()).append(table.text), table.width)
+            SupplyCard(buildingId, materialPage, last, body,
+                PlainTextComponentSerializer.plainText().serialize(body.text).count { it == '\n' } + 1)
+        }
+        val sourcePages = mutableListOf<List<SupplyCard>>()
+        for (card in cards) {
+            val previous = sourcePages.lastOrNull()
+            // Two short sources share a page only while their measured table rows fit a 360px viewport.
+            if (card.lastPage == 0 && previous?.size == 1 && previous.single().lastPage == 0 &&
+                previous.single().lines + card.lines <= 22) sourcePages[sourcePages.lastIndex] = previous + card
+            else sourcePages += listOf(card)
+        }
+        val current = page.coerceIn(0, sourcePages.lastIndex.coerceAtLeast(0))
+        val visible = sourcePages.getOrNull(current).orEmpty()
+        present(player, "civs.logistics", "logistics.title", buildList {
+            result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
+            available.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
+            if (result.isSuccess && requests.isEmpty()) add(body(player, "logistics.empty"))
+            addAll(visible.map(SupplyCard::body))
         }, buildList {
-            pages(player, current, requests.size, LOGISTICS_PAGE_SIZE) { showSupplyRequests(player, warehouseId, it) }
-        }, reopen = { showSupplyRequests(player, warehouseId, current) })
+            visible.singleOrNull()?.takeIf { it.lastPage > 0 }?.let { card ->
+                if (card.page > 0) add(button(player, "materials_previous", "logistics.materials-previous", NAVIGATION,
+                    appearance = Action.PREVIOUS) {
+                    showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page - 1))
+                })
+                if (card.page < card.lastPage) add(button(player, "materials_next", "logistics.materials-next", NAVIGATION,
+                    appearance = Action.NEXT) {
+                    showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page + 1))
+                })
+            }
+            if (current > 0) add(button(player, "previous", "logistics.sources-previous", NAVIGATION, appearance = Action.PREVIOUS) {
+                showSupplyRequests(player, warehouseId, current - 1, materialPages)
+            })
+            if (current < sourcePages.lastIndex) add(button(player, "next", "logistics.sources-next", NAVIGATION, appearance = Action.NEXT) {
+                showSupplyRequests(player, warehouseId, current + 1, materialPages)
+            })
+        }, reopen = { showSupplyRequests(player, warehouseId, current, materialPages) })
     }
 
     private fun showUpgrades(player: Player, page: Int = 0) {
         val city = city(player) ?: return
-        val buildings = city.buildings.filter { it.level < 3 && it.phase == BuildingPhase.ACTIVE }
+        val buildings = city.buildings.filter { it.level < it.type.maxLevel && it.phase == BuildingPhase.ACTIVE }
         val current = page.coerceIn(0, lastPage(buildings.size))
         present(player, "civs.upgrades", "upgrades.title", listOf(body(player,
             if (buildings.isEmpty()) "upgrades.complete" else "upgrades.help")), buildList {
@@ -1321,7 +1381,7 @@ class CivsUi internal constructor(
     private fun showUpgrade(player: Player, buildingId: UUID, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
-        if (building.level >= 3) return showBuilding(player, buildingId)
+        if (building.level >= building.type.maxLevel) return showBuilding(player, buildingId)
         val target = building.level + 1
         val hallRequired = building.type != BuildingType.TOWN_HALL && target > city.level()
         val queued = queuePosition(city, building.id)
@@ -1585,7 +1645,7 @@ class CivsUi internal constructor(
                     tr(player, "common.detail", "label" to text.resource(player, resource), "value" to status.missing[resource])
                 })), STOCK)) else null,
             facts(player, Resource.entries.map { text.resource(player, it) to tint(text.literal(city.stock[it]), STOCK) }),
-            body(tr(player, "autonomy.population", "buildings" to city.buildings.size, "workers" to city.workers.size,
+            body(tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city), "workers" to city.workers.size,
                 "assigned" to city.workers.count { it.assignment != null })),
             body(player, if (paused) "autonomy.paused-help" else "autonomy.resources-help"), feedback?.let(::body),
         ), buildList {
@@ -1611,17 +1671,18 @@ class CivsUi internal constructor(
 
     private fun showAutonomousBuildings(player: Player, cityId: UUID, page: Int = 0) {
         val city = autonomousCity(player, cityId) ?: return
-        val current = page.coerceIn(0, lastPage(city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE))
-        val buildings = city.buildings.drop(current * BUILDING_OVERVIEW_PAGE_SIZE).take(BUILDING_OVERVIEW_PAGE_SIZE)
+        val ordinary = city.buildings.filterNot { it.type.isInfrastructure }
+        val current = page.coerceIn(0, lastPage(ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE))
+        val buildings = ordinary.drop(current * BUILDING_OVERVIEW_PAGE_SIZE).take(BUILDING_OVERVIEW_PAGE_SIZE)
         present(player, "civs.autonomous-buildings", "buildings.title", listOfNotNull(
-            body(tint(text.literal(city.name), LAND)), body(player, "autonomy.buildings-help"),
+            body(tint(text.literal(city.name), LAND)), body(player, "autonomy.buildings-help"), infrastructureSummary(player, city),
             if (buildings.isEmpty()) body(player, "autonomy.buildings-empty") else DialogTables.body(buildings.map { building -> listOf(
                 tint(text.building(player, building.type), buildingColor(building.type)), tint(text.literal(building.level), PERSONAL),
                 buildingSummaryStatus(player, city, building), tint(text.literal(city.workers.count { it.assignment == building.id }), PEOPLE),
             ) }, listOf("building", "level", "state", "workers").map { tr(player, "buildings.column-$it") },
                 DialogTables.Frame.RARE, 400, listOf(5, 1, 5, 3)),
         ), buildList {
-            pages(player, current, city.buildings.size, BUILDING_OVERVIEW_PAGE_SIZE) { showAutonomousBuildings(player, city.id, it) }
+            pages(player, current, ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE) { showAutonomousBuildings(player, city.id, it) }
         }, reopen = { showAutonomousBuildings(player, city.id, current) })
     }
 
@@ -1735,7 +1796,7 @@ class CivsUi internal constructor(
     }
 
     private fun canUpgrade(city: Settlement, building: CivBuilding): Boolean =
-        building.level < 3 && building.phase == BuildingPhase.ACTIVE && queuePosition(city, building.id) == null &&
+        building.level < building.type.maxLevel && building.phase == BuildingPhase.ACTIVE && queuePosition(city, building.id) == null &&
             city.construction?.buildingId != building.id && (building.type == BuildingType.TOWN_HALL || building.level < city.level())
 
     private fun upgradeSummary(player: Player, city: Settlement, building: CivBuilding): PaperDialogBody = presentation.paragraph(Component.join(Component.newline(), buildList {
@@ -1755,14 +1816,17 @@ class CivsUi internal constructor(
 
     private fun upgradeBenefit(player: Player, building: CivBuilding): Component = when (building.type) {
         BuildingType.TOWN_HALL -> tr(player, "upgrades.population", "before" to building.level * 4, "after" to (building.level + 1) * 4)
-        BuildingType.HOUSE -> tr(player, "upgrades.beds", "before" to building.level * 2, "after" to (building.level + 1) * 2)
+        BuildingType.HOUSE -> tr(player, "upgrades.beds", "before" to CivsPopulation.houseBeds(building),
+            "after" to CivsPopulation.houseBeds(building.copy(level = building.level + 1)))
+        BuildingType.TAVERN -> tr(player, "upgrades.tavern")
+        BuildingType.GUARD_TOWER -> tr(player, "upgrades.guard-tower")
         BuildingType.WAREHOUSE -> tr(player, "upgrades.warehouse")
         BuildingType.BUILDER_HUT -> tr(player, "upgrades.builder")
         BuildingType.FARM -> tr(player, "upgrades.field-worker")
         BuildingType.FORESTER -> tr(player, "upgrades.forest-worker")
         BuildingType.QUARRY -> tr(player, "upgrades.mining", "before" to building.level, "after" to building.level + 1)
         BuildingType.SAWMILL -> tr(player, "upgrades.carpentry", "level" to building.level + 1)
-        BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY -> tr(player, "upgrades.processor")
+        BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.BAKERY -> tr(player, "upgrades.processor")
         else -> tr(player, "upgrades.production", "before" to CivsProduction.amount(building),
             "after" to CivsProduction.amount(building.copy(level = building.level + 1)))
     }
@@ -1948,7 +2012,7 @@ class CivsUi internal constructor(
         "world-changed", "protected-terrain", "building-overlap", "outside-city", "protected-area",
         "storage-unavailable", "injury-pending", "closed", "deleting" -> DANGER
         "active", "working", "working-field", "watering", "fertilizing", "felling-tree", "digging-mine", "building", "placing",
-        "delivering", "loading-cargo", "collecting-supplies" -> COMMIT
+        "delivering", "loading-cargo", "collecting-supplies", "guarding" -> COMMIT
         "to-work", "moving-to-work", "moving-to-storage", "to-store", "moving-to-pickup", "carrying-cargo" -> NAVIGATION
         "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers" -> PERSONAL
         "playing", "wandering", "unassigned", "no-assignment", "no-construction" -> PEOPLE
@@ -1967,6 +2031,11 @@ class CivsUi internal constructor(
         BuildingType.BLACKSMITH -> 0xEF9D93
         BuildingType.STONEMASON -> 0xA8BDD8
         BuildingType.LIBRARY -> 0xC4ABFF
+        BuildingType.TAVERN -> 0xE9B58E
+        BuildingType.BAKERY -> 0xE5CE8F
+        BuildingType.GUARD_TOWER -> 0x95B4CC
+        BuildingType.WALL, BuildingType.GATE -> 0xB8BBC4
+        BuildingType.ROAD -> 0xBDAE98
     })
 
     override fun close() {
@@ -1984,7 +2053,7 @@ class CivsUi internal constructor(
         const val BUILDINGS_PAGE_SIZE = 16
         const val BUILDING_OVERVIEW_PAGE_SIZE = 8
         const val SKILLS_PAGE_SIZE = 6
-        const val LOGISTICS_PAGE_SIZE = 3
+        const val LOGISTICS_MATERIAL_PAGE_SIZE = 6
         const val CARPENTRY_PAGE_SIZE = 3
         const val MATERIALS_PAGE_SIZE = 16
         val NAME = PaperDialogInputId.of("city_name")

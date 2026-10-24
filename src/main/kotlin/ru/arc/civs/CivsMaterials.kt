@@ -257,11 +257,12 @@ internal object CivsProduction {
         BuildingType.BLACKSMITH -> listOf("IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE")
         BuildingType.STONEMASON -> listOf("STONE_BRICKS")
         BuildingType.LIBRARY -> listOf("WRITABLE_BOOK")
+        BuildingType.BAKERY -> listOf("BREAD")
         else -> emptyList()
     }
 
     fun amount(building: CivBuilding): Long = when (material(building)) {
-        "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE" -> 1L
+        "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE", "BREAD" -> 1L
         "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS", "STONE_BRICKS" -> 4L
         else -> CivsRules.deliveryAmount(building)
     }
@@ -269,6 +270,7 @@ internal object CivsProduction {
     fun inputs(building: CivBuilding): Map<String, Long> = when (val material = material(building)) {
         "BOOK" -> mapOf("PAPER" to 3L, "LEATHER" to 1L)
         "WRITABLE_BOOK" -> mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L)
+        "BREAD" -> mapOf("WHEAT" to 3L)
         "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS" ->
             mapOf(material.removeSuffix("_PLANKS") + "_LOG" to 1L)
         "STONE_BRICKS" -> mapOf("STONE" to 4L)

@@ -29,7 +29,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
             val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
             val layout = CivsWorksiteLayouts.site(mine)!!.getAsJsonObject("mine")
             val bottom = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout["ladderBottom"]))
-            val floor = CivsWorksiteLayouts.point(mine, CivsWorksiteLayouts.vector(layout.getAsJsonArray("floors")[0].asJsonObject["landing"]))
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val floor = CivsWorksiteLayouts.point(mine, geometry.floors.first().cells
+                .map { it.copy(y = it.y + 1) }.first { geometry.containsWorkStanding(it) })
             for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
             for (y in floor.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
                 Bukkit.createBlockData("minecraft:ladder[facing=${layout["ladderFacing"].asString},waterlogged=false]")
@@ -1727,7 +1729,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
     }
 
     for ((style, legacy) in listOf("nordic" to false, "medievaloak" to false, "caledonia" to false, "medievaloak" to true)) {
-        val scenario = if (legacy) "$style legacy miner physically migrates V3 step83 and completes its first V4 level"
+        val scenario = if (legacy) "$style legacy miner physically migrates V3 step83 and completes its first current level"
             else "$style miner physically completes three then four then five aligned floors"
         test(scenario) {
             failOnUnsupportedMockBukkitOperation {
@@ -1797,6 +1799,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     }
                     val counts = mutableMapOf("COBBLESTONE" to 1_000L, "LADDER" to 1_000L, "TORCH" to 1_000L,
                         "IRON_PICKAXE" to 100L)
+                    requireNotNull(CivsMinePlan.forBuilding(mine)).structuralMaterials.forEach { counts[it] = 2_000L }
                     if (style == "nordic") {
                         val floor = requireNotNull(CivsMinePlan.forBuilding(mine)).floors.first()
                         val leftMouth = floor.cells[floor.sections.take(2).sumOf { it.second }]
@@ -1829,6 +1832,23 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             val shaftColumns = geometry.shaftColumns.mapTo(hashSetOf()) { (x, z) ->
                                 CivsWorksiteLayouts.point(mine, CivPosition(x, 0, z)).let { it.x to it.z }
                             }
+                            val finalFrame = geometry.steps.filter { step ->
+                                step.branch == "railing" || step.branch == "frame" || step.branch?.endsWith("-frame") == true
+                            }.mapNotNull { step -> step.after?.takeIf { state ->
+                                state.substringBefore('[').substringAfter(':').uppercase() in geometry.structuralMaterials
+                            }?.let { step.point to it } }.toMap()
+                            fun assertFrame(local: CivPosition, point: CivPosition) {
+                                ((local.x to local.z) in geometry.openingColumns) shouldBe false
+                                val expected = Bukkit.createBlockData(finalFrame.getValue(local)).also {
+                                    it.rotate(when (rotation) {
+                                        90 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
+                                        180 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
+                                        270 -> org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90
+                                        else -> org.bukkit.block.structure.StructureRotation.NONE
+                                    })
+                                }
+                                world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe expected.asString
+                            }
                             fun assertWideShaft() {
                                 val platforms = geometry.floors.flatMap { it.cells }.toSet()
                                 for (y in geometry.lowest until geometry.bottom.y) for ((x, z) in geometry.shaftColumns) {
@@ -1843,6 +1863,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                             y <= geometry.transferFeetY && x == geometry.extensionLadder.x && z == geometry.extensionLadder.z -> type shouldBe Material.LADDER
                                             y <= geometry.transferFeetY && x == geometry.extensionBacking.x && z == geometry.extensionBacking.z -> type.isOccluding shouldBe true
                                             local in platforms -> type shouldBe Material.COBBLESTONE
+                                            (x to z) in geometry.openingColumns -> type.isAir shouldBe true
+                                            local in finalFrame -> assertFrame(local, p)
                                             else -> (type.isAir || type == Material.TORCH) shouldBe true
                                         }
                                     }
@@ -1928,10 +1950,11 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 finished shouldBe true
                             }
                             assertWideShaft()
+                            for (local in finalFrame.keys) assertFrame(local, CivsWorksiteLayouts.point(mine, local))
                             if (legacy) {
                                 boundaryCut shouldBe true
                                 boundarySealed shouldBe true
-                                city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(4,
+                                city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(CivsMinePlan.VERSION,
                                     geometry.steps.size.toLong(), legacyStep = 214, v3Step = 83)
                                 for (local in oldRungs) {
                                     val point = CivsWorksiteLayouts.point(mine, local)
@@ -1957,8 +1980,12 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                     withClue("$style L$unlocked after $actions actions, persisted ${city.minePlans}; support $support") {
                                         world.getBlockAt(support.x, support.y, support.z).type shouldBe Material.COBBLESTONE
                                         for (dy in 1..3) {
-                                            val type = world.getBlockAt(support.x, support.y + dy, support.z).type
-                                            (type.isAir || dy == 1 && type == Material.TORCH) shouldBe true
+                                            val local = cell.copy(y = cell.y + dy)
+                                            if (local in finalFrame) assertFrame(local, support.copy(y = support.y + dy))
+                                            else {
+                                                val type = world.getBlockAt(support.x, support.y + dy, support.z).type
+                                                (type.isAir || dy == 1 && type == Material.TORCH) shouldBe true
+                                            }
                                         }
                                     }
                                 }

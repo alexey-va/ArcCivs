@@ -55,7 +55,7 @@ class CivsPlacementControlsTest : FunSpec({
             grass.type shouldBe Material.SHORT_GRASS
             h.selection = null; h.preview = h.initialPreview
             pending.complete(Unit); h.paper.performTicks(2)
-            h.controls.frame(h.player)!!.layout.buttons.first().action shouldBe CivsPlacementAction.CONFIRM
+            (CivsPlacementAction.CONFIRM in h.controls.frame(h.player)!!.layout.buttons.map { it.action }) shouldBe true
             verify(exactly = 0) { h.ui.open(any()); h.host.confirmPreview(any()) }
         }
     }
@@ -104,33 +104,58 @@ class CivsPlacementControlsTest : FunSpec({
         }
     }
 
-    test("normal placement has six world actions and changing mode rejects the old confirmation context") {
+    test("normal placement immediately exposes the horizontal pad and separate height with stale mode rejection") {
         controlsScenario { h ->
             h.preview = h.preview!!.copy(control = CivPosition(3, 66, -7))
             val initial = h.controls.frame(h.player)!!
             (initial.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(0.5, 63.5, 0.5)
-            initial.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.MOVE,
-                CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.ROTATE_RIGHT, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
+            initial.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.AWAY, CivsPlacementAction.LEFT,
+                CivsPlacementAction.RIGHT, CivsPlacementAction.TOWARD, CivsPlacementAction.UP, CivsPlacementAction.DOWN,
+                CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.MOVE, CivsPlacementAction.ROTATE_RIGHT,
+                CivsPlacementAction.CONFIRM, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
             h.controls.activate(h.player, initial.context, CivsPlacementAction.MOVE)
             val moving = h.controls.frame(h.player)!!
             (moving.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(0.5, 63.5, 0.5)
             for (frame in listOf(initial, moving)) {
-                val left = frame.layout.buttons[0].rect
-                val right = frame.layout.buttons[1].rect
-                val gap = right.center.x - right.width / 2 - left.center.x - left.width / 2
-                (gap in 0.09..0.11) shouldBe true
-                (right.center.x + right.width / 2 - left.center.x + left.width / 2 < 3.31) shouldBe true
-                frame.layout.labels.single().rect.center.x shouldBe 0.0
+                val positions = frame.layout.buttons.associate { it.action to it.rect.center }
+                val left = positions.getValue(CivsPlacementAction.LEFT)
+                val right = positions.getValue(CivsPlacementAction.RIGHT)
+                val away = positions.getValue(CivsPlacementAction.AWAY)
+                val toward = positions.getValue(CivsPlacementAction.TOWARD)
+                left.y shouldBe right.y
+                away.x shouldBe toward.x
+                (left.x < away.x && away.x < right.x && away.y > left.y && toward.y < left.y) shouldBe true
+                (positions.getValue(CivsPlacementAction.UP).x > right.x) shouldBe true
+                frame.layout.labels.single { it.key == "status" }.rect.center.x shouldBe 0.0
             }
             // Entering move mode must discard the normal panel's retained distance.
             verify(exactly = 1) { h.panels.clear(h.player.uniqueId) }
-            moving.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,
-                CivsPlacementAction.UP, CivsPlacementAction.DOWN, CivsPlacementAction.TOWARD, CivsPlacementAction.AWAY,
+            moving.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.AWAY, CivsPlacementAction.LEFT,
+                CivsPlacementAction.RIGHT, CivsPlacementAction.TOWARD, CivsPlacementAction.UP, CivsPlacementAction.DOWN,
                 CivsPlacementAction.DONE, CivsPlacementAction.CANCEL)
             h.controls.activate(h.player, initial.context, CivsPlacementAction.CONFIRM)
             verify(exactly = 0) { h.host.confirmPreview(any()) }
             h.controls.activate(h.player, moving.context, CivsPlacementAction.DONE)
             h.controls.frame(h.player)!!.context.moving shouldBe false
+        }
+    }
+
+    test("all six nudges are available immediately and preserve the existing single request authority") {
+        controlsScenario { h ->
+            for (action in listOf(CivsPlacementAction.AWAY, CivsPlacementAction.TOWARD, CivsPlacementAction.LEFT,
+                CivsPlacementAction.RIGHT, CivsPlacementAction.UP, CivsPlacementAction.DOWN)) {
+                val current = h.controls.frame(h.player)!!
+                current.context.moving shouldBe false
+                val pending = CompletableFuture<Unit>()
+                every { h.host.nudgePreview(h.player, CivsPreviewMove.valueOf(action.name)) } returns pending
+                h.controls.activate(h.player, current.context, action)
+                h.controls.activate(h.player, current.context, action)
+                verify(exactly = 1) { h.host.nudgePreview(h.player, CivsPreviewMove.valueOf(action.name)) }
+                h.preview = h.preview!!.copy(id = UUID.randomUUID())
+                pending.complete(Unit); h.paper.performTicks(2)
+                h.controls.frame(h.player)!!.context.moving shouldBe false
+            }
+            verify(exactly = 0) { h.host.movePreview(any(), any()); h.host.confirmPreview(any()) }
         }
     }
 
@@ -142,7 +167,8 @@ class CivsPlacementControlsTest : FunSpec({
             h.controls.activate(h.player, before.context, CivsPlacementAction.ROTATE_LEFT)
             h.controls.activate(h.player, before.context, CivsPlacementAction.ROTATE_LEFT)
             h.controls.frame(h.player)!!.inputEnabled shouldBe false
-            h.controls.frame(h.player)!!.layout.buttons.size shouldBe 0
+            h.controls.frame(h.player)!!.layout.buttons.map { it.rect } shouldBe before.layout.buttons.map { it.rect }
+            h.controls.frame(h.player)!!.layout.buttons.all { !it.enabled } shouldBe true
             h.preview = h.preview!!.copy(id = UUID.randomUUID(), rotation = 270)
             pending.complete(Unit)
             h.paper.performTicks(2)

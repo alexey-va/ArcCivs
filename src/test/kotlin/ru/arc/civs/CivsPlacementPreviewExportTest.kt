@@ -13,6 +13,7 @@ import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.actionpanel.*
 import ru.arc.paper.display.PaperPacketDisplays
+import ru.arc.paper.menu.DialogTextLayout
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
 import java.nio.file.Path
@@ -97,10 +98,20 @@ class CivsPlacementPreviewExportTest : FunSpec({
                             ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, 4.0, null) shouldBe null
                         }
                     }
-                    fun label(key: String, rect: ActionPanelRect, component: net.kyori.adventure.text.Component, style: ActionPanelTextStyle) =
-                        mapOf("key" to key, "center" to ActionPanelGeometry.localToWorld(placed, rect.center), "width" to rect.width,
+                    fun label(key: String, rect: ActionPanelRect, component: net.kyori.adventure.text.Component, style: ActionPanelTextStyle): Map<String, Any> {
+                        // Pinned Core measures these localized labels; rotation symbols use the source renderer's full font assets.
+                        if (key in setOf("MOVE", "DETAILS", "CANCEL")) {
+                            val pixels = plainText(component).sumOf { DialogTextLayout.glyphWidth(it) }
+                            withClue("scene=$name label=$key pixels=$pixels lineWidth=${style.lineWidth} hitWidth=${rect.width}") {
+                                (pixels <= style.lineWidth) shouldBe true
+                                (pixels * style.scale / 40.0 <= rect.width) shouldBe true
+                            }
+                        }
+                        return mapOf("key" to key, "center" to ActionPanelGeometry.localToWorld(placed, rect.center), "width" to rect.width,
                             "height" to rect.height, "yaw" to placed.yaw, "text" to plainText(component),
-                            "color" to (component.color()?.asHexString() ?: "#e8dfd2"), "scale" to style.scale, "inset" to style.baselineInset)
+                            "color" to (component.color()?.asHexString() ?: "#e8dfd2"), "scale" to style.scale, "inset" to style.baselineInset,
+                            "nativeLineWidth" to style.lineWidth)
+                    }
                     val labels = layout.buttons.map { label(it.action.name, it.rect, it.text, it.style) } +
                         layout.labels.filter { it.visible }.map { label(it.key, it.rect, it.text, it.style) }
                     // In move mode the player looks at the sampled terrain destination while the panel
@@ -118,8 +129,10 @@ class CivsPlacementPreviewExportTest : FunSpec({
                             (depth > 0) shouldBe true
                             abs(delta.dot(right) / depth / (halfHeight * 16.0 / 9.0)) to abs(delta.dot(up) / depth / halfHeight)
                         }
-                        (projected.maxOf { it.first } <= 1.0) shouldBe true
-                        (projected.maxOf { it.second } <= 1.0) shouldBe true
+                        withClue("scene=$name distance=$distance shift=$chosenShift projected=$projected") {
+                            (projected.maxOf { it.first } <= 1.0) shouldBe true
+                            (projected.maxOf { it.second } <= 1.0) shouldBe true
+                        }
                         mapOf("maximumHorizontalFraction" to projected.maxOf { it.first },
                             "maximumVerticalFraction" to projected.maxOf { it.second }, "verticalFov" to 70)
                     } else emptyMap<String, Any>()
@@ -171,6 +184,9 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     scene("moved-obstructed", base.copy(anchor = CivPosition(3, 63, 2), entrance = CivPosition(3, 64, 2), rotation = 90,
                         control = CivPosition(10, 65, 2),
                         bounds = CivBox(CivPosition(4, 63, -4), CivPosition(15, 72, 7))), ActionPanelPoint(6.5, 65.62, 11.5), true, true))
+                player.setLocale(Locale.ENGLISH)
+                val localizedScenes = scenes + scene("open-en", base.copy(type = BuildingType.GUARD_TOWER),
+                    ActionPanelPoint(0.5, 65.62, 5.5), false, false)
                 val out = System.getenv("CIVS_PLACEMENT_PREVIEW_OUT")?.let(Path::of)
                 if (out != null) {
                     Files.createDirectories(out)
@@ -181,7 +197,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     }
                     Files.writeString(out.resolve("scene.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
                         "evidence" to "Compiled consumer layout, source cue geometry and Core placement helpers. Explicit obstacle and bounds fixtures; no schematic model or native client.",
-                        "sourceSha256" to sources, "scenes" to scenes)))
+                        "sourceSha256" to sources, "scenes" to localizedScenes)))
                 }
             } finally { controls.close(); tasks.close() }
         }

@@ -48,6 +48,415 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("both asynchronous persistence fences hold city authority and delay the exact ground credit") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val source = CompletableFuture<Unit>()
+            val after = CompletableFuture<Unit>()
+            storage.persistCollectedNative = { _, beforeJournal -> if (beforeJournal) source else after }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            collecting.isDone shouldBe false
+            item.isValid shouldBe true
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            h.service.collectionAvailable(before.id) shouldBe false
+            val duplicate = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(duplicate) })?.reason shouldBe "city-busy"
+            source.complete(Unit)
+            h.tickUntil("native ground debit") { !item.isValid }
+            item.isValid shouldBe false
+            h.saves shouldBe emptyList()
+            collecting.isDone shouldBe false
+            after.complete(Unit)
+            h.tickUntil("city save after native and marker ACK") { h.saves.isNotEmpty() }
+            val saved = h.saves.single()
+            saved.first.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
+            saved.second.complete(saved.first)
+            h.await(collecting).revision shouldBe before.revision + 1
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("a native timeout after ground debit retries the same locked receipt after five seconds and credits once") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val afterAttempts = mutableListOf<UUID>()
+            storage.persistCollectedNative = { tx, beforeJournal ->
+                if (beforeJournal) CompletableFuture.completedFuture(Unit)
+                else {
+                    afterAttempts += tx.id
+                    if (afterAttempts.size == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
+                    else CompletableFuture.completedFuture(Unit)
+                }
+            }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            shouldThrow<CompletionException> { h.await(collecting) }
+            item.isValid shouldBe false
+            h.saves shouldBe emptyList()
+            storage.debug(before.id)["total"] shouldBe 1
+            verify(exactly = 0) { h.store.markConsumedItems(any()) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+            h.time += 4_999
+            h.tick()
+            afterAttempts.size shouldBe 1
+            h.time++
+            h.tickUntil("retry native ACK and one recovered city credit") { h.saves.isNotEmpty() }
+            afterAttempts.size shouldBe 2
+            afterAttempts.distinct().size shouldBe 1
+            val saved = h.saves.single()
+            saved.first.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
+            saved.second.complete(saved.first)
+            h.tickUntil("recovered receipt retirement") { storage.debug(before.id)["total"] == 0 }
+            h.service.city(h.player)!!.revision shouldBe before.revision + 1
+            h.time += 10_000
+            h.tick()
+            afterAttempts.size shouldBe 2
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) { h.store.markConsumedItems(any()) }
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("unknown consumed marker outcome retains the debited receipt and cannot credit the bag") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also {
+                storage = it; it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val marker = CompletableFuture<CivConsumedItemIndex>()
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.markConsumedItems(any()) } returns marker
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            repeat(6) { h.paper.performTicks(1) }
+            item.isValid shouldBe false
+            h.saves shouldBe emptyList()
+            collecting.isDone shouldBe false
+            marker.completeExceptionally(java.io.IOException("Unknown atomic marker rename outcome"))
+            shouldThrow<CompletionException> { h.await(collecting) }
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+            verify(exactly = 1) { h.store.markConsumedItems(any()) }
+            storage.debug(before.id)["total"] shouldBe 1
+            h.time += 10_000
+            h.tick()
+            h.saves shouldBe emptyList()
+            verify(exactly = 1) { h.store.markConsumedItems(any()) }
+        }
+    }
+
+    for (phase in listOf("before", "after")) test("city revision drift during $phase disk acknowledgement cannot publish a prepared credit") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val pending = CompletableFuture<Unit>()
+            storage.persistCollectedNative = { _, beforeJournal ->
+                if (beforeJournal == (phase == "before")) pending else CompletableFuture.completedFuture(Unit)
+            }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            repeat(3) { h.paper.performTicks(1) }
+            @Suppress("UNCHECKED_CAST")
+            val current = CivsService::class.java.getDeclaredField("cities").apply { isAccessible = true }
+                .get(h.service) as MutableMap<UUID, Settlement>
+            current[before.id] = before.copy(revision = before.revision + 1)
+            pending.complete(Unit)
+            shouldThrow<CompletionException> { h.await(collecting) }
+            h.saves shouldBe emptyList()
+            item.isValid shouldBe (phase == "before")
+            verify(exactly = if (phase == "before") 0 else 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    for (autonomous in listOf(false, true)) test("ground collection fences both native states before committing and retiring autonomous=$autonomous") {
+        lateinit var storage: CivsStorage
+        val order = mutableListOf<String>()
+        val events = mutableListOf<Map<String, Any?>>()
+        mockkObject(CivsDiagnostics)
+        try {
+            every { CivsDiagnostics.event(any(), *anyVararg()) } answers {
+                if (firstArg<String>() == "resident_ground_collected") events += secondArg<Array<Pair<String, Any?>>>().toMap()
+                Unit
+            }
+            serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+                CivsStorage(plugin) { emptyArray() }.also { storage = it }
+            }) { h ->
+                val worker = h.city.workers.first()
+                val before = h.city.copy(workers = listOf(worker), stock = if (autonomous) h.city.stock else Stock(),
+                    inventory = if (autonomous) null else CivInventory(CivStorageMode.VIRTUAL),
+                    autonomy = if (autonomous) CivAutonomy(paused = true) else null)
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+                every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+                val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+                storage.persistCollectedNative = { _, _ ->
+                    order += if (item.isValid) "source-flush" else "after-flush"
+                    CompletableFuture.completedFuture(Unit)
+                }
+                var receipt: CivInventoryTransaction? = null
+                val journal = CompletableFuture<CivInventoryTransaction>()
+                val retirement = CompletableFuture<Boolean>()
+                every { h.store.saveInventoryTransaction(any()) } answers { order += "journal"; receipt = firstArg(); journal }
+                every { h.store.save(any()) } answers {
+                    order += "city"
+                    CompletableFuture<Settlement>().also { h.saves += firstArg<Settlement>() to it }
+                }
+                every { h.store.markConsumedItems(any()) } answers {
+                    order += "marker"
+                    CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY.adding(listOf(item.uniqueId)))
+                }
+                every { h.store.deleteInventoryTransaction(any()) } answers { order += "retire"; retirement }
+                h.start()
+                val collected = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+                h.paper.performTicks(1) // The acknowledged source returns to city authority before journalling.
+                order shouldBe listOf("source-flush", "journal")
+                item.isValid shouldBe true
+                events shouldBe emptyList()
+                journal.complete(receipt!!)
+                h.tickUntil("city save after journal and marker") { h.saves.isNotEmpty() }
+                order shouldBe listOf("source-flush", "journal", "after-flush", "marker", "city")
+                item.isValid shouldBe false
+                h.service.settlements().single().workers.single().hasCollectedItems shouldBe null
+                h.saves.single().let { it.second.complete(it.first) }
+                h.tickUntil("receipt retirement") { order.last() == "retire" }
+                order.last() shouldBe "retire"
+                events shouldBe emptyList()
+                collected.isDone shouldBe false
+                h.service.collectionAvailable(before.id) shouldBe false
+                retirement.complete(true)
+                val committed = h.await(collected)
+                committed.workers.single().items!![6] shouldBe CivResidentItem("COAL", 8)
+                committed.workers.single().hasCollectedItems shouldBe true
+                committed.stock shouldBe before.stock
+                committed.inventory shouldBe before.inventory
+                events.single()["worker"] shouldBe worker.id
+                events.single()["transaction"] shouldBe receipt!!.id
+                events.single()["items"] shouldBe 8
+                events.single()["slots"] shouldBe 1
+                h.time += 4_999
+                h.service.collectionAvailable(before.id) shouldBe false
+                h.time++
+                h.service.collectionAvailable(before.id) shouldBe true
+            }
+        } finally { unmockkObject(CivsDiagnostics) }
+    }
+
+    for (failurePhase in listOf("before", "after")) test("failed $failurePhase native fence never credits the resident") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 2.5, 64.0, .5)
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            var fences = 0
+            storage.persistCollectedNative = { _, _ ->
+                if (++fences == if (failurePhase == "before") 1 else 2) CompletableFuture.failedFuture(IllegalStateException("flush failed"))
+                else CompletableFuture.completedFuture(Unit)
+            }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            shouldThrow<CompletionException> { h.await(collecting) }
+            h.saves shouldBe emptyList()
+            h.service.city(h.player)!!.workers.single() shouldBe worker
+            item.isValid shouldBe (failurePhase == "before")
+            verify(exactly = if (failurePhase == "before") 0 else 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+            h.service.corpseSettlements().size shouldBe if (failurePhase == "after") 0 else 1
+            h.time += 10_000
+            h.tick()
+            fences shouldBe if (failurePhase == "before") 1 else 2
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    for (stale in listOf("missing", "left-reach")) test("fresh ground $stale while journal writes cancels without credit") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it; it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) } }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            var feet = Location(h.world, 2.5, 64.0, .5)
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } answers { feet }
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val collecting = h.service.pickupGround(before.id, worker.id, listOf(item.uniqueId))
+            h.paper.performTicks(1)
+            if (stale == "missing") item.remove() else feet = Location(h.world, 12.5, 64.0, .5)
+            journal.complete(receipt!!)
+            val failed = shouldThrow<CompletionException> { h.await(collecting) }
+            CivsDiagnostics.rejection(failed)?.reason shouldBe if (stale == "missing") "stale-delivery" else "worker-too-far"
+            h.saves shouldBe emptyList()
+            h.service.city(h.player)!!.workers.single() shouldBe worker
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt!!.id) }
+            if (stale != "missing") item.itemStack.amount shouldBe 8
+            h.service.corpseSettlements().size shouldBe 1
+        }
+    }
+
+    for ((nativeAfter, markedBefore) in listOf(false to false, true to false, true to true))
+        test("ground journal recovery completes one credit without a live actor nativeAfter=$nativeAfter marked=$markedBefore") {
+        lateinit var storage: CivsStorage
+        var fences = 0
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it; it.persistCollectedNative = { _, _ -> fences++; CompletableFuture.completedFuture(Unit) } }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val afterWorker = worker.copy(items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null },
+                hasCollectedItems = true)
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision,
+                before.copy(workers = listOf(afterWorker), revision = before.revision + 1), emptyList(),
+                collected = CivCollectedTransfer(worker.id, CivsEquipment.slots(worker), ground = listOf(
+                    CivGroundItemChange(item.uniqueId, CivPosition(3, 64, 0), CivResidentItem("COAL", 8), null))))
+            if (nativeAfter) item.remove()
+            if (markedBefore) every { h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(
+                CivConsumedItemIndex.EMPTY.adding(listOf(item.uniqueId)))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.citizens.residentCollectionFeet(any(), any()) } returns null
+            h.start()
+            h.tickUntil("recovered city save") { h.saves.isNotEmpty() }
+            val saved = h.saves.single()
+            saved.first shouldBe receipt.after
+            fences shouldBe 1 // The admitted source fence was acknowledged before this persisted journal.
+            item.isValid shouldBe false
+            saved.second.complete(saved.first)
+            repeat(4) { h.paper.performTicks(1) }
+            h.service.settlements().single() shouldBe receipt.after
+            h.service.corpseSettlements().size shouldBe 1
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+            verify(exactly = 0) { h.citizens.residentCollectionFeet(any(), any()) }
+        }
+    }
+
+    test("a committed ground receipt retries a native timeout then retires without another city credit") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val worker = h.city.workers.first()
+            val before = h.city.copy(workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
+            val item = civsGroundFixture(h.paper, h.world, Location(h.world, 3.5, 64.0, .5), ItemStack(Material.COAL, 8))
+            val afterWorker = worker.copy(items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null },
+                hasCollectedItems = true)
+            val receipt = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision,
+                before.copy(workers = listOf(afterWorker), revision = before.revision + 1), emptyList(),
+                collected = CivCollectedTransfer(worker.id, CivsEquipment.slots(worker), ground = listOf(
+                    CivGroundItemChange(item.uniqueId, CivPosition(3, 64, 0), CivResidentItem("COAL", 8), null))))
+            item.remove()
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(receipt.after))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            val retired = mutableListOf<UUID>()
+            every { h.store.deleteInventoryTransaction(any()) } answers {
+                retired += firstArg<UUID>(); CompletableFuture.completedFuture(true)
+            }
+            var attempts = 0
+            storage.persistCollectedNative = { _, beforeJournal ->
+                beforeJournal shouldBe false
+                if (++attempts == 1) CompletableFuture.failedFuture(CivsNativePersistenceRetry("Native persistence timed out"))
+                else CompletableFuture.completedFuture(Unit)
+            }
+            h.start()
+            h.tickUntil("first committed receipt persistence attempt") { attempts == 1 }
+            h.tick()
+            retired shouldBe emptyList()
+            h.saves shouldBe emptyList()
+            h.time += 4_999
+            h.tick()
+            attempts shouldBe 1
+            h.time++
+            h.tickUntil("committed receipt recovery retirement") { retired.isNotEmpty() }
+            attempts shouldBe 2
+            retired shouldBe listOf(receipt.id)
+            h.saves shouldBe emptyList()
+            h.service.city(h.player) shouldBe receipt.after
+            verify(exactly = 1) { h.store.markConsumedItems(receipt) }
+        }
+    }
+
+    test("home deposit persists native exact slots before bag debit and never changes abstract stock") {
+        lateinit var storage: CivsStorage
+        val fences = mutableListOf<Int>()
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage = it }
+        }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val worker = h.city.workers.first().copy(hasCollectedItems = true,
+                items = List(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null })
+            val before = h.city.copy(buildings = listOf(hall), workers = listOf(worker),
+                inventory = null, autonomy = CivAutonomy(paused = true))
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+            storage.persistCollectedNative = { _, _ ->
+                fences += barrel.getItem(0)?.amount ?: 0
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.citizens.residentCollectionFeet(worker.id, any()) } returns Location(h.world, 1.5, 64.0, .5)
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val depositing = h.service.depositCollected(before.id, worker.id, hall.control)
+            repeat(4) { h.paper.performTicks(1) }
+            fences shouldBe listOf(0, 8)
+            barrel.getItem(0) shouldBe ItemStack(Material.COAL, 8)
+            val saved = h.saves.single()
+            saved.first.stock shouldBe before.stock
+            saved.first.inventory shouldBe null
+            saved.first.workers.single().hasCollectedItems shouldBe false
+            saved.second.complete(saved.first)
+            h.await(depositing).workers.single().items!!.all { it == null } shouldBe true
+        }
+    }
+
     test("public building inspection is nearby and autonomous without widening foreign personal access") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
@@ -359,9 +768,9 @@ class CivsServiceTest : FunSpec({
                 buildings = listOf(h.city.buildings.first(), warehouse))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
             val schematic = CompletableFuture<List<CivPlanBlock>>()
-            every { h.blueprints.warehouseStorageRepair(warehouse) } returns schematic
+            every { h.blueprints.buildingStorageRepair(warehouse) } returns schematic
             h.start()
-            val repair = h.service.repairWarehouseStorage(city.id, warehouse.id)
+            val repair = h.service.repairBuildingStorage(city.id, warehouse.id)
             repair.isDone shouldBe false
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city.copy(
                 buildings = listOf(city.buildings.first(), warehouse.copy(phase = BuildingPhase.SITE)))))
@@ -371,7 +780,7 @@ class CivsServiceTest : FunSpec({
             h.tick()
             repair.isCompletedExceptionally shouldBe true
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { repair.join() })?.reason shouldBe "stale-building"
-            verify(exactly = 0) { h.worldAdapter.repairWarehouse(any(), any(), any()) }
+            verify(exactly = 0) { h.worldAdapter.repairStorageRacks(any(), any(), any()) }
         }
     }
 
@@ -382,11 +791,11 @@ class CivsServiceTest : FunSpec({
             val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
                 buildings = listOf(h.city.buildings.first(), warehouse))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-            every { h.blueprints.warehouseStorageRepair(warehouse) } returns CompletableFuture.completedFuture(
+            every { h.blueprints.buildingStorageRepair(warehouse) } returns CompletableFuture.completedFuture(
                 listOf(CivPlanBlock(CivPosition(10, 64, 0), "minecraft:bookshelf", "minecraft:air")))
-            every { h.worldAdapter.repairWarehouse(any(), any(), any()) } throws CivsRejection("world-closed")
+            every { h.worldAdapter.repairStorageRacks(any(), any(), any()) } throws CivsRejection("world-closed")
             h.start()
-            val repair = h.service.repairWarehouseStorage(city.id, warehouse.id)
+            val repair = h.service.repairBuildingStorage(city.id, warehouse.id)
             h.tick()
             repair.isCompletedExceptionally shouldBe true
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { repair.join() })?.reason shouldBe "world-closed"
@@ -4255,6 +4664,9 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         every { renderer.drained() } returns CompletableFuture.completedFuture(null)
         every { boundary.drained() } returns CompletableFuture.completedFuture(null)
         every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(emptyList())
+        every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        every { store.markConsumedItems(any()) } answers { CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY.adding(
+            firstArg<CivInventoryTransaction>().collected?.ground.orEmpty().map(CivGroundItemChange::entityId))) }
         every { player.uniqueId } returns owner
         every { player.world } returns world
         every { player.location } returns Location(world, 0.0, 65.0, 0.0)
@@ -4288,8 +4700,15 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         service.beginFoundingSelection(player, name, style).thenCompose {
             service.selectGround(player, service.selection(player)!!.id, CivsGroundTarget(world.uid, CivPosition(0, 63, 0)))
         }
-    fun start() { val loaded = service.start(); tick(); loaded.join() shouldBe Unit }
+    fun start() { val loaded = service.start(); tick(); await(loaded) shouldBe Unit }
     fun tick() = paper.performTicks(8)
+    fun tickUntil(description: String, condition: () -> Boolean) {
+        repeat(80) {
+            if (condition()) return
+            paper.performTicks(1)
+        }
+        check(condition()) { "$description did not complete within 80 scheduler ticks" }
+    }
     fun prepareCarpentry(stock: Map<String, Long> = emptyMap()): Pair<CivBuilding, CivWorker> {
         val workshop = city.buildings.last().copy(type = BuildingType.SAWMILL,
             control = CivPosition(10, 63, 0), production = null)

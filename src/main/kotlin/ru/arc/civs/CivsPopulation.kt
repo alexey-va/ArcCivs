@@ -8,7 +8,7 @@ object CivsPopulation {
     const val BIRTH_MINUTES = 20
     const val ADULT_MINUTES = 40
 
-    fun houseBeds(house: CivBuilding): Int = maxOf(3, house.level * 2)
+    fun houseBeds(house: CivBuilding): Int = if (house.type == BuildingType.TAVERN) 4 else maxOf(3, house.level * 2)
 
     fun nextImmigrantSex(city: Settlement): CivSex {
         val adults = city.workers.filterNot(CivsResidents::isChild)
@@ -29,7 +29,7 @@ object CivsPopulation {
     ): Settlement {
         CivsRules.validate(city)
         if (city.pendingDeletion != null) return city
-        val homes = city.buildings.filter { it.type in setOf(BuildingType.TOWN_HALL, BuildingType.HOUSE) }
+        val homes = city.buildings.filter { it.type == BuildingType.TOWN_HALL || it.type.isResidence }
             .associateBy { it.id }
         val houses = homes.values.filter { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
         val hall = homes.values.first { it.type == BuildingType.TOWN_HALL }
@@ -67,7 +67,8 @@ object CivsPopulation {
             val resident = residents[index]
             if (resident.homeId != null) continue
             val home = hall.takeIf { residents.count { it.homeId == hall.id } < IMMIGRANT_POPULATION }
-                ?: houses.firstOrNull { house ->
+                ?: homes.values.firstOrNull { house ->
+                    if (!house.type.isResidence || house.phase != BuildingPhase.ACTIVE) return@firstOrNull false
                     val spare = houseBeds(house) - residents.count { it.homeId == house.id }
                     spare > if (families.any { it.homeId == house.id }) 1 else 0
                 }
@@ -107,7 +108,7 @@ object CivsPopulation {
         val workers = city.workers.associateBy { it.id }
         for (worker in city.workers) {
             worker.homeId?.let { home ->
-                require(city.building(home)?.type in setOf(BuildingType.TOWN_HALL, BuildingType.HOUSE))
+                require(city.building(home)?.type?.let { it == BuildingType.TOWN_HALL || it.isResidence } == true)
             }
             val livingParents = worker.parentIds.orEmpty().mapNotNull(workers::get)
             require(livingParents.none(CivsResidents::isChild))

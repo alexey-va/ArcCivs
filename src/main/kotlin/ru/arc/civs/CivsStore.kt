@@ -3,11 +3,13 @@ package ru.arc.civs
 import com.google.gson.Gson
 import ru.arc.persistence.AtomicFileStore
 import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.nio.charset.CodingErrorAction
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -26,6 +28,7 @@ class CivsStore(
     private val ioLock = Any()
     private var cityIndex: Map<UUID, CityIndex>? = null
     private var deletedCityIndex: Map<UUID, CivsDeletedCity>? = null
+    private val consumedItems = CivsConsumedItems()
     private var closed = false
 
     init {
@@ -138,7 +141,7 @@ class CivsStore(
     }
 
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
-        val snapshot = plan.copy(blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
+        val snapshot = plan.copy(building = snapshotBuilding(plan.building), blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
             it.copy(blocks = it.blocks.toList(), route = it.route.toList())
         })
         return submit {
@@ -167,6 +170,7 @@ class CivsStore(
             playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) },
             residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
             worldChanges = transaction.worldChanges?.toList(),
+            collected = transaction.collected?.let { it.copy(before = it.before.toList(), ground = it.ground.toList(), containers = it.containers.toList()) },
             resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = it.corpse.worker.copy(
                 items = it.corpse.worker.items?.toList(), skills = it.corpse.worker.skills?.toMap(),
                 inventory = it.corpse.worker.inventory?.toMap(), parentIds = it.corpse.worker.parentIds?.toSet()))) })
@@ -177,6 +181,8 @@ class CivsStore(
             val existing = store.loadOrNull()?.transaction
             if (existing != null) {
                 require(existing == snapshot) { "Inventory transaction retry differs from its journal" }
+                // A previous write may have reached rename but failed its parent-directory acknowledgement.
+                forceInventoryDirectories(trustedRoot)
                 return@submit existing
             }
             val pending = loadInventoryTransactions(trustedRoot)
@@ -186,22 +192,58 @@ class CivsStore(
             require(snapshot.playerId() == null || pending.none { it.playerId() == snapshot.playerId() }) {
                 "Player already has an inventory transaction"
             }
+            val groundIds = snapshot.collected?.ground.orEmpty().mapTo(hashSetOf(), CivGroundItemChange::entityId)
+            require(pending.none { it.collected?.ground.orEmpty().any { change -> change.entityId in groundIds } }) {
+                "Ground item already has an inventory transaction"
+            }
+            consumedItems.admit(trustedRoot, snapshot, pending)
             val document = InventoryTransactionDocument(SCHEMA_VERSION, snapshot)
             if (gson.toJson(CityDocument(SCHEMA_VERSION, snapshot.after)).toByteArray(StandardCharsets.UTF_8).size > MAX_CITY_BYTES ||
                 gson.toJson(document).toByteArray(StandardCharsets.UTF_8).size > MAX_INVENTORY_TRANSACTION_BYTES)
                 throw CivsRejection("storage-transaction-too-large")
-            requireNotNull(store.write(document).transaction)
+            val written = requireNotNull(store.write(document).transaction)
+            // AtomicFileStore forces inventory-transactions itself. Also persist its newly-created entry in
+            // settlements before native debit; otherwise a crash could lose the entire acknowledged journal.
+            forceInventoryDirectories(trustedRoot)
+            written
         }
     }
 
     fun loadInventoryTransactions(): CompletableFuture<List<CivInventoryTransaction>> = submit {
-        loadInventoryTransactions(trustedRoot())
+        val trustedRoot = trustedRoot()
+        val transactions = loadInventoryTransactions(trustedRoot)
+        // Recovery may resume a prior uncertain write immediately after this ACK, without saving it again.
+        if (transactions.isNotEmpty()) forceInventoryDirectories(trustedRoot)
+        transactions
+    }
+
+    internal fun loadConsumedItems(): CompletableFuture<CivConsumedItemIndex> = submit { consumedItems.load(trustedRoot()) }
+
+    internal fun markConsumedItems(transaction: CivInventoryTransaction): CompletableFuture<CivConsumedItemIndex> = submit {
+        val root = trustedRoot()
+        require(inventoryTransactionStore(root, transaction.id).loadOrNull()?.transaction == transaction) {
+            "Consumed item marker requires its exact durable inventory receipt"
+        }
+        consumedItems.mark(root, transaction.after.worldId, transaction.collected?.ground.orEmpty().map(CivGroundItemChange::entityId))
     }
 
     fun deleteInventoryTransaction(id: UUID): CompletableFuture<Boolean> = submit {
-        val store = inventoryTransactionStore(trustedRoot(), id)
-        if (store.loadOrNull() == null) return@submit false
-        store.deleteIfExists()
+        val trustedRoot = trustedRoot()
+        val store = inventoryTransactionStore(trustedRoot, id)
+        val deleted = if (store.loadOrNull() == null) false else store.deleteIfExists()
+        // A retry after an uncertain delete must acknowledge the directory even when the file is now absent.
+        forceInventoryDirectories(trustedRoot)
+        deleted
+    }
+
+    private fun forceInventoryDirectories(trustedRoot: Path) {
+        val directory = trustedRoot.resolve("inventory-transactions")
+        if (!Files.exists(directory, LinkOption.NOFOLLOW_LINKS)) return
+        require(Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)) { "Inventory journal directory is not a real directory" }
+        // AtomicFileStore covers the file/rename; include both directory creation edges before native mutation.
+        listOf(directory, trustedRoot, requireNotNull(trustedRoot.parent)).forEach {
+            FileChannel.open(it, StandardOpenOption.READ).use { channel -> channel.force(true) }
+        }
     }
 
     /** A pure path accessor for Core's later asynchronous schematic open. */
@@ -345,6 +387,8 @@ class CivsStore(
         require(records.map { it.cityId }.distinct().size == records.size) { "City has multiple pending inventory transactions" }
         val players = records.mapNotNull(CivInventoryTransaction::playerId)
         require(players.distinct().size == players.size) { "Player has multiple pending inventory transactions" }
+        val ground = records.flatMap { it.collected?.ground.orEmpty() }.map(CivGroundItemChange::entityId)
+        require(ground.distinct().size == ground.size) { "Ground item has multiple pending inventory transactions" }
         return records
     }
 
@@ -412,13 +456,15 @@ class CivsStore(
         },
     )
 
+    private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
+
     private fun snapshotCity(city: Settlement): Settlement = city.copy(
-        buildings = city.buildings.toList(), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
+        buildings = city.buildings.map(::snapshotBuilding), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
             inventory = it.inventory?.toMap(), items = it.items?.toList(), parentIds = it.parentIds?.toSet()) }, members = city.members.toSet(),
         memberNames = city.memberNames?.toMap(), families = city.families?.toList(),
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
-        construction = city.construction?.let { it.copy(materials = it.materials?.toMap(),
+        construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.let(::snapshotBuilding), materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
         constructionQueue = city.constructionQueue?.toList(),
@@ -436,7 +482,7 @@ class CivsStore(
         requireNotNull(building.type)
         requireNotNull(building.phase)
         require(validSha256(plan.capturedSha256)) { "Placement capture SHA-256 is invalid" }
-        require(building.level in 1..3) { "Placement building level is invalid" }
+        require(building.level in 1..building.type.maxLevel) { "Placement building level is invalid" }
         require(building.rotation in ROTATIONS) { "Placement building rotation is invalid" }
         require(validBoundedText(building.schematicId, MAX_SCHEMATIC_ID_CHARS)) { "Placement schematic id is invalid" }
 

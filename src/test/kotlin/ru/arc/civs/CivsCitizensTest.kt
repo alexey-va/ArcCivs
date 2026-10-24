@@ -413,7 +413,7 @@ class CivsCitizensTest : FunSpec({
         val city = city(listOf(hall, firstHome, ownHome, hut), child, null)
         val plan = requireNotNull(citizenPlan(city, child))
         plan.idleReason shouldBe "playing"
-        plan.storage shouldBe ownHome.control
+        plan.storage shouldBe ownHome.entrance
         plan.workplace shouldBe null
         plan.courier shouldBe null
         plan.workMillis shouldBe 0L

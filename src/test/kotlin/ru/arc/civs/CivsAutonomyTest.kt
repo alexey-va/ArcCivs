@@ -7,6 +7,20 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsAutonomyTest : FunSpec({
+    test("the infrastructure cap leaves ordinary village upgrades eligible") {
+        val base = autonomyCity().copy(buildings = (CivsAutonomy.profile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
+            .map { autonomyBuilding(it).copy(phase = BuildingPhase.ACTIVE) })
+        val upgrade = requireNotNull(CivsAutonomy.nextGoal(base))
+        upgrade.type shouldBe BuildingType.TOWN_HALL
+        upgrade.targetLevel shouldBe 2
+        CivsAutonomy.infrastructureDue(base, upgrade) shouldBe true
+        val capped = base.copy(buildings = base.buildings + List(CivsRules.MAX_INFRASTRUCTURE) {
+            autonomyBuilding(BuildingType.ROAD).copy(phase = BuildingPhase.ACTIVE)
+        })
+        CivsAutonomy.infrastructureDue(capped, CivsAutonomy.nextGoal(capped)) shouldBe false
+        CivsAutonomy.nextGoal(capped) shouldBe upgrade
+    }
+
     test("legacy cities remain personal and autonomous snapshots reject physical inventory and membership") {
         val city = autonomyCity()
         val personal = CivsRules.found(city.id, city.owner, city.name, city.worldId, city.center,
@@ -106,7 +120,7 @@ class CivsAutonomyTest : FunSpec({
         CivsAutonomy.activeMinute(autonomyRoundtrip(waiting)) shouldBe waiting
     }
 
-    test("essential jobs precede second producer slots and the second builder comes last") {
+    test("essential jobs precede the guard and second producer slots") {
         val buildings = CivsAutonomy.profile.map { autonomyBuilding(it, 2, BuildingPhase.ACTIVE) }
         val hall = buildings.first { it.type == BuildingType.TOWN_HALL }
         val house = buildings.first { it.type == BuildingType.HOUSE }
@@ -117,14 +131,14 @@ class CivsAutonomyTest : FunSpec({
         val assigned = CivsRules.autoAssign(city, city.owner, 300_000)
         assigned.workers.map { worker -> assigned.building(worker.assignment!!)!!.type } shouldBe listOf(
             BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
-            BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM, BuildingType.BUILDER_HUT)
+            BuildingType.GUARD_TOWER, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
         CivsRules.slots(city, hall) shouldBe 0
         CivsRules.slots(city, buildings.first { it.type == BuildingType.WAREHOUSE }) shouldBe 0
         CivsRules.isBuilder(city, hall) shouldBe false
         CivsRules.autoAssign(assigned, city.owner, 400_000) shouldBe assigned
     }
 
-    test("real trip receipts sustain the entire seven-building level-two profile without outside inputs") {
+    test("real trip receipts sustain eleven buildings including three houses through level two without outside inputs") {
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
         val completed = mutableListOf<Pair<BuildingType, Int>>()
@@ -134,7 +148,7 @@ class CivsAutonomyTest : FunSpec({
             if (goal.ready) {
                 val building = goal.buildingId?.let(city::building)?.copy(level = goal.targetLevel,
                     schematicId = "autonomy/${goal.type.name.lowercase()}/${goal.targetLevel}", phase = BuildingPhase.CONSTRUCTING)
-                    ?: autonomyBuilding(goal.type).also { city = CivsRules.placeSite(city, city.owner, it) }
+                    ?: autonomyBuilding(goal.type, occurrence = city.buildings.count { it.type == goal.type }).also { city = CivsRules.placeSite(city, city.owner, it) }
                         .copy(phase = BuildingPhase.CONSTRUCTING)
                 city = CivsRules.autoAssign(city, city.owner, now)
                 val order = autonomyOrder(building, 65)
@@ -163,10 +177,10 @@ class CivsAutonomyTest : FunSpec({
             city = CivsAutonomy.activeMinute(city)
         }
         (minutes < 1_000) shouldBe true
-        completed.take(7).map { it.first } shouldBe CivsAutonomy.profile
-        completed.size shouldBe 14
+        completed.take(9).map { it.first } shouldBe CivsAutonomy.profile
+        completed.size shouldBe 22
         CivsAutonomy.nextGoal(city) shouldBe null
-        city.buildings.size shouldBe 7
+        city.buildings.size shouldBe 11
         city.buildings.all { it.level == 2 && it.phase == BuildingPhase.ACTIVE } shouldBe true
         city.workers.size shouldBe minOf(CivsRules.populationLimit(city), CivsRules.beds(city))
         city.inventory shouldBe null
@@ -178,11 +192,12 @@ class CivsAutonomyTest : FunSpec({
 private fun autonomyCity(): Settlement = CivsAutonomy.found(UUID.randomUUID(), UUID.randomUUID(), "Autonomous village",
     UUID.randomUUID(), CivPosition(0, 64, 0), 128, "medievaloak", autonomyBuilding(BuildingType.TOWN_HALL), 1_000)
 
-private fun autonomyBuilding(type: BuildingType, level: Int = 1, phase: BuildingPhase = BuildingPhase.SITE): CivBuilding {
-    val x = type.ordinal * 8
-    return CivBuilding(UUID(1, type.ordinal.toLong()), type, level, CivPosition(x, 64, 0), 0,
-        "autonomy/${type.name.lowercase()}/$level", CivBox(CivPosition(x - 2, 62, -2), CivPosition(x + 2, 68, 2)),
-        CivPosition(x, 64, -3), phase, CivPosition(x, 64, 0))
+private fun autonomyBuilding(type: BuildingType, level: Int = 1, phase: BuildingPhase = BuildingPhase.SITE,
+    occurrence: Int = 0): CivBuilding {
+    val x = type.ordinal * 8; val z = occurrence * 12
+    return CivBuilding(UUID(1 + occurrence.toLong(), type.ordinal.toLong()), type, level, CivPosition(x, 64, z), 0,
+        "autonomy/${type.name.lowercase()}/$level", CivBox(CivPosition(x - 2, 62, z - 2), CivPosition(x + 2, 68, z + 2)),
+        CivPosition(x, 64, z - 3), phase, CivPosition(x, 64, z))
 }
 
 private fun autonomyImmigrants(before: Settlement): Settlement {

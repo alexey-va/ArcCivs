@@ -36,15 +36,17 @@ class CivsMineWorkStandingTest : FunSpec({
         }
     }
 
-    test("the rotated V4 entrance pays its missing footing from a completed inside stance") {
+    test("the rotated current entrance pays its missing footing from a completed inside stance") {
         withReportedMine { _, world, mine, city, worker, runtime ->
             val work = nextMineWork(runtime, city, worker)
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
             val firstFloor = geometry.steps.first { it.after == "minecraft:cobblestone" && !it.shaftSupport }
             work.focus shouldBe CivsWorksiteLayouts.point(mine, firstFloor.point)
-            work.status shouldBe "securing-mine"
-            work.miningStep shouldBe city.minePlans!!.getValue(mine.id.toString()).nextStep
-            CivsMinePlan.workStandingAllowed(mine, work.standing) shouldBe true
+            work.status shouldBe "digging-mine"
+            work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            work.miningStep shouldBe city.minePlans!!.getValue(mine.id.toString()).nextStep + 1
+            geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
+                requireNotNull(work.miningAccessStep)) shouldBe true
             (work.standing != CivPosition(-96, 60, -51)) shouldBe true
             citizenStandable(world, work.standing) shouldBe true
             runtime.validate(city, work)
@@ -66,7 +68,8 @@ class CivsMineWorkStandingTest : FunSpec({
             second.miningStep shouldBe first.miningStep
             second.changes shouldBe first.changes
             second.inputs shouldBe first.inputs
-            CivsMinePlan.workStandingAllowed(mine, second.standing) shouldBe true
+            requireNotNull(CivsMinePlan.forBuilding(mine)).builtStanding(CivsMinePlan.localPoint(mine, second.standing),
+                requireNotNull(second.miningAccessStep)) shouldBe true
             runtime.validate(city, second)
             advanceTicks(1_201)
             runtime.invalidate(worker.id)
@@ -176,7 +179,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
                         val work = nextMineWork(runtime, city, worker)
-                        work.miningPlanVersion shouldBe 4
+                        work.miningPlanVersion shouldBe CivsMinePlan.VERSION
                         (work.standing != reported) shouldBe true
                         current.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
                             requireNotNull(work.miningAccessStep)) shouldBe true

@@ -242,8 +242,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun quarryWorkAccessible(city: Settlement, building: CivBuilding, world: World, work: CivWorldWork): Boolean {
         val focus = citizenWorkFocus(work) ?: return true
         val p = work.standing
-        if (work.miningStep != null && (!CivsMinePlan.workStandingAllowed(building, p) ||
-                !mineBuiltStanding(building, p, work.miningAccessStep ?: work.miningStep) ||
+        if (work.miningStep != null && (!mineBuiltStanding(building, p, work.miningAccessStep ?: work.miningStep) ||
                 !mineStandingConnected(building, world, focus, p))) return false
         spotChecksRemaining--
         if (!city.contains(p.x, p.z) || !citizenControlClear(city, p) || locked(city.worldId, p) ||
@@ -352,7 +351,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             ?: plan(city, worker)?.takeUnless { it.changes.isEmpty() && it.equipmentAfter != null }
                 ?.inputs?.entries?.firstOrNull()?.let { it.key to it.value } ?: return null
         val quarryBatch = worker.assignment?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
-            ?.let { CivsLogistics.QUARRY_SUPPLIES[required.first] }
+            ?.let { CivsLogistics.quarrySupplies(it)[required.first] }
         if (quarryBatch != null && currentNeed(city, worker)?.material == null) return null
         return required.first to (quarryBatch ?: maxOf(required.second, Material.matchMaterial(required.first)?.maxStackSize?.toLong() ?: 1))
     }
@@ -493,13 +492,18 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         BuildingType.FARM -> "_HOE"; BuildingType.FORESTER -> "_AXE"; else -> "_PICKAXE"
     }
 
-    private fun prepareQuarry(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
-        val required = CivsLogistics.QUARRY_SUPPLIES.mapValues { (material, batch) ->
-            (batch - CivsEquipment.plainCount(worker, material)).coerceAtLeast(0)
-        }.filterValues { it > 0 }
+    private fun prepareQuarry(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+                              needed: String? = null): CivWorldWork? {
         val available = stock(city, building.id)
+        val batches = CivsLogistics.quarrySupplies(building)
+        // Carry available future framing supplies together, but do not stop an unrelated
+        // cut for timber that is only needed by a later paid construction step.
+        val required = batches.mapValues { (material, batch) ->
+            (batch - CivsEquipment.plainCount(worker, material)).coerceAtLeast(0)
+        }.filter { (material, amount) -> amount > 0 &&
+            (material in CivsLogistics.QUARRY_SUPPLIES || material == needed || (available[material] ?: 0) >= amount) }
         required.entries.firstOrNull { (material, amount) -> (available[material] ?: 0) < amount }?.let { (material, _) ->
-            return blocked(worker, "waiting-${material.lowercase()}", material, CivsLogistics.QUARRY_SUPPLIES.getValue(material))
+            return blocked(worker, "waiting-${material.lowercase()}", material, batches.getValue(material))
         }
         val supplied = try { CivsEquipment.collectSupplies(worker, required) } catch (failure: CivsRejection) {
             if (failure.reason != "resident-inventory-full") throw failure
@@ -760,7 +764,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val v3Step = state?.takeIf { it.version == 3 }?.nextStep ?: state?.v3Step ?: 0L
         val v3 = CivsMinePlan.forBuilding(building, 3)?.completed(v3Step)
             ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v3-mine-progress-invalid")
-        val legacy = v1 + v2 + v3
+        val v4Step = state?.takeIf { it.version == 4 }?.nextStep ?: state?.v4Step ?: 0L
+        val v4 = CivsMinePlan.forBuilding(building, 4)?.completed(v4Step)
+            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v4-mine-progress-invalid")
+        val legacy = v1 + v2 + v3 + v4
         val scan = mineCursors[building.id]?.takeIf { it.first == building.level && it.second == progress }
         val scanStart = (scan?.third ?: progress.toInt()).coerceAtMost(steps.size)
         // Take a useful batch before descending, then use it until a supply runs out.
@@ -860,12 +867,14 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     outputs = drops(prerequisite, tool(worker)), status = "digging-mine", duration = 2_000,
                     miningStep = next - 1, miningAccessStep = next - 1)
             }
-            val supportWork = target?.material?.takeIf { it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) }
+            val supportWork = target?.material?.takeIf {
+                it in setOf(Material.COBBLESTONE, Material.LADDER, Material.TORCH) || it.name in geometry.structuralMaterials
+            }
             // Keep the same durable step until the paid ladder is installed.
             val excavating = target?.material == Material.LADDER && !block.type.isAir && block.type != Material.LADDER
             val costs = if (excavating) emptyMap() else supportWork?.let { mapOf(it.name to 1L) }.orEmpty()
             costs.keys.firstOrNull { CivsEquipment.plainCount(worker, it) < 1 }?.let { material ->
-                return blocked(worker, "waiting-${material.lowercase()}", material)
+                return prepareQuarry(city, worker, building, world, material)
             }
             val standing = beside(city, worker, building, world, point, ladder = true,
                 miningStep = if (excavating) next - 1 else next, miningAccessStep = next - 1,
@@ -1199,8 +1208,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val coordinates = listOf(target.x.toLong() + offset.x, target.y.toLong() + offset.y, target.z.toLong() + offset.z)
             if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) { nextPosition(); continue }
             val p = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
-            if (building.type == BuildingType.QUARRY && (!CivsMinePlan.workStandingAllowed(building, p) ||
-                    miningAccessStep != null && !mineBuiltStanding(building, p, miningAccessStep) ||
+            if (building.type == BuildingType.QUARRY && ((if (miningAccessStep != null) !mineBuiltStanding(building, p, miningAccessStep)
+                        else !CivsMinePlan.workStandingAllowed(building, p)) ||
                     !mineLadderConnected(building, world, p, connectedHeights) ||
                     rejectedStanding(worker, building, miningStep, p))) { nextPosition(); continue }
             val shaft = shaftApproach

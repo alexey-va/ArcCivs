@@ -3,8 +3,8 @@ package ru.arc.civs
 import com.google.gson.JsonObject
 import java.util.concurrent.ConcurrentHashMap
 
-/** Versioned, schematic-local geometry. V2/V3 orders stay pinned for saved receipts. */
-internal class CivsMinePlan private constructor(layout: JsonObject, val version: Int) {
+/** Versioned, schematic-local geometry. V2/V3/V4 orders stay pinned for saved receipts. */
+internal class CivsMinePlan private constructor(layout: JsonObject, val version: Int, private val timber: String) {
     data class Step(val point: CivPosition, val after: String?, val stage: String,
         val floor: Int? = null, val branch: String? = null, val shaftSupport: Boolean = false,
         /** Already built predecessor; native support, reach and route checks remain mandatory. */
@@ -178,7 +178,11 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
         openingColumns.forEach { (x, z) -> add(Step(CivPosition(x, lowest - 1, z),
             "minecraft:cobblestone", "shaft", floors.last().index, "bottom")) }
         add(Step(requireNotNull(generator), "minecraft:cobblestone", "gallery", floors.last().index, "generator"))
-    } else buildNetworkSteps()
+    } else if (version == 4) buildNetworkSteps() else buildFramedNetworkSteps()
+
+    /** Exact native items required by the new frame steps; quantities remain ordinary receipts. */
+    val structuralMaterials: Set<String> = if (version >= 5)
+        setOf("${timber}_LOG", "${timber}_PLANKS", "${timber}_FENCE").mapTo(linkedSetOf()) { it.uppercase() } else emptySet()
 
     /** In V4 every ladder, landing and central slice precedes the first branch. */
     val shaftEnd: Int = steps.indexOfFirst { it.stage == "gallery" }.takeIf { it >= 0 } ?: steps.size
@@ -203,7 +207,7 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
      * prerequisite footing outside its ordinal; its real support is checked by the caller.
      */
     fun builtStanding(local: CivPosition, nextStep: Long): Boolean {
-        if (nextStep !in 0..steps.size.toLong() || !containsWorkStanding(local)) return false
+        if (nextStep !in 0..steps.size.toLong() || version < 5 && !containsWorkStanding(local)) return false
         fun open(point: CivPosition): Boolean {
             val change = passageHistory[point]?.lastOrNull { it.first <= nextStep }
             if (change != null) return change.second == null || change.second!!.startsWith("minecraft:ladder[") ||
@@ -354,6 +358,114 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
             "generator", approach = requireNotNull(generatorStanding)))
     }
 
+    /** V5 adds paid framing to the exact V4 topology, with a separate immutable step order. */
+    private fun buildFramedNetworkSteps(): List<Step> = buildList {
+        val base = buildNetworkSteps()
+        val landings = listOf(requireNotNull(entranceLanding)) + floors
+        val lastOpening = base.withIndex().filter { it.value.branch == "opening" }
+            .groupBy { it.value.floor }.mapValues { (_, steps) -> steps.last().index }
+        val lastBranch = base.withIndex().filter { it.value.stage == "gallery" && it.value.branch != "generator" }
+            .groupBy { it.value.floor to it.value.branch }.mapValues { (_, steps) -> steps.last().index }
+        val lastGallery = base.withIndex().filter { it.value.stage == "gallery" && it.value.branch != "generator" }
+            .groupBy { it.value.floor }.mapValues { (_, steps) -> steps.last().index }
+        val bottomSteps = base.filter { it.branch == "bottom" }
+        val log = "minecraft:${timber}_log[axis=y]"
+        val planks = "minecraft:${timber}_planks"
+        fun guards(floor: Floor) = (-2..2).flatMap { d -> (-2..2).mapNotNull { s ->
+            relative(d, s, floor.feetY).takeIf { kotlin.math.abs(d) == 2 || kotlin.math.abs(s) == 2 }
+        } }.toSet()
+        fun posts(floor: Floor) = listOf(-4, 4).flatMap { d -> listOf(-4, 4).map { s -> relative(d, s, floor.feetY) } }.toSet()
+        fun decorateLanding(floor: Floor) {
+            val rail = guards(floor)
+            val corners = posts(floor)
+            val standing = floor.cells.take(floor.sections.first().second).map { it.copy(y = floor.feetY) }
+                .filter { it !in rail && it !in corners }
+            fun place(point: CivPosition, after: String, branch: String) {
+                if (point.x == bottom.x && point.z == bottom.z || point.x == backing.x && point.z == backing.z) return
+                val approach = standing.minWith(compareBy<CivPosition> {
+                    kotlin.math.abs(it.x - point.x) + kotlin.math.abs(it.z - point.z)
+                }.thenBy { it.x }.thenBy { it.z })
+                add(Step(point, after, "shaft", floor.index, branch, approach = approach))
+            }
+            // The current central rows have air above their still-solid floor. Install this
+            // railing before the following lower tier removes that floor and exposes a drop.
+            // Close the far edge first. A near-ladder fence otherwise hides later
+            // targets from the still-required immediate shaft approach.
+            for (point in rail.sortedWith(compareByDescending<CivPosition> {
+                kotlin.math.abs(it.x - bottom.x) + kotlin.math.abs(it.z - bottom.z)
+            }.thenBy { it.x }.thenBy { it.z })) {
+                fun connected(dx: Int, dz: Int) = point.copy(x = point.x + dx, z = point.z + dz) in rail
+                place(point, "minecraft:${timber}_fence[east=${connected(1, 0)},north=${connected(0, -1)}," +
+                    "south=${connected(0, 1)},waterlogged=false,west=${connected(-1, 0)}]", "railing")
+            }
+            // A 3-wide opening in the wall faces each primary gallery. The rear remains a
+            // closed access wing; the original ladder and its backing are never replaced.
+            for (d in -5..5) for (s in -5..5) {
+                if (kotlin.math.abs(d) != 5 && kotlin.math.abs(s) != 5) continue
+                // Diagonal outer corners have no exposed face from this landing.
+                // Keep their native rock; the inner timber post closes that corner.
+                if (kotlin.math.abs(d) == 5 && kotlin.math.abs(s) == 5) continue
+                // This rear column has no face into the room: the immutable ladder
+                // backing already seals it. Keep the original rock behind that backing.
+                if (d == -5 && s == 0) continue
+                if (d == 5 && s in -1..1 || kotlin.math.abs(s) == 5 && d in -1..1) continue
+                for (dy in 0 until floor.height) place(relative(d, s, floor.feetY + dy), "minecraft:cobblestone", "lining")
+            }
+            for (point in corners) for (dy in 0..1) place(point.copy(y = point.y + dy), log, "frame")
+        }
+        fun decorateCeiling(floor: Floor) {
+            val standing = floor.cells.take(floor.sections.first().second).map { it.copy(y = floor.feetY) }
+                .filter { it !in guards(floor) && it !in posts(floor) }
+            // Do this after the gallery mouths are excavated. An early lintel hides
+            // their first ceiling cut. Cap the posts before neighbouring beams hide them.
+            val perimeter = (-4..4).flatMap { d -> (-4..4).mapNotNull { s ->
+                (d to s).takeIf { kotlin.math.abs(d) == 4 || kotlin.math.abs(s) == 4 }
+            } }.sortedByDescending { (d, s) -> kotlin.math.abs(d) == 4 && kotlin.math.abs(s) == 4 }
+            for ((d, s) in perimeter) {
+                val point = relative(d, s, floor.feetY + 2)
+                if (point.x == bottom.x && point.z == bottom.z || point.x == backing.x && point.z == backing.z) continue
+                val approach = standing.minWith(compareBy<CivPosition> {
+                    kotlin.math.abs(it.x - point.x) + kotlin.math.abs(it.z - point.z)
+                }.thenBy { it.x }.thenBy { it.z })
+                add(Step(point, planks, "gallery", floor.index, "frame", approach = approach))
+            }
+        }
+        fun decorateBranch(floor: Floor, branch: String) {
+            val sections = networkSections()
+            val columns = sections.single { it.first == branch }.second
+            val direction = columns[3].let { (d, s) -> d - columns[0].first to s - columns[0].second }
+            val primary = branch in setOf("main", "left", "right")
+            val firstDistance = if (primary) 5 else 2
+            for (distance in if (primary) listOf(8, 18) else listOf(6)) {
+                val (d, s) = columns[(distance - firstDistance) * 3]
+                val stance = relative(d, s, floor.feetY)
+                fun point(side: Int, dy: Int) = relative(d - direction.second * side, s + direction.first * side, floor.feetY + dy)
+                fun step(target: CivPosition, after: String?) = add(Step(target, after, "gallery", floor.index,
+                    "$branch-frame", approach = stance))
+                for (side in listOf(-2, 2)) {
+                    // Posts occupy the rock shoulder outside the three walking columns.
+                    for (dy in 2 downTo 0) step(point(side, dy), null)
+                    step(point(side, -1), "minecraft:cobblestone")
+                    for (dy in 0..1) step(point(side, dy), log)
+                }
+                for (side in listOf(-2, 2, -1, 1, 0)) step(point(side, 2), planks)
+            }
+        }
+        for ((index, step) in base.withIndex()) {
+            if (step.branch == "bottom") continue
+            add(step)
+            if (lastOpening[step.floor] == index) {
+                val floor = landings.single { it.index == step.floor }
+                // Close the lowest opening while its inner rim is still accessible.
+                if (floor.index == floors.last().index) addAll(bottomSteps)
+                decorateLanding(floor)
+            }
+            if (lastBranch[step.floor to step.branch] == index)
+                decorateBranch(floors.single { it.index == step.floor }, requireNotNull(step.branch))
+            if (lastGallery[step.floor] == index) decorateCeiling(floors.single { it.index == step.floor })
+        }
+    }
+
     private fun alignedFloors(count: Int): List<Floor> {
         fun point(d: Int, s: Int, y: Int) = CivPosition(center.x + forward.first * d - forward.second * s,
             y, center.z + forward.second * d + forward.first * s)
@@ -424,14 +536,19 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
         (if (local.x == extensionBacking.x && local.z == extensionBacking.z) extensionLadder else bottom).copy(y = local.y)
 
     companion object {
-        const val VERSION = 4
+        const val VERSION = 5
         private val plans = ConcurrentHashMap<String, CivsMinePlan>()
         fun forBuilding(building: CivBuilding, version: Int = VERSION): CivsMinePlan? {
             if (version !in 2..VERSION) return null
             val key = "${building.schematicId}:$version"
             plans[key]?.let { return it }
             val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("mine") ?: return null
-            return plans.computeIfAbsent(key) { CivsMinePlan(layout, version) }
+            val timber = when {
+                "/nordic/" in building.schematicId -> "spruce"
+                "/caledonia/" in building.schematicId -> "dark_oak"
+                else -> "oak"
+            }
+            return plans.computeIfAbsent(key) { CivsMinePlan(layout, version, timber) }
         }
 
         fun shaftContains(building: CivBuilding, world: CivPosition): Boolean {

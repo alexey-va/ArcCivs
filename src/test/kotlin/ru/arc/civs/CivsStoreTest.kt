@@ -630,6 +630,62 @@ class CivsStoreTest : FreeSpec({
         }
     }
 
+    "collected receipts freeze native endpoints and preserve the optional home-visit marker across reload" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val base = settlement().copy(inventory = null, stock = CivsRules.STARTING_STOCK, autonomy = CivAutonomy())
+        val before = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }
+        val items = before.toMutableList().apply { this[6] = CivResidentItem("COAL", 8) }
+        val worker = CivWorker(UUID.randomUUID(), "Collector", null, items = items, hasCollectedItems = true)
+        val ground = mutableListOf(CivGroundItemChange(UUID.randomUUID(), CivPosition(1, 64, 0), CivResidentItem("COAL", 8), null))
+        val tx = CivInventoryTransaction(UUID.randomUUID(), base.id, base.revision,
+            base.copy(workers = listOf(worker), revision = base.revision + 1), emptyList(),
+            collected = CivCollectedTransfer(worker.id, before, ground = ground))
+        val expected = tx.copy(after = tx.after.copy(workers = listOf(worker.copy(items = items.toList()))),
+            collected = tx.collected!!.copy(before = before.toList(), ground = ground.toList()))
+        val saving = store.saveInventoryTransaction(tx)
+        before.clear(); items.clear(); ground.clear()
+        queued.runNext()
+        saving.join() shouldBe expected
+        val reopened = CivsStore(root, directExecutor)
+        reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
+        reopened.save(base).join()
+        reopened.save(expected.after).join()
+        CivsStore(root, directExecutor).load().join().single().workers.single().hasCollectedItems shouldBe true
+        val legacy = Gson().toJsonTree(expected.after).asJsonObject.also {
+            it["workers"].asJsonArray[0].asJsonObject.remove("hasCollectedItems")
+        }
+        CivsRules.validate(Gson().fromJson(legacy, Settlement::class.java)).workers.single().hasCollectedItems shouldBe null
+        val duplicate = expected.copy(id = UUID.randomUUID(), cityId = UUID.randomUUID()).let {
+            it.copy(after = it.after.copy(id = it.cityId))
+        }
+        shouldThrow<CompletionException> { reopened.saveInventoryTransaction(duplicate).join() }
+        Files.exists(root.resolve("inventory-transactions/${duplicate.id}.json")) shouldBe false
+        reopened.loadInventoryTransactions().join() shouldBe listOf(expected)
+    }
+
+    "home journal freezes exact container slots and refuses item creation" {
+        val queued = QueuedExecutor()
+        val store = CivsStore(root, queued)
+        val base = settlement()
+        val home = base.buildings.single().copy(phase = BuildingPhase.ACTIVE, control = CivPosition(3, 64, 0))
+        val before = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { if (it == 6) CivResidentItem("COAL", 8) else null }
+        val afterItems = List<CivResidentItem?>(CivsEquipment.SLOTS) { null }
+        val worker = CivWorker(UUID.randomUUID(), "Collector", null, items = afterItems, hasCollectedItems = false)
+        val slots = mutableListOf(CivNativeContainerChange(home.control!!, "BARREL", 0, CivResidentItem("COAL", 2), CivResidentItem("COAL", 10)))
+        val tx = CivInventoryTransaction(UUID.randomUUID(), base.id, base.revision,
+            base.copy(buildings = listOf(home), workers = listOf(worker), revision = base.revision + 1), emptyList(),
+            collected = CivCollectedTransfer(worker.id, before, homeId = home.id, containers = slots))
+        val expected = tx.copy(collected = tx.collected!!.copy(before = before.toList(), containers = slots.toList()))
+        val saving = store.saveInventoryTransaction(tx)
+        before.clear(); slots.clear()
+        queued.runNext()
+        saving.join() shouldBe expected
+        CivsStore(root, directExecutor).loadInventoryTransactions().join() shouldBe listOf(expected)
+        shouldThrow<IllegalArgumentException> { expected.copy(collected = expected.collected!!.copy(
+            containers = listOf(expected.collected!!.containers.single().copy(after = CivResidentItem("COAL", 11))))).validated() }
+    }
+
     "legacy receipts without a player endpoint still load and malformed player endpoints stay preserved" {
         val legacy = inventoryTransaction(settlement())
         val path = root.resolve("inventory-transactions/${legacy.id}.json")

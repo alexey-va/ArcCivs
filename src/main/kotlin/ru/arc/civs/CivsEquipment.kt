@@ -77,6 +77,40 @@ internal object CivsEquipment {
     fun usableCount(worker: CivWorker, material: String): Int = plainCount(worker, material) -
         (worker.cargo?.takeIf { it.inventoryBacked && it.material == material }?.amount?.toInt() ?: 0)
 
+    /** Ground belongings go into bag slots only; finding gear never changes the resident's equipment. */
+    internal fun collectGround(worker: CivWorker, item: CivResidentItem): Pair<CivWorker, Int> {
+        val slots = slots(worker).toMutableList()
+        val maximum = item.stack().maxStackSize
+        var remaining = item.amount
+        for (empty in listOf(false, true)) for (slot in BAG until SLOTS) {
+            val before = slots[slot]
+            if (remaining == 0 || (before == null) != empty || before != null &&
+                (before.material != item.material || before.data != item.data)) continue
+            val moved = minOf(remaining, maximum - (before?.amount ?: 0))
+            if (moved <= 0) continue
+            slots[slot] = item.copy(amount = (before?.amount ?: 0) + moved)
+            remaining -= moved
+        }
+        val moved = item.amount - remaining
+        return (if (moved == 0) worker else replace(worker, slots).copy(hasCollectedItems = true)) to moved
+    }
+
+    /** Equipment, food, work inputs and any shipment remain personal; only spare bag contents can go home. */
+    internal fun homeSurplus(worker: CivWorker, reserve: Map<String, Long>): Map<Int, Int> {
+        val remaining = reserve.toMutableMap()
+        worker.cargo?.let { remaining.merge(it.material, it.amount, Math::addExact) }
+        return buildMap {
+            slots(worker).forEachIndexed { slot, item ->
+                if (slot < BAG || item == null) return@forEachIndexed
+                val material = Material.valueOf(item.material)
+                if (material.maxDurability > 0 || armorSlot(item.material) != null || item.material == "SHIELD") return@forEachIndexed
+                val keep = if (item.data == null) minOf(item.amount.toLong(), remaining[item.material] ?: 0L).toInt() else 0
+                if (keep > 0) remaining[item.material] = remaining.getValue(item.material) - keep
+                if (item.amount > keep) put(slot, item.amount - keep)
+            }
+        }
+    }
+
     fun inputsReady(worker: CivWorker, inputs: Map<String, Long>, stock: Map<String, Long>): Boolean =
         storageInputs(worker, inputs).all { (material, count) -> (stock[material] ?: 0L) >= count }
 

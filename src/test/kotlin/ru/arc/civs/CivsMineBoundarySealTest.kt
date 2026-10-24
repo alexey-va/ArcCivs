@@ -83,7 +83,7 @@ class CivsMineBoundarySealTest : FunSpec({
                     world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y - 1, BOUNDARY_CUT.z).type shouldBe Material.STONE
                     commit(seal)
                     city.minePlans!!.getValue(mine.id.toString()) shouldBe
-                        CivMinePlanState(4, 216, legacyStep = 214, v3Step = 83)
+                        CivMinePlanState(CivsMinePlan.VERSION, 216, legacyStep = 214, v3Step = 83)
                     CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe
                         CivsEquipment.plainCount(worker, "COBBLESTONE")
                     world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type shouldBe Material.COBBLESTONE
@@ -153,7 +153,7 @@ private fun withMineBoundary(action: (CivsWorksiteWorldFixture, CivBuilding, Set
                 val key = mine.id.toString()
                 val city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
                     center = CivPosition(-25, 64, -20), mineProgress = mapOf(key to 214L),
-                    minePlans = mapOf(key to CivMinePlanState(4, 215, legacyStep = 214, v3Step = 83))))
+                    minePlans = mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, 215, legacyStep = 214, v3Step = 83))))
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
                 for (step in geometry.steps.take(215)) {
                     val point = CivsWorksiteLayouts.point(mine, step.point)

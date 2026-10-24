@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.destroystokyo.paper.event.entity.EntityAddToWorldEvent
 import org.bukkit.Bukkit
 import org.bukkit.Chunk
 import org.bukkit.Material
@@ -11,6 +12,7 @@ import org.bukkit.block.DoubleChest
 import org.bukkit.block.TileState
 import org.bukkit.block.data.BlockData
 import org.bukkit.entity.Player
+import org.bukkit.entity.Item
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
 import org.bukkit.event.HandlerList
@@ -21,6 +23,10 @@ import org.bukkit.event.block.BlockPlaceEvent
 import org.bukkit.event.entity.EntityExplodeEvent
 import org.bukkit.event.entity.EntityDamageEvent
 import org.bukkit.event.entity.EntityPickupItemEvent
+import org.bukkit.event.entity.ItemMergeEvent
+import org.bukkit.event.entity.ItemDespawnEvent
+import org.bukkit.event.entity.EntityTeleportEvent
+import org.bukkit.event.entity.EntityPortalEvent
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
@@ -43,9 +49,14 @@ import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.InventoryHolder
 import org.bukkit.inventory.ItemStack
 import org.bukkit.plugin.Plugin
+import ru.arc.core.BukkitTaskScheduler
+import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.playerstate.NativePaperPlayerDataPersistence
 import ru.arc.paper.playerstate.PaperPlayerDataPersistence
+import ru.arc.paper.chunk.PaperChunkKey
+import ru.arc.paper.chunk.PaperChunkTicketLease
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
 
 data class CivPlainItem(val material: String, val amount: Int) {
@@ -116,13 +127,18 @@ data class CivInventoryTransaction(
     val residentTransfer: CivResidentTransfer? = null,
     val worldChanges: List<CivPlanBlock>? = null,
     val resurrection: CivResurrectionDebit? = null,
+    val collected: CivCollectedTransfer? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
-        require(after.inventory != null || resurrection != null || after.autonomy != null && residentTransfer != null)
-        require(listOfNotNull(playerDebit, residentTransfer, resurrection).size <= 1)
+        require(after.inventory != null || resurrection != null || collected != null || after.autonomy != null && residentTransfer != null)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected).size <= 1)
+        collected?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
+            it.validated(after)
+        }
         resurrection?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -195,7 +211,7 @@ class CivsStorage(private val plugin: Plugin,
     tileEntities: (Chunk) -> Array<BlockState> = { it.tileEntities }) : Listener, AutoCloseable {
     private data class Key(val worldId: UUID, val position: CivPosition)
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>, val playerId: UUID?,
-        val worldPositions: Set<CivPosition> = emptySet())
+        val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet())
     private data class Source(val position: CivPosition, val type: String, val inventory: Inventory)
     private data class Snapshot(val source: Source, val before: List<ItemStack?>, val after: MutableList<ItemStack?>)
     private class DebitSearch(val worldId: UUID, val owner: UUID, val required: Map<String, Long>, val buildings: Set<UUID>?) {
@@ -209,6 +225,16 @@ class CivsStorage(private val plugin: Plugin,
     private val locked = mutableMapOf<Key, UUID>()
     private val lockedPlayers = mutableMapOf<UUID, UUID>()
     private val lockedWorld = mutableMapOf<Key, UUID>()
+    private val lockedGround = mutableMapOf<UUID, UUID>()
+    private val homeCursors = mutableMapOf<UUID, Int>()
+    internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
+    private val nativePersistenceDelegate = lazy { CivsNativePersistence(plugin) { collectedChunkLease(it) } }
+    private val nativePersistence by nativePersistenceDelegate
+    internal var persistCollectedNative: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { tx, before ->
+        nativePersistence.persist(tx, before)
+    }
+    private val pendingPersistence = mutableSetOf<CompletableFuture<Unit>>()
+    private val persistenceTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val index = CivsContainerIndex(plugin.server, tileEntities)
     private val supplyCaptures = CivsSupplyCaptures(index, { city ->
         val positions = index.positions(city)
@@ -216,6 +242,8 @@ class CivsStorage(private val plugin: Plugin,
     }, ::captureSupplyContainer)
     private val materializationCursors = mutableMapOf<UUID, Int>()
     private val debitSearches = mutableMapOf<UUID, DebitSearch>()
+    private var consumedItems = CivConsumedItemIndex.EMPTY
+    private var consumedWarning = false
     private var receiptBootstrap = false
     private var closed = false
 
@@ -238,6 +266,7 @@ class CivsStorage(private val plugin: Plugin,
             "worldPositions" to claim.worldPositions.size,
             "lockedContainers" to containers.count { it.value == id }, "lockedWorldCells" to worldCells.count { it.value == id })
         } + mapOf("source" to "owner-cache", "closed" to closed, "receiptBootstrap" to receiptBootstrap,
+            "consumedGroundItems" to consumedItems.size, "consumedGroundLimit" to CivConsumedItemIndex.MAX_ITEMS,
             "lockedContainers" to sample(containers) { (key, receipt) -> mapOf("world" to key.worldId.toString(),
                 "position" to point(key.position), "receipt" to receipt.toString()) },
             "lockedWorldCells" to sample(worldCells) { (key, receipt) -> mapOf("world" to key.worldId.toString(),
@@ -261,12 +290,41 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     /** Install every exact lock before releasing unrelated players, independently of network city loading. */
-    fun completeReceiptBootstrap(transactions: Collection<CivInventoryTransaction>) {
+    fun completeReceiptBootstrap(transactions: Collection<CivInventoryTransaction>) =
+        completeReceiptBootstrap(transactions, CivConsumedItemIndex.EMPTY)
+
+    internal fun completeReceiptBootstrap(transactions: Collection<CivInventoryTransaction>, consumed: CivConsumedItemIndex) {
         checkMain(); requireOpen()
         transactions.forEach(::lock)
+        installConsumed(consumed)
         receiptBootstrap = false
         CivsDiagnostics.event("inventory_bootstrap", "state" to "ready", "receipts" to transactions.size,
             "players" to transactions.count { it.playerId() != null })
+    }
+
+    internal fun installConsumed(consumed: CivConsumedItemIndex) {
+        checkMain(); requireOpen()
+        // Store snapshots only grow; an older async callback may not replace a newer committed index.
+        if (consumed.size < consumedItems.size) return
+        consumedItems = consumed
+        if (!consumedWarning && (consumed.size >= CivConsumedItemIndex.MAX_ITEMS * 4 / 5 ||
+            consumed.largestBucket >= CivConsumedItemIndex.MAX_BUCKET_ITEMS * 4 / 5)) {
+            consumedWarning = true
+            plugin.logger.warning("ArcCivs consumed ground item history or one UUID bucket is at least 80% full (total ${consumed.size}/${CivConsumedItemIndex.MAX_ITEMS}, largest bucket ${consumed.largestBucket}/${CivConsumedItemIndex.MAX_BUCKET_ITEMS}); new pickup will fail closed at capacity. History must not be evicted.")
+        }
+    }
+
+    /** A known consumed UUID is a stale native copy, regardless of its current chunk or world. */
+    private fun discardConsumed(item: Item): Boolean {
+        if (receiptBootstrap || item.uniqueId !in consumedItems) return false
+        item.remove()
+        CivsDiagnostics.event("resident_stale_ground_removed", "entity" to item.uniqueId, "world" to item.world.uid)
+        return true
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    fun onGroundAdded(event: EntityAddToWorldEvent) {
+        (event.entity as? Item)?.let(::discardConsumed)
     }
 
     fun replaceCities(cities: Collection<Settlement>) {
@@ -334,8 +392,10 @@ class CivsStorage(private val plugin: Plugin,
     fun seal(transaction: CivInventoryTransaction, keepViewersOpen: Boolean = false) {
         checkMain(); requireOpen(); transaction.validated()
         val claim = claims[transaction.id] ?: throw CivsRejection("storage-busy")
-        val positions = transaction.changes.associate { it.container to it.containerType }
+        val positions = transaction.changes.associate { it.container to it.containerType } +
+            transaction.collected?.containers.orEmpty().associate { it.container to it.containerType }
         val worldPositions = transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position)
+        val groundItems = transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId)
         require(claim.city.id == transaction.cityId && claim.city.revision == transaction.beforeRevision &&
             claim.playerId == transaction.playerId() && positions.all { (position, type) ->
                 position in claim.positions && (claim.positions[position] == null || claim.positions[position] == type)
@@ -350,12 +410,22 @@ class CivsStorage(private val plugin: Plugin,
                 resurrection.corpse.worker.id, resurrection.corpse.diedAt, resurrection.acceptedAt,
                 administrator = claim.city.autonomy != null))
         }
+        transaction.collected?.let { collected ->
+            val worker = claim.city.workers.single { it.id == collected.workerId }
+            val afterWorker = transaction.after.workers.single { it.id == worker.id }
+            require(collected.before == CivsEquipment.slots(worker))
+            require(afterWorker.copy(items = worker.items, inventory = worker.inventory, hasCollectedItems = worker.hasCollectedItems) == worker)
+            require(transaction.after.copy(workers = transaction.after.workers.map { if (it.id == worker.id) worker else it },
+                revision = claim.city.revision) == claim.city)
+        }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
         }
         reject(worldPositions.any { lockedWorld[Key(claim.city.worldId, it)]?.let { id -> id != transaction.id } == true }, "storage-busy")
-        claims[transaction.id] = claim.copy(worldPositions = worldPositions)
+        reject(groundItems.any { lockedGround[it]?.let { id -> id != transaction.id } == true }, "storage-busy")
+        claims[transaction.id] = claim.copy(worldPositions = worldPositions, groundItems = groundItems)
         worldPositions.forEach { lockedWorld[Key(claim.city.worldId, it)] = transaction.id }
+        groundItems.forEach { lockedGround[it] = transaction.id }
         // Retain full frozen source membership for stock reads; native locks cover only receipt coordinates.
         if (!keepViewersOpen) closeViewers(transaction.id, claim.playerId)
     }
@@ -364,17 +434,20 @@ class CivsStorage(private val plugin: Plugin,
     fun lock(transaction: CivInventoryTransaction) {
         checkMain(); requireOpen()
         transaction.validated()
-        val positions = transaction.changes.associate { it.container to it.containerType }
+        val positions = transaction.changes.associate { it.container to it.containerType } +
+            transaction.collected?.containers.orEmpty().associate { it.container to it.containerType }
         lock(transaction.after, transaction.id, positions, transaction.playerId(),
-            transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position))
+            transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position),
+            transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId))
     }
 
     private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>, playerId: UUID?,
-        worldPositions: Set<CivPosition> = emptySet(), closeViewers: Boolean = true) {
+        worldPositions: Set<CivPosition> = emptySet(), groundItems: Set<UUID> = emptySet(), closeViewers: Boolean = true) {
         val existing = claims[transactionId]
         if (existing != null) {
             require(existing.city.id == city.id && existing.city.owner == city.owner && existing.city.worldId == city.worldId && existing.playerId == playerId &&
                 existing.worldPositions == worldPositions &&
+                existing.groundItems == groundItems &&
                 positions.all { (position, type) -> position in existing.positions &&
                     (type == null || existing.positions[position] == null || existing.positions[position] == type) } &&
                 (existing.city.revision == city.revision ||
@@ -383,12 +456,13 @@ class CivsStorage(private val plugin: Plugin,
             return
         }
         reject(city.id in cityClaims || playerId != null && playerId in lockedPlayers || positions.keys.any { Key(city.worldId, it) in locked } ||
-            worldPositions.any { Key(city.worldId, it) in lockedWorld }, "storage-busy")
-        claims[transactionId] = Claim(city, positions, playerId, worldPositions)
+            worldPositions.any { Key(city.worldId, it) in lockedWorld } || groundItems.any { it in lockedGround }, "storage-busy")
+        claims[transactionId] = Claim(city, positions, playerId, worldPositions, groundItems)
         cityClaims[city.id] = transactionId
         if (playerId != null) lockedPlayers[playerId] = transactionId
         positions.keys.forEach { locked[Key(city.worldId, it)] = transactionId }
         worldPositions.forEach { lockedWorld[Key(city.worldId, it)] = transactionId }
+        groundItems.forEach { lockedGround[it] = transactionId }
         try {
             // Closing current viewers scales with players, not every container in a large settlement.
             if (closeViewers) closeViewers(transactionId, playerId)
@@ -413,10 +487,105 @@ class CivsStorage(private val plugin: Plugin,
         claim.playerId?.let { lockedPlayers.remove(it, transactionId) }
         claim.positions.keys.forEach { locked.remove(Key(claim.city.worldId, it), transactionId) }
         claim.worldPositions.forEach { lockedWorld.remove(Key(claim.city.worldId, it), transactionId) }
+        claim.groundItems.forEach { lockedGround.remove(it, transactionId) }
     }
 
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
     fun isWorldLocked(worldId: UUID, position: CivPosition): Boolean = Key(worldId, position) in lockedWorld
+
+    internal fun prepareGroundPickup(city: Settlement, workerId: UUID, entityIds: List<UUID>, feet: org.bukkit.Location): CivCollectedPlan {
+        checkClaim(city)
+        require(entityIds.size in 1..8 && entityIds.distinct().size == entityIds.size)
+        val worker = city.workers.singleOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        reject(worker.cargo != null || CivsResidents.isChild(worker), "stale-delivery")
+        val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+        var updated = worker
+        val changes = mutableListOf<CivGroundItemChange>()
+        for (id in entityIds) {
+            val item = world.getEntity(id) as? Item ?: throw CivsRejection("stale-delivery")
+            reject(receiptBootstrap || discardConsumed(item), "ground-item-consumed")
+            reject(!city.contains(item.location.blockX, item.location.blockZ) || !civsCanCollect(feet, item, workerId), "stale-delivery")
+            val before = requireNotNull(CivResidentItem.of(item.itemStack))
+            val (next, moved) = CivsEquipment.collectGround(updated, before)
+            // Leave the whole native Item unchanged until its complete stack fits. There is no moving remainder to journal.
+            if (moved != before.amount) continue
+            updated = next
+            changes += CivGroundItemChange(id, CivPosition(item.location.blockX, item.location.blockY, item.location.blockZ),
+                before, null)
+        }
+        return CivCollectedPlan(updated, changes.takeIf { it.isNotEmpty() }?.let {
+            CivCollectedTransfer(workerId, CivsEquipment.slots(worker), ground = it)
+        })
+    }
+
+    /** Cached membership limits discovery to four real holders in this resident's own home. */
+    private fun homeSources(city: Settlement, worker: CivWorker, destination: CivPosition? = null): Sequence<Source> {
+        val home = civsCollectionHome(city, worker) ?: return emptySequence()
+        val positions = buildingPositions(city, home.id)
+        val ordered = linkedMapOf<CivPosition, String?>()
+        destination?.takeIf { it in positions }?.let { ordered[it] = positions[it] }
+        val entries = positions.entries.toList()
+        val cursor = (homeCursors[worker.id] ?: 0).takeIf { it in entries.indices } ?: 0
+        for (entry in entries.drop(cursor) + entries.take(cursor)) ordered[entry.key] = entry.value
+        if (destination == null && entries.isNotEmpty()) homeCursors[worker.id] = (cursor + 4) % entries.size
+        return resolveSources(city, ordered.asSequence().take(4).map { it.key to it.value })
+    }
+
+    internal fun homeDestination(city: Settlement, worker: CivWorker, reserve: Map<String, Long>): CivPosition? {
+        checkMain(); requireOpen()
+        if (worker.hasCollectedItems != true || worker.cargo != null || CivsResidents.isChild(worker)) return null
+        val surplus = CivsEquipment.homeSurplus(worker, reserve)
+        if (surplus.isEmpty()) return null
+        val home = civsCollectionHome(city, worker) ?: return null
+        for (source in homeSources(city, worker)) {
+            val world = plugin.server.getWorld(city.worldId) ?: return null
+            if (!citizenChunkReady(world, source.position.x shr 4, source.position.z shr 4)) continue
+            val slots = source.inventory.storageContents
+            if (surplus.any { (index, _) ->
+                val item = requireNotNull(CivsEquipment.slots(worker)[index]).stack()
+                slots.any { native -> isEmpty(native) || native != null && native.isSimilar(item) && native.amount < native.maxStackSize }
+            } && citizenCollectedHomeTarget(city, home, world, source.position) != null) return source.position
+        }
+        return null
+    }
+
+    internal fun prepareHomeDeposit(city: Settlement, workerId: UUID, destination: CivPosition,
+        feet: org.bukkit.Location, reserve: Map<String, Long>): CivCollectedPlan {
+        checkClaim(city)
+        val worker = city.workers.singleOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        reject(worker.hasCollectedItems != true || worker.cargo != null || CivsResidents.isChild(worker), "stale-delivery")
+        val home = civsCollectionHome(city, worker) ?: throw CivsRejection("building-not-found")
+        reject(destination !in buildingPositions(city, home.id) || !civsCanReachContainer(feet, destination), "worker-too-far")
+        val snapshots = homeSources(city, worker, destination).filter { civsCanReachContainer(feet, it.position) }
+            .map { source -> source to source.inventory.storageContents.map(CivResidentItem::of).toMutableList() }.toList()
+        val originals = snapshots.associate { (source, slots) -> source.position to slots.toList() }
+        val items = CivsEquipment.slots(worker).toMutableList()
+        for ((bagSlot, available) in CivsEquipment.homeSurplus(worker, reserve)) {
+            val item = requireNotNull(items[bagSlot])
+            val maximum = item.stack().maxStackSize
+            var remaining = available
+            for ((_, slots) in snapshots) for (empty in listOf(false, true)) for (slot in slots.indices) {
+                val before = slots[slot]
+                if (remaining == 0 || (before == null) != empty || before != null &&
+                    (before.material != item.material || before.data != item.data)) continue
+                val moved = minOf(remaining, maximum - (before?.amount ?: 0))
+                if (moved <= 0) continue
+                slots[slot] = item.copy(amount = (before?.amount ?: 0) + moved)
+                remaining -= moved
+            }
+            items[bagSlot] = item.copy(amount = item.amount - (available - remaining)).takeIf { it.amount > 0 }
+        }
+        val updated = CivsEquipment.replace(worker, items).let {
+            it.copy(hasCollectedItems = CivsEquipment.homeSurplus(it, reserve).isNotEmpty())
+        }
+        val changes = snapshots.flatMap { (source, slots) -> slots.indices.mapNotNull { slot ->
+            val before = originals.getValue(source.position)[slot]
+            if (before == slots[slot]) null else CivNativeContainerChange(source.position, source.type, slot, before, slots[slot])
+        } }
+        return CivCollectedPlan(updated, changes.takeIf { it.isNotEmpty() }?.let {
+            CivCollectedTransfer(workerId, CivsEquipment.slots(worker), homeId = home.id, containers = it)
+        })
+    }
 
     fun prepareResurrection(city: Settlement, player: Player, corpse: CivCorpse, at: Long,
         location: org.bukkit.Location): CivResurrectionDebit {
@@ -494,7 +663,7 @@ class CivsStorage(private val plugin: Plugin,
         return totals.toSortedMap()
     }
 
-    /** Only this building's buffer; active warehouses also include holders inside their own bounds. */
+    /** Only this building's buffer and native holders inside its own completed footprint. */
     fun buildingAvailable(city: Settlement, buildingId: UUID): Map<String, Long> {
         checkMain(); requireOpen()
         val inventory = requireNotNull(city.inventory).validated()
@@ -1036,11 +1205,14 @@ class CivsStorage(private val plugin: Plugin,
         }
         val worldState = classifyWorld(transaction, worldCells)
         if (worldState is CivInventoryApplyResult.Conflict) return worldState
+        val collectedState = classifyCollected(transaction)
+        if (collectedState is CivInventoryApplyResult.Conflict || collectedState is CivInventoryApplyResult.Retry) return collectedState
         val playerState = classifyPlayer(playerId, playerChanges, player)
         if (playerState is CivInventoryApplyResult.Conflict || playerState is CivInventoryApplyResult.Retry) return playerState
         val containerState = classify(transaction, resolved)
         if (containerState is CivInventoryApplyResult.Conflict) return containerState
-        if (player == null && containerState == CivInventoryApplyResult.Applied && worldState == CivInventoryApplyResult.Applied) return containerState
+        if (player == null && containerState == CivInventoryApplyResult.Applied && worldState == CivInventoryApplyResult.Applied &&
+            collectedState == CivInventoryApplyResult.Applied) return containerState
         var playerPersisted = player == null
         try {
             if (player != null) {
@@ -1068,6 +1240,19 @@ class CivsStorage(private val plugin: Plugin,
                 val (block, after) = worldCells.getValue(cell.position)
                 if (block.blockData.asString != cell.after) block.setBlockData(after, false)
             }
+            transaction.collected?.let { collected ->
+                val world = requireNotNull(plugin.server.getWorld(transaction.after.worldId))
+                collected.ground.forEach { change ->
+                    (world.getEntity(change.entityId) as? Item)?.let { item ->
+                        if (change.after == null) item.remove()
+                        else if (!matchesNative(item.itemStack, change.after)) item.itemStack = change.after.stack()
+                    }
+                }
+                collected.containers.forEach { change ->
+                    val inventory = resolve(transaction.after, change.container, change.containerType).inventory
+                    if (!matchesNative(inventory.getItem(change.slot), change.after)) inventory.setItem(change.slot, change.after?.stack())
+                }
+            }
         } catch (failure: Exception) {
             plugin.logger.log(Level.WARNING, "ArcCivs could not apply storage transaction ${transaction.id} for ${transaction.cityId}", failure)
             if (!playerPersisted) return CivInventoryApplyResult.Retry(mapOf("reason" to "player-save-incomplete"))
@@ -1077,6 +1262,103 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     fun apply(transaction: CivInventoryTransaction): CivInventoryApplyResult = reconcile(transaction)
+
+    /** Each admitted batch has two fences: source before the journal, native after before city credit. */
+    internal fun persistCollected(transaction: CivInventoryTransaction, beforeJournal: Boolean = false): CompletableFuture<Unit> {
+        checkMain(); requireOpen()
+        if (transaction.collected == null) return CompletableFuture.completedFuture(Unit)
+        fun checkState() {
+            when (val state = classifyCollected(transaction, beforeJournal)) {
+                CivInventoryApplyResult.Applied -> Unit
+                is CivInventoryApplyResult.Retry -> throw CivsRejection("inventory-recovery", state.values)
+                is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
+                null -> throw CivsRejection("inventory-recovery")
+            }
+        }
+        checkState()
+        val epoch = persistenceTasks.token()
+        val result = CompletableFuture<Unit>()
+        pendingPersistence += result
+        val native = try { persistCollectedNative(transaction, beforeJournal) } catch (failure: Throwable) {
+            pendingPersistence -= result
+            throw failure
+        }
+        native.whenComplete { _, failure ->
+            val complete = complete@{
+                if (!pendingPersistence.remove(result)) return@complete
+                val problem = failure ?: runCatching { requireOpen(); checkState() }.exceptionOrNull()
+                if (problem == null) result.complete(Unit) else result.completeExceptionally(problem)
+                Unit
+            }
+            if (Bukkit.isPrimaryThread()) complete()
+            else persistenceTasks.callSync(epoch, complete).whenComplete { _, dispatchFailure ->
+                if (dispatchFailure != null) result.completeExceptionally(dispatchFailure)
+            }
+        }
+        return result
+    }
+
+    internal fun cancelCollectedPersistence() {
+        checkMain()
+        if (nativePersistenceDelegate.isInitialized()) nativePersistence.cancelPending()
+        pendingPersistence.toList().forEach {
+            pendingPersistence.remove(it)
+            it.completeExceptionally(CivsRejection("not-ready"))
+        }
+        if (closed) persistenceTasks.close() else persistenceTasks.restart()
+    }
+
+    internal fun collectedBeforeState(transaction: CivInventoryTransaction): CivInventoryApplyResult? {
+        checkMain(); requireOpen()
+        return classifyCollected(transaction, true)
+    }
+
+    private fun classifyCollected(transaction: CivInventoryTransaction, expectedBefore: Boolean = false): CivInventoryApplyResult? {
+        val collected = transaction.collected ?: return CivInventoryApplyResult.Applied
+        val world = plugin.server.getWorld(transaction.after.worldId)
+            ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "world-unloaded"))
+        var pending = false
+        for (change in collected.ground) {
+            if (lockedGround[change.entityId] != transaction.id)
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "unlocked-ground-item"))
+            if (!citizenChunkReady(world, change.position.x shr 4, change.position.z shr 4))
+                return CivInventoryApplyResult.Retry(mapOf("reason" to "ground-chunk-unloaded"))
+            val entity = world.getEntity(change.entityId)
+            val item = entity as? Item
+            if (entity != null && (item == null || (item.location.blockX shr 4) != (change.position.x shr 4) ||
+                (item.location.blockZ shr 4) != (change.position.z shr 4)))
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "ground-item-moved"))
+            val before = runCatching { matchesNative(item?.itemStack, change.before) }.getOrDefault(false)
+            val after = runCatching { matchesNative(item?.itemStack, change.after) }.getOrDefault(false)
+            if (expectedBefore) {
+                if (!before) return CivInventoryApplyResult.Conflict(mapOf("reason" to "ground-before-drift"))
+            } else if (!after) {
+                if (!before || item == null || !civsGroundItemAvailable(item, collected.workerId))
+                    return CivInventoryApplyResult.Conflict(mapOf("reason" to "ground-item-drift"))
+                pending = true
+            }
+        }
+        for (change in collected.containers) {
+            if (locked[Key(world.uid, change.container)] != transaction.id)
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "unlocked-home-container"))
+            if (!citizenChunkReady(world, change.container.x shr 4, change.container.z shr 4))
+                return CivInventoryApplyResult.Retry(mapOf("reason" to "home-chunk-unloaded"))
+            val source = try { resolve(transaction.after, change.container, change.containerType) } catch (failure: CivsRejection) {
+                return if (failure.reason == "storage-unavailable") CivInventoryApplyResult.Retry(failure.values)
+                    else CivInventoryApplyResult.Conflict(failure.values)
+            }
+            val native = source.inventory.getItem(change.slot)
+            val before = runCatching { matchesNative(native, change.before) }.getOrDefault(false)
+            val after = runCatching { matchesNative(native, change.after) }.getOrDefault(false)
+            if (expectedBefore) {
+                if (!before) return CivInventoryApplyResult.Conflict(mapOf("reason" to "home-before-drift"))
+            } else if (!after) {
+                if (!before) return CivInventoryApplyResult.Conflict(mapOf("reason" to "home-slot-drift"))
+                pending = true
+            }
+        }
+        return if (pending) null else CivInventoryApplyResult.Applied
+    }
 
     fun waitingForPlayer(transaction: CivInventoryTransaction): Boolean {
         checkMain(); requireOpen()
@@ -1126,7 +1408,10 @@ class CivsStorage(private val plugin: Plugin,
         if (containers is CivInventoryApplyResult.Conflict) return containers
         val world = classifyWorld(transaction, cells)
         if (world is CivInventoryApplyResult.Conflict) return world
-        return if (containers == CivInventoryApplyResult.Applied && world == CivInventoryApplyResult.Applied) CivInventoryApplyResult.Applied
+        val collected = classifyCollected(transaction)
+        if (collected is CivInventoryApplyResult.Conflict || collected is CivInventoryApplyResult.Retry) return collected
+        return if (containers == CivInventoryApplyResult.Applied && world == CivInventoryApplyResult.Applied &&
+            collected == CivInventoryApplyResult.Applied) CivInventoryApplyResult.Applied
             else CivInventoryApplyResult.Retry(mapOf("reason" to "write-incomplete"))
     }
 
@@ -1178,7 +1463,7 @@ class CivsStorage(private val plugin: Plugin,
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         return linkedMapOf<CivPosition, String?>().also { selected ->
             building.control?.takeIf { it in positions }?.let { selected[it] = positions[it] }
-            if (!controlOnly && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.BUILDER_HUT) && building.phase == BuildingPhase.ACTIVE) {
+            if (!controlOnly && building.phase == BuildingPhase.ACTIVE) {
                 val foreignControls = city.buildings.filter { it.id != buildingId }.mapNotNull(CivBuilding::control).toSet()
                 positions.forEach { (position, type) ->
                     if (position !in foreignControls && building.bounds.contains(position.x, position.y, position.z))
@@ -1367,13 +1652,31 @@ class CivsStorage(private val plugin: Plugin,
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onMove(event: InventoryMoveItemEvent) { if (locked(event.source) || locked(event.destination)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    fun onPickup(event: InventoryPickupItemEvent) { if (locked(event.inventory)) event.isCancelled = true }
+    fun onPickup(event: InventoryPickupItemEvent) {
+        if (locked(event.inventory) || groundLocked(event.item.uniqueId)) event.isCancelled = true
+        discardConsumed(event.item)
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onBreak(event: BlockBreakEvent) { if (playerLocked(event.player.uniqueId) || locked(event.block)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onPlace(event: BlockPlaceEvent) { if (playerLocked(event.player.uniqueId) || locked(event.blockPlaced)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    fun onPlayerPickup(event: EntityPickupItemEvent) { if (event.entity is Player && playerLocked(event.entity.uniqueId)) event.isCancelled = true }
+    fun onPlayerPickup(event: EntityPickupItemEvent) {
+        if (groundLocked(event.item.uniqueId) || event.entity is Player && playerLocked(event.entity.uniqueId)) event.isCancelled = true
+        discardConsumed(event.item)
+    }
+    private fun groundLocked(id: UUID): Boolean = receiptBootstrap || id in lockedGround || id in consumedItems
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    fun onGroundMerge(event: ItemMergeEvent) {
+        if (groundLocked(event.entity.uniqueId) || groundLocked(event.target.uniqueId)) event.isCancelled = true
+        discardConsumed(event.entity); discardConsumed(event.target)
+    }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    fun onGroundDespawn(event: ItemDespawnEvent) { if (groundLocked(event.entity.uniqueId)) event.isCancelled = true }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    fun onGroundTeleport(event: EntityTeleportEvent) { if (event.entity is Item && groundLocked(event.entity.uniqueId)) event.isCancelled = true }
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    fun onGroundPortal(event: EntityPortalEvent) { if (event.entity is Item && groundLocked(event.entity.uniqueId)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onPlayerDrop(event: PlayerDropItemEvent) { if (playerLocked(event.player.uniqueId)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
@@ -1393,7 +1696,9 @@ class CivsStorage(private val plugin: Plugin,
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onCommand(event: PlayerCommandPreprocessEvent) { if (playerLocked(event.player.uniqueId)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    fun onPlayerDamage(event: EntityDamageEvent) { if (event.entity is Player && playerLocked(event.entity.uniqueId)) event.isCancelled = true }
+    fun onPlayerDamage(event: EntityDamageEvent) {
+        if (event.entity is Player && playerLocked(event.entity.uniqueId) || event.entity is Item && groundLocked(event.entity.uniqueId)) event.isCancelled = true
+    }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onBlockExplosion(event: BlockExplodeEvent) { event.blockList().removeIf(::locked) }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
@@ -1439,11 +1744,14 @@ class CivsStorage(private val plugin: Plugin,
         checkMain()
         if (closed) return
         closed = true
+        cancelCollectedPersistence()
+        if (nativePersistenceDelegate.isInitialized()) nativePersistence.close()
         HandlerList.unregisterAll(this)
         claims.keys.toList().forEach(::unlock)
         index.clear()
         materializationCursors.clear()
         debitSearches.clear()
+        homeCursors.clear()
         supplyCaptures.clear()
     }
     private fun requireOpen() = check(!closed) { "CivsStorage is closed" }

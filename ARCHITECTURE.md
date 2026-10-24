@@ -17,8 +17,8 @@ autonomous deletion receipts in a separate table so older backends cannot consum
 a player's personal one-time founding reserve after an autonomous deletion. Do not downgrade a backend that has
 created autonomous snapshots to a version without this mode.
 
-`CivsAutonomy` chooses one goal from a finite seven-building profile ending at
-level two. It uses aggregate `Stock` and always has `inventory == null`; migration
+`CivsAutonomy` chooses one paid goal from nine building types, with three
+HOUSE sites (eleven service buildings), ending at level two. It uses aggregate `Stock` and always has `inventory == null`; migration
 to native item stores excludes this mode. Complete schematic details are covered
 by a one-time wood/stone/food price at `reserveBuild`. Producers bypass natural
 world work and exact inputs, but retain the normal NPC journey, work duration,
@@ -532,7 +532,12 @@ reason and route planning from the committed pickup, including no-op pickups.
 A SITE hut can
 bootstrap its own construction; neither the target building nor the hall is a
 construction buffer. Explicit virtual mode uses the same hut-local scope.
-Active warehouses and builder huts can use their indexed internal containers. One city-wide
+All active buildings can use their own indexed internal containers, excluding other buildings'
+controls. SITE and CONSTRUCTING buildings retain control-only local storage. Exact-source
+maintenance restores former MineColonies rack cells to empty chests/barrels; it preserves
+ordinary decorative bookshelves, player-changed blocks, occupied shelves and PDC data.
+The console-only `repair-storage-racks` command compares the exact private legacy/current
+schemes without changing accepted construction captures. One city-wide
 supply dispatcher captures native holders one 27-slot half/barrel per shared Core budget step.
 Only detached stock, capacity, requests, excess, positions and courier tokens enter its bounded
 CPU executor. A shared ledger assigns all couriers together: construction first, then waiting
@@ -795,3 +800,29 @@ so the compatibility condition is unreachable through the new normal flow.
 Creative profession-tool requests can issue one plain requested iron tool directly into the resident's main hand without a player stack. Existing held equipment moves into a real free bag slot. Survival still transfers the cheapest matching native player item; repeated requests recheck the equipped tool after the durable inventory receipt.
 
 Transient schematic WORLD_UNAVAILABLE/chunk-unloaded failures preserve the current paid row and retry no sooner than five seconds later, only when its destination entrance is loaded. They do not become permanent generic placement failures. Pre-upgrade generic paused rows receive one guarded recovery attempt per load; a repeated permanent error stays paused. Native world protection and nonempty-container checks remain mandatory.
+
+## Constructed medieval layout and Mine V5
+
+`CivsSettlementLayout` is the detached deterministic planner used by placement and
+offline preview exports. It reserves future footprints and work fields, places
+residences and civic buildings in the core and producers outside, and connects
+accepted entrances with graded roads and a gated perimeter. The first infrastructure
+receipt pins the largest safe supported ring; existing accepted sites are never
+moved. A partial legacy perimeter reports exact blocking building IDs and coordinates.
+ROAD/GATE preserve explicit transit columns; native collision and headroom remain
+authoritative. There are at most 96 infrastructure pieces in addition to 16 ordinary
+sites. Reaching this infrastructure limit cannot starve ordinary upgrades.
+
+Infrastructure is encoded as bounded entity-free Sponge v3, decoded by the existing
+Core schematic provider, and built through the ordinary immutable plan and payment
+receipts. It has no control barrel, housing, storage or work slots. Player construction
+menus do not expose these internal pieces. A stair's neighbour-derived corner shape
+may change during construction; autonomous revalidation ignores only that property,
+while preserving material, orientation, half, waterlogged and protection checks.
+
+Mine V5 adds paid timber frames, lower-level perimeter walls, rails around the central
+opening and connected galleries to the existing single ladder shaft. V2/V3/V4 plans
+and accepted receipt indices remain immutable. Native work uses the committed prefix
+for standing admission rather than the finished mine mask, so future railings do not
+reject a currently safe construction stance. Timber is collected with other supplies
+when available; its absence stops only a step that actually consumes it.

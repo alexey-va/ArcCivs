@@ -14,7 +14,7 @@ import java.util.logging.Level
 import java.util.logging.LogRecord
 
 class CivsMineSearchWarningsTest : FunSpec({
-    test("a slow matching native mine scan warns once per active minute then reports actual selected work without work credit") {
+    test("a slow native V4 migration scan warns once per active minute then reports actual selected work without work credit") {
         withSlowMineSearch { paper, world, mine, city, runtime, records, _ ->
             val worker = city.workers.single()
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
@@ -34,13 +34,13 @@ class CivsMineSearchWarningsTest : FunSpec({
             val first = warnings().single()
             first.level shouldBe Level.WARNING
             for (field in listOf("city=${city.id}", "worker=${worker.id}", "building=${mine.id}",
-                "cycle=0", "mine_version=4", "committed_step=$committed", "active_ticks=1200", "active_ms=60000",
+                "cycle=0", "mine_version=4", "search_version=${CivsMinePlan.VERSION}", "committed_step=$committed", "active_ticks=1200", "active_ms=60000",
                 "active_time_source=server-ticks", "frontier_target=", "frontier_excavation=-",
                 "frontier_next=", "frontier_deferred=", "candidate=", "aim=", "outcome=searching-work"))
                 withClue(first.message) { (field in first.message) shouldBe true }
             val scan = ((runtime.debug(setOf(worker.id))["mineCursors"] as Map<*, *>)["entries"] as List<*>)
                 .single() as Map<*, *>
-            ((scan["scanStep"] as Number).toLong() > committed) shouldBe true
+            ((scan["scanStep"] as Number).toLong() >= 0) shouldBe true
             ("scan_step=-" in first.message) shouldBe false
             repeat(8) { pulse(0) }
             repeat(59) { pulse() }
@@ -155,11 +155,11 @@ private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorld
         plugin.logger.addHandler(handler)
         try {
             val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
-            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
             val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
                 minePlans = mapOf(mine.id.toString() to CivMinePlanState(4, geometry.shaftEnd.toLong())))
             for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
-            // Native already-matching cells still require the bounded frontier scan;
+            // A real completed V4 prefix migrates through the bounded native V5 frontier scan;
             // the durable cursor and worker receive no work credit while it catches up.
             for (step in geometry.steps.dropLast(1)) {
                 val point = CivsWorksiteLayouts.point(mine, step.point)

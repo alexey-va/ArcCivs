@@ -269,7 +269,7 @@ private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoClos
     val worldAccess = CivsWorld(paper.createSimplePlugin("CivsAutonomousPlacementTest"), tasks, { 0L }) { listOf(city) }
     private val blueprints = mockk<CivsBlueprints>()
     var access = CompletableFuture.completedFuture(CivAutonomousAccess())
-    val planner = CivsAutonomousPlacement(blueprints, worldAccess, Executor(Runnable::run)) { access }
+    val planner = CivsAutonomousPlacement(blueprints, worldAccess, Executor(Runnable::run), loadAccess = { access })
     init {
         for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
         for (x in -40..40) for (z in -40..40) {

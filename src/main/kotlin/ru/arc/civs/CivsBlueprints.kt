@@ -128,13 +128,35 @@ class CivsBlueprints(
         }, executor)
     }
 
+    /** Generated infrastructure uses the same verified, owned capture as authored buildings. */
+    internal fun prepareInfrastructure(piece: CivSettlementPiece, worldId: UUID, bytes: ByteArray, captureId: UUID = piece.id): CompletableFuture<CivBlueprint> {
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+        return captured.loadVerified(captureId.toString(), hash, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+            .thenApplyAsync({ snapshot ->
+                requireVolume(snapshot)
+                val building = CivsInfrastructure.building(piece)
+                val cells = worldCells(snapshot, building.anchor)
+                val exact = cells.filterNot { it.isBarrier }.associate {
+                    CivPosition(it.position.x, it.position.y, it.position.z) to it.blockData
+                }
+                if (exact != piece.blocks.associate { it.position to it.after }) throw CivsRejection("invalid-plan")
+                rejectHazards(cells)
+                val estimate = CivsMaterials.required(CivPlacementPlan(piece.id, piece.id, worldId, building,
+                    exact.map { (position, after) -> CivPlanBlock(position, "minecraft:air", after) }))
+                CivBlueprint(building, worldId, snapshot, cells, exposedCells(cells), bytes.copyOf(), estimate)
+            }, executor)
+    }
+
     /** Explicit maintenance compares the delivered legacy racks with the corrected private library.
      * Geometry remains private; neither arbitrary blocks nor library bookshelves are repair targets. */
-    internal fun warehouseStorageRepair(building: CivBuilding): CompletableFuture<List<CivPlanBlock>> {
-        require(building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE)
-        val style = STYLES.singleOrNull { building.schematicId == schematicId(it, BuildingType.WAREHOUSE, building.level) }
+    internal fun buildingStorageRepair(building: CivBuilding): CompletableFuture<List<CivPlanBlock>> {
+        require(building.phase == BuildingPhase.ACTIVE)
+        val style = STYLES.singleOrNull { building.schematicId == schematicId(it, building.type, building.level) }
             ?: return CompletableFuture.failedFuture(CivsRejection("invalid-building"))
-        val legacy = source.load("civs/legacy-warehouse-racks/$style/warehouse${building.level}", ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        val legacyId = if (building.type == BuildingType.WAREHOUSE) "civs/legacy-warehouse-racks/$style/warehouse${building.level}"
+            else building.schematicId.replace("civs/minecolonies/", "civs/legacy-building-racks/")
+        val legacy = source.load(legacyId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         val current = source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         fun transformed(snapshot: ArcSchematicSnapshot) = source.transform(snapshot, ArcSchematicTransform(building.rotation / 90, false))
         return legacy.thenCompose(::transformed).thenCombineAsync(current.thenCompose(::transformed), { before, after ->
@@ -146,9 +168,9 @@ class CivsBlueprints(
                 val target = replacements.getValue(cell.position)
                 if (cell.blockData == target.blockData) return@mapNotNull null
                 require(cell.blockData.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
-                    target.blockData.substringBefore('[') in setOf("minecraft:chest", "minecraft:air")) { "Warehouse repair contains non-rack changes" }
+                    target.blockData.substringBefore('[') in setOf("minecraft:chest", "minecraft:barrel", "minecraft:air")) { "Storage repair contains non-rack changes" }
                 CivPlanBlock(CivPosition(cell.position.x, cell.position.y, cell.position.z), cell.blockData, target.blockData)
-            }.also { require(it.size in 1..512) { "Warehouse repair must contain at most512 authored rack cells" } }
+            }.also { require(it.size in 1..512) { "Storage repair must contain at most512 authored rack cells" } }
         }, executor)
     }
 
@@ -204,7 +226,7 @@ class CivsBlueprints(
     companion object {
         val STYLES = listOf("nordic", "medievaloak", "caledonia")
         fun schematicId(style: String, type: BuildingType, level: Int): String {
-            require(style in STYLES && level in 1..3)
+            require(style in STYLES && level in 1..type.maxLevel)
             val name = when (type) {
                 BuildingType.TOWN_HALL -> "fundamentals/townhall"
                 BuildingType.BUILDER_HUT -> "fundamentals/builder"
@@ -217,6 +239,11 @@ class CivsBlueprints(
                 BuildingType.BLACKSMITH -> "craftsmanship/metallurgy/blacksmith"
                 BuildingType.STONEMASON -> "craftsmanship/masonry/stonemason"
                 BuildingType.LIBRARY -> "education/library"
+                BuildingType.TAVERN -> "fundamentals/tavern"
+                BuildingType.BAKERY -> "craftsmanship/luxury/baker"
+                BuildingType.GUARD_TOWER -> "military/guardtower"
+                BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD ->
+                    return "civs/infrastructure/$style/${type.name.lowercase()}$level"
             }
             return "civs/minecolonies/$style/$name$level"
         }

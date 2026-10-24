@@ -44,7 +44,7 @@ class CivsMineV4Test : FunSpec({
     test("all styles have one continuous ladder aligned open tiers and connected three-wide branch junctions") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
             val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
             plan.version shouldBe 4
             val rungs = plan.steps.filter { it.after?.startsWith("minecraft:ladder[") == true }.map { it.point }
             rungs.toSet() shouldBe (plan.lowest until plan.bottom.y).map { plan.bottom.copy(y = it) }.toSet()
@@ -88,7 +88,7 @@ class CivsMineV4Test : FunSpec({
     test("every operation approaches from an already open supported predecessor and all landings precede branches") {
         for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
             val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
             val prefix = mutableMapOf<CivPosition, String?>()
             for ((index, step) in plan.steps.withIndex()) {
                 val approach = requireNotNull(step.approach)
@@ -140,7 +140,7 @@ class CivsMineV4Test : FunSpec({
         val summaries = mutableListOf<Map<String, Any>>()
         for (style in listOf("nordic", "medievaloak", "caledonia")) for (level in 1..3) {
             val mine = spatialBuilding(style, "miner", level, CivPosition(0, 80, 0))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 4))
             val name = "$style-l$level-v4.json"
             Files.writeString(directory.resolve(name), Gson().toJson(mapOf(
                 "schematicId" to mine.schematicId, "buildingLevel" to level, "version" to plan.version,

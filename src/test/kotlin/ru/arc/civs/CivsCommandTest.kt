@@ -14,6 +14,26 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("construction retry accepts only console administrators and an exact city UUID") {
+        val calls = mutableListOf<UUID>()
+        val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), retryConstruction = { city ->
+            calls += city; java.util.concurrent.CompletableFuture<Unit>()
+        })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val city = UUID.randomUUID(); val command = mockk<Command>()
+        val args = arrayOf("retry-construction", city.toString())
+        router.onCommand(player, command, "civs", args)
+        router.onCommand(console, command, "civs", args + "extra")
+        router.onCommand(console, command, "civs", arrayOf("retry-construction", "bad"))
+        every { console.hasPermission("arccivs.admin") } returns false
+        router.onCommand(console, command, "civs", args)
+        calls shouldBe emptyList()
+        every { console.hasPermission("arccivs.admin") } returns true
+        router.onCommand(console, command, "civs", args)
+        calls shouldBe listOf(city)
+    }
+
     test("resurrection scroll issuance is admin self-only and never drops items from a full inventory") {
         ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation {
             ru.arc.paper.testing.MockBukkitTestRuntime.open().use { paper ->
@@ -68,7 +88,7 @@ class CivsCommandTest : FunSpec({
 
     test("warehouse maintenance accepts only console administrators and exact city building UUIDs") {
         val calls = mutableListOf<Pair<UUID, UUID>>()
-        val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), repairWarehouse = { city, building ->
+        val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), repairStorageRacks = { city, building ->
             calls += city to building; java.util.concurrent.CompletableFuture<Map<String, Int>>()
         })
         val console = mockk<ConsoleCommandSender>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
@@ -84,6 +104,8 @@ class CivsCommandTest : FunSpec({
         every { console.hasPermission("arccivs.admin") } returns true
         router.onCommand(console, command, "civs", args)
         calls shouldBe listOf(city to building)
+        router.onCommand(console, command, "civs", arrayOf("repair-storage-racks", city.toString(), building.toString()))
+        calls shouldBe listOf(city to building, city to building)
     }
 
     test("console settings route has a closed grammar and never accepts player authority") {

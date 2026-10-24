@@ -131,18 +131,18 @@ internal class CivsPlacementControls(
             session.moving -> text.render(player, "panel.moving")
             else -> text.render(player, "panel.status", "building" to text.building(player, preview.type), "rotation" to preview.rotation)
         }
-        val actions = if (busy) emptyList() else actions(preview, session.moving)
+        val actions = actions(preview, session.moving)
         return ActionPanelFrame(
             CivsPlacementContext(preview.id, session.moving, session.pending),
             ActionPanelPlacement.FollowTarget(preview.worldId,
                 ActionPanelPoint(preview.anchor.x + 0.5, preview.anchor.y + 0.5, preview.anchor.z + 0.5),
                 followingSettings(session.moving)),
-            layout(player, actions, status), !busy,
+            layout(player, actions, status, busy), !busy,
             ActionPanelOptions(ActionPanelInputProfile.ENTITY_BOTH, 4.0, false), null,
         )
     }
 
-    internal fun layout(player: Player, actions: List<CivsPlacementAction>, status: Component): ActionPanelLayout<CivsPlacementAction> {
+    internal fun layout(player: Player, actions: List<CivsPlacementAction>, status: Component, busy: Boolean = false): ActionPanelLayout<CivsPlacementAction> {
         val buttons = actions.map { action ->
             ActionPanelAction(action, text.render(player, action.key).color(when (action) {
                 CivsPlacementAction.CONFIRM, CivsPlacementAction.DONE -> TextColor.color(0x9BD48D)
@@ -152,9 +152,53 @@ internal class CivsPlacementControls(
                 else -> TextColor.color(0xFFFFFF)
             }))
         }
-        // The automatic barrel needs no empty center corridor. Keep both pages as one compact group.
-        val grid = ActionPanelGridSettings(0.26, 1.7, 1.6f, 0.23f, 0.75f)
-        return ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0, grid)
+        if (CivsPlacementAction.AWAY !in actions) {
+            return ActionPanelLayouts.twoColumn(buttons, status, Component.empty(), 0,
+                ActionPanelGridSettings(0.26, 1.7, 1.6f, 0.23f, 0.75f))
+        }
+        // The same horizontal cross used by Builder; world height is deliberately a separate column.
+        val labels = buttons.associateBy { it.action }
+        // Leave reach for a sideways obstacle escape. Text retains its readable size; a wider 12-button
+        // footprint forces Core too close to the eye and covers the selected block with its bottom row.
+        val spacing = if (CivsPlacementAction.DONE in actions) 1.0 else .85
+        fun rect(x: Double, y: Double, width: Double, height: Double) =
+            ActionPanelRect(ActionPanelPoint(x * spacing, y * spacing, 0.0), width * spacing, height * spacing)
+        fun button(action: CivsPlacementAction, x: Double, y: Double, width: Double = .70,
+            height: Double = .27, scale: Float = .8f): ActionPanelButton<CivsPlacementAction> {
+            val area = rect(x, y, width, height)
+            return ActionPanelButton(action, area, labels.getValue(action).text,
+                ActionPanelTextStyle(scale, (area.width * 40 / scale).toInt() - 5,
+                    area.width.toFloat(), area.height.toFloat(), .025), true, !busy)
+        }
+        fun label(key: String, x: Double, y: Double, width: Double, value: Component, scale: Float): ActionPanelLabel {
+            val area = rect(x, y, width, .18)
+            return ActionPanelLabel(key, area, value,
+                ActionPanelTextStyle(scale, (area.width * 40 / scale).toInt() - 5,
+                    area.width.toFloat(), area.height.toFloat(), .025))
+        }
+        return ActionPanelLayout(buildList {
+            add(button(CivsPlacementAction.AWAY, -.65, .42))
+            add(button(CivsPlacementAction.LEFT, -1.42, .10))
+            add(button(CivsPlacementAction.RIGHT, .12, .10))
+            add(button(CivsPlacementAction.TOWARD, -.65, -.22))
+            add(button(CivsPlacementAction.UP, 1.15, .42, .90))
+            add(button(CivsPlacementAction.DOWN, 1.15, -.22, .90))
+            if (CivsPlacementAction.DONE in actions) {
+                add(button(CivsPlacementAction.DONE, -.75, -.65, 1.50, .34, .55f))
+                add(button(CivsPlacementAction.CANCEL, .85, -.65, 1.50, .34, .55f))
+            } else {
+                add(button(CivsPlacementAction.ROTATE_LEFT, -1.08, -.57, 1.02, scale = .52f))
+                add(button(CivsPlacementAction.MOVE, 0.0, -.57, 1.02, scale = .43f))
+                add(button(CivsPlacementAction.ROTATE_RIGHT, 1.08, -.57, 1.02, scale = .52f))
+                add(button(CivsPlacementAction.CONFIRM, -.97, -.95, 1.32, .38, .50f))
+                add(button(CivsPlacementAction.DETAILS, .23, -.95, .98, .38, .46f))
+                add(button(CivsPlacementAction.CANCEL, 1.19, -.95, .84, .38, .42f))
+            }
+        }, listOf(
+            label("status", 0.0, .79, 3.50, status, .48f),
+            label("horizontal", -.65, .10, .70, text.render(player, "panel.horizontal"), .44f),
+            label("height", 1.15, .10, .90, text.render(player, "panel.height"), .46f),
+        ))
     }
 
     override fun activate(player: Player, context: CivsPlacementContext, action: CivsPlacementAction) {
@@ -353,14 +397,16 @@ internal class CivsPlacementControls(
     companion object {
         /** Follow the selected place before the building; movement leaves terrain visible below. */
         internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings =
-            ActionPanelFollowSettings(if (moving) 3.0 else 2.6, 0.0, if (moving) 0.3 else -0.1, 1.25, 0.03)
+            ActionPanelFollowSettings(if (moving) 3.0 else 2.6, 0.0, if (moving) 0.45 else 0.18, 1.25, 0.03)
 
         internal fun actions(preview: CivsPreviewView, moving: Boolean): List<CivsPlacementAction> = when {
             moving && preview.movable -> listOf(CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,
                 CivsPlacementAction.UP, CivsPlacementAction.DOWN, CivsPlacementAction.TOWARD, CivsPlacementAction.AWAY,
                 CivsPlacementAction.DONE, CivsPlacementAction.CANCEL)
-            preview.movable -> listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.MOVE,
-                CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.ROTATE_RIGHT, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
+            preview.movable -> listOf(CivsPlacementAction.AWAY, CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT,
+                CivsPlacementAction.TOWARD, CivsPlacementAction.UP, CivsPlacementAction.DOWN,
+                CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.MOVE, CivsPlacementAction.ROTATE_RIGHT,
+                CivsPlacementAction.CONFIRM, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
             else -> listOf(CivsPlacementAction.CONFIRM, CivsPlacementAction.DETAILS, CivsPlacementAction.CANCEL)
         }
     }

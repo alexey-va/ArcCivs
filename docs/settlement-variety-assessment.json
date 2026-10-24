@@ -1,0 +1,399 @@
+{
+  "version": 1,
+  "title": "ArcCivs additional settlement buildings and constructed infrastructure",
+  "assumptions": [
+    "Candidate source only; no new building or native output is active yet. Existing active .67 excludes this catalog.",
+    "Player-town buildings continue to consume exact captured native schematic bills. Auto primitive stock is separate from native items, Vault, tokens and player XP; it never creates withdrawable items. No item redemption or SELL price is assumed. The existing SELL flow and future SELL-to-contract transition are unchanged.",
+    "TAVERN L1/L2/L3 primitive costs are wood32/128/288 and stone16/64/144, total448wood224stone. All three levels contain four actual shared beds, population cap12 and birth cadence unchanged. HOUSE costs24/96/216wood12/48/108stone with3/4/6 beds; tavern is an extra shared residence, not a superior capacity upgrade.",
+    "GUARD_TOWER L1/L2/L3 primitive costs are wood24/96/216 and stone24/96/216, total336wood336stone. One guard per active tower at all levels, no free equipment, damage modifier, drops or paid payout. Auto assigns only after builder and the three basic producers.",
+    "WALL/GATE/ROAD have one level and no employment/storage/housing capacity. Primitive prices remain WALL8wood16stone, GATE12wood16stone, ROAD0wood8stone per captured piece. A piece is bounded to24blocks span and a road96columns. The separate infrastructure cap is96; ordinary-building cap16 is unchanged. Exact deterministic export pieces: medievalflat57 (21wall/3gate/33road),hill94(21/3/70),water52(21/3/28), nordic58(23/3/32),caledonia60(23/3/34). Their wood/stone costs are204/648,204/944,204/608,220/672,220/688 respectively. Partial cliff50 costs188/576 and obstructedlegacy48 costs184/560. Counts are whole bounded pieces, not individual blocks; blocked perimeters are reported, not claimed complete.",
+    "BAKERY is player-only until native input delivery is available to Auto. One ordinary cycle consumes3 existing WHEAT and produces1 BREAD, vanilla crafting ratio. Output is never credited without the existing exact storage receipt. 60-second work cycle (120s hungry), level permits1/2/3 workers, unchanged global cap12. Travel, food, inputs and storage may reduce throughput.",
+    "Low/base/high scenarios are assumed10/30/60 completed bake cycles per active worker-hour for1/4/8h per day:10/120/480 bread and30/360/1440 wheat consumed per worker-day. These are sensitivities, not measured yields. 1/5/10 participating workers yield70/4200/33600 bread per network-week with matching210/12600/100800 wheat consumed. Per-account theoretical ceiling12 fully fed workers*60/h*24h=17280bread/day consumes51840wheat/day; NPC work and input constraints reduce it, accounts scale linearly without any extra mint loop.",
+    "Baking is the existing vanilla3wheat->1bread transformation; it cannot create a new buy-craft-sell ratio versus manual crafting. New automation can increase realized volume, but current sale prices and actual utilization are unknown; no currency profit is invented.",
+    "Auto source production remains4wood and3stone per60-second active cycle at L1, with actual walking delivery and night pauses. Ignoring those reductions, tavern L1 needs8wood cycles/6stone cycles and guard8stone cycles/6wood cycles. These are lower bounds, not measured accumulation times. Primitive stock has no declared currency or item conversion.",
+    "Construction recovery keeps exact accepted costs and block plans. New catalog does not reprice historical orders, relocate existing buildings, issue gear or modify corpse loot. Post-activation verify native wheat debit/bread credit, actual guard arrival and construction progress separately.",
+    "Zero disposable abstract resources in the calculator mean no measured spendable surplus has been established, not that producers yield zero. No days-to-save estimate is reported.",
+    "Mine V5 keeps V2/V3/V4 sequences immutable, existing3/4/5 tiers, ore chances and renewable-generator outputs unchanged. New structural rails/walls are paid native placements; no free timber, minted resources or sale-price assumption.",
+    "Exact V5 additional structural bill versus V4 for each of3styles: L1 adds346COBBLESTONE/152LOG/243PLANKS/64FENCE; L2 adds444/200/324/80; L3 adds542/248/405/96. The inaccessible outer corner columns and one backing-side column remain native and are excluded from these bills. Unchanged native blocks may skip payment. Each tier adds60 clear operations; only actual native blocks yield normal drops. Timber follows OAK/SPRUCE/DARK_OAK by style. Original ladder and backing states are preserved.",
+    "At most one paid item per structural placement; crash retries keep existing exact resident inventory receipt. Primitive Auto work remains separate and never receives these native item bills or transferable outputs. Additional time is at least2s per actual changed work operation, plus walking/supply/safety; no measured income/time claim.",
+    "Auto grows from9unique types to11sites by adding two additional ordinary HOUSE goals. Existing per-house prices are unchanged:24wood12stone atL1 and96wood48stone atL2, so both added houses throughL2 cost240wood120stone total. Together with tavern and guard throughL2 the added service-building cost is520wood320stone. Global population cap12 and food consumption/recruitment remain unchanged; more homes do not mint residents, food, currency or equipment."
+  ],
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "new_buildings_direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs additional settlement buildings and constructed infrastructure",
+          "basis": "No direct currency or player XP issuance; separate zero delta.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "new_buildings_direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs additional settlement buildings and constructed infrastructure",
+          "basis": "No direct currency or player XP issuance; separate zero delta.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "new_buildings_direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs additional settlement buildings and constructed infrastructure",
+          "basis": "No direct currency or player XP issuance; separate zero delta.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "native_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "bakery_native_bread",
+          "kind": "item",
+          "source": "ArcCivs additional settlement buildings and constructed infrastructure",
+          "basis": "One exact native3wheat->1bread conversion after observed work and durable receipt.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              120,
+              480
+            ]
+          }
+        }
+      ]
+    },
+    "native_wheat": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "bakery_native_wheat",
+          "kind": "burn",
+          "source": "ArcCivs additional settlement buildings and constructed infrastructure",
+          "basis": "One exact native3wheat->1bread conversion after observed work and durable receipt.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              120,
+              480
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [],
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      }
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [],
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      }
+    }
+  },
+  "prices": [
+    {
+      "id": "tavern_L1_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "32",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "tavern_L1_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "16",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "tavern_L2_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "128",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "tavern_L2_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "64",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "tavern_L3_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "288",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "tavern_L3_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "144",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L1_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "24",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L1_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "24",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L2_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "96",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L2_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "96",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L3_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "216",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "guard_tower_L3_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "216",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "wall_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "8",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "wall_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "16",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "gate_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "12",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "gate_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "16",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "road_abstract_wood",
+      "currency": "abstract_wood",
+      "before": null,
+      "after": {
+        "value": "0",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "road_abstract_stone",
+      "currency": "abstract_stone",
+      "before": null,
+      "after": {
+        "value": "8",
+        "unit": "major"
+      }
+    }
+  ]
+}

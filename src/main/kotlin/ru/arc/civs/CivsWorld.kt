@@ -27,7 +27,7 @@ import java.util.concurrent.Executor
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
  * Requests may arrive on any thread. All Bukkit reads run in one lifecycle-owned timer,
  * sharing a time-bounded 2048-cell budget across at most four scans. No scan loads a chunk.
- * Explicit warehouse repair is the guarded maintenance mutation in the same native budget.
+ * Explicit storage rack repair is the guarded maintenance mutation in the same native budget.
  * Final revalidation must follow publication of the durable, protected construction footprint.
  */
 class CivsWorld(
@@ -100,9 +100,9 @@ class CivsWorld(
         TerraformApply(plan, owner, batchBlocks.toList(), terrainStart, canAdvance, onPlaced)
     }
 
-    internal fun repairWarehouse(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
+    internal fun repairStorageRacks(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
         requireCivs(cells.size in 1..512 && cells.map { it.position }.distinct().size == cells.size, "invalid-plan")
-        WarehouseRepair(city.id, city.owner, city.worldId, building, cells.toList())
+        StorageRackRepair(city.id, city.owner, city.worldId, building, cells.toList())
     }
 
     /** Inverse journal cells restore an older access route; no construction credit, drops or resources. */
@@ -384,11 +384,11 @@ class CivsWorld(
             }
         }
 
-        protected fun rejectAt(reason: String, block: Block): Nothing = throw CivsRejection(reason, mapOf(
+        protected fun rejectAt(reason: String, block: Block, states: Map<String, String> = emptyMap()): Nothing = throw CivsRejection(reason, mapOf(
             "block" to block.type.name,
             "x" to block.x.toString(), "y" to block.y.toString(), "z" to block.z.toString(),
             "world" to block.world.uid.toString(), "world_name" to block.world.name,
-        ))
+        ) + states)
 
         protected fun checkCell(position: CivPosition) {
             requireCivs(building.bounds.contains(position.x, position.y, position.z) && seen.add(position), "invalid-plan")
@@ -611,8 +611,9 @@ class CivsWorld(
         private var searching: CompletableFuture<CitizenSearchResult>? = null
         private var capture: CitizenNavigationCapture? = null
         private val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
-        private val obstacles = citySnapshot.buildings.filter { it.id != previous?.id }
-            .map { CivsAutonomousGeometry.futureBounds(citySnapshot, it) } + building.bounds
+        private val obstacles = citySnapshot.buildings.filter { it.id != previous?.id && !civsPublicTransit(it) }
+            .map { CivsAutonomousGeometry.futureBounds(citySnapshot, it) } +
+            if (civsPublicTransit(building, allowPlanned = true)) emptyList() else listOf(building.bounds)
         private var overlayIndex = 0
         private var routeIndex = 0
         private val overlay = terraform?.blocks.orEmpty().associateBy { it.position }
@@ -734,12 +735,12 @@ class CivsWorld(
         }, "autonomy-no-path")
     }
 
-    private inner class WarehouseRepair(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+    private inner class StorageRackRepair(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         private val cells: List<CivPlanBlock>) : Scan<Map<String, Int>>(cityId, owner, worldId, building) {
         private val counts = linkedMapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "occupied" to 0, "denied" to 0)
         override fun validateIdentity(city: Settlement?) {
             requireCivs(city?.pendingDeletion == null && city?.building(building.id) == building &&
-                building.type == BuildingType.WAREHOUSE && building.phase == BuildingPhase.ACTIVE &&
+                building.phase == BuildingPhase.ACTIVE &&
                 city.construction?.buildingId != building.id, "stale-building")
         }
         override fun step() {
@@ -747,7 +748,7 @@ class CivsWorld(
             val cell = cells[index++]
             checkCell(cell.position)
             requireCivs(cell.before.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
-                cell.after.substringBefore('[') in setOf("minecraft:chest", "minecraft:air"), "invalid-plan")
+                cell.after.substringBefore('[') in setOf("minecraft:chest", "minecraft:barrel", "minecraft:air"), "invalid-plan")
             val block = read(cell.position)
             fun count(key: String) { counts[key] = counts.getValue(key) + 1 }
             if (block.blockData.asString == parse(cell.after).asString) { count("unchanged"); return }
@@ -830,6 +831,9 @@ class CivsWorld(
         private val terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList())
         private val terrainOverlay = terraform?.blocks.orEmpty().associateBy { it.position }
         private val terrainBlocks = ArrayList<CivPlanBlock>()
+        private val infrastructureGround = if (building.type.isInfrastructure) cells.filterNot { it.isBarrier || it.isAir }
+            .groupBy { civsTerrainKey(it.position.x, it.position.z) }.mapValues { (_, values) -> values.minOf { it.position.y } }
+            else emptyMap()
         private var terrainIndex = 0
         private var routeIndex = 0
 
@@ -907,7 +911,7 @@ class CivsWorld(
             val state = if (block.type.isAir) null else block.state
             if (strictAutonomous && position !in terrainOverlay && (previous?.phase != BuildingPhase.ACTIVE ||
                     !previous.bounds.contains(position.x, position.y, position.z)))
-                checkAutonomousTerrain(block, building.anchor.y)
+                checkAutonomousTerrain(block, infrastructureGround[civsTerrainKey(position.x, position.z)] ?: building.anchor.y)
             if (block.type == Material.BEDROCK || previous?.bounds?.contains(position.x, position.y, position.z) != true &&
                 state is TileState) rejectAt("protected-terrain", block)
             // Never replace a player's inventory, including chests installed while a SITE was waiting.
@@ -1009,8 +1013,9 @@ class CivsWorld(
             val cell = plan.blocks[index++]
             checkCell(cell.position)
             val block = read(cell.position)
-            if (autonomous && block.blockData.asString != cell.before && block.blockData.asString != cell.after)
-                rejectAt("autonomy-terrain", block)
+            val actual = block.blockData
+            if (autonomous && !sameConstructionState(actual, parse(cell.before)) && !sameConstructionState(actual, parse(cell.after)))
+                rejectAt("autonomy-terrain", block, mapOf("before" to cell.before, "after" to cell.after, "actual" to actual.asString))
             if (block.type == Material.BEDROCK) rejectAt("protected-terrain", block)
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             // Players may clear or remodel a cell before this one-pass construction batch reaches it.
@@ -1021,6 +1026,14 @@ class CivsWorld(
     }
 
     companion object {
+        /** Neighbour updates change only a stair's corner shape while surrounding rows are built. */
+        internal fun sameConstructionState(actual: BlockData, expected: BlockData): Boolean {
+            if (actual.asString == expected.asString) return true
+            if (actual !is org.bukkit.block.data.type.Stairs || expected !is org.bukkit.block.data.type.Stairs ||
+                actual.material != expected.material) return false
+            return (actual.clone() as org.bukkit.block.data.type.Stairs).apply { shape = expected.shape }.asString == expected.asString
+        }
+
         const val CELLS_PER_TICK = 2048
         const val NANOS_PER_TICK = 2_000_000L
         const val MAX_SCANS = 4

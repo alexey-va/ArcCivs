@@ -92,6 +92,12 @@ class CivsCitizens(
     private val craftSupplies: (UUID, UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("stale-delivery")) },
     private val constructionWorkplace: (UUID, UUID) -> CivPosition? = { _, _ -> null },
+    private val collectionAvailable: (UUID) -> Boolean = { false },
+    private val collectionHome: (Settlement, CivWorker) -> CivCollectedHome? = { _, _ -> null },
+    private val pickupGround: (UUID, UUID, List<UUID>) -> CompletableFuture<Settlement> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
+    private val depositCollected: (UUID, UUID, CivPosition?) -> CompletableFuture<Settlement> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
@@ -110,12 +116,14 @@ class CivsCitizens(
     private var retirement: CompletableFuture<Void>? = null
     private var wanderBudget = 0
     private var campBudget = 0
+    private var collectionBudget = 0
     private var recoveryBudget = 0
     private val campfires = CivsCampfires()
     private val voices = CivsCitizenVoices(plugin.config)
     private val pendingHarm = mutableSetOf<UUID>()
     private val harmCompletions = ConcurrentLinkedQueue<HarmCompletion>()
     private val supplyCompletions = ConcurrentLinkedQueue<SupplyCompletion>()
+    private val collectedCompletions = ConcurrentLinkedQueue<CollectedCompletion>()
     private var harmEpoch = 0L
     private var navigationTick = 0L
     private var navigationAt = 0L
@@ -133,6 +141,14 @@ class CivsCitizens(
         checkMainThread()
         val actor = actors[workerId]?.takeIf { it.npc.isValid } ?: return null
         return actor.sleepOrigin?.clone() ?: actor.npc.location.clone()
+    }
+
+    internal fun residentCollectionFeet(workerId: UUID, allowNight: Boolean = false): Location? {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.npc.isValid } ?: return null
+        if (actor.sleeping || !allowNight && actor.sheltering || actor.attacker != null || workerId in pendingHarm ||
+            !allowNight && actor.npc.world.time in 12_000L..23_000L) return null
+        return actor.npc.location.clone()
     }
 
     /** A small physical push changes only the observed position, never a work or cargo receipt. */
@@ -187,9 +203,11 @@ class CivsCitizens(
         courierObservedAt = nowMillis
         wanderBudget = 8 // Aggregate native target checks across all idle actors, not eight per NPC.
         campBudget = 2 // At most two six-place campfire admission searches for the entire owner.
+        collectionBudget = 2 // Two 32-item discoveries or four-holder home checks across the whole owner.
         recoveryBudget = 2 // At most two bounded safe-position searches after real route failures per pulse.
         drainCompletions(nowMillis)
         drainSupplies(nowMillis)
+        drainCollected(nowMillis)
         drainHarm()
         val cities = cityProvider().associateBy { it.id }
         paths.retain(cities)
@@ -378,7 +396,7 @@ class CivsCitizens(
             actors.values.filter { it.courierPickupStartedAt != null && it.plan.courier?.cargo?.sourceWorkerId == worker.id }
                 .forEach { pause(it, "route-unreachable", now) }
         }
-        return if (actor.supplyPickup != null || actor.courierHeld) actor.plan
+        return if (actor.supplyPickup != null || actor.collectedPending != null || actor.courierHeld) actor.plan
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
     }
 
@@ -423,6 +441,9 @@ class CivsCitizens(
                 val actor = actors[workerId]
                 actor?.combatStatus?.let { return "workers.status.$it" }
                 if (actor?.sheltering == true) return "workers.status.${if (actor.sleeping) "sleeping" else "sheltering"}"
+                if (actor?.collectedPending != null) return "workers.status.loading-cargo"
+                if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
+                if (actor?.collectionSeek != null) return "workers.status.walking"
                 if (actor?.courierHeld == true) return "workers.status.waiting-courier"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
                 actor?.social?.visit?.let {
@@ -856,7 +877,7 @@ class CivsCitizens(
             if (route == null && !actor.sleeping && actor.workerId !in pendingHarm && npc.isValid) {
                 actor.lookYaw?.let { citizenFace(npc, it, actor.lookPitch, if (actor.attacker != null) 16f else CITIZEN_TURN_PER_TICK) }
             }
-            if (route == null || actor.workerId in pendingHarm || !npc.isValid ||
+            if (route == null || actor.collectedPending != null || actor.workerId in pendingHarm || !npc.isValid ||
                 !activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
                 !route.chunks.ready(npc.world)) {
                 actor.footsteps.reset()
@@ -901,7 +922,7 @@ class CivsCitizens(
                 CitizenPhase.TO_STORAGE, CitizenPhase.RETURNING -> actor.plan.storage
                 else -> null
             }
-            if (travelTarget != null && !actor.sheltering &&
+            if (travelTarget != null && !actor.sheltering && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
                 arrivedAt(actor, city, npc.world, travelTarget)) {
                 motion.cancel()
@@ -941,7 +962,8 @@ class CivsCitizens(
                 continue
             }
             val before = npc.location
-            val working = actor.attacker == null && (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))
+            val working = actor.attacker == null && actor.collectionSeek == null && actor.collectionHome == null &&
+                (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))
             val speed = if (actor.attacker != null) 1.1 else if (working)
                 .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             val next = motion.move(before, speed, { from, to -> residentStepAllowed(npc, from, to) }) { destination ->
@@ -1040,12 +1062,14 @@ class CivsCitizens(
             releaseCourierSource(actor, now)
             return
         }
+        if (actor.collectedPending != null) { statuses[actor.workerId] = "loading-cargo"; return }
         if (supplyFood(actor, city, worker, world, now)) {
             actor.mineRouteEpisode.retain(null)
             releaseCourierSource(actor, now)
             return
         }
         if (world.time in 12_000L..23_000L && cycle.phase !in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP)) {
+            if (collectItems(actor, city, worker, world, now, night = true)) return
             actor.mineRouteEpisode.retain(null)
             releaseCourierSource(actor, now)
             stopCamp(actor, "night")
@@ -1081,6 +1105,7 @@ class CivsCitizens(
             }
             return
         }
+        if (collectItems(actor, city, worker, world, now)) return
         if (returnToWarehouse(actor, city, world, now)) return
         if (citizenCampEligible(actor.plan, cycle.phase, world.time)) {
             if (gather(actor, city, worker, world, now)) return
@@ -1162,6 +1187,7 @@ class CivsCitizens(
                     actor.cycle.start()
                 } else if (!arrivedAt(actor, city, world, target))
                     pauseNavigation(actor, "route-unreachable", "left-workplace", resolvedTarget(actor, target).location(world), now)
+                else if (actor.plan.type == BuildingType.GUARD_TOWER) cycle.deferWork(now)
                 else if (actor.plan.idleReason != "placing") {
                     cycle.work(now)
                     if (cycle.phase == CitizenPhase.READY) submitReadyDelivery(actor, city, world, now)
@@ -1369,6 +1395,146 @@ class CivsCitizens(
                 if (completion.pickup.resumeWork && workInputsReady(city, worker)) actor.cycle.arrive(now)
                 actor.equipmentItems = null
             }
+        }
+    }
+
+    /** Seeking is leisure; a useful work action, cargo, combat and night shelter retain their priorities. */
+    private fun collectItems(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long,
+        night: Boolean = false): Boolean {
+        if (CivsResidents.isChild(worker) || worker.cargo != null || actor.plan.courier != null ||
+            actor.sleeping || actor.foodSource != null || actor.supplyPickup != null ||
+            actor.cycle.phase in setOf(CitizenPhase.WORKING, CitizenPhase.PICKUP_READY, CitizenPhase.PICKING_UP,
+                CitizenPhase.RETURNING, CitizenPhase.READY, CitizenPhase.DELIVERING)) {
+            clearCollectedRoute(actor)
+            return false
+        }
+        if (worker.hasCollectedItems != true) {
+            actor.collectionCycle = null
+            if (actor.collectionHome != null) { cancelRoute(actor); actor.collectionHome = null }
+        } else if (actor.collectionCycle == null) actor.collectionCycle = worker.completedCycles
+        val idle = citizenCollectionIdle(actor.plan, actor.cycle.phase)
+        val shouldGoHome = worker.hasCollectedItems == true &&
+            (night || idle || worker.completedCycles > requireNotNull(actor.collectionCycle))
+        if (night || !idle && !shouldGoHome) clearCollectedRoute(actor)
+        if (now < actor.collectionRetryAt || !collectionAvailable(city.id) || collectionBudget == 0) {
+            // An admitted leisure route retains its identity while another resident uses the native budget.
+            if (actor.collectionSeek != null || actor.collectionHome != null) {
+                statuses[worker.id] = if (actor.collectionHome != null) "moving-to-storage" else "walking"
+                return true
+            }
+            return false
+        }
+        collectionBudget--
+        citizenRotateAfterAdmission(actors, actor.workerId)
+        if (shouldGoHome) {
+            val home = collectionHome(city, worker)
+            if (home == null) { actor.collectionRetryAt = now + 5_000; return false }
+            if (!home.surplus) {
+                beginCollected(actor, now) { depositCollected(city.id, worker.id, null) }
+                return true
+            }
+            val target = home.container
+            if (target == null) { actor.collectionRetryAt = now + 5_000; return false }
+            if (civsCanReachContainer(actor.npc.location, target)) {
+                stopCamp(actor, "home-deposit")
+                cancelRoute(actor)
+                actor.collectionHome = target
+                beginCollected(actor, now) { depositCollected(city.id, worker.id, target) }
+                return true
+            }
+            if (night) return false
+            val building = city.building(home.homeId) ?: return false
+            val standing = citizenCollectedHomeTarget(city, building, world, target)
+            if (standing == null) { actor.collectionRetryAt = now + 5_000; return false }
+            stopCamp(actor, "home-return")
+            if (actor.collectionHome != target || actor.route?.authored != standing) cancelRoute(actor)
+            actor.collectionSeek = null
+            actor.collectionHome = target
+            if (actor.route == null) startRoute(actor, world, standing, now)
+            val route = actor.route
+            if (route == null || route.completion != null || route.timedOut(now)) {
+                cancelRoute(actor)
+                actor.collectionHome = null
+                actor.collectionRetryAt = now + 5_000
+                return false
+            }
+            statuses[worker.id] = "moving-to-storage"
+            return true
+        }
+        if (night) return false
+        val origin = actor.npc.location
+        val radius = if (idle) 8.0 else 2.0
+        val nearby = world.getNearbyEntities(origin, radius, 2.0, radius) { it is org.bukkit.entity.Item }.asSequence()
+            .filterIsInstance<org.bukkit.entity.Item>().take(32)
+            .filter { city.contains(it.location.blockX, it.location.blockZ) && civsGroundItemAvailable(it, worker.id) }
+            .filter { item -> CivResidentItem.of(item.itemStack)?.let { CivsEquipment.collectGround(worker, it).second > 0 } == true }
+            .sortedWith(compareBy<org.bukkit.entity.Item> { origin.distanceSquared(it.location) }.thenBy { it.uniqueId })
+            .toList()
+        val reachable = nearby.filter { civsCanCollect(origin, it, worker.id) }.take(8)
+        if (reachable.isNotEmpty()) {
+            if (actor.collectionSeek != null) cancelRoute(actor)
+            stopCamp(actor, "ground-pickup")
+            actor.collectionSeek = null
+            actor.collectionCycle = worker.completedCycles
+            beginCollected(actor, now) { pickupGround(city.id, worker.id, reachable.map { it.uniqueId }) }
+            return true
+        }
+        if (!idle) return false
+        val item = nearby.firstOrNull { civsCanCollect(origin, it, worker.id, 8.0) }
+        if (item == null) {
+            if (actor.collectionSeek != null) cancelRoute(actor)
+            actor.collectionSeek = null
+            actor.collectionRetryAt = now + 2_000
+            return false
+        }
+        val standing = citizenCollectedItemTarget(city, world, item.location)
+        if (standing == null) { actor.collectionRetryAt = now + 5_000; return false }
+        stopCamp(actor, "ground-item")
+        if (actor.collectionSeek != item.uniqueId || actor.route?.authored != standing) cancelRoute(actor)
+        actor.collectionSeek = item.uniqueId
+        if (actor.route == null) startRoute(actor, world, standing, now)
+        val route = actor.route
+        if (route == null || route.completion != null || route.timedOut(now)) {
+            cancelRoute(actor)
+            actor.collectionSeek = null
+            actor.collectionRetryAt = now + 5_000
+            return false
+        }
+        statuses[worker.id] = "walking"
+        return true
+    }
+
+    private fun clearCollectedRoute(actor: Actor) {
+        if (actor.collectionSeek != null || actor.collectionHome != null) cancelRoute(actor)
+        actor.collectionSeek = null
+        actor.collectionHome = null
+    }
+
+    private fun beginCollected(actor: Actor, now: Long, operation: () -> CompletableFuture<Settlement>) {
+        val ticket = UUID.randomUUID()
+        actor.collectedPending = ticket
+        actor.collectionRetryAt = now + 5_000
+        statuses[actor.workerId] = "loading-cargo"
+        val future = try { operation() } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
+        future.whenComplete { city, failure ->
+            if (!closed.get()) collectedCompletions.add(CollectedCompletion(actor.workerId, actor.instanceId, ticket, city, failure))
+        }
+    }
+
+    private fun drainCollected(now: Long) {
+        while (true) {
+            val completion = collectedCompletions.poll() ?: return
+            val actor = actors[completion.workerId]?.takeIf {
+                it.instanceId == completion.actorId && it.collectedPending == completion.ticket
+            } ?: continue
+            actor.collectedPending = null
+            actor.collectionRetryAt = now + 5_000
+            if (actor.collectionHome != null) cancelRoute(actor)
+            actor.collectionSeek = null
+            actor.collectionHome = null
+            actor.equipmentItems = null
+            val error = (completion.error as? CompletionException)?.cause ?: completion.error
+            if (error != null && error !is CivsRejection) logFailure(actor, "collected-items", error)
         }
     }
 
@@ -1856,7 +2022,8 @@ class CivsCitizens(
         val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
             listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id })
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
-        val trip = if (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering)) paths.begin(city) else null
+        val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
+            (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))) paths.begin(city) else null
         val mine = routeMine(actor, city).takeIf { idleAnchor == null }
         // The outdoor approach to the upper ladder is ordinary city travel. Once inside,
         // a work leg must use the mine's passages, including when a natural cave is open nearby.
@@ -2047,7 +2214,8 @@ class CivsCitizens(
 
     private fun routeMine(actor: Actor, city: Settlement): CivBuilding? = actor.plan.takeIf {
         it.type == BuildingType.QUARRY && it.worldWork != null && it.courier == null && !actor.sheltering &&
-            actor.attacker == null && actor.foodSource == null && actor.social.visit == null
+            actor.attacker == null && actor.foodSource == null && actor.social.visit == null &&
+            actor.collectionSeek == null && actor.collectionHome == null
     }?.token?.assignmentId?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
 
     private fun canWorkFrom(actor: Actor, work: CivWorldWork): Boolean {
@@ -2056,7 +2224,8 @@ class CivsCitizens(
             val mine = city.building(work.buildingId) ?: return false
             val feet = actor.npc.location
             val standing = CivPosition(feet.blockX, feet.y.roundToInt(), feet.blockZ)
-            if (!CivsMinePlan.workStandingAllowed(mine, standing) ||
+            val geometry = CivsMinePlan.forBuilding(mine, work.miningPlanVersion ?: CivsMinePlan.VERSION) ?: return false
+            if (!geometry.builtStanding(CivsMinePlan.localPoint(mine, standing), work.miningAccessStep ?: work.miningStep) ||
                 !citizenMineWorkRouteAllowed(mine, feet.point(), work.miningAccessStep ?: work.miningStep,
                     city.minePlans?.get(mine.id.toString()))) return false
         }
@@ -2566,6 +2735,7 @@ class CivsCitizens(
         completions.clear()
         harmCompletions.clear()
         supplyCompletions.clear()
+        collectedCompletions.clear()
         pendingHarm.clear()
         spawnRetries.clear()
         admissions.clear()
@@ -2627,6 +2797,11 @@ class CivsCitizens(
         var supplyPickup: SupplyPickup? = null
         var supplyFailure: Pair<UUID, String>? = null
         var supplyRetryAt = 0L
+        var collectedPending: UUID? = null
+        var collectionCycle: Long? = null
+        var collectionRetryAt = 0L
+        var collectionSeek: UUID? = null
+        var collectionHome: CivPosition? = null
         var foodSource: UUID? = null
         var nextRecoveryAt = 0L
         var attacker: Monster? = null
@@ -2675,6 +2850,8 @@ class CivsCitizens(
     private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?, val epoch: Long)
     private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean)
     private data class SupplyCompletion(val workerId: UUID, val actorId: UUID, val pickup: SupplyPickup,
+        val city: Settlement?, val error: Throwable?)
+    private data class CollectedCompletion(val workerId: UUID, val actorId: UUID, val ticket: UUID,
         val city: Settlement?, val error: Throwable?)
 
     private companion object {
@@ -2817,7 +2994,8 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
     val autonomousWork: CivBuilding? = null) {
     val spawnOrigin: CivPosition get() = if (courier?.cargo?.sourceWorkerId != null) storage else courier?.cargo?.sourceEntrance ?: storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
-        worldWork != null || type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
+        worldWork != null || type == BuildingType.GUARD_TOWER ||
+            type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
 }
 
 /** Pickup publication changes carried quantity, never the identity of the journey already observed. */
@@ -2886,7 +3064,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
     val order = city.construction.takeIf { builder }
     val workBuilding = order?.buildingId?.let(city::building) ?: order?.plannedBuilding
     val workplace = if (builder) workBuilding?.control ?: order?.plannedBuilding?.entrance ?: workBuilding?.entrance
-        else if (autonomous) assigned?.entrance else assigned?.control
+        else if (autonomous || workType == BuildingType.GUARD_TOWER) assigned?.entrance else assigned?.control
     val depot = city.buildings.filter(CivsRules::isDepot)
         .minByOrNull { (if (autonomous) it.entrance else it.control ?: it.entrance).point()
             .distanceSquared((workplace ?: city.center).point()) }
@@ -2908,13 +3086,16 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         builder && order?.phase == ConstructionPhase.PAUSED -> "construction-paused"
         builder && order?.phase in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING) -> "placing"
         builder && !autonomous && city.inventory == null && depot?.control == null && depot?.phase == BuildingPhase.ACTIVE -> "storage-unavailable"
+        workType == BuildingType.GUARD_TOWER && assigned.phase == BuildingPhase.ACTIVE -> null
         !builder && !CivsRules.productionAvailable(city, assigned) -> "building-unavailable"
         workplace == null -> "building-unavailable"
         else -> null
     }
     return CitizenPlan(CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, order?.id),
         storage, workplace, workType,
-        if (builder && (order?.payment != null || city.autonomy != null)) CivsRules.BUILDER_SESSION_INTERVAL else workType?.let(CivsRules::deliveryInterval) ?: 0,
+        if (workType == BuildingType.GUARD_TOWER) Long.MAX_VALUE
+        else if (builder && (order?.payment != null || city.autonomy != null)) CivsRules.BUILDER_SESSION_INTERVAL
+        else workType?.let(CivsRules::deliveryInterval) ?: 0,
         reason, builder || city.inventory != null,
         autonomousWork = assigned?.takeIf { autonomous && CivsRules.resource(it.type) != null })
 }
@@ -2955,6 +3136,31 @@ internal fun citizenStorageTarget(city: Settlement, own: CivBuilding, world: Wor
             city.buildings.none { it.id != own.id && it.bounds.contains(point.x, point.y, point.z) } &&
             city.construction?.plannedBuilding?.takeIf { it.id != own.id }?.bounds?.contains(point.x, point.y, point.z) != true &&
             citizenControlClear(city, point) && safe(point)) return point
+    }
+    return null
+}
+
+internal fun citizenCollectionIdle(plan: CitizenPlan, phase: CitizenPhase): Boolean = plan.courier == null &&
+    phase !in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP) &&
+    plan.idleReason in setOf("unassigned", "waiting-orders", "waiting-growth", "no-construction", "building-unavailable")
+
+/** A route ends beside the real container; the final native ray remains authoritative at deposit time. */
+internal fun citizenCollectedHomeTarget(city: Settlement, home: CivBuilding, world: World, target: CivPosition): CivPosition? {
+    if (!citizenChunkReady(world, target.x shr 4, target.z shr 4)) return null
+    val levels = listOf(home.entrance.y, target.y, target.y - 1, target.y + 1, target.y - 2, target.y - 3).distinct()
+    for (y in levels) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+        val point = target.copy(x = target.x + dx, y = y, z = target.z + dz)
+        if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point) &&
+            city.buildings.none { it.id != home.id && it.bounds.contains(point.x, point.y, point.z) } &&
+            citizenCanReachBlock(world, point.location(world).add(0.0, 1.5, 0.0), target, 3.0)) return point
+    }
+    return null
+}
+
+internal fun citizenCollectedItemTarget(city: Settlement, world: World, item: Location): CivPosition? {
+    for (dy in listOf(0, 1, -1)) for ((dx, dz) in listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+        val point = CivPosition(item.blockX + dx, item.blockY + dy, item.blockZ + dz)
+        if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point)) return point
     }
     return null
 }
@@ -3160,9 +3366,9 @@ private const val CITIZEN_IDLE_RADIUS = 8.0
 internal fun citizenIdleBuilding(city: Settlement, worker: CivWorker): CivBuilding? =
     worker.assignment?.let(city::building) ?: citizenHomeBuilding(city, worker)
 
-/** Autonomous sites prepare their exterior entrance before an authored interior control is reachable. */
-internal fun citizenIdleAnchor(city: Settlement, building: CivBuilding): CivPosition =
-    if (city.autonomy != null) building.entrance else building.control ?: building.entrance
+/** An interior barrel can be farther from the door than the entire leisure radius. */
+internal fun citizenIdleAnchor(@Suppress("UNUSED_PARAMETER") city: Settlement, building: CivBuilding): CivPosition =
+    building.entrance
 
 private fun citizenWithinIdleArea(anchor: CivPosition, at: CitizenPoint): Boolean =
     (at.x - (anchor.x + .5)) * (at.x - (anchor.x + .5)) +
@@ -3415,7 +3621,7 @@ private fun CivPosition.inChunk(x: Int, z: Int) = this.x shr 4 == x && this.z sh
 
 /** Horizontal footprints stay off transit routes, except the departure and actual destination buildings. */
 internal fun citizenRouteCellAllowed(city: Settlement, allowed: Set<UUID>, x: Int, z: Int): Boolean =
-    city.contains(x, z) && civsProtectedBuildings(city).none { it.id !in allowed &&
+    city.contains(x, z) && civsProtectedBuildings(city).none { it.id !in allowed && !civsPublicTransit(it, x, z) &&
         (x in it.bounds.min.x..it.bounds.max.x && z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, x, z)) }
 
 /** Only an observed mine leg may pass below another building, with headroom below its foundation. */
@@ -3424,7 +3630,7 @@ internal fun citizenRoutePointAllowed(city: Settlement, allowed: Set<UUID>, poin
         CivsMinePlan.forBuilding(building)?.bottom?.let { CivsWorksiteLayouts.point(building, it) }
     }
     return city.contains(point.x, point.z) && civsProtectedBuildings(city).none { building ->
-        building.id !in allowed &&
+        building.id !in allowed && !civsPublicTransit(building, point.x, point.z) &&
             (point.x in building.bounds.min.x..building.bounds.max.x && point.z in building.bounds.min.z..building.bounds.max.z ||
                 CivsWorksiteLayouts.isField(building, point.x, point.z)) &&
             (bottom == null || point.y >= bottom.y || !CivsMinePlan.belowFoundation(building, point.y, headroom = 1))
@@ -3438,6 +3644,8 @@ private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
     val bottom = CivsWorksiteLayouts.point(mine, current.bottom)
     val prefixes = buildList {
         add(current to accessStep)
+        val v4 = if (state?.version == 4) state.nextStep else state?.v4Step
+        if (v4 != null && v4 > 0) CivsMinePlan.forBuilding(mine, 4)?.let { add(it to v4) }
         val v3 = if (state?.version == 3) state.nextStep else state?.v3Step
         if (v3 != null && v3 > 0) CivsMinePlan.forBuilding(mine, 3)?.let { add(it to v3) }
         val v2 = if (state?.version == 2) state.nextStep else state?.v2Step
@@ -3576,9 +3784,9 @@ private fun citizenShelterCandidates(city: Settlement, worker: CivWorker): List<
 
 private fun citizenHomeBuilding(city: Settlement, worker: CivWorker): CivBuilding? {
     worker.homeId?.let { id -> city.building(id)?.takeIf { home ->
-        home.type == BuildingType.TOWN_HALL || home.type == BuildingType.HOUSE && home.phase == BuildingPhase.ACTIVE
+        home.type == BuildingType.TOWN_HALL || home.type.isResidence && home.phase == BuildingPhase.ACTIVE
     }?.let { return it } }
-    val homes = city.buildings.filter { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
+    val homes = city.buildings.filter { it.type.isResidence && it.phase == BuildingPhase.ACTIVE }
         .flatMap { home -> List(CivsPopulation.houseBeds(home)) { home } }
     return homes.getOrNull(city.workers.indexOfFirst { it.id == worker.id })
         ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }

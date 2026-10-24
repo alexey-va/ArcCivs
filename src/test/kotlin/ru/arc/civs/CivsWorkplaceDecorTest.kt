@@ -111,7 +111,10 @@ class CivsWorkplaceDecorTest : FunSpec({
         civsWorkplaceTransform(0, 1).scale.x shouldBe .26f
         civsWorkplaceTransform(0, 2).scale.x shouldBe .24f
         civsWorkplacePieces(BuildingType.HOUSE, 0) shouldBe emptyList()
-        for (type in BuildingType.entries.filter { it != BuildingType.HOUSE }) {
+        for (type in BuildingType.entries.filter { it.isInfrastructure }) {
+            civsWorkplacePieces(type, 0) shouldBe emptyList()
+        }
+        for (type in BuildingType.entries.filter { it != BuildingType.HOUSE && !it.isInfrastructure }) {
             civsWorkplacePieces(type, 0).size shouldBe 7
             civsWorkplaceItems(type).distinct().size shouldBe 3
         }

@@ -187,9 +187,14 @@ class CivsUiTest : FunSpec({
             export("resources")
             h.click("buildings")
             h.screen.id shouldBe "civs.autonomous-buildings"
-            materialTableCells(h.screen).drop(1).size shouldBe 7
-            h.screen.buttons.isEmpty() shouldBe true
+            materialTableCells(h.screen).drop(1).size shouldBe 8
+            h.screen.buttons.map { it.id.value } shouldBe listOf("next")
             export("buildings")
+            h.click("next")
+            materialTableCells(h.screen).drop(1).size shouldBe village.buildings.size - 8
+            h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
+            export("buildings-page-2")
+            h.click("previous")
             h.click("history"); h.click("workers")
             h.screen.id shouldBe "civs.autonomous-workers"
             village.workers.forEach { h.body() shouldContain it.name }
@@ -941,6 +946,46 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("infrastructure is compact in building lists and never consumes ordinary catalog or storage slots") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val base = settlement(h.player)
+            val template = base.buildings.last()
+            val infrastructure = (0 until 20).map { i -> template.copy(id = UUID(90, i.toLong()), level = 1,
+                type = when { i < 12 -> BuildingType.ROAD; i < 18 -> BuildingType.WALL; else -> BuildingType.GATE },
+                control = null, phase = if (i == 19) BuildingPhase.CONSTRUCTING else BuildingPhase.ACTIVE) }
+            h.city = base.copy(buildings = base.buildings + infrastructure)
+            h.open()
+            h.body() shouldContain "${base.buildings.size} / ${CivsRules.MAX_BUILDINGS}"
+            h.click("buildings")
+            h.screen.buttons.count { it.id.value.startsWith("building_") } shouldBe base.buildings.size
+            h.screen.buttons.map { it.id.value } shouldNotContain "next"
+            h.body() shouldContain "12 / 12"
+            h.body() shouldContain "6 / 6"
+            h.body() shouldContain "1 / 2"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-infrastructure-$language", h.screen) }
+            h.click("catalog")
+            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 13
+            val labels = h.screen.buttons.map { plainText(it.label) }
+            for (type in infrastructure.map { it.type }.distinct()) {
+                val name = plainText(CivsText.fromYaml(civsLocaleSource()).building(h.player, type))
+                labels.any { it == "$name ›" } shouldBe false
+            }
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "catalog-expanded-$language", h.screen) }
+            h.open(); h.click("management"); h.click("stock")
+            h.screen.buttons.count { it.id.value.startsWith("warehouse_") } shouldBe base.buildings.size
+            h.ui.openBuilding(h.player, base.id, infrastructure.first().id)
+            h.screen.buttons shouldBe emptyList()
+            verify(exactly = 0) { h.host.buildingRequest(h.player, infrastructure.first().id) }
+            for (type in listOf(BuildingType.TAVERN, BuildingType.BAKERY, BuildingType.GUARD_TOWER)) {
+                h.city = base.copy(buildings = base.buildings.dropLast(1) + template.copy(type = type))
+                h.ui.openBuilding(h.player, base.id, template.id)
+                h.body().contains("building-purpose.") shouldBe false
+                System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "new-building-${type.name.lowercase()}-$language", h.screen) }
+            }
+        }
+    }
+
     test("new workshop catalog recipes and skill pages expose actual choices and return to their resident") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -954,13 +999,13 @@ class CivsUiTest : FunSpec({
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
             val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
-            offers.size shouldBe 10
+            offers.size shouldBe 13
             h.screen.columns shouldBe 2
-            offers.map { it.label.color() }.distinct().size shouldBe 10
+            offers.map { it.label.color() }.distinct().size shouldBe 13
             h.screen.buttons.map { it.id.value } shouldNotContain "next"
             export("workshops-catalog-first-ru")
-            offers.takeLast(2).map { plainText(it.label) } shouldBe
-                listOf("Каменотёсная ›", "Библиотека ›")
+            offers.takeLast(3).map { plainText(it.label) } shouldBe
+                listOf("Таверна ›", "Пекарня ›", "Сторожевая башня ›")
             h.click("offer_7")
             h.body() shouldContain "1 → 2 → 3"
             h.body() shouldContain "желез"
@@ -1025,25 +1070,23 @@ class CivsUiTest : FunSpec({
             val beforeRequests = stockSnapshots
             h.click("logistics")
             h.screen.id shouldBe "civs.logistics"
-            h.body() shouldContain "Осталось"
-            h.body() shouldContain "складах"
-            h.body() shouldContain "Осталось: 1 · В пути: 2"
-            h.body() shouldContain "На складах: 47"
-            h.body() shouldContain "Часть груза в пути"
-            h.body() shouldContain "На складах: 12"
-            h.body() shouldContain "Осталось: 8 · В пути: 0"
-            h.body() shouldContain "На складах: 128"
-            h.body() shouldContain "В пути: 2"
+            materialTableCells(h.screen).first() shouldBe listOf("Материал", "Нужно", "В пути", "Запас", "Состояние")
+            materialTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "1", "2", "47", "Частично")
+            materialTableCells(h.screen).first { it.first() == "Кожа" }.take(4) shouldBe listOf("Кожа", "1", "0", "12")
+            materialTableCells(h.screen).first { it.first() == "Камень" }.take(4) shouldBe listOf("Камень", "8", "0", "128")
             stockSnapshots shouldBe beforeRequests + 1
-            h.screen.buttons.map { it.id.value } shouldBe listOf("next")
+            h.screen.body.size shouldBe 1 // One card for all four requests from this hall.
+            h.screen.buttons shouldBe emptyList()
+            materialTableCells(h.screen).first { it.first() == "Дубовое бревно" }.take(4) shouldBe listOf("Дубовое бревно", "4", "0", "4")
             export("logistics-requests-ru")
             physical = physical + ("OAK_LOG" to 6L)
-            h.click("next")
-            h.body() shouldContain "Осталось: 4 · В пути: 0"
-            h.body() shouldContain "На складах: 6"
-            stockSnapshots shouldBe beforeRequests + 2
-            h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
-            export("logistics-requests-page-2-ru")
+            h.click("history")
+            val beforeRefresh = stockSnapshots
+            h.click("logistics")
+            materialTableCells(h.screen).first { it.first() == "Дубовое бревно" }.take(4) shouldBe listOf("Дубовое бревно", "4", "0", "6")
+            stockSnapshots shouldBe beforeRefresh + 1
+            h.screen.buttons shouldBe emptyList()
+            export("logistics-requests-refreshed-ru")
             h.click("history")
             h.screen.id shouldBe "civs.building"
             h.ui.openBuilding(h.player, base.id, hall.id)
@@ -1067,6 +1110,90 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("courier board pages a long source locally and keeps short sources together without losing exact values") {
+        for (locale in listOf("ru", "en")) withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag(locale))
+            val labels = CivsText.fromYaml(civsLocaleSource())
+            val base = settlement(h.player)
+            val warehouse = base.buildings.last().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE)
+            val sources = (0..3).map { index -> base.buildings.last().copy(id = UUID.randomUUID(),
+                type = BuildingType.BUILDER_HUT, level = 2, control = CivPosition(12 + index * 10, 64, 8)) }
+            h.city = base.copy(buildings = base.buildings + warehouse + sources)
+            val materials = listOf("OAK_LOG", "COBBLESTONE", "GLASS", "SPRUCE_PLANKS", "OAK_STAIRS",
+                "STRIPPED_DARK_OAK_LOG", "STONE_BRICKS", "IRON_BARS", "LANTERN", "CHEST", "TORCH", "LADDER",
+                "POLISHED_BLACKSTONE_BRICKS", "DARK_OAK_TRAPDOOR", "SPRUCE_FENCE_GATE", "CHISELED_STONE_BRICKS",
+                "MOSSY_COBBLESTONE_STAIRS", "DEEPSLATE_BRICK_WALL", "POLISHED_ANDESITE", "BIRCH_SLAB",
+                "RED_STAINED_GLASS_PANE", "WAXED_CUT_COPPER_STAIRS", "SMOOTH_QUARTZ", "WHITE_TERRACOTTA")
+            val dense = materials.mapIndexed { index, material ->
+                CivSupplyRequest(sources[0].id, material, 12L + index, if (index % 3 == 0) 4 else 0, true)
+            }
+            every { h.host.supplyRequests(h.player) } returns listOf(dense.first(),
+                CivSupplyRequest(sources[1].id, "PAPER", 7, 0)) + dense.drop(1) + listOf(
+                CivSupplyRequest(sources[2].id, "LEATHER", 8, 0), CivSupplyRequest(sources[3].id, "COAL", 9, 0))
+            every { h.host.availableMaterials(h.player) } returns mapOf("OAK_LOG" to 64L, "GLASS" to 37L, "PAPER" to 16L)
+            fun export(name: String) = System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                exportUiScreen(it, "$name-$locale", h.screen, listOf(640, 360))
+            }
+            h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            val observed = mutableListOf<List<String>>()
+            repeat(4) { materialPage ->
+                h.screen.body.size shouldBe 1 // A long source stays one card; its six visible rows are explicit.
+                h.body() shouldContain "12, 64, 8"
+                h.body() shouldContain "${materialPage + 1}/4"
+                h.body().contains("22, 64, 8") shouldBe false
+                materialTableCells(h.screen).first() shouldBe if (locale == "ru")
+                    listOf("Материал", "Нужно", "В пути", "Запас", "Состояние")
+                    else listOf("Material", "Need", "Transit", "Stock", "State")
+                val rows = logisticsMaterialRows(h.screen)
+                rows.size shouldBe 6
+                observed += rows
+                h.screen.buttons.map { it.id.value } shouldBe buildList {
+                    if (materialPage > 0) add("materials_previous")
+                    if (materialPage < 3) add("materials_next")
+                    add("next")
+                }
+                when (materialPage) {
+                    0 -> export("logistics-grouped-dense")
+                    1 -> export("logistics-grouped-materials-middle")
+                    3 -> export("logistics-grouped-materials-last")
+                }
+                if (materialPage < 3) h.click("materials_next")
+            }
+            observed shouldBe materials.mapIndexed { index, material ->
+                val transit = if (index % 3 == 0) 4 else 0
+                val stock = when (material) { "OAK_LOG" -> 64; "GLASS" -> 37; else -> 0 }
+                val state = if (transit > 0) "part-in-transit" else if (stock > 0) "waiting-courier" else "waiting-stock"
+                listOf(plainText(labels.material(h.player, material)), (12 + index - transit).toString(), transit.toString(),
+                    stock.toString(), plainText(labels.render(h.player, "logistics.state.$state")))
+            }
+            h.click("materials_previous")
+            h.body() shouldContain "3/4"
+            logisticsMaterialRows(h.screen) shouldBe observed.subList(12, 18)
+            h.click("materials_next")
+            h.click("next")
+            h.screen.body.size shouldBe 2
+            val shortCards = h.screen.body.map { plainText(it.text) }
+            shortCards[0] shouldContain "22, 64, 8"
+            shortCards[0] shouldContain plainText(labels.material(h.player, "PAPER"))
+            shortCards[1] shouldContain "32, 64, 8"
+            shortCards[1] shouldContain plainText(labels.material(h.player, "LEATHER"))
+            h.screen.buttons.map { it.id.value } shouldBe listOf("previous", "next")
+            export("logistics-grouped-short")
+            h.click("previous")
+            h.screen.body.size shouldBe 1
+            h.body() shouldContain "4/4" // Switching sources retains the source's local material page.
+            logisticsMaterialRows(h.screen) shouldBe observed.takeLast(6)
+            h.click("next"); h.click("next")
+            h.screen.body.size shouldBe 1
+            h.body() shouldContain "42, 64, 8"
+            h.body() shouldContain plainText(labels.material(h.player, "COAL"))
+            h.screen.buttons.map { it.id.value } shouldBe listOf("previous")
+            export("logistics-grouped-last")
+            h.click("history")
+            h.screen.id shouldBe "civs.building"
+        }
+    }
+
     test("warehouse request board keeps stock unknown when its snapshot is unavailable") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -1078,9 +1205,10 @@ class CivsUiTest : FunSpec({
             every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-unavailable")
             h.ui.openBuilding(h.player, base.id, warehouse.id)
             h.click("logistics")
-            h.body() shouldContain "Осталось: 3 · В пути: 0"
-            h.body() shouldContain "На складах: Нет данных"
-            h.body() shouldContain "Запасы неизвестны"
+            materialTableCells(h.screen).first { it.first() == "Бумага" }.take(3) shouldBe listOf("Бумага", "3", "0")
+            materialTableCells(h.screen).dropWhile { it.first() != "Бумага" }.map { it[3] }
+                .filter(String::isNotBlank).joinToString(" ") shouldBe "Нет данных"
+            materialTableCells(h.screen).first { it.first() == "Бумага" }.last() shouldBe "Неизвестно"
             h.body().contains("3 / 0") shouldBe false
             h.screen.buttons shouldBe emptyList()
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-stock-unavailable-ru", h.screen, listOf(588, 380)) }
@@ -1098,10 +1226,9 @@ class CivsUiTest : FunSpec({
                 CivSupplyRequest(base.buildings.first().id, "LEATHER", 2, 0))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
-            h.body() shouldContain "Осталось: 0 · В пути: 5"
-            h.body() shouldContain "Всё необходимое в пути"
-            h.body() shouldContain "Ожидает материалов"
-            h.body().contains("Осталось: -") shouldBe false
+            materialTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "0", "5", "0", "В пути")
+            materialTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "2", "0", "0", "Нет запаса")
+            materialTableCells(h.screen).drop(2).none { it.getOrNull(1)?.startsWith("-") == true } shouldBe true
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-covered-and-short-ru", h.screen, listOf(588, 380)) }
         }
     }
@@ -3250,6 +3377,18 @@ private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> {
         .filter { it.contains((base + 4).toChar()) }.map { line -> line.split((base + 5).toChar()).map { cell -> buildString {
             cell.codePoints().filter { it !in base..base + 14 && it !in 0xF0F01..0xF0F11 }.forEach(::appendCodePoint)
         } } }.toList()
+}
+
+/** Reassemble wrapped cell lines so a dense-board assertion checks every full name, count and state. */
+private fun logisticsMaterialRows(screen: PaperDialogScreen): List<List<String>> {
+    val rows = mutableListOf<MutableList<String>>()
+    for (line in materialTableCells(screen).dropWhile { it[1].toLongOrNull() == null }) {
+        if (line[1].isNotBlank()) rows += line.toMutableList()
+        else line.forEachIndexed { column, value ->
+            if (value.isNotBlank()) rows.last()[column] = listOf(rows.last()[column], value).filter(String::isNotBlank).joinToString(" ")
+        }
+    }
+    return rows
 }
 
 private fun builderMaterialEstimate() = mapOf("CHISELED_BOOKSHELF" to 2L, "COBBLESTONE" to 4L,
