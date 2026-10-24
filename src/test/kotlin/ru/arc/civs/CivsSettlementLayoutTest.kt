@@ -108,6 +108,28 @@ class CivsSettlementLayoutTest : FunSpec({
         rejection.pieces.flatMap { it.blocks }.none { it.position.x == wet.x && it.position.z == wet.z } shouldBe true
     }
 
+    test("non-paving retained approaches still protect wall crossings and gate grades") {
+        val city = layoutFixtureCity()
+        val frame = CivsSettlementLayout.frame(city)
+        val surface = layoutSurface(city, "flat")
+        val gate = frame.gates.first()
+        val gateRoute = layoutAxisRoute(gate.center.copy(x = gate.center.x - 6, y = 66),
+            gate.center.copy(x = gate.center.x + 6, y = 66))
+        val wall = frame.wallObstacles.first()
+        val crossing = CivPosition((wall.min.x + wall.max.x) / 2, 65, (wall.min.z + wall.max.z) / 2)
+        val retained = layoutAxisRoute(crossing.copy(z = wall.min.z - 2), crossing.copy(z = wall.max.z + 2))
+        val result = CivsSettlementLayout.infrastructure(city, frame, surface, listOf(gateRoute, retained), pavingRoutes = emptyList())
+        result.pieces.none { it.type == BuildingType.ROAD } shouldBe true
+        (result.rejected.getValue("route-crosses-wall") > 0) shouldBe true
+        result.perimeterClosed shouldBe false
+        result.pieces.filter { it.type == BuildingType.WALL }.none {
+            CivsAutonomousGeometry.horizontalContains(it.bounds, crossing)
+        } shouldBe true
+        val passage = result.pieces.single { it.type == BuildingType.GATE &&
+            it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
+        passage.transit.single { it.x == gate.center.x && it.z == gate.center.z }.y shouldBe 66
+    }
+
     test("gate floors retain route grades and steep infrastructure has an explicit rejection") {
         val city = layoutFixtureCity()
         val frame = CivsSettlementLayout.frame(city)

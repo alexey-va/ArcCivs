@@ -26,6 +26,8 @@ These are actual outputs of the runtime planner over specified fixtures, not han
 
 The planner reports specific blockers instead of placing walls through accepted buildings or claiming a partial perimeter is complete. Infrastructure exhaustion must not prevent ordinary building upgrades.
 
+The 0.1.72 demand correction stops infrastructure construction approaches from generating additional paving demand and schedules gates/walls before optional roads. Prices, the 96-piece limit and accepted receipts stay unchanged. The verified full Auto snapshot still requires a separate migration decision; the correction does not claim its perimeter is restored. See the [paired replay and resource assessment](infrastructure-demand-recovery.md).
+
 ## Mine frames and storage
 
 V5 preserves immutable V2/V3/V4 receipt ordinals, one ladder shaft, and the existing three/four/five tiers. Fences, framing and lining consume actual carried items. Compared with V4, levels one/two/three add 346/444/542 cobblestone, 152/200/248 logs, 243/324/405 planks and 64/80/96 fences. The inaccessible outer corner columns and one backing-side column remain native and are excluded from these bills; ordinary frontier safety checks remain active. Each tier also has 60 additional clearance operations. Only actual native blocks produce their normal drops; unchanged cells do not require replacement payments.

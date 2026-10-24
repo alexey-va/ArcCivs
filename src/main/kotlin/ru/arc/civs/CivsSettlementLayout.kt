@@ -229,7 +229,8 @@ internal object CivsSettlementLayout {
      * exact materials and recovery are deliberately supplied by the existing construction owner.
      */
     fun infrastructure(city: Settlement, frame: CivSettlementFrame, surface: CivTerrainSurface,
-        routes: List<List<CivPosition>>, accepted: List<CivSettlementPiece> = emptyList()): CivSettlementInfrastructure {
+        routes: List<List<CivPosition>>, accepted: List<CivSettlementPiece> = emptyList(),
+        pavingRoutes: List<List<CivPosition>> = routes): CivSettlementInfrastructure {
         val rejected = sortedMapOf<String, Int>()
         fun reject(reason: String) { rejected.merge(reason, 1, Int::plus) }
         require(accepted.map { it.id }.distinct().size == accepted.size)
@@ -369,7 +370,7 @@ internal object CivsSettlementLayout {
             }
         }
         val roads = linkedMapOf<Long, CivPosition>()
-        for (route in routes) {
+        for (route in pavingRoutes) {
             if (!acceptsRoute(frame, route)) { reject("route-crosses-wall"); continue }
             for (p in route) for (shoulder in shoulders(p)) {
                 if (!city.contains(shoulder.x, shoulder.z) || key(shoulder) in used ||

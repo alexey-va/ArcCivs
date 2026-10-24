@@ -124,8 +124,9 @@ internal class CivsAutonomousPlacement(
                 phase = "surface"
                 await(world.autonomousHeightField(city, hall, hall)) { field ->
                     surface = field; columns = field.columns.size
+                    val pavingRoutes = access.routes.filterKeys { id -> city.building(id)?.type?.isInfrastructure == false }.values.toList()
                     val plan = CivsSettlementLayout.infrastructure(city, CivsSettlementLayout.frame(city), field,
-                        access.routes.values.toList(), access.infrastructure)
+                        access.routes.values.toList(), access.infrastructure, pavingRoutes)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
                     if (blockers.isNotEmpty()) ru.arc.logging.ArcLogging.warn(ru.arc.logging.ArcLogging.escapeMM(
@@ -133,7 +134,7 @@ internal class CivsAutonomousPlacement(
                             "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size)))
                     val missing = plan.pieces.filter { city.building(it.id) == null }
                         .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
-                            BuildingType.ROAD -> 0; BuildingType.GATE -> 1; else -> 2
+                            BuildingType.GATE -> 0; BuildingType.WALL -> 1; else -> 2
                         } }.thenBy { it.bounds.min.x }.thenBy { it.bounds.min.z })
                     if (missing.isEmpty()) {
                         fail(if (plan.rejected.isEmpty()) "autonomy-layout-complete" else "autonomy-no-site")

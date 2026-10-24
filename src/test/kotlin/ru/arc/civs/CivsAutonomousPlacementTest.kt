@@ -21,6 +21,51 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsAutonomousPlacementTest : FunSpec({
+    for (gatesBuilt in listOf(false, true))
+    test("infrastructure drafts ${if (gatesBuilt) "walls" else "gates"} before pending road paving") {
+        InfrastructurePlacementScenario().use { s ->
+            val route = (0..10).map { CivPosition(0, 65, it) }
+            val seed = CivsSettlementLayout.infrastructure(s.city, CivsSettlementLayout.frame(s.city), s.surface, listOf(route))
+            seed.pieces.any { it.type == BuildingType.ROAD } shouldBe true
+            val gates = seed.pieces.filter { it.type == BuildingType.GATE }
+            gates.size shouldBe 3
+            if (gatesBuilt) s.city = s.city.copy(buildings = s.city.buildings + gates.map {
+                CivsInfrastructure.building(it).copy(phase = BuildingPhase.ACTIVE)
+            })
+            s.access = CivAutonomousAccess(mapOf(s.city.buildings.first().id to route), if (gatesBuilt) gates else emptyList())
+            val result = s.planner.infrastructure(s.city)
+            spatialFailure(result) shouldBe "test-selected-infrastructure-draft"
+            s.drafts.single().building.type shouldBe if (gatesBuilt) BuildingType.WALL else BuildingType.GATE
+            s.drafts.single().route.first() shouldBe s.city.buildings.first().entrance
+            s.drafts.single().route.last() shouldBe s.drafts.single().building.entrance
+        }
+    }
+
+    for (type in listOf(BuildingType.ROAD, BuildingType.GATE, BuildingType.WALL))
+    test("a completed $type approach remains protected without requesting a new paving generation") {
+        InfrastructurePlacementScenario().use { s ->
+            val route = (0..10).map { CivPosition(0, 65, it) }
+            val seed = CivsSettlementLayout.infrastructure(s.city, CivsSettlementLayout.frame(s.city), s.surface, listOf(route))
+            seed.rejected shouldBe emptyMap()
+            seed.perimeterClosed shouldBe true
+            s.city = s.city.copy(buildings = s.city.buildings + seed.pieces.map {
+                CivsInfrastructure.building(it).copy(phase = BuildingPhase.ACTIVE)
+            })
+            val piece = seed.pieces.first { it.type == type }
+            val retained = (2 downTo 0).map { offset ->
+                if (type == BuildingType.WALL) piece.entrance.copy(z = piece.entrance.z + offset)
+                else piece.entrance.copy(x = piece.entrance.x - offset)
+            }
+            s.access = CivAutonomousAccess(mapOf(s.city.buildings.first().id to route, piece.id to retained), seed.pieces)
+            val standing = s.access.standing(s.city, UUID.randomUUID())
+            retained.forEach { standing[civsTerrainKey(it.x, it.z)] shouldBe it }
+            piece.transit.forEach { standing[civsTerrainKey(it.x, it.z)] shouldBe it }
+            val result = s.planner.infrastructure(s.city)
+            spatialFailure(result) shouldBe "autonomy-layout-complete"
+            s.drafts shouldBe emptyList()
+        }
+    }
+
     test("candidate rings preserve full upgrade volume and each existing approach") {
         val city = spatialCity(UUID.randomUUID())
         val small = spatialBlueprint(UUID.randomUUID(), city.worldId, CivPosition(0, 0, 0), 0, 1).building
@@ -306,6 +351,29 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 })
+
+/** Real catalog and terraform draft; stop at the native boundary so selection has no world side effects. */
+private class InfrastructurePlacementScenario : AutoCloseable {
+    var city = spatialCity(UUID.randomUUID()).copy(autonomy = CivAutonomy(layoutHalfWidth = 24))
+    var access = CivAutonomousAccess()
+    val surface = CivTerrainSurface(-64, 320, buildMap {
+        for (x in -96..96) for (z in -96..96) put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, true))
+    })
+    val drafts = mutableListOf<CivTerraformDraft>()
+    private val world = mockk<CivsWorld>()
+    private val blueprints = mockk<CivsBlueprints>()
+    private val tasks = LifecycleTaskScope(TestTaskScheduler())
+    val planner = CivsAutonomousPlacement(blueprints, world, Executor(Runnable::run),
+        loadAccess = { CompletableFuture.completedFuture(access) })
+    init {
+        every { world.autonomousHeightField(any(), any(), any()) } returns CompletableFuture.completedFuture(surface)
+        every { world.captureTerraform(any(), any(), any(), any()) } answers {
+            drafts += arg<CivTerraformDraft>(1)
+            CompletableFuture.failedFuture(CivsRejection("test-selected-infrastructure-draft"))
+        }
+    }
+    override fun close() { planner.close(); tasks.close() }
+}
 
 private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     val world = CivsWorksiteWorldFixture("autonomous-placement").also(paper.server::addWorld)
