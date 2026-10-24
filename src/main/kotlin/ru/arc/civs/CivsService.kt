@@ -154,8 +154,15 @@ class CivsService(
                 (block.getState(false) as? org.bukkit.block.Container)?.inventory?.isEmpty == false) return false
             if (!access.repairing && city.autonomy != null) {
                 val expected = access.expectedCells[position] ?: return false
-                val current = block.blockData.asString
-                if (current != expected.before && current != expected.after) return false
+                val current = block.blockData
+                if (!CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.before)) &&
+                    !CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.after))) {
+                    plugin.logger.warning(CivsDiagnostics.line("construction_write_denied", "city" to city.id,
+                        "order" to access.plan.id, "batch" to city.construction?.workDone, "reason" to "autonomy-terrain",
+                        "world" to worldId, "x" to x, "y" to y, "z" to z,
+                        "before" to expected.before, "after" to expected.after, "actual" to current.asString))
+                    return false
+                }
             }
             // Preflight can precede this write by many ticks; Lands authority must still be current.
             return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))

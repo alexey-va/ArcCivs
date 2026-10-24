@@ -4401,6 +4401,49 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    for (stairState in listOf("before", "after"))
+    test("autonomous final write gate tolerates only neighbour-derived $stairState stair shape") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true)
+            val order = requireNotNull(placement.city.construction)
+            val original = requireNotNull(h.store.loadPlan(order.id).join())
+            val snapshot = h.blueprints.recover(original).join()
+            val stair = "minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=false]"
+            val before = if (stairState == "before") stair else "minecraft:stone"
+            val after = if (stairState == "after") stair else "minecraft:stone"
+            val plan = original.copy(blocks = original.blocks.mapIndexed { index, cell ->
+                if (index == 0) cell.copy(before = before, after = after) else cell
+            })
+            val village = CivsRules.validate(placement.city.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = Stock(40, 30, 20), construction = order.copy(payment = null,
+                    batches = order.batches!!.copy(atomicPairs = true),
+                    cost = CivsAutonomy.cost(requireNotNull(order.plannedBuilding).type, order.targetLevel))))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+            every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+            var landsAllowed = true
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } answers { landsAllowed }
+            val block = h.world.getBlockAt(15, 64, 0)
+            block.blockData = Bukkit.createBlockData(before)
+            h.start(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            for (state in listOf(stair, stair.replace("straight", "outer_left"), stair.replace("straight", "inner_right"), "minecraft:stone")) {
+                block.blockData = Bukkit.createBlockData(state)
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+            }
+            for (state in listOf(stair.replace("north", "south"), stair.replace("top", "bottom"),
+                stair.replace("false", "true"), stair.replace("oak_stairs", "stone_brick_stairs"), "minecraft:air")) {
+                block.blockData = Bukkit.createBlockData(state)
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                block.blockData.asString shouldBe state
+            }
+            block.blockData = Bukkit.createBlockData(stair.replace("straight", "outer_right"))
+            landsAllowed = false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.settlements().single().stock shouldBe village.stock
+        }
+    }
+
     test("autonomous construction preserves a foreign block placed during its delayed begin save") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
