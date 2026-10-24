@@ -4489,6 +4489,55 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    for (fenceState in listOf("before", "after"))
+    test("autonomous final write gate tolerates only neighbour-derived $fenceState fence connections") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = true)
+            val order = requireNotNull(placement.city.construction)
+            val original = requireNotNull(h.store.loadPlan(order.id).join())
+            val snapshot = h.blueprints.recover(original).join()
+            val fence = "minecraft:spruce_fence[east=true,north=false,south=false,waterlogged=false,west=true]"
+            val observed = "minecraft:spruce_fence[east=true,north=true,south=false,waterlogged=false,west=false]"
+            val trapdoor = "minecraft:spruce_trapdoor[facing=east,half=bottom,open=true,powered=false,waterlogged=false]"
+            val before = if (fenceState == "before") fence else trapdoor
+            val after = if (fenceState == "after") fence else trapdoor
+            val plan = original.copy(blocks = original.blocks.mapIndexed { index, cell ->
+                if (index == 0) cell.copy(before = before, after = after) else cell
+            })
+            val village = CivsRules.validate(placement.city.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = Stock(40, 30, 20), construction = order.copy(payment = null,
+                    batches = order.batches!!.copy(atomicPairs = true),
+                    cost = CivsAutonomy.cost(requireNotNull(order.plannedBuilding).type, order.targetLevel))))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+            every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+            var landsAllowed = true
+            every { h.worldAdapter.canModify(h.owner, any(), any()) } answers { landsAllowed }
+            val block = h.world.getBlockAt(15, 64, 0)
+            block.blockData = Bukkit.createBlockData(before)
+            h.start(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            for (state in listOf(fence, observed,
+                "minecraft:spruce_fence[east=false,north=true,south=true,waterlogged=false,west=false]", trapdoor)) {
+                block.blockData = Bukkit.createBlockData(state)
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
+                block.blockData.asString shouldBe state
+            }
+            for (state in listOf(observed.replace("spruce_fence", "oak_fence"), observed.replace("waterlogged=false", "waterlogged=true"),
+                "minecraft:air", trapdoor.replace("facing=east", "facing=west"), trapdoor.replace("open=true", "open=false"),
+                trapdoor.replace("powered=false", "powered=true"), trapdoor.replace("half=bottom", "half=top"),
+                trapdoor.replace("waterlogged=false", "waterlogged=true"))) {
+                block.blockData = Bukkit.createBlockData(state)
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                block.blockData.asString shouldBe state
+            }
+            block.blockData = Bukkit.createBlockData(observed)
+            landsAllowed = false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            h.service.settlements().single().stock shouldBe village.stock
+        }
+    }
+
     test("autonomous construction preserves a foreign block placed during its delayed begin save") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)

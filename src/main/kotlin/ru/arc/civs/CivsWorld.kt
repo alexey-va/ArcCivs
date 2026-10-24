@@ -11,10 +11,12 @@ import org.bukkit.SoundCategory
 import org.bukkit.Tag
 import org.bukkit.World
 import org.bukkit.block.Block
+import org.bukkit.block.BlockFace
 import org.bukkit.block.TileState
 import org.bukkit.inventory.InventoryHolder
 import org.bukkit.block.data.BlockData
 import org.bukkit.block.data.Waterlogged
+import org.bukkit.block.data.type.Fence
 import org.bukkit.block.data.type.Leaves
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
@@ -1026,12 +1028,18 @@ class CivsWorld(
     }
 
     companion object {
-        /** Neighbour updates change only a stair's corner shape while surrounding rows are built. */
+        /** Neighbour updates can change stair shape or a fence's four horizontal connections. */
         internal fun sameConstructionState(actual: BlockData, expected: BlockData): Boolean {
             if (actual.asString == expected.asString) return true
-            if (actual !is org.bukkit.block.data.type.Stairs || expected !is org.bukkit.block.data.type.Stairs ||
-                actual.material != expected.material) return false
-            return (actual.clone() as org.bukkit.block.data.type.Stairs).apply { shape = expected.shape }.asString == expected.asString
+            if (actual.material != expected.material) return false
+            if (actual is org.bukkit.block.data.type.Stairs && expected is org.bukkit.block.data.type.Stairs)
+                return (actual.clone() as org.bukkit.block.data.type.Stairs).apply { shape = expected.shape }.asString == expected.asString
+            if (actual is Fence && expected is Fence)
+                return (actual.clone() as Fence).apply {
+                    for (face in listOf(BlockFace.NORTH, BlockFace.EAST, BlockFace.SOUTH, BlockFace.WEST))
+                        setFace(face, expected.hasFace(face))
+                }.asString == expected.asString
+            return false
         }
 
         const val CELLS_PER_TICK = 2048

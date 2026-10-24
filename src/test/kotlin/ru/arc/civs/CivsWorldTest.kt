@@ -72,6 +72,51 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("autonomous revalidation accepts the observed fence connections before a trapdoor upgrade without accepting real drift") {
+        worldScenario { s ->
+            val position = CivPosition(0, 64, 0)
+            val before = "minecraft:spruce_fence[east=true,north=false,south=false,waterlogged=false,west=true]"
+            val observed = "minecraft:spruce_fence[east=true,north=true,south=false,waterlogged=false,west=false]"
+            val after = "minecraft:spruce_trapdoor[facing=east,half=bottom,open=true,powered=false,waterlogged=false]"
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val plan = CivPlacementPlan(UUID.randomUUID(), city.id, s.world.uid, building,
+                listOf(CivPlanBlock(position, before, after)))
+            val block = s.world.getBlockAt(0, 64, 0)
+            for (state in listOf(before, observed,
+                "minecraft:spruce_fence[east=false,north=true,south=true,waterlogged=false,west=false]", after)) {
+                block.blockData = Bukkit.createBlockData(state)
+                val result = s.subject.revalidate(plan, city.owner)
+                s.scheduler.tick()
+                completed(result) shouldBe Unit
+                block.blockData.asString shouldBe state
+            }
+            for (state in listOf(observed.replace("spruce_fence", "oak_fence"), observed.replace("waterlogged=false", "waterlogged=true"),
+                "minecraft:air", after.replace("facing=east", "facing=west"), after.replace("open=true", "open=false"),
+                after.replace("powered=false", "powered=true"), after.replace("half=bottom", "half=top"),
+                after.replace("waterlogged=false", "waterlogged=true"))) {
+                block.blockData = Bukkit.createBlockData(state)
+                val result = s.subject.revalidate(plan, city.owner)
+                s.scheduler.tick()
+                val failure = rejection(result)
+                failure.reason shouldBe "autonomy-terrain"
+                failure.values["actual"] shouldBe state
+                failure.values["before"] shouldBe before
+                failure.values["after"] shouldBe after
+                block.blockData.asString shouldBe state
+            }
+        }
+    }
+
+    test("other multiple-facing blocks retain exact construction state") {
+        worldScenario {
+            val expected = Bukkit.createBlockData("minecraft:vine[east=false,north=true,south=false,up=false,west=false]")
+            val actual = Bukkit.createBlockData("minecraft:vine[east=true,north=true,south=false,up=false,west=false]")
+            CivsWorld.sameConstructionState(actual, expected) shouldBe false
+        }
+    }
+
     test("site capture reserves an empty authored marker without placing a barrel and construction still requires it") {
         worldScenario { s ->
             val marker = CivPosition(1, 64, 0)
