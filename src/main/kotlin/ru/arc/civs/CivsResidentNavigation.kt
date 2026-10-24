@@ -324,11 +324,20 @@ internal class CitizenPacketRoute(
                     }
                 }
             }
-        val clipped = citizenSlideBody(from.toVector(), candidate.toVector(), .299, 1.8, .299, floors)
-        if (clipped != null) {
-            candidate.y = max(candidate.y, clipped.position.y)
-            // The collision solver leaves a tiny separation; feet/arrival use the exact native top.
-            floors.firstOrNull { abs(it.maxY - candidate.y) < .000001 }?.let { candidate.y = it.maxY }
+        // Gravity may change only Y: a general body slide can also clip X/Z at a
+        // taller neighbouring floor. Keeping its Y but restoring the intended X/Z
+        // would move inside that floor. Stay above every support crossed by this
+        // packet's horizontal footprint; the caller still validates its full body.
+        val horizontalFrom = org.bukkit.util.Vector(from.x, .5, from.z)
+        val horizontalTo = org.bukkit.util.Vector(candidate.x, .5, candidate.z)
+        val direction = horizontalTo.clone().subtract(horizontalFrom)
+        val distance = direction.length()
+        for (floor in floors) {
+            val footprint = BoundingBox(floor.minX - .299 + .0000001, 0.0, floor.minZ - .299 + .0000001,
+                floor.maxX + .299 - .0000001, 1.0, floor.maxZ + .299 - .0000001)
+            if (footprint.contains(horizontalFrom) || footprint.contains(horizontalTo) ||
+                distance > .0000001 && footprint.rayTrace(horizontalFrom, direction, distance) != null)
+                candidate.y = max(candidate.y, floor.maxY)
         }
         return candidate
     }

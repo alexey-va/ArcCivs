@@ -41,13 +41,20 @@ internal object CivsAutonomousTerraform {
 
     /** A median terrace minimises excavation; nearby levels allow a less costly graded connection. */
     fun options(city: Settlement, candidates: List<CivsAutonomousCandidate>, surface: CivTerrainSurface,
-        fixed: Boolean = false): List<CivTerraformOption> = candidates.flatMap { candidate ->
+        fixed: Boolean = false, rejected: (String, CivPosition) -> Unit = { _, _ -> }): List<CivTerraformOption> = candidates.flatMap { candidate ->
         val b = candidate.building
         val heights = ArrayList<Int>()
         for (x in b.bounds.min.x..b.bounds.max.x) for (z in b.bounds.min.z..b.bounds.max.z) {
-            val c = surface.at(x, z) ?: return@flatMap emptyList()
+            val c = surface.at(x, z)
+            if (c == null || !c.loaded) {
+                rejected("chunks-unloaded", CivPosition(x, c?.groundY ?: b.anchor.y, z))
+                return@flatMap emptyList()
+            }
             val ownMarker = fixed && b.control?.let { it.x == x && it.z == z } == true
-            if (!c.loaded || !c.natural && !ownMarker) return@flatMap emptyList()
+            if (!c.natural && !ownMarker) {
+                rejected("autonomy-terrain", CivPosition(x, c.groundY, z))
+                return@flatMap emptyList()
+            }
             heights += if (ownMarker) b.anchor.y else c.groundY
         }
         if (heights.isEmpty()) return@flatMap emptyList()
@@ -56,8 +63,14 @@ internal object CivsAutonomousTerraform {
         val levels = if (fixed) listOf(b.anchor.y) else listOf(median, median - 4, median + 4).distinct()
         levels.mapNotNull { y ->
             val building = CivsAutonomousGeometry.atHeight(b, y)
-            if (heights.any { abs(it - y) > MAXIMUM_CHANGE } || building.bounds.min.y <= surface.minHeight ||
-                building.bounds.max.y >= surface.maxHeight - 2) return@mapNotNull null
+            if (heights.any { abs(it - y) > MAXIMUM_CHANGE }) {
+                rejected("autonomy-slope", building.anchor)
+                return@mapNotNull null
+            }
+            if (building.bounds.min.y <= surface.minHeight || building.bounds.max.y >= surface.maxHeight - 2) {
+                rejected("outside-world", building.anchor)
+                return@mapNotNull null
+            }
             val nearest = sources(city, building).minOfOrNull { source ->
                 abs(source.x - building.entrance.x) + abs(source.z - building.entrance.z) +
                     abs(source.y - building.entrance.y) * 3

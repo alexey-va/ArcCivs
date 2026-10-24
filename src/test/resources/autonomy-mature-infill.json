@@ -1,0 +1,2296 @@
+{
+  "provenance": {
+    "source": "Saved Anvil disk heightfield projection, 2026-10-24. Not a native-memory capture. Outside these 323 columns the test supplies explicitly synthetic uneven terrain. Building coordinates and envelopes are the incident snapshot; resident and owner identities are omitted.",
+    "sourceSha256": "e37a5e8f201a47f20a45f4fe14753701ec0b1cc4820befc163f90ee1cded06df"
+  },
+  "center": {
+    "x": -408,
+    "y": 81,
+    "z": -505
+  },
+  "radius": 128,
+  "style": "caledonia",
+  "layoutHalfWidth": 37,
+  "buildings": [
+    {
+      "anchor": {
+        "x": -423,
+        "y": 77,
+        "z": -506
+      },
+      "bounds": {
+        "max": {
+          "x": -404,
+          "y": 112,
+          "z": -496
+        },
+        "min": {
+          "x": -422,
+          "y": 77,
+          "z": -514
+        }
+      },
+      "control": {
+        "x": -408,
+        "y": 81,
+        "z": -505
+      },
+      "entrance": {
+        "x": -423,
+        "y": 78,
+        "z": -506
+      },
+      "level": 2,
+      "phase": "ACTIVE",
+      "rotation": 90,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/townhall2",
+      "type": "TOWN_HALL"
+    },
+    {
+      "anchor": {
+        "x": -426,
+        "y": 77,
+        "z": -505
+      },
+      "bounds": {
+        "max": {
+          "x": -427,
+          "y": 89,
+          "z": -499
+        },
+        "min": {
+          "x": -439,
+          "y": 73,
+          "z": -511
+        }
+      },
+      "control": {
+        "x": -430,
+        "y": 79,
+        "z": -504
+      },
+      "entrance": {
+        "x": -426,
+        "y": 78,
+        "z": -505
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 270,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/builder1",
+      "type": "BUILDER_HUT"
+    },
+    {
+      "anchor": {
+        "x": -421,
+        "y": 74,
+        "z": -518
+      },
+      "bounds": {
+        "max": {
+          "x": -413,
+          "y": 83,
+          "z": -519
+        },
+        "min": {
+          "x": -425,
+          "y": 74,
+          "z": -531
+        }
+      },
+      "control": {
+        "x": -416,
+        "y": 75,
+        "z": -521
+      },
+      "entrance": {
+        "x": -421,
+        "y": 75,
+        "z": -518
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 0,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/lumberjack1",
+      "type": "FORESTER"
+    },
+    {
+      "anchor": {
+        "x": -408,
+        "y": 70,
+        "z": -565
+      },
+      "bounds": {
+        "max": {
+          "x": -399,
+          "y": 87,
+          "z": -566
+        },
+        "min": {
+          "x": -417,
+          "y": 65,
+          "z": -584
+        }
+      },
+      "control": {
+        "x": -408,
+        "y": 71,
+        "z": -572
+      },
+      "entrance": {
+        "x": -408,
+        "y": 71,
+        "z": -565
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 0,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/miner1",
+      "type": "QUARRY"
+    },
+    {
+      "anchor": {
+        "x": -468,
+        "y": 77,
+        "z": -505
+      },
+      "bounds": {
+        "max": {
+          "x": -469,
+          "y": 89,
+          "z": -499
+        },
+        "min": {
+          "x": -481,
+          "y": 77,
+          "z": -511
+        }
+      },
+      "control": {
+        "x": -472,
+        "y": 79,
+        "z": -504
+      },
+      "entrance": {
+        "x": -468,
+        "y": 78,
+        "z": -505
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 270,
+      "schematicId": "civs/minecolonies/caledonia/agriculture/horticulture/farmer1",
+      "type": "FARM"
+    },
+    {
+      "anchor": {
+        "x": -408,
+        "y": 76,
+        "z": -459
+      },
+      "bounds": {
+        "max": {
+          "x": -400,
+          "y": 93,
+          "z": -440
+        },
+        "min": {
+          "x": -418,
+          "y": 76,
+          "z": -458
+        }
+      },
+      "control": {
+        "x": -409,
+        "y": 78,
+        "z": -450
+      },
+      "entrance": {
+        "x": -408,
+        "y": 77,
+        "z": -459
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 180,
+      "schematicId": "civs/minecolonies/caledonia/craftsmanship/storage/warehouse1",
+      "type": "WAREHOUSE"
+    },
+    {
+      "anchor": {
+        "x": -390,
+        "y": 77,
+        "z": -463
+      },
+      "bounds": {
+        "max": {
+          "x": -383,
+          "y": 93,
+          "z": -444
+        },
+        "min": {
+          "x": -395,
+          "y": 77,
+          "z": -462
+        }
+      },
+      "control": {
+        "x": -386,
+        "y": 79,
+        "z": -450
+      },
+      "entrance": {
+        "x": -390,
+        "y": 78,
+        "z": -463
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 180,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/residence1",
+      "type": "HOUSE"
+    },
+    {
+      "anchor": {
+        "x": -413,
+        "y": 77,
+        "z": -480
+      },
+      "bounds": {
+        "max": {
+          "x": -405,
+          "y": 95,
+          "z": -481
+        },
+        "min": {
+          "x": -417,
+          "y": 77,
+          "z": -493
+        }
+      },
+      "control": {
+        "x": -411,
+        "y": 78,
+        "z": -490
+      },
+      "entrance": {
+        "x": -413,
+        "y": 78,
+        "z": -480
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 0,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/tavern1",
+      "type": "TAVERN"
+    },
+    {
+      "anchor": {
+        "x": -395,
+        "y": 71,
+        "z": -504
+      },
+      "bounds": {
+        "max": {
+          "x": -376,
+          "y": 112,
+          "z": -498
+        },
+        "min": {
+          "x": -394,
+          "y": 71,
+          "z": -510
+        }
+      },
+      "control": {
+        "x": -387,
+        "y": 73,
+        "z": -503
+      },
+      "entrance": {
+        "x": -395,
+        "y": 72,
+        "z": -504
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 90,
+      "schematicId": "civs/minecolonies/caledonia/military/guardtower1",
+      "type": "GUARD_TOWER"
+    },
+    {
+      "anchor": {
+        "x": -395,
+        "y": 71,
+        "z": -524
+      },
+      "bounds": {
+        "max": {
+          "x": -376,
+          "y": 87,
+          "z": -519
+        },
+        "min": {
+          "x": -394,
+          "y": 71,
+          "z": -531
+        }
+      },
+      "control": {
+        "x": -382,
+        "y": 73,
+        "z": -528
+      },
+      "entrance": {
+        "x": -395,
+        "y": 72,
+        "z": -524
+      },
+      "level": 1,
+      "phase": "ACTIVE",
+      "rotation": 90,
+      "schematicId": "civs/minecolonies/caledonia/fundamentals/residence1",
+      "type": "HOUSE"
+    }
+  ],
+  "columns": [
+    [
+      -394,
+      74,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      74,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      74,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      74,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      74,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      73,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      69,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      62,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      57,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -394,
+      57,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      74,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      74,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      74,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      73,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      72,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      72,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      67,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      60,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      57,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -393,
+      57,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      73,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      72,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      72,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      72,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      72,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      72,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      65,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      57,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      57,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -392,
+      56,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      73,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      72,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      72,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      72,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      72,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      72,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      71,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      63,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      57,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -391,
+      51,
+      -479,
+      "minecraft:copper_ore"
+    ],
+    [
+      -390,
+      73,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      73,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      73,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      73,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      72,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      72,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      72,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      72,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      72,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      71,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      71,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      70,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      61,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -390,
+      54,
+      -480,
+      "minecraft:stone"
+    ],
+    [
+      -390,
+      55,
+      -479,
+      "minecraft:stone"
+    ],
+    [
+      -389,
+      73,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      73,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      73,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      72,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      72,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      72,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      72,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      71,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      71,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      71,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      70,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      67,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      61,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -389,
+      56,
+      -480,
+      "minecraft:stone"
+    ],
+    [
+      -389,
+      57,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      73,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      72,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      72,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      72,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      72,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      72,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      71,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      71,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      71,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      70,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      69,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      63,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      61,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      59,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      58,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -388,
+      58,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      72,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      72,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      72,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      72,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      72,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      71,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      71,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      70,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      69,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      68,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      62,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      60,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      59,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      58,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -387,
+      57,
+      -480,
+      "minecraft:stone"
+    ],
+    [
+      -387,
+      57,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      72,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      72,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      72,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      72,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      72,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      71,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      70,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      70,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      69,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      66,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      61,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      59,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      58,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      57,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      57,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -386,
+      57,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      72,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      72,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      72,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      72,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      71,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      70,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      69,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      68,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      63,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      60,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      58,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      57,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      57,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -385,
+      56,
+      -480,
+      "minecraft:stone"
+    ],
+    [
+      -385,
+      56,
+      -479,
+      "minecraft:stone"
+    ],
+    [
+      -384,
+      72,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      72,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      70,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      69,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      67,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      62,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      58,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      57,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      57,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      56,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      56,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -384,
+      55,
+      -479,
+      "minecraft:stone"
+    ],
+    [
+      -383,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      70,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      68,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      66,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      59,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      56,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      56,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      55,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      54,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      54,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -383,
+      54,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      71,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      69,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      68,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      64,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      56,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      54,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      53,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      53,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      52,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      52,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -382,
+      52,
+      -479,
+      "minecraft:andesite"
+    ],
+    [
+      -381,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      69,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      67,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      58,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      54,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      52,
+      -484,
+      "minecraft:andesite"
+    ],
+    [
+      -381,
+      52,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      51,
+      -482,
+      "minecraft:andesite"
+    ],
+    [
+      -381,
+      51,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -381,
+      51,
+      -480,
+      "minecraft:andesite"
+    ],
+    [
+      -381,
+      51,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      68,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      66,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      54,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -380,
+      52,
+      -485,
+      "minecraft:andesite"
+    ],
+    [
+      -380,
+      51,
+      -484,
+      "minecraft:andesite"
+    ],
+    [
+      -380,
+      51,
+      -483,
+      "minecraft:andesite"
+    ],
+    [
+      -380,
+      50,
+      -482,
+      "minecraft:andesite"
+    ],
+    [
+      -380,
+      50,
+      -481,
+      "minecraft:stone"
+    ],
+    [
+      -380,
+      50,
+      -480,
+      "minecraft:stone"
+    ],
+    [
+      -380,
+      51,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      71,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      70,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      68,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      67,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      62,
+      -486,
+      "minecraft:lava"
+    ],
+    [
+      -379,
+      53,
+      -485,
+      "minecraft:lava"
+    ],
+    [
+      -379,
+      52,
+      -484,
+      "minecraft:lava"
+    ],
+    [
+      -379,
+      50,
+      -483,
+      "minecraft:andesite"
+    ],
+    [
+      -379,
+      50,
+      -482,
+      "minecraft:andesite"
+    ],
+    [
+      -379,
+      50,
+      -481,
+      "minecraft:stone"
+    ],
+    [
+      -379,
+      50,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -379,
+      51,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      71,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      71,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      71,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      71,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      70,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      69,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      68,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      67,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      64,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      52,
+      -485,
+      "minecraft:lava"
+    ],
+    [
+      -378,
+      51,
+      -484,
+      "minecraft:lava"
+    ],
+    [
+      -378,
+      49,
+      -483,
+      "minecraft:stone"
+    ],
+    [
+      -378,
+      50,
+      -482,
+      "minecraft:andesite"
+    ],
+    [
+      -378,
+      50,
+      -481,
+      "minecraft:stone"
+    ],
+    [
+      -378,
+      50,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -378,
+      72,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      69,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      68,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      67,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      66,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      51,
+      -485,
+      "minecraft:lava"
+    ],
+    [
+      -377,
+      50,
+      -484,
+      "minecraft:lava"
+    ],
+    [
+      -377,
+      49,
+      -483,
+      "minecraft:stone"
+    ],
+    [
+      -377,
+      49,
+      -482,
+      "minecraft:stone"
+    ],
+    [
+      -377,
+      72,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      72,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -377,
+      72,
+      -479,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -495,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -494,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -493,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -492,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -491,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      70,
+      -490,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      69,
+      -489,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      68,
+      -488,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      68,
+      -487,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      67,
+      -486,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      67,
+      -485,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      67,
+      -484,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      68,
+      -483,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      72,
+      -482,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      72,
+      -481,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      73,
+      -480,
+      "minecraft:grass_block"
+    ],
+    [
+      -376,
+      73,
+      -479,
+      "minecraft:grass_block"
+    ]
+  ]
+}

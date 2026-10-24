@@ -96,13 +96,21 @@ internal class CivsAutonomousPlacement(
         private lateinit var surface: CivTerrainSurface
         private var access = CivAutonomousAccess()
         private var pieces = emptyMap<UUID, CivSettlementPiece>()
+        private var templates: Pair<CivBuilding, CivBuilding>? = null
+        @Volatile private var infillTried = false
+        @Volatile private var frontageCandidates = 0
+        @Volatile private var infillCandidates = 0
+        @Volatile private var candidateSource = "frontage"
+        @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
         @Volatile private var blockers = emptyList<CivSettlementBlocker>()
 
         fun debug(): Map<String, Any?> = mapOf("city" to city.id.toString(), "building" to buildingId.toString(),
             "type" to type.name, "candidate" to next, "candidates" to candidates.size, "options" to options.size,
             "surface_columns" to columns, "phase" to phase, "rejections" to rejections.toSortedMap(),
-            "selected_anchor" to selected?.anchor, "fixed" to (pinned != null), "layout_blockers" to blockers)
+            "selected_anchor" to selected?.anchor, "fixed" to (pinned != null), "layout_blockers" to blockers,
+            "candidate_source" to candidateSource, "frontage_candidates" to frontageCandidates,
+            "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples)
 
         fun start() {
             phase = "access"
@@ -152,10 +160,32 @@ internal class CivsAutonomousPlacement(
                 CivPosition(0, 0, 0), 2, 0)
             val future = if (level == 3) current else blueprints.prepare(city.style, type, 3, buildingId,
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
-            await(current.thenCombineAsync(future, { a, b ->
-                CivsSettlementLayout.candidates(city, a.building, b.building, access)
-            }, executor)) { choices -> candidates = choices; captureSurface() }
+            await(current.thenCombineAsync(future, { a, b -> a.building to b.building }, executor)) { pair ->
+                templates = pair
+                candidates = CivsSettlementLayout.candidates(city, pair.first, pair.second, access)
+                frontageCandidates = candidates.size
+                if (candidates.isEmpty()) candidates = infill()
+                captureSurface()
+            }
         }
+
+        private fun infill(): List<CivsAutonomousCandidate> {
+            val pair = templates ?: return emptyList()
+            if (infillTried) return emptyList()
+            infillTried = true
+            candidateSource = "infill"
+            val seen = candidates.mapTo(hashSetOf()) { it.building.anchor to it.building.rotation }
+            return CivsSettlementLayout.infill(city, pair.first, pair.second, access)
+                .filter { (it.building.anchor to it.building.rotation) !in seen }
+                .also { infillCandidates = it.size }
+        }
+
+        private fun grade(choices: List<CivsAutonomousCandidate>): List<CivTerraformOption> =
+            CivsAutonomousTerraform.options(city, choices, surface, pinned != null) { reason, at ->
+                rejections.merge(reason, 1, Int::plus)
+                if (gradingSamples.size < 4) gradingSamples = gradingSamples +
+                    mapOf("source" to candidateSource, "reason" to reason, "at" to at)
+            }
 
         private fun captureSurface() {
             val first = candidates.firstOrNull() ?: return fail("autonomy-no-site")
@@ -165,11 +195,7 @@ internal class CivsAutonomousPlacement(
                 columns = field.columns.size
                 phase = "grading"
                 options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
-                    else CivsAutonomousTerraform.options(city, candidates, field, pinned != null).take(MAXIMUM_OPTIONS)
-                if (options.isEmpty()) {
-                    val reasons = if (field.columns.values.none { it.loaded }) "chunks-unloaded" else "autonomy-terrain"
-                    rejections.merge(reasons, 1, Int::plus)
-                }
+                    else grade(candidates).take(MAXIMUM_OPTIONS)
                 attempt()
             }
         }
@@ -177,6 +203,13 @@ internal class CivsAutonomousPlacement(
         private fun attempt() {
             if (result.isDone) return
             if (next >= options.size) {
+                // Reuse this detached surface. The two tiers share the original 64 native-attempt budget.
+                if (!infillTried && templates != null && next < MAXIMUM_OPTIONS) {
+                    val extra = infill()
+                    candidates = candidates + extra
+                    options = options + grade(extra).take(MAXIMUM_OPTIONS - next)
+                    if (next < options.size) { attempt(); return }
+                }
                 val reason = when {
                     rejections.containsKey("chunks-unloaded") && rejections.size == 1 -> "chunks-unloaded"
                     rejections.containsKey("autonomy-search-budget") -> "autonomy-search-budget"

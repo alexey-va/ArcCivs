@@ -112,14 +112,6 @@ internal object CivsSettlementLayout {
 
     fun candidates(city: Settlement, current: CivBuilding, future: CivBuilding,
         access: CivAutonomousAccess = CivAutonomousAccess(), frame: CivSettlementFrame = frame(city)): List<CivsAutonomousCandidate> {
-        val envelope = (listOf(current.bounds.min, current.bounds.max, future.bounds.min, future.bounds.max) +
-            CivsWorksiteLayouts.field(current) + CivsWorksiteLayouts.irrigation(current) +
-            CivsWorksiteLayouts.field(future) + CivsWorksiteLayouts.irrigation(future)).let(::box)
-        val occupied = city.buildings.filter { it.id != current.id }.map { CivsAutonomousGeometry.futureBounds(city, it) } +
-            listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds)
-        val protected = city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
-            access.standing(city, current.id).values
-        val streetCells = frame.streets.flatMap { streetPoints(it).flatMap(::shoulders) }.mapTo(hashSetOf()) { key(it) }
         val exterior = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
         val choices = mutableListOf<Pair<CivPosition, Int>>()
         if (exterior) {
@@ -149,6 +141,40 @@ internal object CivsSettlementLayout {
                 }
             }
         }
+        return selectCandidates(city, current, future, access, frame, choices, reserveUnbuiltStreets = true)
+    }
+
+    /**
+     * A mature town may have no safe frontage on the ideal street sketch. Try finite inner yards
+     * only after those plots fail. Existing roads, approaches, buildings and the pinned perimeter
+     * remain protected; the normal graded route connects an accepted yard to the actual settlement.
+     */
+    fun infill(city: Settlement, current: CivBuilding, future: CivBuilding,
+        access: CivAutonomousAccess = CivAutonomousAccess(), frame: CivSettlementFrame = frame(city)): List<CivsAutonomousCandidate> {
+        if (current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM) || current.type.isInfrastructure)
+            return emptyList()
+        // At the largest V1 frame: 53 * 53 * 4 detached placements, with at most 64 results.
+        val choices = buildList {
+            for (x in frame.core.min.x + 4..frame.core.max.x - 4 step 2)
+                for (z in frame.core.min.z + 4..frame.core.max.z - 4 step 2)
+                    for (turns in 0..3) add(CivPosition(x, city.center.y, z) to turns)
+        }
+        return selectCandidates(city, current, future, access, frame, choices, reserveUnbuiltStreets = false)
+    }
+
+    private fun selectCandidates(city: Settlement, current: CivBuilding, future: CivBuilding,
+        access: CivAutonomousAccess, frame: CivSettlementFrame, choices: List<Pair<CivPosition, Int>>,
+        reserveUnbuiltStreets: Boolean): List<CivsAutonomousCandidate> {
+        val envelope = (listOf(current.bounds.min, current.bounds.max, future.bounds.min, future.bounds.max) +
+            CivsWorksiteLayouts.field(current) + CivsWorksiteLayouts.irrigation(current) +
+            CivsWorksiteLayouts.field(future) + CivsWorksiteLayouts.irrigation(future)).let(::box)
+        val occupied = city.buildings.filter { it.id != current.id }.map { CivsAutonomousGeometry.futureBounds(city, it) } +
+            listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds)
+        val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
+            access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
+        val streetCells = if (reserveUnbuiltStreets)
+            frame.streets.flatMap { streetPoints(it).flatMap(::shoulders) }.mapTo(hashSetOf(), ::key) else emptySet()
+        val exterior = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
         fun placed(entry: CivPosition, turns: Int): CivBuilding {
             val entryOffset = rotate(current.entrance, turns)
             val anchor = CivPosition(entry.x - entryOffset.x, city.center.y, entry.z - entryOffset.z)
@@ -171,7 +197,7 @@ internal object CivsSettlementLayout {
             city.contains(bounds.min.x, bounds.min.z) && city.contains(bounds.max.x, bounds.max.z) &&
                 CivsAutonomousGeometry.approach(b).all { city.contains(it.x, it.z) } &&
                 occupied.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
-                protected.none { contains(bounds, it) } &&
+                (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in protected } } &&
                 CivsAutonomousGeometry.approach(b).none { p -> occupied.any { contains(it, p) } } &&
                 frame.wallObstacles.none { CivsAutonomousGeometry.overlaps(bounds, it, 2) } &&
                 (if (exterior) !CivsAutonomousGeometry.overlaps(bounds, frame.core, 3) else

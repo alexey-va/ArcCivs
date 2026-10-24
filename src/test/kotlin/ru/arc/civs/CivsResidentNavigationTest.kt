@@ -416,6 +416,47 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("idle travel from a lowered path clears the adjacent full-height corner before descending") {
+        MockBukkitTestRuntime.open().use {
+            // Saved Test-city columns at (-58,-46), (-58,-45), (-57,-46), (-57,-45).
+            // Both observed starts are still at Y70 above the path's Y69.9375 top.
+            val terrain = ResidentRouteTerrain()
+            for (x in -58..-57) for (z in -46..-45) terrain.blocks[CivPosition(x, 68, z)] = Material.DIRT
+            terrain.blocks[CivPosition(-58, 69, -46)] = Material.DIRT_PATH
+            terrain.blocks[CivPosition(-57, 69, -46)] = Material.DIRT_PATH
+            terrain.blocks[CivPosition(-58, 69, -45)] = Material.MOSS_BLOCK
+            val origins = listOf(-57.68169344829578 to -45.31830655170422,
+                -57.63475363298664 to -45.36524636701336)
+            val targets = listOf(Location(terrain.world, -56.5, 69.0, -44.5),
+                Location(terrain.world, -57.5, 70.0, -44.5))
+            for ((x, z) in origins) for (target in targets) for (speed in listOf(.55, .8, 1.3)) {
+                var at = Location(terrain.world, x, 70.0, z, -119f, 0f)
+                val route = CitizenPacketRoute(terrain.world, at, target,
+                    { it.x in -58..-57 && it.z in -46..-45 && it.y in 69..70 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe null
+                withClue("origin=$x,$z target=$target speed=$speed") {
+                    repeat(100) {
+                        route.move(at, speed) { true }?.let { next ->
+                            val horizontal = next.clone().also { it.y = at.y }
+                            (at.distance(horizontal) <= .215 * speed + .000001) shouldBe true
+                            (next.y <= at.y + .000001) shouldBe true
+                            for (sample in 0..10) {
+                                val p = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
+                                citizenPacketBodyClear(terrain.world, CitizenPoint(p.x, p.y, p.z), false) shouldBe true
+                            }
+                            at = next
+                        }
+                        route.failure shouldBe null
+                    }
+                    route.finished shouldBe true
+                    at.distanceSquared(target) shouldBe 0.0
+                    (route.forwardProgress > .5) shouldBe true
+                }
+            }
+        }
+    }
+
     for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (returning in listOf(false, true))
     test("a lowered path connects the farm stair and deck at direction $dx,$dz returning=$returning") {
         MockBukkitTestRuntime.open().use {

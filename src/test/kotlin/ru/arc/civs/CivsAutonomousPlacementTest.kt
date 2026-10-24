@@ -87,6 +87,52 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    test("search exhausts unsafe frontage then captures a connected native infill without rewriting ore") {
+        spatialScenario { s ->
+            s.city = s.city.copy(autonomy = CivAutonomy(layoutHalfWidth = 24))
+            val id = UUID.randomUUID()
+            val current = spatialBlueprint(id, s.city.worldId, CivPosition(0, 0, 0), 0, 1).building
+            val future = spatialBlueprint(id, s.city.worldId, CivPosition(0, 0, 0), 0, 3).building
+            val frontage = CivsSettlementLayout.candidates(s.city, current, future)
+            check(frontage.isNotEmpty())
+            fun obstruction(candidate: CivBuilding, yard: CivBuilding): CivPosition? =
+                (candidate.bounds.min.x..candidate.bounds.max.x).asSequence().flatMap { x ->
+                    (candidate.bounds.min.z..candidate.bounds.max.z).asSequence().map { z -> CivPosition(x, 64, z) }
+                }.firstOrNull { !CivsAutonomousGeometry.horizontalContains(yard.bounds, it) &&
+                    CivsAutonomousGeometry.approach(yard).none { p -> p.x == it.x && p.z == it.z } &&
+                    CivsAutonomousGeometry.approach(s.city.buildings.single()).none { p -> p.x == it.x && p.z == it.z } }
+            val yard = CivsSettlementLayout.infill(s.city, current, future).first { candidate ->
+                frontage.all { obstruction(it.building, candidate.building) != null }
+            }.building
+            val protected = mutableSetOf<CivPosition>()
+            for (candidate in frontage) {
+                val point = requireNotNull(obstruction(candidate.building, yard))
+                protected += point
+                s.world.getBlockAt(point.x, point.y, point.z).type = Material.COPPER_ORE
+            }
+            val search = s.planner.search(s.city, BuildingType.HOUSE, 1, id)
+            s.finish(search)
+            val design = search.join()
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["candidate_source"] shouldBe "infill"
+            terminal["frontage_candidates"] shouldBe frontage.size
+            (terminal["infill_candidates"] as Int > 0) shouldBe true
+            (terminal["candidate"] as Int <= 64) shouldBe true
+            val terrain = requireNotNull(design.terrain)
+            terrain.route.first() shouldBe s.city.buildings.single().entrance
+            terrain.route.last() shouldBe design.blueprint.building.entrance
+            val captured = s.worldAccess.captureAutonomousSite(s.city.id, s.city.owner, s.city.worldId,
+                design.blueprint.building, design.blueprint.cells, terrain)
+            s.finish(captured)
+            captured.isCompletedExceptionally shouldBe false
+            protected.forEach { point ->
+                s.world.getBlockAt(point.x, point.y, point.z).type shouldBe Material.COPPER_ORE
+                terrain.blocks.none { it.position == point } shouldBe true
+            }
+        }
+    }
+
     test("preparing an existing site preserves its pinned geometry and refreshes changed terrain") {
         spatialScenario { s ->
             val blueprint = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 90, 1)
