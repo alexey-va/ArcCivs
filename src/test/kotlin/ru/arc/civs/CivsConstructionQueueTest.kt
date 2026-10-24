@@ -95,6 +95,31 @@ class CivsConstructionQueueTest : FunSpec({
         city.workers.first().completedCycles shouldBe 1L
     }
 
+    test("manual foundation rows run free across restart and stop at the authored material rows") {
+        val f = QueueFixture()
+        val building = f.first.copy(phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), building.id, building.level, 3, 0,
+            ConstructionPhase.READY_TO_PLACE, Stock(), plannedBuilding = building,
+            batches = CivConstructionBatches(3, 16), materials = mapOf("STONE" to 1L),
+            payment = CivConstructionPayment(), automaticPreparationBatches = 2)
+        var city = CivsRules.reserveBuild(f.city, f.city.owner, building, order)
+        repeat(2) { index ->
+            city = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
+            city.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+            city = CivsRules.payBatch(city, city.owner, order.id, index, emptyMap())
+            city.construction!!.payment!!.reservedBatch shouldBe index
+            city.construction!!.materials shouldBe mapOf("STONE" to 1L)
+            city.inventory shouldBe f.city.inventory
+            city = CivsRules.completeBatch(city, city.owner, order.id)
+        }
+        city.construction!!.workDone shouldBe 2
+        city.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
+        city.construction!!.workCredit shouldBe null
+        shouldThrow<CivsRejection> { CivsRules.payBatch(city, city.owner, order.id, 2, emptyMap()) }.reason shouldBe "stale-construction"
+        val paused = CivsRules.pauseConstruction(CivsRules.reserveBuild(f.city, f.city.owner, building, order), f.city.owner, order.id, "chunk-unloaded")
+        CivsRules.retryConstruction(paused, paused.owner, order.id).construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+    }
+
     test("old prepaid row remains a single row with no newly introduced payment") {
         val f = QueueFixture()
         var city = f.start(f.city, f.first, incremental = false)

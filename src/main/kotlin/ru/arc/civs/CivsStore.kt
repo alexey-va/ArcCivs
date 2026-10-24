@@ -506,7 +506,7 @@ class CivsStore(
         }
         plan.terrain?.let { terrain ->
             require(terrain.blocks.size <= MAX_PLAN_BLOCKS && terrain.blocks.size + plan.blocks.size <= MAX_PLAN_BLOCKS)
-            require(terrain.route.isNotEmpty() && terrain.route.size <= 4096)
+            require(terrain.route.size <= 4096)
             require(terrain.cutCount >= 0 && terrain.fillCount >= 0 &&
                 terrain.cutCount.toLong() + terrain.fillCount <= terrain.blocks.size)
             requireSafePosition(terrain.bounds.min); requireSafePosition(terrain.bounds.max)
@@ -519,6 +519,14 @@ class CivsStore(
                 require(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z))
                 require(cell.position != building.control && terrainCoordinates.add(cell.position))
                 require(validBoundedText(cell.before, MAX_BLOCK_STATE_CHARS) && validBoundedText(cell.after, MAX_BLOCK_STATE_CHARS))
+                if (terrain.route.isEmpty()) {
+                    val p = cell.position
+                    val footprint = p.x in bounds.min.x..bounds.max.x && p.z in bounds.min.z..bounds.max.z
+                    val entrance = p.x == building.entrance.x && p.z == building.entrance.z
+                    require(footprint || entrance) { "Manual foundation lies outside its footprint" }
+                    val ground = if (entrance && !footprint) building.entrance.y - 1 else building.anchor.y
+                    require(if (cell.after == "minecraft:air") p.y > ground else cell.after == "minecraft:dirt" && p.y <= ground)
+                }
             }
             terrain.route.forEach(::requireSafePosition)
             terrain.route.zipWithNext().forEach { (a, b) ->

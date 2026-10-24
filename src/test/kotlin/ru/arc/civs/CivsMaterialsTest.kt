@@ -113,6 +113,21 @@ class CivsMaterialsTest : FunSpec({
             .let { CivsMaterials.required(plan.copy(blocks = it)) } shouldBe CivsMaterials.required(plan)
     }
 
+    test("manual foundation batches have no invented worker route and preserve the authored price") {
+        val building = CivBuilding(java.util.UUID.randomUUID(), BuildingType.HOUSE, 1, CivPosition(0, 70, 0), 0, "test",
+            CivBox(CivPosition(0, 70, 0), CivPosition(0, 72, 0)), CivPosition(0, 71, -1), BuildingPhase.CONSTRUCTING)
+        val foundation = (0..19).map { i -> CivPlanBlock(CivPosition(0, 50 + i, 0), "minecraft:air", "minecraft:dirt") }
+        val plan = CivPlacementPlan(java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), java.util.UUID.randomUUID(), building,
+            listOf(CivPlanBlock(CivPosition(0, 70, 0), "minecraft:air", "minecraft:stone")),
+            terrain = CivTerraformPlan(CivBox(foundation.first().position, foundation.last().position), foundation, emptyList(), 69, 0, 20))
+        val batches = civsTerraformBatches(plan)
+        batches.size shouldBe 2
+        batches.map { it.terrainCount } shouldBe listOf(16, 4)
+        batches.all { it.workplace == null } shouldBe true
+        batches.flatMap { civsBatchBlocks(plan, it) } shouldBe foundation
+        CivsMaterials.required(plan) shouldBe mapOf("STONE" to 1L)
+    }
+
     test("terraform prefix preserves cut fill ordering and resumes before the same authored building rows") {
         val building = CivBuilding(java.util.UUID.randomUUID(), BuildingType.BUILDER_HUT, 1,
             CivPosition(12, 64, 0), 0, "test", CivBox(CivPosition(12, 63, 0), CivPosition(15, 68, 2)),

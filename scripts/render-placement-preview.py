@@ -148,6 +148,9 @@ def main():
                 view.cuboid(lower, np.array(upper) - lower, textures["STONE"])
             for cue in scene["cues"]:
                 view.cuboid([cue[axis] for axis in "xyz"], [cue[f"s{axis}"] for axis in "xyz"], textures[cue["material"]])
+            if scene.get("overlay"):
+                # VIEW_OVERLAY uses native see-through text and ignores world depth for this private UI.
+                view.depth[:] = np.inf
             label_metrics = []
             for label in scene["labels"]:
                 glyph_image = font_core.render_text_line(label["color"] + label["text"], stack)
@@ -157,15 +160,23 @@ def main():
                 width = glyph_image.width / stack.raster_scale * .025 * label["scale"]
                 height = glyph_image.height / stack.raster_scale * .025 * label["scale"]
                 center = point(label["center"])
-                bottom = center.copy()
-                bottom[1] -= label["height"] / 2 - label["inset"]
                 yaw = math.radians(label["yaw"])
                 right = np.array([math.cos(yaw), 0, math.sin(yaw)])
-                top = bottom + np.array([0, height, 0])
-                view.quad([top - right * width / 2, top + right * width / 2,
-                           bottom + right * width / 2, bottom - right * width / 2], texture)
+                rotation = math.radians(label.get("rotationDegrees", 0))
+                horizontal = right * math.cos(rotation) + np.array([0, math.sin(rotation), 0])
+                vertical = np.array([0, math.cos(rotation), 0]) - right * math.sin(rotation)
+                # Match Core's rotation of the baseline around the authored rectangle center.
+                bottom = center + vertical * (-label["height"] / 2 + label["inset"])
+                top = bottom + vertical * height
+                view.quad([top - horizontal * width / 2, top + horizontal * width / 2,
+                           bottom + horizontal * width / 2, bottom - horizontal * width / 2], texture)
+                rendered_width = abs(width * math.cos(rotation)) + abs(height * math.sin(rotation))
+                rendered_height = abs(height * math.cos(rotation)) + abs(width * math.sin(rotation))
                 label_metrics.append({"key": label["key"], "text": label["text"], "renderedWidth": width,
-                                      "hitWidth": label["width"], "withinHitWidth": width <= label["width"]})
+                                      "rotationDegrees": label.get("rotationDegrees", 0),
+                                      "rotatedWidth": rendered_width, "rotatedHeight": rendered_height,
+                                      "hitWidth": label["width"], "withinHitWidth": rendered_width <= label["width"],
+                                      "hitHeight": label["height"], "withinHitHeight": rendered_height <= label["height"]})
             image = view.image()
             if scene.get("actionBar") and camera_name == "player":
                 glyph_image = font_core.render_text_line(scene.get("actionBarColor", "#FFFFFF") + scene["actionBar"], stack)
@@ -175,18 +186,23 @@ def main():
                 cx, cy = view.width // 2, view.height // 2
                 draw.line((cx - 5, cy, cx + 5, cy), fill=(245, 245, 245), width=1)
                 draw.line((cx, cy - 5, cx, cy + 5), fill=(245, 245, 245), width=1)
-            draw.rectangle((0, 0, view.width, 74), fill=(18, 27, 35))
+            # Captions belong outside the sampled camera; covering its top hides valid UI bounds.
+            captioned = Image.new("RGB", (view.width, view.height + 74), (18, 27, 35))
+            captioned.paste(image, (0, 74))
+            image = captioned
+            draw = ImageDraw.Draw(image)
             title = f"ArcCivs / {scene['id']} / {camera_name}"
             font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 24)
             small = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial.ttf", 17)
             draw.text((24, 12), title, font=font, fill=(238, 238, 231))
             note = ("Source projection | 1-block ground support | no floating panel | action bar position approximated | no native client"
                     if scene.get("actionBar") else
-                    f"Source projection | distance {scene['distance']:.2f} m | shift {scene['shift']['side']:+.2f}/{scene['shift']['up']:+.2f} m | explicit fixture, no schematic mesh/native client")
+                    f"Source projection | distance {scene['distance']:.2f} m | {'private overlay' if scene.get('overlay') else 'world depth'} | explicit fixture, no schematic mesh/native client")
             draw.text((24, 44), note, font=small, fill=(178, 194, 203))
             name = f"{scene['id']}-{camera_name}.png"
             image.save(args.out / name)
             render_report.append({"image": name, "eye": list(eye), "target": list(target), "verticalFov": fov,
+                                  "viewport": {"width": view.width, "height": view.height, "topInset": 74},
                                   "labels": label_metrics})
             print(name)
     (args.out / "render-report.json").write_text(json.dumps({

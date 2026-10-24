@@ -848,12 +848,19 @@ class CivsService(
         }
         busy += cityId
         val result = tracked<Unit>()
-        val capture = if (preview.upgrading && !queuedUpgrade) world.capture(cityId, previousCity?.owner ?: player.uniqueId, blueprint.worldId,
-            blueprint.building, blueprint.cells, previousCity?.building(blueprint.building.id))
-        else if (preview.autonomous) world.captureAutonomousSite(cityId, player.uniqueId, blueprint.worldId,
-            blueprint.building, blueprint.cells)
-        else world.captureSite(cityId, previousCity?.owner ?: player.uniqueId, blueprint.worldId, blueprint.building,
-            blueprint.cells, previousCity?.building(blueprint.building.id))
+        val captureOwner = previousCity?.owner ?: player.uniqueId
+        val previous = previousCity?.building(blueprint.building.id)
+        val capture = if (preview.upgrading && !queuedUpgrade) world.capture(cityId, captureOwner, blueprint.worldId,
+            blueprint.building, blueprint.cells, previous)
+        else if (queuedUpgrade) world.captureSite(cityId, captureOwner, blueprint.worldId,
+            blueprint.building, blueprint.cells, previous)
+        else world.captureManualFoundation(cityId, captureOwner, blueprint.worldId, blueprint.building,
+            blueprint.cells, executor, previous, autonomous = preview.autonomous).thenCompose { terrain ->
+            if (preview.autonomous) world.captureAutonomousSite(cityId, captureOwner, blueprint.worldId,
+                blueprint.building, blueprint.cells, terrain)
+            else world.captureSite(cityId, captureOwner, blueprint.worldId, blueprint.building,
+                blueprint.cells, previous, terrain)
+        }
         capture.whenCompleteSync(tasks) { captured, captureFailure ->
             if (captureFailure != null) return@whenCompleteSync finishReservation(cityId, player.uniqueId, result, captureFailure)
             runCatching {
@@ -867,7 +874,7 @@ class CivsService(
                     }
                 } else {
                     val control = if (queuedUpgrade) null else prepareControl(cityId, blueprint.worldId,
-                        previousCity?.owner ?: player.uniqueId, blueprint.building)
+                        previousCity?.owner ?: player.uniqueId, blueprint.building, prepareApproach = capturedPlan.terrain == null)
                     // Queued upgrades have a separate immutable capture; the original SITE payload stays owned by its building.
                     val plan = capturedPlan.copy(id = if (queuedUpgrade) queuedUpgradeId(blueprint.building.id, blueprint.building.level)
                         else blueprint.building.id)
@@ -1207,7 +1214,11 @@ class CivsService(
                 CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, target.anchor) }, executor).whenCompleteSync(tasks) cellsReady@ { cells, cellsFailure ->
                     if (cellsFailure != null) return@cellsReady finishReservation(city.id, actor, result, cellsFailure)
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
-                    val terrain = if (city.autonomy != null && building.phase == BuildingPhase.SITE)
+                    val terrain = if (building.phase == BuildingPhase.SITE &&
+                        (city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
+                        world.captureManualFoundation(city.id, city.owner, city.worldId, target,
+                            requireNotNull(cells), executor, building)
+                    else if (city.autonomy != null && building.phase == BuildingPhase.SITE)
                         autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
                             requireNotNull(cells), emptyList(), bytes)).thenApply { it.terrain }
                     else CompletableFuture.completedFuture(sitePlan.terrain)
@@ -1252,13 +1263,16 @@ class CivsService(
         CompletableFuture.supplyAsync({
             val materials = CivsMaterials.required(plan)
             val terrainBatches = civsTerraformBatches(plan)
+            val automaticPreparation = terrainBatches.size.takeIf { it > 0 && plan.terrain?.route?.isEmpty() == true }
             val batches = CivConstructionBatches(terrainBatches.size + civsMaterialBatches(plan, atomicPairs = true).size, 16, atomicPairs = true)
             CivConstruction(plan.id, building.id, building.level, batches.total, 0,
-                ConstructionPhase.CONSTRUCTING, if (city.autonomy != null) CivsAutonomy.cost(building.type, building.level) else Stock(),
+                if (automaticPreparation != null) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING,
+                if (city.autonomy != null) CivsAutonomy.cost(building.type, building.level) else Stock(),
                 plannedBuilding = building, batches = batches, materials = materials,
                 payment = if (city.autonomy != null) null else CivConstructionPayment(),
                 blocksRequired = plan.blocks.count { it.before != it.after } + plan.terrain?.blocks.orEmpty().count { it.before != it.after },
-                blocksPlaced = 0, preparationWorkplace = terrainBatches.firstOrNull()?.workplace ?: plan.terrain?.route?.last())
+                blocksPlaced = 0, preparationWorkplace = terrainBatches.firstOrNull()?.workplace ?: plan.terrain?.route?.lastOrNull(),
+                automaticPreparationBatches = automaticPreparation)
         }, executor).thenCompose { order ->
             store.saveSchematic(plan.id, bytes).thenCompose { store.savePlan(plan) }.thenCompose {
                 // Order captures are deleted on completion; keep the admitted access road with its building.
@@ -3754,8 +3768,10 @@ class CivsService(
                 if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)
                 runCatching {
+                    val automaticPreparation = batch?.terrainStart != null && plan.terrain?.route?.isEmpty() == true &&
+                        order.workDone < (order.automaticPreparationBatches ?: 0)
                     val required = if (order.payment != null && order.payment.reservedBatch == null)
-                        CivsMaterials.required(batchPlan) else null
+                        if (automaticPreparation) emptyMap() else CivsMaterials.required(batchPlan) else null
                     if (required != null) constructionSupplyNeeds[city.id] = ConstructionSupplyNeed(order.id, order.workDone, required)
                     val begin = afterCityAvailable(city.id) {
                         rejectIf(placementRuns[city.id] != run, "stale-construction")
@@ -3856,12 +3872,14 @@ class CivsService(
         CivsDiagnostics.event("terraform_batch_started", "city" to city.id, "order" to order.id,
             "batch" to order.workDone, "cells" to cells.size, "workplace" to order.preparationWorkplace)
         var lastPlacedTick = Int.MIN_VALUE
+        val automaticPreparation = plan.terrain?.route?.isEmpty() == true &&
+            order.workDone < (order.automaticPreparationBatches ?: 0)
         val operation = world.applyTerraform(plan, city.owner, cells, requireNotNull(access.batch?.terrainStart), {
             ready() && placementRuns[city.id] == run && placementAccess[city.id] === access &&
-                cities[city.id]?.autonomy?.paused == false &&
+                cities[city.id]?.autonomy?.paused != true &&
                 cities[city.id]?.construction?.let { it.id == order.id && it.workDone == order.workDone } == true &&
                 (lastPlacedTick == Int.MIN_VALUE || Bukkit.getCurrentTick() - lastPlacedTick >= 1) &&
-                citizens.constructionReady(city.id, order.id)
+                (automaticPreparation || citizens.constructionReady(city.id, order.id))
         }, { cell ->
             lastPlacedTick = Bukkit.getCurrentTick()
             constructionFocus[city.id] = ConstructionFocus(order.id, cell.position, lastPlacedTick)

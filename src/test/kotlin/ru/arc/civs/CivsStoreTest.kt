@@ -39,6 +39,24 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe false
     }
 
+    "manual foundation journal roundtrips and rejects blocks outside its footprint" {
+        val city = settlement()
+        val initial = placementPlan(city)
+        val p = initial.building.bounds.min.copy(y = initial.building.bounds.min.y - 1)
+        val cell = CivPlanBlock(p, "minecraft:air", "minecraft:dirt")
+        val plan = initial.copy(terrain = CivTerraformPlan(CivBox(p, p), listOf(cell), emptyList(), p.y, 0, 1))
+        CivsStore(root, directExecutor).use { store ->
+            store.savePlan(plan).join() shouldBe plan
+            store.loadPlan(plan.id).join() shouldBe plan
+            val outside = p.copy(x = initial.building.bounds.max.x + 10)
+            val bad = plan.copy(id = UUID.randomUUID(), terrain = plan.terrain!!.copy(bounds = CivBox(p, outside),
+                blocks = listOf(cell.copy(position = outside))))
+            shouldThrow<CompletionException> { store.savePlan(bad).join() }
+            val costly = plan.copy(id = UUID.randomUUID(), terrain = plan.terrain!!.copy(blocks = listOf(cell.copy(after = "minecraft:diamond_block"))))
+            shouldThrow<CompletionException> { store.savePlan(costly).join() }
+        }
+    }
+
     "one administrator retains a personal city and several autonomous villages across reload" {
         val personal = settlement()
         fun village() = settlement(owner = personal.owner).copy(inventory = null,

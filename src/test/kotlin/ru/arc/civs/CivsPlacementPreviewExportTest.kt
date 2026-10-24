@@ -52,6 +52,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     val reference = building.anchor
                     val target = ActionPanelPoint(reference.x + 0.5, reference.y + 0.5, reference.z + 0.5)
                     val settings = CivsPlacementControls.followingSettings(moving)
+                    val options = CivsPlacementControls.options()
                     val yaw = Math.toDegrees(atan2(target.x - eye.x, eye.z - target.z)).toFloat()
                     fun anchor(distance: Double, shift: ActionPanelShift) =
                         ActionPanelGeometry.followingAnchor(eye, yaw, rects, distance,
@@ -61,7 +62,8 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         else ActionPanelBounds(1.0, 65.0, 3.0, 2.0, 66.0, 4.0)) else emptyList()
                     fun safe(distance: Double, shift: ActionPanelShift, clearance: Double): Boolean {
                         val placed = anchor(distance, shift)
-                        if (!ActionPanelGeometry.allReachable(eye, placed, rects, 4.0)) return false
+                        if (!ActionPanelGeometry.allReachable(eye, placed, rects, options.reach)) return false
+                        if (options.depth == ActionPanelDepth.VIEW_OVERLAY) return true
                         val volume = ActionPanelGeometry.volume(placed, rects, ActionPanelGeometry.SURFACE_CLEARANCE + clearance)
                         if (obstacles.any { ActionPanelGeometry.overlaps(volume, it) }) return false
                         return rects.flatMap { ActionPanelGeometry.corners(placed, it) }.all { corner ->
@@ -95,7 +97,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     }
                     selectionRays.forEach { ray ->
                         withClue("scene=$name distance=$distance shift=$chosenShift selected-block ray=$ray") {
-                            ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, 4.0, null) shouldBe null
+                            ActionPanelGeometry.nearestTarget(eye, ray, occupiedPlanes, options.reach, null) shouldBe null
                         }
                     }
                     fun label(key: String, rect: ActionPanelRect, component: net.kyori.adventure.text.Component, style: ActionPanelTextStyle): Map<String, Any> {
@@ -110,7 +112,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         return mapOf("key" to key, "center" to ActionPanelGeometry.localToWorld(placed, rect.center), "width" to rect.width,
                             "height" to rect.height, "yaw" to placed.yaw, "text" to plainText(component),
                             "color" to (component.color()?.asHexString() ?: "#e8dfd2"), "scale" to style.scale, "inset" to style.baselineInset,
-                            "nativeLineWidth" to style.lineWidth)
+                            "nativeLineWidth" to style.lineWidth, "rotationDegrees" to style.rotationDegrees)
                     }
                     val labels = layout.buttons.map { label(it.action.name, it.rect, it.text, it.style) } +
                         layout.labels.filter { it.visible }.map { label(it.key, it.rect, it.text, it.style) }
@@ -146,9 +148,9 @@ class CivsPlacementPreviewExportTest : FunSpec({
                             listOf(candidate.minOf { it.z }, cameraTarget.z, candidate.maxOf { it.z + it.sz }).map { z ->
                                 val direction = ActionPanelPoint(x - eye.x, candidate.maxOf { it.y + it.sy } - eye.y, z - eye.z)
                                 // Quarter-block padding tests a deliberate margin, not merely a missed center ray.
-                                ActionPanelGeometry.nearestTarget(eye, direction, planes, 4.0, null) shouldBe null
+                                ActionPanelGeometry.nearestTarget(eye, direction, planes, options.reach, null) shouldBe null
                                 val hit = requireNotNull(ActionPanelGeometry.nearestHit(eye, direction,
-                                    listOf(ActionPanelPlane(Unit, placed.point, placed.yaw, 8.0, 8.0, true)), 4.0, null))
+                                    listOf(ActionPanelPlane(Unit, placed.point, placed.yaw, 8.0, 8.0, true)), options.reach, null))
                                 lowerEdge - hit.point.y
                             }
                         }
@@ -156,6 +158,7 @@ class CivsPlacementPreviewExportTest : FunSpec({
                         mapOf("minimumVerticalGap" to margins.min(), "sampledRays" to margins.size, "requiredGap" to 0.25)
                     } else emptyMap<String, Any>()
                     return mapOf("id" to name, "eye" to eye, "target" to target, "cameraTarget" to cameraTarget, "anchor" to placed,
+                        "overlay" to (options.depth == ActionPanelDepth.VIEW_OVERLAY),
                         "distance" to distance, "shift" to chosenShift, "labels" to labels, "obstacles" to obstacles,
                         "selectionCorridor" to mapOf("sampledRays" to selectionRays.size, "interceptedRays" to 0),
                         "viewport" to viewport, "outsideBuildingFootprint" to true,
@@ -192,7 +195,8 @@ class CivsPlacementPreviewExportTest : FunSpec({
                     Files.createDirectories(out)
                     val sources = listOf("src/main/kotlin/ru/arc/civs/CivsPlacementControls.kt", "src/main/kotlin/ru/arc/civs/CivsPreviewRenderer.kt",
                         "src/main/resources/locales.yml", "src/main/kotlin/ru/arc/civs/CivsText.kt", "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelGeometry.kt",
-                        "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelSpec.kt").associateWith { name ->
+                        "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/ActionPanelSpec.kt",
+                        "../arc-core/arc-core-paper/src/main/kotlin/ru/arc/paper/actionpanel/PaperActionPanels.kt").associateWith { name ->
                         MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of(name))).joinToString("") { "%02x".format(it) }
                     }
                     Files.writeString(out.resolve("scene.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(

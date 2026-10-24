@@ -440,13 +440,14 @@ object CivsRules {
         check(order.buildingId == plan.id && order.targetLevel == plan.level &&
             (city.inventory == null || order.batches != null) &&
             validConstructionPrice(city, order, plan) &&
-            order.workDone == 0 && order.phase == ConstructionPhase.CONSTRUCTING && order.failure == null &&
+            order.workDone == 0 && order.phase == (if ((order.automaticPreparationBatches ?: 0) > 0)
+                ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING) && order.failure == null &&
             (order.payment == null || order.payment == CivConstructionPayment()) &&
             (order.plannedBuilding == null || order.plannedBuilding == plan), "invalid-construction")
         val reserved = order.copy(plannedBuilding = plan)
         city.construction?.let { current ->
             check(current.id == order.id, "construction-busy")
-            val replay = current.copy(workDone = 0, phase = ConstructionPhase.CONSTRUCTING, failure = null,
+            val replay = current.copy(workDone = 0, phase = reserved.phase, failure = null,
                 workCredit = if (city.autonomy != null) reserved.workCredit else current.workCredit,
                 blocksPlaced = if (city.autonomy != null) reserved.blocksPlaced else current.blocksPlaced)
             check(replay == reserved, "invalid-construction")
@@ -546,7 +547,8 @@ object CivsRules {
         authorized(city, actor)
         val order = order(city, orderId)
         if (order.phase != ConstructionPhase.PAUSED) return city
-        val phase = if (order.workDone == order.workRequired || order.payment?.reservedBatch == order.workDone || (order.workCredit ?: 0) > 0)
+        val phase = if (order.workDone < (order.automaticPreparationBatches ?: 0) || order.workDone == order.workRequired ||
+            order.payment?.reservedBatch == order.workDone || (order.workCredit ?: 0) > 0)
             ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING
         return changed(city, city.copy(construction = order.copy(phase = phase, failure = null,
             payment = order.payment?.copy(awaiting = null))))
@@ -571,7 +573,8 @@ object CivsRules {
         return if (completed == order.workRequired) finishConstruction(city, order)
         else changed(city, city.copy(construction = order.copy(workDone = completed,
             workCredit = order.workCredit?.let { (it - 1).coerceAtLeast(0) },
-            phase = if ((order.workCredit ?: 0) > 1) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING,
+            phase = if (completed < (order.automaticPreparationBatches ?: 0) || (order.workCredit ?: 0) > 1)
+                ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING,
             payment = order.payment?.let { CivConstructionPayment() })))
     }
 
@@ -736,7 +739,10 @@ object CivsRules {
                 snapshot(founding || target.type != BuildingType.TOWN_HALL || target.level > 1 || order.batches != null)
                 snapshot(validConstructionPrice(city, order, target))
                 order.preparationWorkplace?.let { point ->
-                    snapshot(city.autonomy != null && city.contains(point.x, point.z) && point.y in -4095..4095)
+                    snapshot(city.contains(point.x, point.z) && point.y in -4095..4095)
+                }
+                order.automaticPreparationBatches?.let { count ->
+                    snapshot(order.batches != null && count in 1 until order.workRequired)
                 }
                 snapshot((order.blocksRequired == null) == (order.blocksPlaced == null))
                 order.blocksRequired?.let { total -> snapshot(total in 0..CivsStore.MAX_PLAN_BLOCKS && order.blocksPlaced!! in 0..total) }

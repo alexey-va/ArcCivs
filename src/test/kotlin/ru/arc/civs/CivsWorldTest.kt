@@ -1241,6 +1241,247 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("manual foundations fill every footprint and entrance column beyond twenty four blocks with dirt") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(1, 105, 0)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
+            val work = mutableListOf<Runnable>()
+            val captured = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(work::add))
+            s.scheduler.tick()
+            captured.isDone shouldBe false
+            work.size shouldBe 1
+            CompletableFuture.runAsync { work.single().run() }.join()
+            captured.isDone shouldBe false
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(captured))
+            terrain.route shouldBe emptyList()
+            terrain.cutCount shouldBe 0
+            terrain.fillCount shouldBe 3 * (104 - 63)
+            terrain.blocks.all { it.after == "minecraft:dirt" } shouldBe true
+            for (x in -1..1) terrain.blocks.filter { it.position.x == x }.map { it.position.y } shouldBe (64..104).toList()
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("manual foundation cuts uneven natural terrain before the founding site is published") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 69, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(1, 72, 0)))
+                .copy(anchor = CivPosition(0, 68, 0), entrance = CivPosition(-1, 69, 0), control = marker)
+            for (y in 64..73) s.world.getBlockAt(1, y, 0).type = Material.STONE
+            s.world.getBlockAt(marker.x, marker.y, marker.z).type = Material.STONE
+            val cells = worldSchematicCells(building).map { if (it.position.x == marker.x && it.position.y == marker.y)
+                worldCell(marker.x, marker.y, "minecraft:structure_void") else it }
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(preparation))
+            terrain.blocks.none { it.position == marker } shouldBe true
+            terrain.blocks.filter { it.position.x == 1 && it.after == "minecraft:air" }.map { it.position.y } shouldBe (73 downTo 69).toList()
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, terrain)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            plan.terrain shouldBe terrain
+            plan.blocks.first { it.position == CivPosition(1, 70, 0) }.before shouldBe "minecraft:air"
+            s.world.getBlockAt(1, 73, 0).type shouldBe Material.STONE
+            s.world.getBlockAt(marker.x, marker.y, marker.z).type shouldBe Material.STONE
+        }
+    }
+
+    test("manual foundation returns no terrain when the footprint and entrance already have safe support") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            s.world.getBlockAt(0, 64, 0).type = Material.STONE
+            val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            completed(preparation) shouldBe null
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.STONE
+        }
+    }
+
+    for (platform in listOf(Material.OAK_PLANKS, Material.STONE_BRICKS))
+    test("ordinary manual foundation reuses an unchanged $platform platform without creating terrain") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(anchor = CivPosition(0, 63, 0))
+            s.world.getBlockAt(0, 63, 0).type = platform
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            completed(preparation) shouldBe null
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, worldSchematicCells(building), null)
+            s.scheduler.tick()
+            completed(capture).terrain shouldBe null
+            s.world.getBlockAt(0, 63, 0).type shouldBe platform
+        }
+    }
+
+    test("ordinary mixed platform preserves crafted supports while only natural gaps receive dirt") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 1))
+            s.world.getBlockAt(0, 63, 0).type = Material.OAK_PLANKS
+            s.world.getBlockAt(0, 64, 0).type = Material.STONE_BRICKS
+            s.world.getBlockAt(1, 63, 0).type = Material.AIR
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val cells = (0..1).map { worldCell(it, 64, "minecraft:oak_planks") }
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(preparation))
+            terrain.blocks shouldBe listOf(
+                CivPlanBlock(CivPosition(1, 63, 0), "minecraft:air", "minecraft:dirt"),
+                CivPlanBlock(CivPosition(1, 64, 0), "minecraft:air", "minecraft:dirt"))
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, terrain)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            plan.blocks.first().before shouldBe "minecraft:stone_bricks"
+            plan.blocks.last().before shouldBe "minecraft:dirt"
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.OAK_PLANKS
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.STONE_BRICKS
+            s.world.getBlockAt(1, 63, 0).type shouldBe Material.AIR
+        }
+    }
+
+    for (published in listOf(false, true))
+    test("${if (published) "published" else "unpublished"} autonomous foundation still refuses a crafted platform") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(anchor = CivPosition(0, 63, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            if (published) s.cities += city
+            s.world.getBlockAt(0, 63, 0).type = Material.OAK_PLANKS
+            val preparation = s.subject.captureManualFoundation(city.id, city.owner, s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run), autonomous = !published)
+            s.scheduler.tick()
+            failureReason(preparation) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.OAK_PLANKS
+        }
+    }
+
+    test("ordinary manual foundation retains its existing crafted marker placement permission") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 65, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), marker)).copy(control = marker)
+            s.world.getBlockAt(0, 64, 0).type = Material.STONE
+            s.world.getBlockAt(0, 65, 0).type = Material.OAK_PLANKS
+            val cells = listOf(worldCell(0, 64, "minecraft:air"), worldCell(0, 65, "minecraft:structure_void"))
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            completed(preparation) shouldBe null
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null)
+            s.scheduler.tick()
+            completed(capture).blocks.single().before shouldBe "minecraft:stone"
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.OAK_PLANKS
+        }
+    }
+
+    test("ordinary foundation still refuses to cut a crafted block above its intended ground") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 70, 0)))
+            s.world.getBlockAt(0, 67, 0).type = Material.OAK_PLANKS
+            val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(preparation) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(0, 67, 0).type shouldBe Material.OAK_PLANKS
+        }
+    }
+
+    test("an autonomous first marker may occupy natural rock when its manual foundation needs no changes") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 65, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), marker)).copy(control = marker)
+            s.world.getBlockAt(0, 64, 0).type = Material.STONE
+            s.world.getBlockAt(0, 65, 0).type = Material.STONE
+            val cells = listOf(worldCell(0, 64, "minecraft:air"), worldCell(0, 65, "minecraft:structure_void"))
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid,
+                building, cells, java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            completed(preparation) shouldBe null
+            val capture = s.subject.captureAutonomousSite(cityId, owner, s.world.uid, building, cells)
+            s.scheduler.tick()
+            completed(capture).blocks.single().before shouldBe "minecraft:stone"
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.STONE
+        }
+    }
+
+    for (obstacle in listOf(Material.WATER, Material.CHEST))
+    test("manual foundation protects its reserved marker from $obstacle even when no other terrain changes") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 65, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), marker)).copy(control = marker)
+            s.world.getBlockAt(0, 64, 0).type = Material.STONE
+            s.world.getBlockAt(0, 65, 0).type = obstacle
+            val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(preparation) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(0, 65, 0).type shouldBe obstacle
+        }
+    }
+
+    for (obstacle in listOf(Material.WATER, Material.CHEST))
+    test("manual foundation refuses $obstacle in a deep support column without changing it") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 96, 0), CivPosition(0, 98, 0)))
+                .copy(anchor = CivPosition(0, 98, 0), entrance = CivPosition(-1, 99, 0))
+            s.world.getBlockAt(0, 70, 0).type = obstacle
+            val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            failureReason(preparation) shouldBe "autonomy-terrain"
+            s.world.getBlockAt(0, 70, 0).type shouldBe obstacle
+            s.world.getBlockAt(0, 96, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("a large manual foundation yields to the shared native scan budget") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(12, 105, 12)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
+            val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+            s.scheduler.tick()
+            preparation.isDone shouldBe false
+            repeat(10) { if (!preparation.isDone) s.scheduler.tick() }
+            requireNotNull(completed(preparation)).fillCount shouldBe 170 * (104 - 63)
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("manual terrain apply requires the exact persisted automatic preparation prefix") {
+        worldScenario(collisionWorld = true) { s ->
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(cell)).let { it.copy(terrain = it.terrain!!.copy(route = emptyList())) }
+            val city = worldTerraformCity(s, plan).let { it.copy(autonomy = null,
+                construction = it.construction!!.copy(automaticPreparationBatches = 1)) }
+            s.cities.clear(); s.cities += city
+            val unreserved = city.copy(construction = city.construction!!.copy(automaticPreparationBatches = null))
+            s.cities.clear(); s.cities += unreserved
+            val rejected = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            failureReason(rejected) shouldBe "stale-construction"
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
+            s.cities.clear(); s.cities += city
+            val placed = mutableListOf<CivPlanBlock>()
+            val accepted = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, placed::add)
+            s.scheduler.tick()
+            completed(accepted) shouldBe Unit
+            placed shouldBe listOf(cell)
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+        }
+    }
+
     test("terrain materialization preserves a dirt path and native completion waits for the owning tick") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(0, 0))
@@ -1416,6 +1657,10 @@ private fun worldCity(worldId: UUID, building: CivBuilding) = Settlement(UUID.ra
 private fun worldCell(x: Int, y: Int, data: String) = ArcSchematicBlock(ArcSchematicPoint(x, y, 0), data,
     data == "minecraft:air", data == "minecraft:barrier")
 private fun worldCells(building: CivBuilding) = (building.bounds.min.x..building.bounds.max.x).map { worldCell(it, 64, "minecraft:air") }
+private fun worldSchematicCells(building: CivBuilding) = buildList {
+    for (y in building.bounds.min.y..building.bounds.max.y) for (z in building.bounds.min.z..building.bounds.max.z)
+        for (x in building.bounds.min.x..building.bounds.max.x) add(ArcSchematicBlock(ArcSchematicPoint(x, y, z), "minecraft:air", true, false))
+}
 private fun worldTerraformPlan(s: WorldScenario, cells: List<CivPlanBlock>,
     building: CivBuilding = worldBuilding(worldBox(0, 0))): CivPlacementPlan {
     val positions = cells.map { it.position } + building.entrance

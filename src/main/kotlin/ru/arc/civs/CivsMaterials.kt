@@ -51,15 +51,15 @@ internal data class CivBuildBatch(val minimum: CivPosition, val maximum: CivPosi
 /** Preserve the planner's safe cut/fill order and finish each approach segment before advancing. */
 internal fun civsTerraformBatches(plan: CivPlacementPlan, size: Int = 16): List<CivBuildBatch> {
     val terrain = plan.terrain ?: return emptyList()
-    require(size in 1..16 && terrain.route.isNotEmpty())
+    require(size in 1..16)
     val result = mutableListOf<CivBuildBatch>()
     terrain.blocks.forEachIndexed { index, cell ->
         val p = cell.position
-        val routeIndex = terrain.route.indices.minBy { i ->
+        val routeIndex = terrain.route.indices.minByOrNull { i ->
             val r = terrain.route[i]
             kotlin.math.abs(r.x.toLong() - p.x) + kotlin.math.abs(r.z.toLong() - p.z)
         }
-        val standing = terrain.route[(routeIndex - 3).coerceAtLeast(0)]
+        val standing = routeIndex?.let { terrain.route[(it - 3).coerceAtLeast(0)] }
         val previous = result.lastOrNull()
         if (previous != null && previous.terrainCount < size && previous.workplace == standing) {
             result[result.lastIndex] = previous.copy(
@@ -148,7 +148,7 @@ internal fun civsConstructionBatches(plan: CivPlacementPlan, order: CivConstruct
         civsMaterialBatches(plan, requireNotNull(order.batches).size, order.batches.atomicPairs == true)
     else civsBuildBatches(plan, requireNotNull(order.batches).size)).map { batch ->
         // An authored control can be upstairs until its staircase exists. Keep the proven outside entrance.
-        if (plan.terrain == null) batch else batch.copy(workplace = plan.terrain.route.last())
+        if (plan.terrain == null) batch else batch.copy(workplace = plan.terrain.route.lastOrNull() ?: plan.building.entrance)
     }
 
 /** Only native two-cell blocks; trapdoors and ordinary bisected-looking states remain single blocks. */

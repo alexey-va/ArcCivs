@@ -25,6 +25,7 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.actionpanel.PaperActionPanels
 import ru.arc.paper.actionpanel.ActionPanelPlacement
 import ru.arc.paper.actionpanel.ActionPanelPoint
+import ru.arc.paper.actionpanel.ActionPanelDepth
 import ru.arc.paper.display.PaperPacketDisplays
 import net.kyori.adventure.text.format.TextColor
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -108,6 +109,7 @@ class CivsPlacementControlsTest : FunSpec({
         controlsScenario { h ->
             h.preview = h.preview!!.copy(control = CivPosition(3, 66, -7))
             val initial = h.controls.frame(h.player)!!
+            initial.options.depth shouldBe ActionPanelDepth.VIEW_OVERLAY
             (initial.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(0.5, 63.5, 0.5)
             initial.layout.buttons.map { it.action } shouldBe listOf(CivsPlacementAction.AWAY, CivsPlacementAction.LEFT,
                 CivsPlacementAction.RIGHT, CivsPlacementAction.TOWARD, CivsPlacementAction.UP, CivsPlacementAction.DOWN,
@@ -127,6 +129,12 @@ class CivsPlacementControlsTest : FunSpec({
                 (left.x < away.x && away.x < right.x && away.y > left.y && toward.y < left.y) shouldBe true
                 (positions.getValue(CivsPlacementAction.UP).x > right.x) shouldBe true
                 frame.layout.labels.single { it.key == "status" }.rect.center.x shouldBe 0.0
+                frame.layout.labels.map { it.key } shouldBe listOf("status")
+                val arrows = frame.layout.buttons.filter { it.action in setOf(CivsPlacementAction.AWAY,
+                    CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT, CivsPlacementAction.TOWARD) }
+                arrows.map { plainText(it.text) }.distinct() shouldBe listOf(">")
+                arrows.map { it.style.rotationDegrees } shouldBe listOf(90f, 180f, 0f, -90f)
+                arrows.map { it.rect.width to it.rect.height }.distinct().size shouldBe 1
             }
             // Entering move mode must discard the normal panel's retained distance.
             verify(exactly = 1) { h.panels.clear(h.player.uniqueId) }
@@ -142,6 +150,7 @@ class CivsPlacementControlsTest : FunSpec({
 
     test("all six nudges are available immediately and preserve the existing single request authority") {
         controlsScenario { h ->
+            val target = (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target
             for (action in listOf(CivsPlacementAction.AWAY, CivsPlacementAction.TOWARD, CivsPlacementAction.LEFT,
                 CivsPlacementAction.RIGHT, CivsPlacementAction.UP, CivsPlacementAction.DOWN)) {
                 val current = h.controls.frame(h.player)!!
@@ -151,11 +160,52 @@ class CivsPlacementControlsTest : FunSpec({
                 h.controls.activate(h.player, current.context, action)
                 h.controls.activate(h.player, current.context, action)
                 verify(exactly = 1) { h.host.nudgePreview(h.player, CivsPreviewMove.valueOf(action.name)) }
-                h.preview = h.preview!!.copy(id = UUID.randomUUID())
+                h.preview = h.preview!!.copy(id = UUID.randomUUID(), anchor = h.preview!!.anchor.let { it.copy(x = it.x + 1, y = it.y + 1) })
+                (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target shouldBe target
                 pending.complete(Unit); h.paper.performTicks(2)
                 h.controls.frame(h.player)!!.context.moving shouldBe false
+                (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target shouldBe target
             }
+            verify(exactly = 0) { h.panels.clear(h.player.uniqueId) }
             verify(exactly = 0) { h.host.movePreview(any(), any()); h.host.confirmPreview(any()) }
+        }
+    }
+
+    test("rejected nudges use the action bar without repeated chat messages") {
+        controlsScenario { h ->
+            every { h.host.nudgePreview(h.player, CivsPreviewMove.LEFT) } returns
+                CompletableFuture.failedFuture(CivsRejection("look-at-ground"))
+            repeat(3) {
+                h.controls.activate(h.player, h.controls.frame(h.player)!!.context, CivsPlacementAction.LEFT)
+                h.paper.performTicks(2)
+                plainText(requireNotNull(h.player.nextActionBar())) shouldContain "nearby block"
+                h.player.nextComponentMessage() shouldBe null
+            }
+            h.controls.frame(h.player)!!.inputEnabled shouldBe true
+        }
+    }
+
+    test("rejected confirmations use the action bar and leave the same panel usable") {
+        controlsScenario { h ->
+            val before = h.controls.frame(h.player)!!
+            val preview = h.preview
+            every { h.host.confirmPreview(h.player) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-terrain"))
+            repeat(3) {
+                h.controls.activate(h.player, before.context, CivsPlacementAction.CONFIRM)
+                h.paper.performTicks(2)
+                plainText(requireNotNull(h.player.nextActionBar())) shouldContain "safe support"
+                h.player.nextComponentMessage() shouldBe null
+                h.preview shouldBe preview
+                val after = h.controls.frame(h.player)!!
+                after.context shouldBe before.context
+                after.inputEnabled shouldBe true
+                after.layout.buttons.all { it.enabled } shouldBe true
+                after.layout.buttons.map { it.rect } shouldBe before.layout.buttons.map { it.rect }
+                (after.placement as ActionPanelPlacement.FollowTarget).target shouldBe
+                    (before.placement as ActionPanelPlacement.FollowTarget).target
+            }
+            verify(exactly = 3) { h.host.confirmPreview(h.player) }
         }
     }
 
@@ -169,10 +219,12 @@ class CivsPlacementControlsTest : FunSpec({
             h.controls.frame(h.player)!!.inputEnabled shouldBe false
             h.controls.frame(h.player)!!.layout.buttons.map { it.rect } shouldBe before.layout.buttons.map { it.rect }
             h.controls.frame(h.player)!!.layout.buttons.all { !it.enabled } shouldBe true
-            h.preview = h.preview!!.copy(id = UUID.randomUUID(), rotation = 270)
+            h.preview = h.preview!!.copy(id = UUID.randomUUID(), rotation = 270, anchor = CivPosition(3, 64, -2))
             pending.complete(Unit)
             h.paper.performTicks(2)
             h.controls.frame(h.player)!!.inputEnabled shouldBe true
+            (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target shouldBe
+                (before.placement as ActionPanelPlacement.FollowTarget).target
             h.controls.activate(h.player, before.context, CivsPlacementAction.CONFIRM)
             verify(exactly = 1) { h.host.rotatePreview(h.player, -90) }
             verify(exactly = 0) { h.host.confirmPreview(any()) }
@@ -182,7 +234,7 @@ class CivsPlacementControlsTest : FunSpec({
     test("move mode consumes only the main-hand placement gesture and returns to normal controls") {
         controlsScenario { h ->
             every { h.host.movePreview(any(), any()) } answers {
-                h.preview = h.preview!!.copy(id = UUID.randomUUID())
+                h.preview = h.preview!!.copy(id = UUID.randomUUID(), anchor = CivPosition(2, 63, 2))
                 CompletableFuture.completedFuture(Unit)
             }
             h.controls.activate(h.player, h.controls.frame(h.player)!!.context, CivsPlacementAction.MOVE)
@@ -201,6 +253,16 @@ class CivsPlacementControlsTest : FunSpec({
             verify(exactly = 1) { h.host.movePreview(h.player, CivsGroundTarget(ground.world.uid, CivPosition(2, 63, 2))) }
             verify(exactly = 0) { h.host.movePreview(any()) }
             h.controls.frame(h.player)!!.context.moving shouldBe false
+            (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(2.5, 63.5, 2.5)
+            verify(exactly = 2) { h.panels.clear(h.player.uniqueId) }
+        }
+    }
+
+    test("an independent preview gets a new panel target") {
+        controlsScenario { h ->
+            h.controls.frame(h.player)
+            h.preview = h.preview!!.copy(id = UUID.randomUUID(), anchor = CivPosition(8, 64, 7))
+            (h.controls.frame(h.player)!!.placement as ActionPanelPlacement.FollowTarget).target shouldBe ActionPanelPoint(8.5, 64.5, 7.5)
         }
     }
 

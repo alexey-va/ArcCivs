@@ -119,6 +119,8 @@ data class CivConstruction(
     val blocksPlaced: Int? = null,
     /** Reachable earthwork front, then the prepared entrance until completion; null uses the authored workplace. */
     val preparationWorkplace: CivPosition? = null,
+    /** Free, journaled manual foundation rows run before the builder can reach the raised entrance. */
+    val automaticPreparationBatches: Int? = null,
 )
 
 data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: Map<String, Long>? = null)

@@ -15,16 +15,17 @@ internal data class CivTerrainSurface(
 internal data class CivTerrainSurfaceColumn(val groundY: Int, val natural: Boolean, val loaded: Boolean = true,
     val topY: Int = groundY)
 
-/** Native capture covers [floorY - MAXIMUM_CHANGE, maxOf(surfaceY, groundY) + 2]. */
+/** Native capture covers [supportY, maxOf(surfaceY, groundY) + 2]. */
 internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int, val floorY: Int,
-    val surfaceY: Int, val preserve: Boolean = false)
+    val surfaceY: Int, val preserve: Boolean = false,
+    val supportY: Int = floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
     val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess())
 
-/** Exact state plus native collision/safety classification, captured by the world budget. */
+/** Exact native state; [supportSafe] permits retaining a solid block, never changing it. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
-    val solid: Boolean, val passable: Boolean)
+    val solid: Boolean, val passable: Boolean, val supportSafe: Boolean = safe)
 
 internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xffff_ffffL)
 
@@ -168,11 +169,12 @@ internal object CivsAutonomousTerraform {
                     throw CivsRejection("autonomy-no-path")
                 return@forEach
             }
-            val support = (column.floorY downTo column.floorY - MAXIMUM_CHANGE).firstOrNull { y ->
+            val support = (column.floorY downTo column.supportY).firstOrNull { y ->
                 cells[CivPosition(x, y, z)]?.let { it.solid && it.data.substringBefore('[') !in FALLING_GROUND } == true
             } ?: throw CivsRejection("autonomy-foundation")
             val base = at(x, support, z)
-            if (!base.safe && base.data != "minecraft:bedrock" && base.position != draft.building.control)
+            if (!base.safe && !(draft.route.isEmpty() && base.supportSafe) &&
+                base.data != "minecraft:bedrock" && base.position != draft.building.control)
                 throw CivsRejection("autonomy-terrain")
             // Clearing first also makes ascent headroom usable before the next route column is reached.
             for (y in maxOf(column.surfaceY, ground) + 2 downTo ground + 1) {
@@ -182,8 +184,10 @@ internal object CivsAutonomousTerraform {
             for (y in support + 1..ground) {
                 val cell = at(x, y, z)
                 if (cell.position == draft.building.control) continue
+                if (draft.route.isEmpty() && cell.solid && cell.supportSafe) continue
                 if (!cell.safe) throw CivsRejection("autonomy-terrain")
                 if (!cell.solid) change(cell, when {
+                    draft.route.isEmpty() -> "minecraft:dirt"
                     y == ground -> "minecraft:coarse_dirt"
                     y >= ground - 2 -> "minecraft:dirt"
                     else -> "minecraft:stone"
@@ -191,7 +195,7 @@ internal object CivsAutonomousTerraform {
             }
         }
         val points = result.keys + draft.route
-        if (points.isEmpty()) throw CivsRejection("invalid-plan")
+        if (points.isEmpty()) return CivTerraformPlan(draft.building.bounds, emptyList(), emptyList(), draft.groundY, 0, 0)
         val bounds = CivBox(CivPosition(points.minOf { it.x }, points.minOf { it.y }, points.minOf { it.z }),
             CivPosition(points.maxOf { it.x }, points.maxOf { it.y }, points.maxOf { it.z }))
         val blocks = result.values.toList()

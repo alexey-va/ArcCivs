@@ -4614,6 +4614,52 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("manual foundations reserve an empty payment and run before an unreachable builder entrance") {
+        serviceScenario { h ->
+            val placement = h.incrementalPlacement(paid = false)
+            val old = requireNotNull(placement.city.construction)
+            val building = requireNotNull(old.plannedBuilding)
+            val cell = CivPlanBlock(CivPosition(15, 63, 0), "minecraft:air", "minecraft:dirt")
+            val plan = CivPlacementPlan(old.id, h.city.id, h.world.uid, building, listOf(
+                CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:stone"),
+                CivPlanBlock(CivPosition(16, 64, 0), "minecraft:air", "minecraft:oak_planks")), "b".repeat(64),
+                CivTerraformPlan(CivBox(cell.position, cell.position), listOf(cell), emptyList(), 63, 0, 1))
+            val order = old.copy(phase = ConstructionPhase.READY_TO_PLACE, payment = CivConstructionPayment(),
+                batches = CivConstructionBatches(3, 16, true), workRequired = 3, workDone = 0, workCredit = null,
+                materials = mapOf("STONE" to 1L, "OAK_PLANKS" to 1L),
+                automaticPreparationBatches = 1, preparationWorkplace = null, blocksRequired = 3, blocksPlaced = 0)
+            val city = CivsRules.validate(placement.city.copy(construction = order))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+            every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(mockk(relaxed = true))
+            every { h.citizens.constructionReady(city.id, order.id) } returns false
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            val applied = CompletableFuture<Unit>()
+            var gate: (() -> Boolean)? = null
+            every { h.worldAdapter.applyTerraform(plan, h.owner, listOf(cell), 0, any(), any()) } answers {
+                gate = arg(4)
+                applied
+            }
+            h.start()
+            val reserved = h.saves.single().first
+            reserved.construction!!.phase shouldBe ConstructionPhase.PLACING
+            reserved.construction!!.payment!!.reservedBatch shouldBe 0
+            reserved.construction!!.materials shouldBe order.materials
+            reserved.inventory shouldBe city.inventory
+            gate shouldBe null
+            h.commit()
+            requireNotNull(gate).invoke() shouldBe true
+            applied.complete(Unit); h.tick()
+            val finished = h.saves.last().first
+            finished.construction!!.workDone shouldBe 1
+            finished.construction!!.phase shouldBe ConstructionPhase.CONSTRUCTING
+            finished.construction!!.materials shouldBe order.materials
+            finished.construction!!.preparationWorkplace shouldBe building.entrance
+            verify(exactly = 0) { h.citizens.constructionReady(city.id, order.id); h.blueprints.paste(any(), any(), any(), any(), any()) }
+        }
+    }
+
     for (resumedBatch in 0..1) test("autonomous earthworks resume batch $resumedBatch with actual worker admission and durable next front") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
@@ -4844,6 +4890,8 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
 
     init {
         every { worldAdapter.canModify(any(), any(), any()) } returns true
+        every { worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+            CompletableFuture.completedFuture(null)
         every { worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } answers {
             worldAdapter.capture(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5))
         }

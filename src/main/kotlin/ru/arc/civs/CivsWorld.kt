@@ -59,9 +59,10 @@ class CivsWorld(
 
     /** A new site reserves its marker before the one-time control barrel is installed. */
     fun captureSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
-        cells: List<ArcSchematicBlock>, previous: CivBuilding?): CompletableFuture<CivPlacementPlan> = admit {
+        cells: List<ArcSchematicBlock>, previous: CivBuilding?,
+        terrain: CivTerraformPlan? = null): CompletableFuture<CivPlacementPlan> = admit {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true)
+        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true, terrain = terrain)
     }
 
     /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
@@ -81,6 +82,14 @@ class CivsWorld(
     internal fun captureTerraform(city: Settlement, draft: CivTerraformDraft, executor: Executor,
         previous: CivBuilding? = null): CompletableFuture<CivTerraformPlan> = admit {
         TerraformCapture(city, draft, executor, previous)
+    }
+
+    /** Manual sites receive the same journaled earthworks without requiring an existing graded road. */
+    internal fun captureManualFoundation(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+        cells: List<ArcSchematicBlock>, executor: Executor,
+        previous: CivBuilding? = null, autonomous: Boolean = false): CompletableFuture<CivTerraformPlan?> = admit {
+        requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
+        ManualFoundationCapture(cityId, owner, worldId, building, cells.size, executor, previous, autonomous)
     }
 
     internal fun autonomousSurface(city: Settlement, envelope: CivBuilding): CompletableFuture<Int> = admit {
@@ -263,15 +272,19 @@ class CivsWorld(
         }
 
         /** Terrain extends beyond the schematic; check the exact position rather than its broad route box. */
-        protected fun checkTerrainOwnership(position: CivPosition, repair: CivAutonomousAccessRepair? = null) {
+        protected fun checkTerrainOwnership(position: CivPosition, repair: CivAutonomousAccessRepair? = null,
+            allowUnpublished: Boolean = false) {
             requireCivs(position.y in world.minHeight until world.maxHeight, "outside-world")
             requireCivs(world.worldBorder.isInside(Location(world, position.x + .5, position.y.toDouble(), position.z + .5)),
                 "outside-border")
             val all = cities()
-            val city = all.firstOrNull { it.id == cityId } ?: throw CivsRejection("not-authorized")
-            requireCivs(city.owner == owner && city.worldId == worldId && city.pendingDeletion == null,
+            val city = all.firstOrNull { it.id == cityId }
+            requireCivs(city != null || allowUnpublished && building.type == BuildingType.TOWN_HALL && building.level == 1,
                 "not-authorized")
-            requireCivs(city.contains(position.x, position.z), "outside-city")
+            if (city != null) {
+                requireCivs(city.owner == owner && city.worldId == worldId && city.pendingDeletion == null, "not-authorized")
+                requireCivs(city.contains(position.x, position.z), "outside-city")
+            }
             requireCivs(position != building.control, "protected-terrain")
             for (other in all) {
                 if (other.worldId != worldId) continue
@@ -296,8 +309,9 @@ class CivsWorld(
             }
         }
 
-        protected fun checkTerraformBlock(block: Block, after: BlockData, tree: Boolean = false) {
-            checkTerrainOwnership(CivPosition(block.x, block.y, block.z))
+        protected fun checkTerraformBlock(block: Block, after: BlockData, tree: Boolean = false,
+            allowUnpublished: Boolean = false) {
+            checkTerrainOwnership(CivPosition(block.x, block.y, block.z), allowUnpublished = allowUnpublished)
             val state = if (block.type.isAir) null else block.state
             if ((state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true)
                 rejectAt("container-not-empty", block)
@@ -358,10 +372,18 @@ class CivsWorld(
         }
 
         protected fun checkTerraformCell(cell: CivPlanBlock, terrain: CivTerraformPlan) {
-            val source = terrain.route.first()
             requireCivs(terrain.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
                 seenTerrain.add(cell.position) && cell.position != building.control, "invalid-plan")
-            requireCivs(cell.before == cell.after || cell.position.x != source.x || cell.position.z != source.z ||
+            val source = terrain.route.firstOrNull()
+            if (source == null) {
+                val p = cell.position
+                val footprint = CivsAutonomousGeometry.horizontalContains(building.bounds, p)
+                val entrance = p.x == building.entrance.x && p.z == building.entrance.z
+                val ground = if (entrance && !footprint) building.entrance.y - 1 else building.anchor.y
+                requireCivs(footprint || entrance, "invalid-plan")
+                requireCivs(if (parse(cell.after).material.isAir) p.y > ground
+                    else cell.after == "minecraft:dirt" && p.y <= ground, "invalid-plan")
+            } else requireCivs(cell.before == cell.after || cell.position.x != source.x || cell.position.z != source.z ||
                 cell.position.y !in source.y - 1..source.y + 1, "autonomy-no-path")
             requireCivs(parse(cell.before).asString == cell.before && parse(cell.after).asString == cell.after &&
                 (parse(cell.after).material.isAir || parse(cell.after).material in TERRAFORM_GROUND), "invalid-plan")
@@ -488,6 +510,90 @@ class CivsWorld(
             val clearable = block.type.isAir || block.type in AUTONOMOUS_PLANTS || leaves ||
                 leavesSeen && Tag.LOGS.isTagged(block.type)
             if (!clearable || probes >= MAXIMUM_TREE_READS) complete(probeY, false) else probeY--
+        }
+    }
+
+    /** A downward probe is one queue unit; deep foundations share every other scan's tick budget. */
+    private inner class ManualFoundationCapture(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
+        private val schematicCells: Int, private val executor: Executor, private val previous: CivBuilding?,
+        private var strictAutonomous: Boolean) :
+        Scan<CivTerraformPlan?>(cityId, owner, worldId, building) {
+        private val width = building.bounds.max.x - building.bounds.min.x + 1
+        private val footprintColumns = width * (building.bounds.max.z - building.bounds.min.z + 1)
+        private val entranceOutside = !CivsAutonomousGeometry.horizontalContains(building.bounds, building.entrance)
+        private val totalColumns = footprintColumns + if (entranceOutside) 1 else 0
+        private val captured = linkedMapOf<CivPosition, CivTerraformCell>()
+        private val columns = ArrayList<CivTerraformColumn>()
+        private var columnIndex = 0
+        private var y: Int? = null
+        private var topY = 0
+        private var leafY: Int? = null
+        private var planned: CompletableFuture<CivTerraformPlan?>? = null
+
+        init { future.whenComplete { _, _ -> if (future.isCancelled) planned?.cancel(false) } }
+
+        override fun validateIdentity(city: Settlement?) {
+            if (city?.autonomy != null) strictAutonomous = true
+            requireCivs(city?.pendingDeletion == null && city?.building(building.id) == previous, "stale-building")
+        }
+
+        override fun ready(): Boolean = planned?.isDone != false
+
+        override fun step() {
+            planned?.let { return finish(it.join()) }
+            if (columnIndex == totalColumns) {
+                planned = CompletableFuture.supplyAsync({
+                    val draft = CivTerraformDraft(building, columns, emptyList(), building.anchor.y)
+                    CivsAutonomousTerraform.materialize(draft, captured).takeIf { it.blocks.isNotEmpty() }.also {
+                        requireCivs(schematicCells.toLong() + (it?.blocks?.size ?: 0) <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
+                    }
+                }, executor)
+                return
+            }
+            val footprint = columnIndex < footprintColumns
+            val x = if (footprint) building.bounds.min.x + columnIndex % width else building.entrance.x
+            val z = if (footprint) building.bounds.min.z + columnIndex / width else building.entrance.z
+            // Completed buildings retain their authored structure and already accepted foundations.
+            if (previous?.phase == BuildingPhase.ACTIVE &&
+                (CivsAutonomousGeometry.horizontalContains(previous.bounds, CivPosition(x, 0, z)) || !footprint)) {
+                columnIndex++
+                return
+            }
+            val ground = if (footprint) building.anchor.y else building.entrance.y - 1
+            val floor = if (footprint) minOf(ground, building.bounds.min.y - 1) else ground
+            requireCivs(floor >= world.minHeight && ground + 2 < world.maxHeight, "outside-world")
+            val currentY = y ?: run {
+                requireCivs(world.isChunkLoaded(x shr 4, z shr 4), "chunks-unloaded")
+                topY = world.getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)
+                requireCivs(maxOf(topY, ground) + 2 < world.maxHeight, "outside-world")
+                maxOf(topY, ground) + 2
+            }
+            requireCivs(index < CivsAutonomousTerraform.MAXIMUM_CAPTURE_CELLS, "autonomy-search-budget")
+            val position = CivPosition(x, currentY, z)
+            val block = read(position)
+            val data = block.blockData
+            if (position == building.control && !(previous?.control == position && block.type == Material.BARREL) &&
+                (if (strictAutonomous) !naturalTerraform(block) else block.isLiquid ||
+                    (data as? Waterlogged)?.isWaterlogged == true || block.state is TileState || block.type == Material.BEDROCK))
+                rejectAt("autonomy-terrain", block)
+            if (block.type in TERRAFORM_GROUND) leafY = null
+            if (naturalLeaves(data)) leafY = currentY
+            val tree = leafY?.let { it.toLong() - currentY in 1..MAXIMUM_TREE_READS.toLong() } == true
+            val accessible = canModify(owner, block) && try {
+                checkTerrainOwnership(position, allowUnpublished = true); true
+            } catch (_: CivsRejection) { false }
+            val safe = naturalTerraform(block, tree) && accessible
+            val solid = !Tag.LOGS.isTagged(block.type) && !naturalLeaves(data) && fullTerraformSupport(block)
+            val supportSafe = safe || !strictAutonomous && accessible && solid && block.state !is TileState
+            captured[position] = CivTerraformCell(position, data.asString, safe, solid, passableTerraform(block), supportSafe)
+            index++
+            if (currentY <= floor && solid && block.type !in FALLING_GROUND) {
+                columns += CivTerraformColumn(x, z, ground, floor, topY, supportY = currentY)
+                columnIndex++; y = null; leafY = null
+            } else {
+                if (currentY == world.minHeight) rejectAt("autonomy-foundation", block)
+                y = currentY - 1
+            }
         }
     }
 
@@ -729,7 +835,8 @@ class CivsWorld(
         block.type in AUTONOMOUS_PLANTS && !block.isLiquid &&
         (block.blockData as? Waterlogged)?.isWaterlogged != true && block.collisionShape.boundingBoxes.isEmpty()
 
-    private fun requireTerrainRoute(route: List<CivPosition>, building: CivBuilding) {
+    private fun requireTerrainRoute(route: List<CivPosition>, building: CivBuilding, allowManualFoundation: Boolean = false) {
+        if (allowManualFoundation && route.isEmpty()) return
         requireCivs(route.size in 1..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH && route.last() == building.entrance &&
             route.all { it.y in -4_095..4_095 } &&
             route.map { civsTerrainKey(it.x, it.z) }.distinct().size == route.size, "invalid-plan")
@@ -845,19 +952,25 @@ class CivsWorld(
             requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
             terraform?.let {
                 requireCivs(cells.size.toLong() + it.blocks.size <= CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-                requireTerrainRoute(it.route, building)
-                strictAutonomous = true
+                requireTerrainRoute(it.route, building, allowManualFoundation = true)
+                if (it.route.isNotEmpty()) strictAutonomous = true
             }
         }
 
         override fun checkControl(block: Block) {
             // Only an already accepted building owns this marker; an unrelated barrel is terrain.
             if (strictAutonomous && (previous == null || previous.control != building.control))
-                checkAutonomousTerrain(block, building.anchor.y)
+                checkControlTerrain(block)
             if (!allowControlPlacement || block.type == Material.BARREL) return super.checkControl(block)
-            if (strictAutonomous) checkAutonomousTerrain(block, building.anchor.y)
+            if (strictAutonomous) checkControlTerrain(block)
             if (block.type == Material.BEDROCK || block.state is TileState) rejectAt("control-obstructed", block)
             if (!canModify(owner, block, Material.BARREL)) rejectAt("lands-denied", block)
+        }
+
+        private fun checkControlTerrain(block: Block) {
+            if (allowControlPlacement && terraform?.route.isNullOrEmpty()) {
+                if (!naturalTerraform(block)) rejectAt("autonomy-terrain", block)
+            } else checkAutonomousTerrain(block, building.anchor.y)
         }
 
         override fun validateIdentity(city: Settlement?) {
@@ -880,7 +993,7 @@ class CivsWorld(
                     checkTerraformCell(cell, plan)
                     val block = read(cell.position)
                     val after = parse(cell.after)
-                    checkTerraformBlock(block, after, tree)
+                    checkTerraformBlock(block, after, tree, allowUnpublished = plan.route.isEmpty())
                     if (!matchesTerraformBefore(cell.before, block.blockData)) rejectAt("world-changed", block)
                     terrainBlocks += cell.copy(before = block.blockData.asString, after = after.asString)
                     return
@@ -944,11 +1057,14 @@ class CivsWorld(
             requireCivs(terraform.blocks.size in 1..CivsStore.MAX_PLAN_BLOCKS &&
                 plan.blocks.size.toLong() + terraform.blocks.size <= CivsStore.MAX_PLAN_BLOCKS &&
                 terrainStart >= 0 && terrainStart.toLong() + cells.size <= terraform.blocks.size, "invalid-plan")
-            requireTerrainRoute(terraform.route, building)
+            requireTerrainRoute(terraform.route, building, allowManualFoundation = true)
         }
         override fun validateIdentity(city: Settlement?) {
-            requireCivs(city != null && city.pendingDeletion == null && city.autonomy != null &&
-                city.construction?.let { it.id == plan.id && it.buildingId == building.id &&
+            val construction = city?.construction
+            requireCivs(city != null && city.pendingDeletion == null && (if (terraform.route.isEmpty())
+                construction?.automaticPreparationBatches?.let { construction.workDone in 0 until it } == true
+                else city.autonomy != null) &&
+                construction?.let { it.id == plan.id && it.buildingId == building.id &&
                     it.plannedBuilding == building && it.phase == ConstructionPhase.PLACING } == true, "stale-construction")
         }
         override fun ready(): Boolean = blockedTick != tickSequence
@@ -1059,6 +1175,7 @@ class CivsWorld(
             Material.DIORITE, Material.ANDESITE, Material.TUFF)
         private val TREE_GROUND = AUTONOMOUS_SOIL + AUTONOMOUS_ROCK
         private val TERRAFORM_GROUND = TREE_GROUND + setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
+        private val FALLING_GROUND = setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
         private val AUTONOMOUS_PLANTS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN,
             Material.LARGE_FERN, Material.DEAD_BUSH, Material.SNOW, Material.MOSS_CARPET, Material.DANDELION,
             Material.POPPY, Material.BLUE_ORCHID, Material.ALLIUM, Material.AZURE_BLUET, Material.RED_TULIP,

@@ -57,6 +57,7 @@ internal class CivsPlacementControls(
         var moving = false
         var pending: UUID? = null
         var confirming = false
+        var panelTarget: CivPosition? = null
         var target: CivPosition? = null
         var hintTicks = 0
         var feedback: Component? = null
@@ -122,8 +123,11 @@ internal class CivsPlacementControls(
         if (session.previewId != preview.id && session.pending == null) {
             session.previewId = preview.id
             session.selecting = false
+            session.panelTarget = null
             clearTarget(session)
         }
+        // Nudges replace the preview, but the controls must remain under the player's aim.
+        val panelTarget = session.panelTarget ?: preview.anchor.also { session.panelTarget = it }
         val busy = preview.busy || session.pending != null
         val status = when {
             session.confirming -> text.render(player, "panel.saving")
@@ -135,16 +139,20 @@ internal class CivsPlacementControls(
         return ActionPanelFrame(
             CivsPlacementContext(preview.id, session.moving, session.pending),
             ActionPanelPlacement.FollowTarget(preview.worldId,
-                ActionPanelPoint(preview.anchor.x + 0.5, preview.anchor.y + 0.5, preview.anchor.z + 0.5),
+                ActionPanelPoint(panelTarget.x + 0.5, panelTarget.y + 0.5, panelTarget.z + 0.5),
                 followingSettings(session.moving)),
             layout(player, actions, status, busy), !busy,
-            ActionPanelOptions(ActionPanelInputProfile.ENTITY_BOTH, 4.0, false), null,
+            options(), null,
         )
     }
 
     internal fun layout(player: Player, actions: List<CivsPlacementAction>, status: Component, busy: Boolean = false): ActionPanelLayout<CivsPlacementAction> {
         val buttons = actions.map { action ->
-            ActionPanelAction(action, text.render(player, action.key).color(when (action) {
+            val glyph = when (action) {
+                CivsPlacementAction.LEFT, CivsPlacementAction.RIGHT, CivsPlacementAction.AWAY, CivsPlacementAction.TOWARD -> CivsPlacementAction.RIGHT
+                else -> action
+            }
+            ActionPanelAction(action, text.render(player, glyph.key).color(when (action) {
                 CivsPlacementAction.CONFIRM, CivsPlacementAction.DONE -> TextColor.color(0x9BD48D)
                 CivsPlacementAction.CANCEL -> TextColor.color(0xFF6B61)
                 CivsPlacementAction.ROTATE_LEFT, CivsPlacementAction.ROTATE_RIGHT -> TextColor.color(0xC4A7E7)
@@ -158,17 +166,22 @@ internal class CivsPlacementControls(
         }
         // The same horizontal cross used by Builder; world height is deliberately a separate column.
         val labels = buttons.associateBy { it.action }
-        // Leave reach for a sideways obstacle escape. Text retains its readable size; a wider 12-button
-        // footprint forces Core too close to the eye and covers the selected block with its bottom row.
+        // Compact geometry keeps the full panel within reach without shrinking the text.
         val spacing = if (CivsPlacementAction.DONE in actions) 1.0 else .85
         fun rect(x: Double, y: Double, width: Double, height: Double) =
             ActionPanelRect(ActionPanelPoint(x * spacing, y * spacing, 0.0), width * spacing, height * spacing)
-        fun button(action: CivsPlacementAction, x: Double, y: Double, width: Double = .70,
-            height: Double = .27, scale: Float = .8f): ActionPanelButton<CivsPlacementAction> {
+        fun button(action: CivsPlacementAction, x: Double, y: Double, width: Double = .42,
+            height: Double = .32, scale: Float = .9f): ActionPanelButton<CivsPlacementAction> {
             val area = rect(x, y, width, height)
+            val rotation = when (action) {
+                CivsPlacementAction.LEFT -> 180f
+                CivsPlacementAction.AWAY -> 90f
+                CivsPlacementAction.TOWARD -> -90f
+                else -> 0f
+            }
             return ActionPanelButton(action, area, labels.getValue(action).text,
                 ActionPanelTextStyle(scale, (area.width * 40 / scale).toInt() - 5,
-                    area.width.toFloat(), area.height.toFloat(), .025), true, !busy)
+                    area.width.toFloat(), area.height.toFloat(), .025, 0, 0, rotation), true, !busy)
         }
         fun label(key: String, x: Double, y: Double, width: Double, value: Component, scale: Float): ActionPanelLabel {
             val area = rect(x, y, width, .18)
@@ -177,27 +190,25 @@ internal class CivsPlacementControls(
                     area.width.toFloat(), area.height.toFloat(), .025))
         }
         return ActionPanelLayout(buildList {
-            add(button(CivsPlacementAction.AWAY, -.65, .42))
-            add(button(CivsPlacementAction.LEFT, -1.42, .10))
-            add(button(CivsPlacementAction.RIGHT, .12, .10))
-            add(button(CivsPlacementAction.TOWARD, -.65, -.22))
-            add(button(CivsPlacementAction.UP, 1.15, .42, .90))
-            add(button(CivsPlacementAction.DOWN, 1.15, -.22, .90))
+            add(button(CivsPlacementAction.AWAY, -.55, .32))
+            add(button(CivsPlacementAction.LEFT, -1.05, .08))
+            add(button(CivsPlacementAction.RIGHT, -.05, .08))
+            add(button(CivsPlacementAction.TOWARD, -.55, -.16))
+            add(button(CivsPlacementAction.UP, .92, .32, .50))
+            add(button(CivsPlacementAction.DOWN, .92, -.16, .50))
             if (CivsPlacementAction.DONE in actions) {
-                add(button(CivsPlacementAction.DONE, -.75, -.65, 1.50, .34, .55f))
-                add(button(CivsPlacementAction.CANCEL, .85, -.65, 1.50, .34, .55f))
+                add(button(CivsPlacementAction.DONE, -.75, -.55, 1.50, .34, .60f))
+                add(button(CivsPlacementAction.CANCEL, .85, -.55, 1.50, .34, .60f))
             } else {
-                add(button(CivsPlacementAction.ROTATE_LEFT, -1.08, -.57, 1.02, scale = .52f))
-                add(button(CivsPlacementAction.MOVE, 0.0, -.57, 1.02, scale = .43f))
-                add(button(CivsPlacementAction.ROTATE_RIGHT, 1.08, -.57, 1.02, scale = .52f))
-                add(button(CivsPlacementAction.CONFIRM, -.97, -.95, 1.32, .38, .50f))
-                add(button(CivsPlacementAction.DETAILS, .23, -.95, .98, .38, .46f))
-                add(button(CivsPlacementAction.CANCEL, 1.19, -.95, .84, .38, .42f))
+                add(button(CivsPlacementAction.ROTATE_LEFT, -1.13, -.47, 1.02, .27, .57f))
+                add(button(CivsPlacementAction.MOVE, 0.0, -.47, 1.18, .27, .50f))
+                add(button(CivsPlacementAction.ROTATE_RIGHT, 1.13, -.47, 1.02, .27, .57f))
+                add(button(CivsPlacementAction.CONFIRM, -1.02, -.82, 1.42, .34, .55f))
+                add(button(CivsPlacementAction.DETAILS, .25, -.82, 1.04, .34, .50f))
+                add(button(CivsPlacementAction.CANCEL, 1.30, -.82, .98, .34, .50f))
             }
         }, listOf(
-            label("status", 0.0, .79, 3.50, status, .48f),
-            label("horizontal", -.65, .10, .70, text.render(player, "panel.horizontal"), .44f),
-            label("height", 1.15, .10, .90, text.render(player, "panel.height"), .46f),
+            label("status", 0.0, .65, 3.50, status, .54f),
         ))
     }
 
@@ -227,6 +238,7 @@ internal class CivsPlacementControls(
 
     private fun beginMove(player: Player, session: Session) {
         session.moving = true
+        session.panelTarget = host.preview(player)?.anchor
         // A new mode starts at its authored distance instead of inheriting the old distance hysteresis.
         panels.clear(player.uniqueId)
         player.sendMessage(text.info(player, "panel.move-opened"))
@@ -246,13 +258,12 @@ internal class CivsPlacementControls(
             if (closed || !player.isOnline || sessions[player.uniqueId] !== session || session.pending != request) return@whenCompleteSync
             session.pending = null
             session.confirming = false
-            if (failure != null && session.selecting) {
+            if (failure != null) {
                 session.feedback = text.failure(player, failure)
                 session.feedbackTicks = 80
                 session.hintTicks = 0
                 player.sendActionBar(requireNotNull(session.feedback))
-            } else if (failure != null) player.sendMessage(text.failure(player, failure))
-            else if (confirming) player.sendMessage(text.success(player, if (upgrading) "panel.upgrade-confirmed" else "panel.confirmed"))
+            } else if (confirming) player.sendMessage(text.success(player, if (upgrading) "panel.upgrade-confirmed" else "panel.confirmed"))
             else if (session.selecting) {
                 session.selecting = false
                 clearTarget(session)
@@ -260,7 +271,13 @@ internal class CivsPlacementControls(
             }
             else if (finishMove) session.moving = false
             val preview = eligible(player)
-            if (preview != null) session.previewId = preview.id
+            if (preview != null) {
+                session.previewId = preview.id
+                if (failure == null && finishMove) {
+                    session.panelTarget = preview.anchor
+                    panels.clear(player.uniqueId)
+                }
+            }
             else if (host.selection(player) == null) clear(player.uniqueId)
         }
     }
@@ -335,8 +352,8 @@ internal class CivsPlacementControls(
     }
 
     private fun refreshTarget(player: Player, session: Session) {
-        if ((!session.selecting && !session.moving) || ui.showingDialog(player)) { clearTarget(session); return }
         if (session.feedbackTicks > 0) session.feedbackTicks-- else session.feedback = null
+        if ((!session.selecting && !session.moving) || ui.showingDialog(player)) { clearTarget(session); return }
         if (session.hintTicks-- <= 0) {
             player.sendActionBar(session.feedback ?: if (session.pending != null) text.warning(player, "selection.loading")
                 else text.info(player, if (session.selecting) "selection.hint" else "panel.pick-hint"))
@@ -395,6 +412,10 @@ internal class CivsPlacementControls(
     }
 
     companion object {
+        /** Private tool controls keep their aimable plane even when the preview or terrain covers it. */
+        internal fun options(): ActionPanelOptions =
+            ActionPanelOptions(ActionPanelInputProfile.ENTITY_BOTH, 4.0, false, false, ActionPanelDepth.VIEW_OVERLAY)
+
         /** Follow the selected place before the building; movement leaves terrain visible below. */
         internal fun followingSettings(moving: Boolean): ActionPanelFollowSettings =
             ActionPanelFollowSettings(if (moving) 3.0 else 2.6, 0.0, if (moving) 0.45 else 0.18, 1.25, 0.03)
