@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "title": "ArcCivs organic settlement density proposal and safe-site recovery",
+  "assumptions": [
+    "Preview proposal only. Active 0.1.69 retains eleven ordinary autonomous sites and ordinary cap 16. This assessment does not establish runtime activation of the V2 density proposal.",
+    "Proposed V2 target: 28 ordinary buildings, 20 HOUSE plus 8 existing service buildings. Before: 3 HOUSE plus 8 services, 11 total. Proposed autonomous hard cap 32; player-town cap 16, population cap 12, producer counts, cycle outputs, food/recruitment rates and stock limits remain unchanged.",
+    "HOUSE L1 remains 24 abstract wood, 12 abstract stone and zero food. Seventeen additional paid houses consume 408 wood and 204 stone once. House-only target costs change from 72 wood/36 stone to 480 wood/240 stone. Accepted order prices and receipts remain unchanged.",
+    "Each HOUSE L1 has 3 beds. House capacity changes 9 to 60 beds, delta 51. Population remains 12; capacity grants no residents, production, items or equipment.",
+    "Auto wood/stone/food remain abstract stocks without item or currency redemption. Empty template containers add capacity only. Player construction continues to pay its exact native schematic bill.",
+    "Low/base/high assumptions: 1/5/10 villages completing one expansion each spend 408/2040/4080 abstract wood and 204/1020/2040 stone per once-only cohort. These are scenarios, not measured daily or weekly utilization. Retry and crash recovery must not duplicate payment.",
+    "No measured disposable income or work hours are inferred. Unchanged ideal L1 output is 4 wood and 3 stone per 60-second fed active cycle: additional stock needs at least 102 wood cycles and 68 stone cycles. Walking, night and storage reduce actual rate; parallel producer time is not summed.",
+    "Infrastructure prices remain wall 8 wood/16 stone, gate 12/16, road 0/8. V2 infrastructure counts and total cost are pending the actual export; this assessment does not authorize changing its cap without counting.",
+    "No boost, stacking or buy-craft-sell ratio is added. Current SELL and future SELL-to-contract transition remain unchanged. Direct deltas separately zero Vault, zero tokens and zero player XP. No sale value is invented.",
+    "V1 safe-site fallback and movement corrections restore intended progress at unchanged nominal costs, outputs and limits. Realized throughput is unmeasured. Fluids, occupied/foreign blocks and live protection remain exclusions."
+  ],
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "organic_layout_vault",
+          "kind": "mint",
+          "source": "ArcCivs organic settlement preview",
+          "basis": "No currency or XP emission introduced.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "organic_layout_tokens",
+          "kind": "mint",
+          "source": "ArcCivs organic settlement preview",
+          "basis": "No currency or XP emission introduced.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "organic_layout_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs organic settlement preview",
+          "basis": "No currency or XP emission introduced.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [],
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      }
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [],
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      }
+    }
+  },
+  "prices": [
+    {
+      "id": "complete_L1_house_target_wood",
+      "currency": "abstract_wood",
+      "before": {
+        "value": "72",
+        "unit": "major"
+      },
+      "after": {
+        "value": "480",
+        "unit": "major"
+      }
+    },
+    {
+      "id": "complete_L1_house_target_stone",
+      "currency": "abstract_stone",
+      "before": {
+        "value": "36",
+        "unit": "major"
+      },
+      "after": {
+        "value": "240",
+        "unit": "major"
+      }
+    }
+  ]
+}
