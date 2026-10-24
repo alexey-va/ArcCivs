@@ -905,6 +905,148 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (fullBeforeWork in listOf(false, true))
+    test("full autonomous storage permits leisure then resumes at real delivery points fullBeforeWork=$fullBeforeWork") {
+        residentRuntime { h ->
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val producer = h.assignFarm().copy(type = BuildingType.FORESTER, production = null,
+                bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)), control = null)
+            h.world.getBlockAt(20, 64, 0).type = Material.AIR
+            val hall = h.city.buildings.first().copy(
+                bounds = CivBox(CivPosition(-2, 64, -4), CivPosition(2, 68, -1)))
+            h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                buildings = listOf(hall, producer)))
+            val token = requireNotNull(citizenPlan(h.city, h.city.workers.single())).token
+            val full = Stock(wood = CivsRules.capacity(h.city))
+            if (fullBeforeWork) h.city = h.city.copy(stock = full)
+            h.onDelivery = {
+                it shouldBe token
+                h.owner.requireAutonomousDelivery(h.city.id, h.workerId, it)
+            }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            val actor = h.owner.collisionActors().single()
+            for (tick in 1..2_400) {
+                if (h.phase() == CitizenPhase.PAUSED) break
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                // Fill storage only after observed work; the completed trip must survive its pause.
+                if (!fullBeforeWork && h.phase() == CitizenPhase.RETURNING) h.city = h.city.copy(stock = full)
+            }
+            h.phase() shouldBe CitizenPhase.PAUSED
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.deliveries shouldBe 0
+            val pausedAt = actor.location
+            val pausedCity = h.city
+            val roadSteps = h.steps.size
+            for (tick in 1..800) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .118251) shouldBe true
+                if (actor.location.distance(pausedAt) >= 2.0 && h.routeIdentity() != null) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") {
+                (actor.location.distance(pausedAt) >= 2.0) shouldBe true
+                h.phase() shouldBe CitizenPhase.PAUSED
+            }
+            h.city shouldBe pausedCity
+            h.steps.size shouldBe roadSteps
+            h.deliveries shouldBe 0
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
+            val leisureRoute = requireNotNull(h.routeIdentity())
+
+            h.city = h.city.copy(stock = Stock())
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.phase() shouldBe if (fullBeforeWork) CitizenPhase.TO_STORAGE else CitizenPhase.RETURNING
+            (h.routeIdentity() === leisureRoute) shouldBe false
+            h.deliveries shouldBe 0
+            for (tick in 1..2_400) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (!fullBeforeWork) (h.phase() == CitizenPhase.WORKING) shouldBe false
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token)
+            h.city.stock shouldBe Stock()
+            h.city.workers.single().completedCycles shouldBe 0L
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            h.city = CivsRules.deliver(h.city, h.city.owner, h.workerId, producer.id,
+                token.completedCycles, token.nextDeliveryAt, requireNotNull(h.navigationNow))
+            h.pendingDelivery.complete(h.city)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
+            h.city.workers.single().completedCycles shouldBe 1L
+            h.city.stock.wood shouldBe CivsRules.deliveryAmount(producer)
+            h.deliveries shouldBe 1
+        }
+    }
+
+    test("full physical bags keep their items while wandering and return to the captured work before delivery") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 22.5, 64.0, .5))
+            val focus = CivPosition(23, 63, 0)
+            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                outputs = mapOf("WHEAT" to 1L), durationMillis = 1_500, status = "working-field", focus = focus)
+            h.work = work
+            h.onDelivery = { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.WORKING
+            val fullBag = List(CivsEquipment.SLOTS) { slot ->
+                if (slot >= CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 64) else null
+            }
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = fullBag) })
+            h.navigationNow = 3_500
+            h.owner.pulse(3_500)
+            h.phase() shouldBe CitizenPhase.PAUSED
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            for (tick in 1..1_200) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .118251) shouldBe true
+                if (!citizenCanReachBlock(actor, focus) && h.routeIdentity() != null) break
+            }
+            citizenCanReachBlock(actor, focus) shouldBe false
+            h.phase() shouldBe CitizenPhase.PAUSED
+            h.city.workers.single().items shouldBe fullBag
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
+            val leisureRoute = requireNotNull(h.routeIdentity())
+            val freed = fullBag.toMutableList().also { it[CivsEquipment.BAG] = null }
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = freed) })
+            // The fixture retains this work plan; worksite cache invalidation on bag edits is a separate contract.
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.phase() shouldBe CitizenPhase.RETURNING
+            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
+            (h.routeIdentity() === leisureRoute) shouldBe false
+            h.deliveries shouldBe 0
+            for (tick in 1..800) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (h.phase() == CitizenPhase.WORKING) shouldBe false
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.city.workers.single().items shouldBe freed
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            h.city = CivsRules.finishWorldWork(h.city, work, requireNotNull(h.navigationNow))
+            h.work = null
+            h.idleReason = "waiting-growth"
+            h.pendingDelivery.complete(h.city)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
+            h.city.workers.single().completedCycles shouldBe 1L
+            h.city.workers.single().items shouldBe freed.toMutableList().also { it[CivsEquipment.BAG] = CivResidentItem("WHEAT", 1) }
+            h.deliveries shouldBe 1
+        }
+    }
+
     for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY))
     test("autonomous $type walks a complete production trip beside a floating hall SITE barrel") {
         residentRuntime { h ->
@@ -1871,6 +2013,83 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a full bag is offered at rest and its accepted courier meeting prevents a new walk before the hold") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
+                anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            val courierId = UUID.randomUUID()
+            val fullBag = List(CivsEquipment.SLOTS) { slot ->
+                if (slot >= CivsEquipment.BAG) CivResidentItem("COAL", 64) else null
+            }
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
+                workers = h.city.workers.map { it.copy(items = fullBag) } +
+                    CivWorker(courierId, "Courier", warehouse.id, nextDeliveryAt = 1)))
+            val producer = h.owner.collisionActors().single()
+            producer.teleport(Location(h.world, 22.5, 64.0, .5))
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(CivPosition(23, 63, 0), "minecraft:stone", "minecraft:air")),
+                outputs = mapOf("WHEAT" to 1L), durationMillis = 1_500, status = "working-field")
+            // Production uses a cached dispatcher result, not a fresh allocation on every actor read.
+            var accepted: CivCourierPlan? = null
+            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
+            h.onPickup = { cityId, workerId, cargo -> h.owner.requireCargoPickupArrival(cityId, workerId, cargo) }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.PAUSED
+            val origin = producer.location
+            for (tick in 1..1_200) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (producer.location.distanceSquared(origin) > 4.0 && h.routeIdentity() != null) break
+            }
+            (producer.location.distanceSquared(origin) > 4.0) shouldBe true
+            requireNotNull(h.routeIdentity())
+            h.owner.courierSupplySources(h.city.id) shouldBe emptyMap()
+            h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
+            for (tick in 1..1_200) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (h.routeIdentity() == null) break
+            }
+            h.routeIdentity() shouldBe null
+            h.owner.courierSupplySources(h.city.id).keys shouldBe setOf(h.workerId)
+            accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
+                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
+            val meeting = producer.location
+            // Only the producer gets its fast field pulse: the accepted courier has not acquired its hold yet.
+            h.navigationNow = requireNotNull(h.navigationNow) + 60_000
+            h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+            h.routeIdentity() shouldBe null
+            repeat(20) { h.navigate() }
+            producer.location shouldBe meeting
+            h.city.workers.first().items shouldBe fullBag
+            h.pickups shouldBe 0
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-courier"
+            for (tick in 1..800) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                producer.location shouldBe meeting
+                if (h.pickups == 1) break
+            }
+            withClue(h.navigationState(courierId)) { h.pickups shouldBe 1 }
+            val cargo = requireNotNull(h.pickedCargo)
+            cargo.id shouldBe requireNotNull(accepted).cargo.id
+            h.city.workers.first().items shouldBe fullBag
+            h.owner.requireCargoPickupArrival(h.city.id, courierId, cargo)
+            h.city = CivsLogistics.pickup(h.city, courierId, cargo)
+            accepted = requireNotNull(accepted).copy(carrying = true)
+            h.pendingPickup.complete(h.city)
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe (CivsEquipment.SLOTS - CivsEquipment.BAG - 1) * 64
+            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 64
+            h.pickups shouldBe 1
+        }
+    }
+
     for (ground in listOf(Material.STONE, Material.FARMLAND, Material.DIRT_PATH))
     test("worker-bag pickup on $ground holds the real producer and requires a nearby observed courier") {
         residentRuntime { h ->
@@ -2048,6 +2267,8 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("expired worker rendezvous releases the producer and retries rarely after three failures") {
         residentRuntime { h ->
             val farm = h.assignFarm()
+            // Keep this backoff-only fixture at rest; travelling producers are not fixed meeting points.
+            h.idleReason = "searching-work"
             val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
                 anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
                 bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
@@ -2069,7 +2290,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 expired = start + 90_000L
                 h.owner.pulse(expired); h.owner.pulse(expired + 1)
                 h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
-                h.owner.status(h.workerId) shouldBe "workers.status.waiting-inputs"
+                h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
                 start = expired + if (attempt == 0) 5_001L else 15_001L
             }
             h.owner.pulse(expired + 59_999L)
@@ -2653,6 +2874,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         isAccessible = true
         get(target)
     }
+    fun phase(worker: UUID = workerId): CitizenPhase =
+        ((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["phase"] as CitizenPhase
     /** Read-only identity distinguishes an accepted pending route from a silent replacement. */
     fun routeIdentity(worker: UUID = workerId): Any? =
         (field(owner, "actors") as Map<*, *>)[worker]?.let { field(it, "route") }

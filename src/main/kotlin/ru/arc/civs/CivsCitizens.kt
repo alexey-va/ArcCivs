@@ -709,7 +709,7 @@ class CivsCitizens(
     private fun sourceReady(actor: Actor, city: Settlement, worker: CivWorker): Boolean {
         if (actor.cityId != city.id || !actor.npc.isValid || actor.npc.world.uid != city.worldId || actor.sleeping || actor.sheltering ||
             actor.attacker != null || actor.workerId in pendingHarm || actor.supplyPickup != null || actor.foodSource != null ||
-            actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
+            actor.route != null || actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
             actor.cycle.phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED)) return false
         val excess = CivsLogistics.workerExcess(city, worker)
         if (excess.isEmpty()) return false
@@ -918,8 +918,7 @@ class CivsCitizens(
             // Waiting for the coarse work pulse used to keep walking around the barrel after arrival.
             val travelTarget = actor.combatDestination ?: actor.foodSource?.let(city::building)?.control ?:
                 if (actor.returningToWarehouse) actor.plan.storage else when (actor.cycle.phase) {
-                CitizenPhase.TO_WORK -> actor.plan.workplace
-                CitizenPhase.TO_STORAGE, CitizenPhase.RETURNING -> actor.plan.storage
+                CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> actor.plan.travelTarget(actor.cycle.phase)
                 else -> null
             }
             if (travelTarget != null && !actor.sheltering && actor.collectionSeek == null && actor.collectionHome == null &&
@@ -1132,11 +1131,15 @@ class CivsCitizens(
             }
         }
         if (cycle.reason == "storage-full" && actor.plan.courier == null) {
-            if (hasCapacity(city, actor.plan)) cycle.resume()
-            else {
+            if (!hasCapacity(city, actor.plan)) {
+                wander(actor, city, world, now)
                 statuses[actor.workerId] = "storage-full"
                 return
             }
+            // Leisure owns its route while production waits. Resume the saved work only
+            // after retiring that route, and walk back before submitting a completed receipt.
+            cancelRoute(actor)
+            cycle.resumeAfterWander()
         }
         cycle.retry(now)
         if (cycle.phase == CitizenPhase.IDLE) {
@@ -1145,7 +1148,7 @@ class CivsCitizens(
         }
         when (cycle.phase) {
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> {
-                val target = if (cycle.phase == CitizenPhase.TO_WORK) requireNotNull(actor.plan.workplace) else actor.plan.storage
+                val target = actor.plan.travelTarget(cycle.phase)
                 if (arrivedAt(actor, city, world, target)) {
                     arriveForWork(actor, city, worker, now)
                     statuses[actor.workerId] = citizenWorkStatus(actor.plan, actor.cycle.phase) ?: actor.cycle.status()
@@ -1539,7 +1542,7 @@ class CivsCitizens(
     }
 
     private fun submitReadyDelivery(actor: Actor, city: Settlement, world: World, now: Long) {
-        val target = if (actor.plan.completeAtWorkplace) requireNotNull(actor.plan.workplace) else actor.plan.storage
+        val target = actor.plan.travelTarget(CitizenPhase.RETURNING)
         if (!arrivedAt(actor, city, world, target)) {
             pauseNavigation(actor, "route-unreachable", "left-delivery-point", resolvedTarget(actor, target).location(world), now)
         } else if (!hasCapacity(city, actor.plan)) actor.cycle.pause("storage-full", now, true)
@@ -1788,6 +1791,11 @@ class CivsCitizens(
             return
         }
         if (!actor.wander.ready(now) || wanderBudget == 0) return
+        // Acceptance can precede the courier's next pulse. Keep the offered feet fixed
+        // until its existing hold takes over, or the dispatcher releases the plan.
+        if (city.workers.any { courierPlan(city, it)?.let { plan ->
+                !plan.carrying && plan.cargo.sourceWorkerId == actor.workerId
+            } == true }) return
         wanderBudget--
         // Keep short invalid-target retries fair within the shared eight-check budget.
         citizenRotateAfterAdmission(actors, actor.workerId)
@@ -2282,6 +2290,7 @@ class CivsCitizens(
             actor.sheltering -> actor.shelter ?: return false
             actor.returningToWarehouse -> actor.plan.storage
             idleAnchor != null -> idleAnchor
+            actor.cycle.phase == CitizenPhase.RETURNING -> actor.plan.travelTarget(CitizenPhase.RETURNING)
             actor.cycle.phase in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING) ||
                 actor.cycle.phase == CitizenPhase.READY && actor.plan.completeAtWorkplace -> actor.plan.workplace ?: return false
             else -> actor.plan.storage
@@ -2993,6 +3002,8 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false,
     val autonomousWork: CivBuilding? = null) {
     val spawnOrigin: CivPosition get() = if (courier?.cargo?.sourceWorkerId != null) storage else courier?.cargo?.sourceEntrance ?: storage
+    fun travelTarget(phase: CitizenPhase): CivPosition =
+        if (phase == CitizenPhase.TO_WORK || phase == CitizenPhase.RETURNING && completeAtWorkplace) requireNotNull(workplace) else storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
         worldWork != null || type == BuildingType.GUARD_TOWER ||
             type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
@@ -3557,9 +3568,18 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         reason = null
         deliveryRetryAt = null
     }
+    fun resumeAfterWander() {
+        if (phase != CitizenPhase.PAUSED) return
+        resume()
+        if (phase == CitizenPhase.READY) phase = CitizenPhase.RETURNING
+    }
     fun close() { phase = CitizenPhase.CLOSED; ticket = null; deliveryRetryAt = null }
     fun status(): String = when (phase) {
-        CitizenPhase.RETURNING -> if (pickupAtWorkplace) "carrying-cargo" else "moving-to-storage"
+        CitizenPhase.RETURNING -> when {
+            pickupAtWorkplace -> "carrying-cargo"
+            completeAtWorkplace -> "moving-to-work"
+            else -> "moving-to-storage"
+        }
         CitizenPhase.TO_STORAGE -> "moving-to-storage"
         CitizenPhase.TO_WORK -> if (pickupAtWorkplace) "moving-to-pickup" else "moving-to-work"
         CitizenPhase.WORKING -> "working"

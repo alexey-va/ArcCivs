@@ -882,6 +882,32 @@ class CivsCitizensTest : FunSpec({
         cycle.acceptsCompletion(retry) shouldBe true
     }
 
+    for (atWorkplace in listOf(false, true))
+    test("storage-full leisure preserves completed work and requires a new arrival atWorkplace=$atWorkplace") {
+        val cycle = CitizenCycle(token(), 1_000, completeAtWorkplace = atWorkplace)
+        reachWork(cycle)
+        cycle.work(1_000)
+        if (!atWorkplace) cycle.arrive(2_000)
+        val old = requireNotNull(cycle.beginDelivery(2_000))
+        cycle.pause("storage-full", 3_000, true)
+        cycle.beginDelivery(30_000) shouldBe null
+        cycle.resumeAfterWander()
+        cycle.phase shouldBe CitizenPhase.RETURNING
+        cycle.beginDelivery(30_000) shouldBe null
+        cycle.acceptsCompletion(old) shouldBe false
+        cycle.arrive(30_000)
+        cycle.phase shouldBe CitizenPhase.READY
+        val retry = requireNotNull(cycle.beginDelivery(30_000))
+        (retry == old) shouldBe false
+        cycle.acceptsCompletion(retry) shouldBe true
+
+        val unstarted = CitizenCycle(token(), 1_000, completeAtWorkplace = atWorkplace, directToWork = atWorkplace)
+        unstarted.pause("storage-full", 3_000, false)
+        unstarted.resumeAfterWander()
+        unstarted.phase shouldBe if (atWorkplace) CitizenPhase.TO_WORK else CitizenPhase.TO_STORAGE
+        unstarted.beginDelivery(30_000) shouldBe null
+    }
+
     test("four workers retain completed trips through repeated busy commits and earn only once") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val foresters = (1..4).map { building(BuildingType.FORESTER, CivPosition(it * 5, 64, 0)) }
