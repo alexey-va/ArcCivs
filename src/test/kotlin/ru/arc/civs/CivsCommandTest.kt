@@ -267,6 +267,76 @@ class CivsCommandTest : FunSpec({
         }
     }
 
+    test("layout export is asynchronous and permission failures stay bounded and structured") {
+        val city = UUID.randomUUID()
+        for ((use, admin) in listOf(false to true, true to false, true to true)) {
+            val messages = mutableListOf<String>()
+            val player = mockk<Player>(relaxed = true) {
+                every { hasPermission("arccivs.use") } returns use
+                every { hasPermission("arccivs.admin") } returns admin
+                every { sendMessage(capture(messages)) } returns Unit
+            }
+            val scheduler = ru.arc.core.TestTaskScheduler()
+            val tasks = ru.arc.core.LifecycleTaskScope(scheduler)
+            val completion = java.util.concurrent.CompletableFuture<Map<String, Any?>>()
+            val requests = mutableListOf<Pair<UUID, Boolean>>()
+            val router = CivsCommand(mockk(), mockk(), mockk(), tasks, debugLayout = { id, terrain ->
+                requests += id to terrain
+                completion
+            })
+            router.onCommand(player, mockk(), "civs", arrayOf("debug", "layout", city.toString(), "terrain")) shouldBe true
+            if (use && admin) {
+                requests shouldBe listOf(city to true)
+                messages shouldBe emptyList()
+                completion.complete(mapOf("city" to city, "path" to "debug/layout/$city.json", "bytes" to 120))
+                scheduler.executeImmediate()
+                val receipt = JsonParser.parseString(messages.single().removePrefix("ARCCIVS_DEBUG ")).asJsonObject
+                receipt["status"].asString shouldBe "completed"
+                receipt["path"].asString shouldBe "debug/layout/$city.json"
+                receipt["bytes"].asInt shouldBe 120
+            } else {
+                requests shouldBe emptyList()
+                val denied = JsonParser.parseString(messages.single().removePrefix("ARCCIVS_DEBUG ")).asJsonObject
+                denied["system"].asString shouldBe "layout"
+                denied["status"].asString shouldBe "failed"
+                denied["error"].asString shouldBe "not-authorized"
+            }
+            tasks.close()
+        }
+    }
+
+    test("layout export rejects malformed arguments before invoking its provider and reports export failures") {
+        val city = UUID.randomUUID()
+        val messages = mutableListOf<String>()
+        val sender = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val scheduler = ru.arc.core.TestTaskScheduler()
+        val tasks = ru.arc.core.LifecycleTaskScope(scheduler)
+        var requests = 0
+        val router = CivsCommand(mockk(), mockk(), mockk(), tasks, debugLayout = { _, _ ->
+            requests++
+            java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("city-not-found"))
+        })
+        for ((args, error) in listOf(
+            arrayOf("debug", "layout") to "invalid-layout-arguments",
+            arrayOf("debug", "layout", "1-1-1-1-1") to "invalid-city-id",
+            arrayOf("debug", "layout", city.toString(), "other") to "invalid-layout-arguments",
+            arrayOf("debug", "layout", city.toString(), "terrain", "extra") to "invalid-layout-arguments",
+        )) {
+            router.onCommand(sender, mockk(), "civs", args)
+            scheduler.executeImmediate()
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_DEBUG ")).asJsonObject["error"].asString shouldBe error
+        }
+        requests shouldBe 0
+        router.onCommand(sender, mockk(), "civs", arrayOf("debug", "layout", city.toString()))
+        scheduler.executeImmediate()
+        requests shouldBe 1
+        JsonParser.parseString(messages.last().removePrefix("ARCCIVS_DEBUG ")).asJsonObject["error"].asString shouldBe "city-not-found"
+        tasks.close()
+    }
+
     test("suggestions stay within exact syntax and never request Bukkit player fallback") {
         CivsCommand.completions(false, true, arrayOf("")) shouldBe emptyList()
         CivsCommand.completions(true, false, arrayOf("")) shouldBe listOf("preview")
@@ -276,7 +346,10 @@ class CivsCommandTest : FunSpec({
         CivsCommand.completions(true, false, arrayOf("debug")) shouldBe emptyList()
         CivsCommand.completions(true, true, arrayOf("debug", "Wo")) shouldBe listOf("worksites")
         CivsCommand.completions(true, true, arrayOf("debug", "all", "")) shouldBe emptyList()
-        val systems = listOf("all", "overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
+        CivsCommand.completions(true, true, arrayOf("debug", "lay")) shouldBe listOf("layout")
+        CivsCommand.completions(true, true, arrayOf("debug", "layout", UUID.randomUUID().toString(), "t")) shouldBe listOf("terrain")
+        CivsCommand.completions(true, false, arrayOf("debug", "layout", UUID.randomUUID().toString(), "t")) shouldBe emptyList()
+        val systems = listOf("all", "overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "layout")
         val router = CivsCommand(mockk(), mockk(), mockk(), mockk())
         for ((use, admin) in listOf(false to true, true to false, true to true)) {
             val sender = mockk<CommandSender> {

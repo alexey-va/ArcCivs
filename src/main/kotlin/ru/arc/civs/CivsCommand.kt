@@ -23,14 +23,24 @@ class CivsCommand(
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
     private val retryConstruction: (UUID) -> java.util.concurrent.CompletableFuture<Unit> = {
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
+    private val debugLayout: (UUID, Boolean) -> java.util.concurrent.CompletableFuture<Map<String, Any?>> = { _, _ ->
+        java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("layout-export-unavailable")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        val layoutExport = args.getOrNull(0) == "debug" && args.getOrNull(1) == "layout"
         if (!sender.hasPermission("arccivs.use")) {
-            sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+            if (layoutExport) sender.sendMessage(CivsLayoutDebug.line(failure = CivsRejection("not-authorized")))
+            else sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
             return true
         }
         if (args.firstOrNull() == "debug") {
-            if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+            if (layoutExport) {
+                if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(CivsLayoutDebug.line(failure = CivsRejection("not-authorized")))
+                else CivsLayoutDebug.request(args.drop(2), debugLayout).whenCompleteSync(tasks) { receipt, failure ->
+                    sender.sendMessage(CivsLayoutDebug.line(receipt, failure))
+                }
+            }
+            else if (!sender.hasPermission("arccivs.admin")) sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
             else CivsDebug.lines(args.drop(1), debugState).forEach(sender::sendMessage)
             return true
         }
@@ -138,7 +148,9 @@ class CivsCommand(
         internal fun completions(use: Boolean, admin: Boolean, args: Array<out String>): List<String> {
             if (!use) return emptyList()
             if (admin && args.size == 2 && args[0] == "debug")
-                return (listOf("all") + CivsDebug.systems).filter { it.startsWith(args[1], true) }
+                return (listOf("all") + CivsDebug.systems + "layout").filter { it.startsWith(args[1], true) }
+            if (admin && args.size == 4 && args[0] == "debug" && args[1] == "layout")
+                return listOf("terrain").filter { it.startsWith(args[3], true) }
             if (admin && args.size == 2 && args[0] == "autonomous")
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()

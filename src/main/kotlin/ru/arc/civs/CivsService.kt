@@ -107,6 +107,11 @@ class CivsService(
     private var loadFailure: String? = null
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
+    private val layoutDebug = CivsLayoutDebug(plugin.dataFolder.toPath(), tasks, executor, { id ->
+        store.loadPlan(id).whenComplete { _, failure ->
+            if (failure != null) plugin.logger.log(Level.WARNING, "ArcCivs layout export could not read plan=$id", failure)
+        }
+    }, clock)
     private val autonomousPlacement = CivsAutonomousPlacement(blueprints, world, executor, ::loadAutonomousAccess,
         store::saveSchematic, store::deleteSchematic, plugin.server.unsafe.dataVersion)
     // Terrain can change without a city revision; retry a settled layout after five minutes.
@@ -305,6 +310,27 @@ class CivsService(
     private fun testingAllowed(city: Settlement): Boolean = plugin.server.getWorld(city.worldId)?.let {
         testingPermissions.allowed(city.owner, it.name)
     } == true
+    /** Main captures city identity; plans, serialization and atomic file IO remain on the bounded worker. */
+    fun debugLayout(cityId: UUID, terrain: Boolean): CompletableFuture<Map<String, Any?>> {
+        check(Bukkit.isPrimaryThread())
+        if (closed || !ready()) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        val city = cities[cityId] ?: return CompletableFuture.failedFuture(CivsRejection("city-not-found"))
+        val nativeWorld = plugin.server.getWorld(city.worldId)
+        if (terrain && nativeWorld == null) return CompletableFuture.failedFuture(CivsRejection("terrain-world-not-loaded"))
+        val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
+            ?: return CompletableFuture.failedFuture(CivsRejection("layout-town-hall-missing"))
+        val runtime = mapOf("captured_at_ms" to now(), "coverage" to "existing-bounded-owner-debug-samples-with-total-and-truncated",
+            "citizens" to debugState("citizens", cityId, null), "worksites" to debugState("worksites", cityId, null),
+            "supply" to debugState("supply", cityId, null))
+        return layoutDebug.export(city, nativeWorld?.name, plugin.pluginMeta.version, runtime,
+            if (terrain) ({ world.autonomousHeightField(city, hall, hall) }) else null) { cities[cityId] }
+            .whenComplete { _, failure ->
+                if (failure != null && CivsDiagnostics.rejection(failure) == null &&
+                    CivsDiagnostics.cause(failure) !is java.util.concurrent.CancellationException)
+                    plugin.logger.log(Level.WARNING, "ArcCivs layout export failed city=$cityId terrain=$terrain", failure)
+            }
+    }
+
     /** Cached snapshots by default; explicit terrain alone captures a bounded loaded native neighbourhood. */
     fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())
@@ -4099,6 +4125,7 @@ class CivsService(
         if (closed) return
         closed = true
         initialized = false
+        layoutDebug.close()
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
         supply.close()
@@ -4140,7 +4167,7 @@ class CivsService(
         updateHealth()
     }
 
-    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain, supply.drained())
+    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain, supply.drained(), layoutDebug.drained())
 
     companion object {
         internal fun areasOverlap(a: CivPosition, ar: Int, b: CivPosition, br: Int): Boolean =

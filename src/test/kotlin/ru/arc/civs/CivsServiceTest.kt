@@ -860,6 +860,51 @@ class CivsServiceTest : FunSpec({
             }
         } finally { unmockkConstructor(CivsChunkPermissions::class) }
     }
+    test("layout debug exports city and bounded runtime snapshots without native capture or city writes by default") {
+        serviceScenario { h ->
+            h.start()
+            val result = h.service.debugLayout(h.city.id, false)
+            val receipt = h.await(result)
+            receipt["city"] shouldBe h.city.id
+            receipt["source_revision"] shouldBe h.city.revision
+            receipt["layout_unchanged"] shouldBe true
+            val file = h.plugin.dataFolder.toPath().resolve(receipt["path"].toString())
+            val document = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(file)).asJsonObject
+            document.getAsJsonObject("city")["world"].asString shouldBe h.world.uid.toString()
+            document.getAsJsonObject("runtime").keySet().containsAll(listOf("citizens", "worksites", "supply", "coverage")) shouldBe true
+            document["surface"].isJsonNull shouldBe true
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
+            h.saves shouldBe emptyList()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.service.debugLayout(UUID.randomUUID(), false).join() })
+                ?.reason shouldBe "city-not-found"
+        }
+    }
+
+    test("explicit layout terrain uses the existing loaded-only height field with the pinned hall") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first()
+            val surface = CivTerrainSurface(-64, 320, mapOf(civsTerrainKey(0, 0) to CivTerrainSurfaceColumn(63, true)))
+            every { h.worldAdapter.autonomousHeightField(h.city, hall, hall) } returns CompletableFuture.completedFuture(surface)
+            h.start()
+            val receipt = h.await(h.service.debugLayout(h.city.id, true))
+            val document = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(
+                h.plugin.dataFolder.toPath().resolve(receipt["path"].toString()))).asJsonObject
+            document.getAsJsonObject("surface")["loaded_only"].asBoolean shouldBe true
+            document.getAsJsonObject("surface")["atomic"].asBoolean shouldBe false
+            verify(exactly = 1) { h.worldAdapter.autonomousHeightField(h.city, hall, hall) }
+            h.saves shouldBe emptyList()
+        }
+        serviceScenario { h ->
+            val unavailable = h.city.copy(worldId = UUID.randomUUID())
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(unavailable))
+            h.start()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.service.debugLayout(unavailable.id, true).join() })
+                ?.reason shouldBe "terrain-world-not-loaded"
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
+            h.saves shouldBe emptyList()
+        }
+    }
+
     test("global worksite debug includes the ninth city's cached need beyond the city row sample") {
         serviceScenario { h ->
             val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
