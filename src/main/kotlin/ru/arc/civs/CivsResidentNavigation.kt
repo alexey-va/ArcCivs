@@ -3,7 +3,10 @@ package ru.arc.civs
 import org.bukkit.Location
 import org.bukkit.Tag
 import org.bukkit.World
+import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.Openable
 import org.bukkit.block.data.type.Door
+import org.bukkit.block.data.type.Gate
 import org.bukkit.util.BoundingBox
 import java.util.ArrayDeque
 import kotlin.math.abs
@@ -143,7 +146,7 @@ internal class CitizenPacketRoute(
             CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
         }
         capturedBlocks++
-        return CitizenTerrainBlock(true, block.isLiquid, block.blockData is Door,
+        return CitizenTerrainBlock(true, block.isLiquid, citizenRouteOpenable(block.blockData) != null,
             Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), allowed(point), travelCost(block), boxes)
     }
 
@@ -223,9 +226,10 @@ internal class CitizenPacketRoute(
             if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
                 !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
                 !citizenPacketSupported(world, next) ||
-                !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite() || !openDoor(to)) {
+                !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite()) {
                 fail("path-changed"); break
             }
+            if (!openDoor(to)) { fail("passage-blocked"); break }
             // Lift before ascending and centre ladder entry. Ordinary downhill travel
             // follows the horizontal route while gravity settles onto native support.
             val descending = gravityStep(entry, point.y)
@@ -453,10 +457,17 @@ internal fun citizenFace(npc: ru.arc.paper.npc.PacketPlayerNpc, yaw: Float, pitc
 internal data class CitizenCollisionSnapshot(val liquid: Boolean, val door: Boolean,
     val localBoxes: List<BoundingBox>, val boxes: List<BoundingBox>)
 
+/** Ground passages only: opening a trapdoor could remove a resident's floor or ladder access. */
+internal fun citizenRouteOpenable(data: BlockData): Openable? = when (data) {
+    is Door -> data
+    is Gate -> data
+    else -> null
+}
+
 private fun citizenCollisionSnapshot(world: World, x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
     val block = world.getBlockAt(x, y, z)
     val local = block.collisionShape.boundingBoxes.map { it.clone() }
-    return CitizenCollisionSnapshot(block.isLiquid, block.blockData is Door, local,
+    return CitizenCollisionSnapshot(block.isLiquid, citizenRouteOpenable(block.blockData) != null, local,
         local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
 }
 
@@ -465,16 +476,16 @@ internal fun citizenPacketBodyClear(world: World, point: CitizenPoint, allowDoor
                                     allowLiquids: Boolean = false, allowBelowWorld: Boolean = false,
                                     collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): Boolean {
     val body = BoundingBox(point.x - .299, point.y + .001, point.z - .299, point.x + .299, point.y + 1.799, point.z + .299)
+    val feetRow = floor(body.minY).toInt()
+    if (feetRow < world.minHeight && !allowBelowWorld) return false
     for (x in floor(body.minX).toInt()..floor(body.maxX).toInt()) for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt()) {
         if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
-        for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {
-            if (y < world.minHeight) {
-                if (allowBelowWorld) continue
-                return false
-            }
+        // Fence/gate shapes extend half a block above their own native cell.
+        for (y in max(world.minHeight, feetRow - 1)..floor(body.maxY).toInt()) {
             if (y >= world.maxHeight) return false
             val state = collision?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
-            if (state.liquid && !allowLiquids) return false
+            if (state.liquid && !allowLiquids &&
+                body.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
             if (allowDoors && state.door) continue
             if (state.boxes.any(body::overlaps)) return false
         }
@@ -490,7 +501,7 @@ internal fun citizenPacketSupported(world: World, point: CitizenPoint): Boolean 
     if (Tag.CLIMBABLE.isTagged(world.getBlockAt(x, y, z).type)) return true
     val by = citizenSupportY(point.y)
     val block = world.getBlockAt(x, by, z)
-    if (block.isLiquid) return false
+    if (block.isLiquid || citizenRouteOpenable(block.blockData) != null) return false
     return block.collisionShape.boundingBoxes.any {
         abs(by + it.maxY - point.y) <= .13 && point.x - x in it.minX..it.maxX && point.z - z in it.minZ..it.maxZ
     }
@@ -549,10 +560,12 @@ private fun citizenPacketSegmentClear(world: World, from: CitizenPoint, to: Citi
     // Both ends of a short rounded corner can be clear while its middle clips a
     // thin door panel. Sweep the same body used below through native block boxes.
     val obstacles = mutableListOf<BoundingBox>()
+    val feetRow = floor(min(from.y, to.y) + .001).toInt()
+    if (feetRow < world.minHeight) return false
     for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
         for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt()) {
             if (!citizenChunkReady(world, x shr 4, z shr 4)) return false
-            for (y in floor(min(from.y, to.y) + .001).toInt()..floor(max(from.y, to.y) + 1.799).toInt()) {
+            for (y in max(world.minHeight, feetRow - 1)..floor(max(from.y, to.y) + 1.799).toInt()) {
                 if (y !in world.minHeight until world.maxHeight) return false
                 val state = collision?.invoke(x, y, z) ?: citizenCollisionSnapshot(world, x, y, z)
                 if (state.liquid) obstacles += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)

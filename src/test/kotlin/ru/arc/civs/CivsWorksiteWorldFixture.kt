@@ -3,8 +3,10 @@ package ru.arc.civs
 import org.bukkit.Location
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Material
+import org.bukkit.block.BlockFace
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.type.Gate
 import org.bukkit.block.structure.StructureRotation
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
@@ -47,6 +49,13 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
             override fun getCollisionShape(): VoxelShape {
                 val boxes = if (type.name.endsWith("_FENCE")) {
                     fenceCollisionBoxes(blockData.asString)
+                } else if (blockData is Gate) {
+                    // Purpur 1.21.11 native FenceGateBlock probe: closed height 1.5, open empty.
+                    val gate = blockData as Gate
+                    if (gate.isOpen) emptyList()
+                    else if (gate.facing in setOf(BlockFace.NORTH, BlockFace.SOUTH))
+                        listOf(BoundingBox(0.0, 0.0, .375, 1.0, 1.5, .625))
+                    else listOf(BoundingBox(.375, 0.0, 0.0, .625, 1.5, 1.0))
                 } else {
                     val bounds = boundingBox
                     if (bounds.height == 0.0) emptyList() else listOf(bounds.shift(-x.toDouble(), -y.toDouble(), -z.toDouble()))

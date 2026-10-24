@@ -30,7 +30,7 @@ class CivsResidentDamageEvent(
     }
 }
 
-/** Replaces the Citizens-only door event; receipt locks and footprint checks run again after dispatch. */
+/** Door/gate passage event; receipt locks and native block identity are checked again after dispatch. */
 class CivsResidentOpenDoorEvent(val cityId: UUID, val door: Block) : Event(), Cancellable {
     private var cancelled = false
     override fun isCancelled(): Boolean = cancelled

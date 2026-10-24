@@ -202,10 +202,10 @@ internal class CitizenNavigationCapture(
         if (positions.isEmpty()) {
             val n = probe.node
             val y = floor(n.y).toInt()
-            // Full candidate body, support/heat row and +/-1 ascent. Include adjacent columns
+            // Full candidate body, tall shapes below its feet and +/-17/16 ascent/descent. Include adjacent columns
             // for an off-centre initial body, not just the centre-to-centre planned edge.
             positions = buildList {
-                for (x in n.x - 1..n.x + 1) for (z in n.z - 1..n.z + 1) for (by in y - 2..y + 3)
+                for (x in n.x - 1..n.x + 1) for (z in n.z - 1..n.z + 1) for (by in y - 3..y + 3)
                     add(CivPosition(x, by, z))
             }
         }

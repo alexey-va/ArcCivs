@@ -172,7 +172,8 @@ internal fun citizenSearchCandidates(probe: CitizenSearchProbe, blocks: Map<CivP
         for (by in base - 2..base + 1) {
             if (by < minimumY || by + 2 >= maximumY) continue
             val block = blocks[CivPosition(x, by, z)] ?: continue
-            if (!block.loaded || block.liquid) continue
+            // Opening a passage must never remove the foothold selected by the planner.
+            if (!block.loaded || block.liquid || block.door) continue
             if (block.climbable && block.allowed && citizenStepHeightAllowed(node.y, by.toDouble()))
                 result += CitizenSearchNode(x, by.toDouble(), z, climbing = true)
             for (box in block.boxes) {
@@ -215,12 +216,15 @@ private class CitizenSearchGeometry(
 
     fun bodyClear(point: CitizenPoint): Boolean {
         val body = body(point)
+        val feetRow = floor(body.minY).toInt()
+        if (feetRow < minimumY) return false
         for (x in floor(body.minX).toInt()..floor(body.maxX).toInt())
             for (z in floor(body.minZ).toInt()..floor(body.maxZ).toInt())
-                for (y in floor(body.minY).toInt()..floor(body.maxY).toInt()) {
+                for (y in max(minimumY, feetRow - 1)..floor(body.maxY).toInt()) {
                     val p = CivPosition(x, y, z)
                     val block = blocks[p] ?: return false
-                    if (y !in minimumY until maximumY || !block.loaded || block.liquid) return false
+                    if (y >= maximumY || !block.loaded) return false
+                    if (block.liquid && body.overlaps(BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0))) return false
                     if (!block.door && block.boxes.any { body.overlaps(it.at(p)) }) return false
                 }
         return true
@@ -245,9 +249,11 @@ private class CitizenSearchGeometry(
 
     private fun segmentClear(from: CitizenPoint, to: CitizenPoint, occupied: CitizenPoint): Boolean {
         val obstacles = mutableListOf<BoundingBox>()
+        val feetRow = floor(min(from.y, to.y) + .001).toInt()
+        if (feetRow < minimumY) return false
         for (x in floor(min(from.x, to.x) - .299).toInt()..floor(max(from.x, to.x) + .299).toInt())
             for (z in floor(min(from.z, to.z) - .299).toInt()..floor(max(from.z, to.z) + .299).toInt())
-                for (y in floor(min(from.y, to.y) + .001).toInt()..floor(max(from.y, to.y) + 1.799).toInt()) {
+                for (y in max(minimumY, feetRow - 1)..floor(max(from.y, to.y) + 1.799).toInt()) {
                     val p = CivPosition(x, y, z)
                     val block = blocks[p] ?: return false
                     if (y !in minimumY until maximumY || !block.loaded) return false

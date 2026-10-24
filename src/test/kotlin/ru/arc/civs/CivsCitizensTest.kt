@@ -12,6 +12,7 @@ import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.data.type.Door
+import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Entity
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
@@ -508,6 +509,82 @@ class CivsCitizensTest : FunSpec({
                 (lower.blockData as Door).isOpen shouldBe false
                 // A missing or replaced companion is a collision, never a permission to walk through it.
                 open() shouldBe false
+            }
+        }
+    }
+
+    test("a route opens the gate below its feet while preserving native cancellation ownership and receipt locks") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("citizen-gate").also(paper.server::addWorld)
+                world.loadChunk(0, 0)
+                val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+                val worker = CivWorker(UUID.randomUUID(), "Писарь", hall.id)
+                val city = city(listOf(hall), worker, null).copy(worldId = world.uid)
+                val point = CivPosition(0, 64, 0)
+                val block = world.getBlockAt(0, 64, 0)
+                val closed = "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
+                fun close() { block.setBlockData(org.bukkit.Bukkit.createBlockData(closed), false) }
+                var action: (CivsResidentOpenDoorEvent) -> Unit = {}
+                var events = 0
+                paper.server.pluginManager.registerEvents(object : Listener {
+                    @EventHandler
+                    fun passage(event: CivsResidentOpenDoorEvent) { events++; action(event) }
+                }, paper.createSimplePlugin("CitizenGates"))
+                val at = Location(world, .5, 65.0, -1.5)
+                val destination = Location(world, .5, 65.0, .5)
+                fun open(current: Settlement = city, blocked: (UUID, CivPosition) -> Boolean = { _, _ -> false }) =
+                    citizenOpenRouteDoors(current, setOf(hall.id), at, destination, blocked)
+                close()
+                open() shouldBe true
+                events shouldBe 1
+                block.blockData.asString shouldBe closed.replace("open=false", "open=true")
+                // Repeated movement through an already open gate does not redispatch the interaction.
+                open() shouldBe true
+                events shouldBe 1
+                close()
+                // A gate below the body's collision range is not an interaction target.
+                citizenOpenRouteDoors(city, setOf(hall.id), at, destination.clone().also { it.y = 65.5 }) { _, _ -> false } shouldBe true
+                block.blockData.asString shouldBe closed
+                events shouldBe 1
+                action = { it.isCancelled = true }
+                open() shouldBe false
+                block.blockData.asString shouldBe closed
+                action = {}
+                open(blocked = { _, p -> p == point }) shouldBe false
+                events shouldBe 2
+                for (phase in ConstructionPhase.entries) {
+                    close()
+                    val construction = CivConstruction(UUID.randomUUID(), hall.id, 2, 1, 0,
+                        phase, Stock(), plannedBuilding = hall.copy(level = 2))
+                    open(city.copy(buildings = listOf(hall.copy(phase = BuildingPhase.CONSTRUCTING)),
+                        construction = construction)) shouldBe true
+                    (block.blockData as Gate).isOpen shouldBe true
+                }
+                close()
+                open(city.copy(pendingDeletion = CivDeletion(null))) shouldBe false
+                citizenOpenRouteDoors(city, emptySet(), at, destination) { _, _ -> false } shouldBe false
+                citizenOpenRouteDoors(city, setOf(hall.id), at.clone().also { it.z = -8.0 }, destination) { _, _ -> false } shouldBe false
+                for (replacement in listOf("minecraft:stone", closed.replace("oak_fence_gate", "spruce_fence_gate"))) {
+                    close()
+                    action = { block.blockData = org.bukkit.Bukkit.createBlockData(replacement) }
+                    open() shouldBe false
+                    block.blockData.asString shouldBe replacement
+                }
+                close()
+                var receiptLocked = false
+                action = { receiptLocked = true }
+                open(blocked = { _, _ -> receiptLocked }) shouldBe false
+                block.blockData.asString shouldBe closed
+                action = {}
+                val trapdoor = org.bukkit.Bukkit.createBlockData("minecraft:oak_trapdoor[open=false]")
+                block.blockData = trapdoor
+                val previousEvents = events
+                citizenOpenRouteDoor(city, setOf(hall.id), at, point) { _, _ -> false } shouldBe true
+                citizenOpenRouteDoors(city, setOf(hall.id), at, destination) { _, _ -> false } shouldBe true
+                events shouldBe previousEvents
+                block.blockData.asString shouldBe trapdoor.asString
+                citizenRouteOpenable(block.blockData) shouldBe null
             }
         }
     }

@@ -6,6 +6,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import org.bukkit.Chunk
+import org.bukkit.Bukkit
 import org.bukkit.GameMode
 import org.bukkit.Material
 import org.bukkit.Location
@@ -351,6 +352,7 @@ private class ResidentCollisionFixture(private val paper: MockBukkitTestRuntime)
             blocks.getOrPut(key) {
                 mockk<Block> {
                     every { type } answers { if (key in walls || supported && key.second <= 63) Material.STONE else Material.AIR }
+                    every { blockData } answers { Bukkit.createBlockData(type) }
                     every { isLiquid } returns false
                     every { collisionShape } answers { if (type.isAir) EMPTY else FULL }
                 }

@@ -4,7 +4,6 @@ import org.bukkit.Bukkit
 import org.bukkit.Chunk
 import org.bukkit.Location
 import org.bukkit.Tag
-import org.bukkit.block.data.type.Door
 
 /** Explicit operator capture only: a fixed neighbourhood, with no chunk admission, NBT or inventories. */
 internal object CivsTerrainDebug {
@@ -55,7 +54,7 @@ internal object CivsTerrainDebug {
                 val data = block.blockData
                 val entry = PaletteEntry(data.asString, block.collisionShape.boundingBoxes.map {
                     CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
-                }, Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), block.isLiquid, data is Door)
+                }, Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), block.isLiquid, citizenRouteOpenable(data) != null)
                 val index = palette.getOrPut(entry) { palette.size }
                 voxels += listOf(x - min.x, y - min.y, z - min.z, index, true)
             }

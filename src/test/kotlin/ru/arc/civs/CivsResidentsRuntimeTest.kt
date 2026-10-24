@@ -17,11 +17,15 @@ import org.bukkit.Particle
 import org.bukkit.Sound
 import org.bukkit.SoundCategory
 import org.bukkit.block.Block
+import org.bukkit.block.BlockFace
 import org.bukkit.block.BlockState
 import org.bukkit.block.data.Ageable
+import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Monster
+import org.bukkit.event.EventHandler
+import org.bukkit.event.Listener
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.BoundingBox
@@ -627,6 +631,93 @@ class CivsResidentsRuntimeTest : FunSpec({
                 h.city.workers.single().completedCycles shouldBe 1L
                 h.deliveries shouldBe 1
             } finally { h.logger.removeHandler(handler) }
+        }
+    }
+
+    for (denial in listOf("cancelled event", "receipt lock"))
+    test("a $denial keeps a closed gate authoritative across retries and recovery until a real walk is permitted") {
+        residentRuntime { h ->
+            val warehouse = h.assignFarm().copy(type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null)
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                if (it.id == warehouse.id) warehouse else it
+            }))
+            for (x in -1..23) for (z in -1..1) for (y in 64..66)
+                if (x == -1 || x == 23 || z != 0 || y == 66) h.world.getBlockAt(x, y, z).type = Material.STONE
+            // The selected east side of the real barrel needs room to walk around it.
+            // This room is beyond the gate; the origin corridor still has no other exit.
+            for (x in 18..22) for (z in listOf(-1, 1)) for (y in 64..65)
+                h.world.getBlockAt(x, y, z).type = Material.AIR
+            val gate = h.world.getBlockAt(10, 64, 0)
+            gate.blockData = Bukkit.createBlockData("minecraft:oak_fence_gate[facing=east,in_wall=false,open=false,powered=false]")
+            var denied = true
+            h.passageLocked = denial == "receipt lock"
+            Bukkit.getPluginManager().registerEvents(object : Listener {
+                @EventHandler
+                fun passage(event: CivsResidentOpenDoorEvent) {
+                    if (denial == "cancelled event" && denied) event.isCancelled = true
+                }
+            }, requireNotNull(Bukkit.getPluginManager().getPlugin("ResidentsTest")))
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, .5, 64.0, .5, -90f, 0f))
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000L)
+            fun awaitDenial() {
+                for (tick in 1..512) {
+                    if (h.routeFailure() != null) break
+                    val before = actor.location
+                    h.navigate(advanceMillis = 0)
+                    (before.distance(actor.location) <= .172001) shouldBe true
+                    (actor.location.x < 10.0) shouldBe true
+                }
+                withClue(h.navigationState()) { h.routeFailure() shouldBe "passage-blocked" }
+                (gate.blockData as Gate).isOpen shouldBe false
+                h.deliveries shouldBe 0
+                h.unloads shouldBe 0
+                h.city.workers.single().completedCycles shouldBe 0L
+            }
+            awaitDenial()
+            repeat(3) {
+                val now = requireNotNull(h.navigationNow)
+                val failed = requireNotNull(h.routeIdentity())
+                val feet = actor.location
+                val teleports = h.teleports
+                h.owner.pulse(now)
+                for (delay in listOf(1_000L, 4_999L)) {
+                    h.navigationNow = now + delay
+                    h.navigate(advanceMillis = 0)
+                    h.owner.pulse(now + delay)
+                    (h.routeIdentity() === failed) shouldBe true
+                    actor.location.toVector() shouldBe feet.toVector()
+                    h.teleports shouldBe teleports
+                }
+                h.navigationNow = now + 5_000L
+                h.owner.pulse(now + 5_000L)
+                h.routeIdentity() shouldBe null
+                actor.location.toVector() shouldBe feet.toVector()
+                h.teleports shouldBe teleports
+                h.navigationNow = now + 5_001L
+                h.owner.pulse(now + 5_001L)
+                awaitDenial()
+            }
+            denied = false
+            h.passageLocked = false
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.navigationNow = requireNotNull(h.navigationNow) + 5_000L
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.navigationNow = requireNotNull(h.navigationNow) + 1L
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            for (tick in 1..512) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (before.distance(actor.location) <= .172001) shouldBe true
+                if (h.owner.status(h.workerId) == "workers.status.waiting-orders") break
+            }
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-orders"
+            (actor.location.x > 10.5) shouldBe true
+            (gate.blockData as Gate).isOpen shouldBe true
+            h.deliveries shouldBe 0
+            h.unloads shouldBe 0
         }
     }
 
@@ -2696,6 +2787,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var navigationNow: Long? = null
     var holdNavigation = false
     var navigationRejections = 0
+    var passageLocked = false
     val pendingNavigationWorkers: Int get() = navigationWorkers.size
     var hits = 0
     var deliveries = 0
@@ -2797,6 +2889,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
                 pendingDelivery
             },
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
+            doorBlocked = { _, _ -> passageLocked },
             footstep = { _, _, _, from, to -> steps += from.clone() to to.clone() },
             surfaceSpeed = { surfaceMultiplier },
             courierPlan = { city, worker -> courierProvider?.invoke(city, worker) ?: courier },
@@ -3008,6 +3101,10 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
             }, z + 1.0)
             override fun getCollisionShape(): VoxelShape = when {
                 type.isAir -> EMPTY_SHAPE
+                blockData is Gate -> (blockData as Gate).let { gate ->
+                    if (gate.isOpen) EMPTY_SHAPE
+                    else if (gate.facing in setOf(BlockFace.NORTH, BlockFace.SOUTH)) NORTH_GATE_SHAPE else EAST_GATE_SHAPE
+                }
                 type == Material.LADDER -> LADDER_SHAPE
                 type == Material.FARMLAND || type == Material.DIRT_PATH -> LOWERED_SHAPE
                 else -> FULL_SHAPE
@@ -3052,5 +3149,7 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         private val FULL_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)))
         private val LOWERED_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .9375, 1.0)))
         private val LADDER_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0)))
+        private val NORTH_GATE_SHAPE = shape(listOf(BoundingBox(0.0, 0.0, .375, 1.0, 1.5, .625)))
+        private val EAST_GATE_SHAPE = shape(listOf(BoundingBox(.375, 0.0, 0.0, .625, 1.5, 1.0)))
     }
 }

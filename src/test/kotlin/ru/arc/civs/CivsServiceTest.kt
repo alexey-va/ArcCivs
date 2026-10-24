@@ -4538,14 +4538,17 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("autonomous final write gate tolerates only door opening during an oak-to-spruce upgrade") {
+    for (passage in listOf("door", "fence_gate"))
+    test("autonomous final write gate tolerates only $passage opening during an oak-to-spruce upgrade") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
             val order = requireNotNull(placement.city.construction)
             val original = requireNotNull(h.store.loadPlan(order.id).join())
             val snapshot = h.blueprints.recover(original).join()
-            val before = "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
-            val after = "minecraft:spruce_door[facing=north,half=lower,hinge=right,open=false,powered=false]"
+            val before = if (passage == "door") "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
+                else "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
+            val after = if (passage == "door") "minecraft:spruce_door[facing=north,half=lower,hinge=right,open=false,powered=false]"
+                else "minecraft:spruce_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
             val plan = original.copy(blocks = original.blocks.mapIndexed { index, cell ->
                 if (index == 0) cell.copy(before = before, after = after) else cell
             })
@@ -4569,10 +4572,11 @@ class CivsServiceTest : FunSpec({
                 block.blockData.asString shouldBe state
             }
             val drifted = listOf(before, after).flatMap { state -> listOf(
-                state.replace("facing=north", "facing=south"), state.replace("half=lower", "half=upper"),
+                state.replace("facing=north", "facing=south"),
+                if (passage == "door") state.replace("half=lower", "half=upper") else state.replace("in_wall=false", "in_wall=true"),
                 state.replace("powered=false", "powered=true"),
-            ) } + listOf(before.replace("hinge=left", "hinge=right"), after.replace("hinge=right", "hinge=left"),
-                before.replace("oak_door", "birch_door"), "minecraft:air")
+            ) } + (if (passage == "door") listOf(before.replace("hinge=left", "hinge=right"), after.replace("hinge=right", "hinge=left"))
+                else emptyList()) + listOf(before.replace("oak_", "birch_"), "minecraft:air")
             for (state in drifted) {
                 block.blockData = Bukkit.createBlockData(state)
                 protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false

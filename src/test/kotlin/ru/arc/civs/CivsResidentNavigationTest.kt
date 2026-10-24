@@ -13,6 +13,7 @@ import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.data.Lightable
+import org.bukkit.block.data.type.Gate
 import org.bukkit.util.BoundingBox
 import org.bukkit.util.VoxelShape
 import ru.arc.paper.testing.MockBukkitTestRuntime
@@ -352,6 +353,111 @@ class CivsResidentNavigationTest : FunSpec({
             changed.blocks[CivPosition(next.blockX, 64, next.blockZ)] = Material.STONE
             second.move(Location(changed.world, .5, 64.0, .5, -90f, 0f), 1.0) { true } shouldBe null
             second.failure shouldBe "movement-blocked"
+        }
+    }
+
+    test("a closed native gate is planned as a passage and opened before strict packet movement") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("route-gate").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val gate = world.getBlockAt(0, 64, 0)
+            val closed = "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
+            gate.setBlockData(Bukkit.createBlockData(closed), false)
+            var at = Location(world, .5, 64.0, -1.5)
+            val target = Location(world, .5, 64.0, 2.5)
+            val city = pathsCity().copy(worldId = world.uid)
+            val route = CitizenPacketRoute(world, at, target,
+                { p -> p.x == 0 && p.z in -2..2 && p.y == 64 }, { _, _ -> true }, { 1.0 })
+            route.prepare()
+            route.failure shouldBe null
+            gate.blockData.asString shouldBe closed
+            citizenPacketBodyClear(world, CitizenPoint(.5, 64.0, .5), true) shouldBe true
+            citizenPacketBodyClear(world, CitizenPoint(.5, 64.0, .5), false) shouldBe false
+            repeat(80) {
+                route.move(at, 1.0) { destination ->
+                    citizenOpenRouteDoors(city, emptySet(), at, destination) { _, _ -> false }
+                }?.let { next ->
+                    citizenPacketStepClear(world, CitizenPoint(at.x, at.y, at.z),
+                        CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+            (gate.blockData as Gate).isOpen shouldBe true
+        }
+    }
+
+    test("native and detached sweeps include tall fence shapes below the feet but admit openable gates") {
+        MockBukkitTestRuntime.open().use {
+            for (material in listOf(Material.OAK_FENCE, Material.OAK_FENCE_GATE)) {
+                val terrain = ResidentRouteTerrain()
+                for (x in 0..1) for (z in 0..1) terrain.blocks[CivPosition(x, 64, z)] = Material.STONE
+                val fence = CivPosition(1, 64, 0)
+                terrain.blocks[fence] = material
+                terrain.boxes[fence] = listOf(BoundingBox(0.0, 0.0, .375, 1.0, 1.5, .625))
+                val from = CitizenPoint(.5, 65.0, .5)
+                val to = CitizenPoint(1.5, 65.0, 1.5)
+                val overlapping = CitizenPoint(1.5, 65.0, .5)
+                citizenPacketBodyClear(terrain.world, from, false) shouldBe true
+                citizenPacketBodyClear(terrain.world, to, false) shouldBe true
+                citizenPacketBodyClear(terrain.world, overlapping, false) shouldBe false
+                citizenPacketBodyClear(terrain.world, overlapping, true) shouldBe (material == Material.OAK_FENCE_GATE)
+                citizenPacketStepClear(terrain.world, from, to, false) shouldBe false
+                val route = CitizenPacketRoute(terrain.world, Location(terrain.world, from.x, from.y, from.z),
+                    Location(terrain.world, to.x, to.y, to.z),
+                    { p -> p.x == p.z && p.x in 0..1 && p.y == 65 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe if (material == Material.OAK_FENCE_GATE) null else "no-path"
+                if (material == Material.OAK_FENCE_GATE) {
+                    terrain.boxes[fence] = emptyList()
+                    citizenPacketBodyClear(terrain.world, overlapping, false) shouldBe true
+                    citizenPacketStepClear(terrain.world, from, to, false) shouldBe true
+                }
+            }
+        }
+    }
+
+    test("a passage cannot be chosen as a foothold that opening would remove") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            terrain.blocks[CivPosition(0, 64, 0)] = Material.STONE
+            val gate = CivPosition(1, 64, 0)
+            terrain.blocks[gate] = Material.OAK_FENCE_GATE
+            terrain.boxes[gate] = listOf(BoundingBox(0.0, 0.0, .375, 1.0, 1.5, .625))
+            val top = CitizenPoint(1.5, 65.5, .5)
+            citizenPacketBodyClear(terrain.world, top, false) shouldBe true
+            citizenPacketSupported(terrain.world, top) shouldBe false
+            val route = CitizenPacketRoute(terrain.world, Location(terrain.world, .5, 65.0, .5),
+                Location(terrain.world, top.x, top.y, top.z),
+                { p -> p.x in 0..1 && p.z == 0 && p.y in 65..66 }, { _, _ -> true }, { 1.0 })
+            route.prepare()
+            route.failure shouldBe "no-path"
+        }
+    }
+
+    test("the extra shape row does not turn liquid or heat below a supported slab into a body collision") {
+        MockBukkitTestRuntime.open().use {
+            for (material in listOf(Material.WATER, Material.CAMPFIRE)) {
+                val terrain = ResidentRouteTerrain()
+                for (x in 0..2) {
+                    terrain.blocks[CivPosition(x, 64, 0)] = Material.OAK_SLAB
+                    terrain.boxes[CivPosition(x, 64, 0)] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0))
+                }
+                terrain.blocks[CivPosition(1, 63, 0)] = material
+                val lower = terrain.world.getBlockAt(1, 63, 0)
+                every { lower.isLiquid } returns (material == Material.WATER)
+                val from = CitizenPoint(.5, 64.5, .5)
+                val to = CitizenPoint(2.5, 64.5, .5)
+                citizenPacketBodyClear(terrain.world, CitizenPoint(1.5, 64.5, .5), false) shouldBe true
+                citizenPacketStepClear(terrain.world, from, to, false) shouldBe true
+                val route = CitizenPacketRoute(terrain.world, Location(terrain.world, from.x, from.y, from.z),
+                    Location(terrain.world, to.x, to.y, to.z),
+                    { p -> p.x in 0..2 && p.z == 0 && p.y == 64 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                route.failure shouldBe null
+            }
         }
     }
 

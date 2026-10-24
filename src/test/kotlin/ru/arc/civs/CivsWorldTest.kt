@@ -109,11 +109,14 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("autonomous revalidation tolerates only door opening during an oak-to-spruce upgrade") {
+    for (passage in listOf("door", "fence_gate"))
+    test("autonomous revalidation tolerates only $passage opening during an oak-to-spruce upgrade") {
         worldScenario { s ->
             val position = CivPosition(0, 64, 0)
-            val before = "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
-            val after = "minecraft:spruce_door[facing=north,half=lower,hinge=right,open=false,powered=false]"
+            val before = if (passage == "door") "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
+                else "minecraft:oak_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
+            val after = if (passage == "door") "minecraft:spruce_door[facing=north,half=lower,hinge=right,open=false,powered=false]"
+                else "minecraft:spruce_fence_gate[facing=north,in_wall=false,open=false,powered=false]"
             val building = worldBuilding(worldBox(0, 0))
             val city = worldCity(s.world.uid, building).copy(autonomy = CivAutonomy())
             s.cities += city
@@ -129,10 +132,11 @@ class CivsWorldTest : FunSpec({
                 block.blockData.asString shouldBe state
             }
             val drifted = listOf(before, after).flatMap { state -> listOf(
-                state.replace("facing=north", "facing=south"), state.replace("half=lower", "half=upper"),
+                state.replace("facing=north", "facing=south"),
+                if (passage == "door") state.replace("half=lower", "half=upper") else state.replace("in_wall=false", "in_wall=true"),
                 state.replace("powered=false", "powered=true"),
-            ) } + listOf(before.replace("hinge=left", "hinge=right"), after.replace("hinge=right", "hinge=left"),
-                before.replace("oak_door", "birch_door"), "minecraft:air")
+            ) } + (if (passage == "door") listOf(before.replace("hinge=left", "hinge=right"), after.replace("hinge=right", "hinge=left"))
+                else emptyList()) + listOf(before.replace("oak_", "birch_"), "minecraft:air")
             for (state in drifted) {
                 block.blockData = Bukkit.createBlockData(state)
                 val result = s.subject.revalidate(plan, city.owner)

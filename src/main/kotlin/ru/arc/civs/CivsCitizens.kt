@@ -13,6 +13,7 @@ import org.bukkit.Tag
 import org.bukkit.World
 import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.type.Door
+import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Player
 import org.bukkit.entity.Monster
 import org.bukkit.event.EventHandler
@@ -966,8 +967,7 @@ class CivsCitizens(
             val speed = if (actor.attacker != null) 1.1 else if (working)
                 .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             val next = motion.move(before, speed, { from, to -> residentStepAllowed(npc, from, to) }) { destination ->
-                (0..1).all { dy -> citizenOpenRouteDoor(city, route.allowedBuildings, before,
-                    CivPosition(destination.blockX, destination.blockY + dy, destination.blockZ), doorBlocked) }
+                citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked)
             }
             if (next != null) {
                 npc.teleport(next)
@@ -1908,7 +1908,7 @@ class CivsCitizens(
         }
     }
 
-    /** Capacity/capture failures retry after a quiet backoff; they never justify teleporting. */
+    /** Capacity/capture failures and denied passages retry quietly; they never justify teleporting. */
     private fun retryPreparation(actor: Actor, route: Route, now: Long): Boolean {
         val reason = route.motion.failure?.takeIf { it in PREPARATION_FAILURES } ?: return false
         val retryAt = route.preparationRetryAt ?: (now + 5_000).also { route.preparationRetryAt = it }
@@ -2274,7 +2274,7 @@ class CivsCitizens(
     /** A proven failed route may recover to a freshly validated loaded endpoint, never into a wall. */
     private fun recoverNavigation(actor: Actor, target: Location, now: Long, idleAnchor: CivPosition? = null): Boolean {
         val failed = actor.route ?: return false
-        // Planning latency and a temporary player obstruction are not proof of an impossible route.
+        // Planning latency, denied passages and player obstruction never authorize a recovery teleport.
         if (failed.motion.searching || failed.motion.waitingForCollision || now < actor.nextRecoveryAt || actor.attacker != null) return false
         if (failed.motion.failure in PREPARATION_FAILURES) return false
         if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now)) return false
@@ -2868,7 +2868,7 @@ class CivsCitizens(
         val MINE_ROUTE_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_MINE_ROUTE_BLOCKED")
         val MINE_ROUTE_RECOVERED = StructuredDebugLine("ARCCIVS_MINE_ROUTE_RECOVERED")
         val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "planner-busy", "planner-error",
-            "chunk-unloaded", "cancelled", "broken-path")
+            "chunk-unloaded", "cancelled", "broken-path", "passage-blocked")
     }
 }
 
@@ -3290,29 +3290,58 @@ internal fun citizenDoorPair(world: World, point: CivPosition): Pair<org.bukkit.
 internal fun citizenDoorAllowed(city: Settlement, allowed: Set<UUID>, point: CivPosition): Boolean =
     city.pendingDeletion == null && citizenRouteCellAllowed(city, allowed, point.x, point.z)
 
-/** Open only a nearby path door; normal blocks, foreign footprints and rejected native events stay intact. */
+/** A gate can overlap feet one block above its base; it has no upper half like a door. */
+internal fun citizenOpenRouteDoors(city: Settlement, allowed: Set<UUID>, at: Location, destination: Location,
+    blocked: (UUID, CivPosition) -> Boolean): Boolean {
+    check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
+    val world = destination.world ?: return false
+    if (world.uid != city.worldId || at.world?.uid != world.uid ||
+        !world.isChunkLoaded(destination.blockX shr 4, destination.blockZ shr 4)) return false
+    val body = BoundingBox(destination.x - .299, destination.y + .001, destination.z - .299,
+        destination.x + .299, destination.y + 1.799, destination.z + .299)
+    return (-1..1).all { dy ->
+        val point = CivPosition(destination.blockX, destination.blockY + dy, destination.blockZ)
+        if (dy == -1) {
+            if (point.y !in world.minHeight until world.maxHeight) return@all true
+            val block = world.getBlockAt(point.x, point.y, point.z)
+            if (block.blockData !is Gate || block.collisionShape.boundingBoxes.none {
+                    body.overlaps(it.clone().shift(point.x.toDouble(), point.y.toDouble(), point.z.toDouble()))
+                }) return@all true
+        }
+        citizenOpenRouteDoor(city, allowed, at, point, blocked)
+    }
+}
+
+/** Open only a nearby path door or gate; foreign footprints and rejected native events stay intact. */
 internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Location, point: CivPosition,
     blocked: (UUID, CivPosition) -> Boolean): Boolean {
+    check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
     val world = at.world ?: return false
     if (world.uid != city.worldId || point.y !in world.minHeight until world.maxHeight ||
         !world.isChunkLoaded(point.x shr 4, point.z shr 4)) return false
-    if (world.getBlockAt(point.x, point.y, point.z).blockData !is Door) return true
-    val pair = citizenDoorPair(world, point) ?: return false
-    val lower = pair.first
+    if (citizenRouteOpenable(world.getBlockAt(point.x, point.y, point.z).blockData) == null) return true
+    fun passage() = if (!world.isChunkLoaded(point.x shr 4, point.z shr 4)) null else when (world.getBlockAt(point.x, point.y, point.z).blockData) {
+        is Door -> citizenDoorPair(world, point)?.toList()
+        is Gate -> listOf(world.getBlockAt(point.x, point.y, point.z))
+        else -> null
+    }
+    val blocks = passage() ?: return false
+    val materials = blocks.map { it.type }
+    val lower = blocks.first()
     if (at.distanceSquared(Location(world, lower.x + 0.5, lower.y.toDouble(), lower.z + 0.5)) > 2.5 * 2.5 ||
-        listOf(pair.first, pair.second).any { block ->
+        blocks.any { block ->
             val p = CivPosition(block.x, block.y, block.z)
             !citizenDoorAllowed(city, allowed, p) || blocked(world.uid, p)
         }) return false
-    if (listOf(pair.first, pair.second).all { (it.blockData as Door).isOpen }) return true
+    if (blocks.all { citizenRouteOpenable(it.blockData)?.isOpen == true }) return true
     val event = CivsResidentOpenDoorEvent(city.id, lower)
     Bukkit.getPluginManager().callEvent(event)
     if (event.isCancelled) return false
-    // A native event listener may replace a block; never put captured door data over its replacement.
-    val current = citizenDoorPair(world, point) ?: return false
-    if (listOf(current.first, current.second).any { blocked(world.uid, CivPosition(it.x, it.y, it.z)) }) return false
-    for (block in listOf(current.first, current.second)) {
-        val state = block.blockData as Door
+    // A native event listener may replace a block; never open its replacement or restore captured data.
+    val current = passage() ?: return false
+    if (current.map { it.type } != materials || current.any { blocked(world.uid, CivPosition(it.x, it.y, it.z)) }) return false
+    for (block in current) {
+        val state = citizenRouteOpenable(block.blockData) ?: return false
         if (!state.isOpen) block.setBlockData(state.also { it.isOpen = true }, false)
     }
     return true

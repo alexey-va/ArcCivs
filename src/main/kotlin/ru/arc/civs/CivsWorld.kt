@@ -17,6 +17,7 @@ import org.bukkit.inventory.InventoryHolder
 import org.bukkit.block.data.BlockData
 import org.bukkit.block.data.Waterlogged
 import org.bukkit.block.data.type.Door
+import org.bukkit.block.data.type.Gate
 import org.bukkit.block.data.type.Fence
 import org.bukkit.block.data.type.Leaves
 import org.bukkit.plugin.Plugin
@@ -1029,12 +1030,14 @@ class CivsWorld(
     }
 
     companion object {
-        /** Normal interactions can open doors; neighbour updates can reshape stairs and fence connections. */
+        /** Normal interactions can open doors/gates; neighbour updates can reshape stairs and fences. */
         internal fun sameConstructionState(actual: BlockData, expected: BlockData): Boolean {
             if (actual.asString == expected.asString) return true
             if (actual.material != expected.material) return false
             if (actual is Door && expected is Door)
                 return (actual.clone() as Door).apply { isOpen = expected.isOpen }.asString == expected.asString
+            if (actual is Gate && expected is Gate)
+                return (actual.clone() as Gate).apply { isOpen = expected.isOpen }.asString == expected.asString
             if (actual is org.bukkit.block.data.type.Stairs && expected is org.bukkit.block.data.type.Stairs)
                 return (actual.clone() as org.bukkit.block.data.type.Stairs).apply { shape = expected.shape }.asString == expected.asString
             if (actual is Fence && expected is Fence)
