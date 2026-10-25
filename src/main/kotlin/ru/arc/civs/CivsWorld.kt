@@ -15,11 +15,13 @@ import org.bukkit.block.BlockFace
 import org.bukkit.block.TileState
 import org.bukkit.inventory.InventoryHolder
 import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.Waterlogged
 import org.bukkit.block.data.type.Door
 import org.bukkit.block.data.type.Gate
 import org.bukkit.block.data.type.Fence
 import org.bukkit.block.data.type.Leaves
+import org.bukkit.block.data.type.Stairs
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
@@ -215,6 +217,7 @@ class CivsWorld(
         private var treeProbe: CivPosition? = null
         private var treeProbeDepth = 0
         private val palette = HashMap<String, BlockData>()
+        private val standingColumns = HashMap<UUID, Pair<List<CivBuilding>, Map<Long, CivPosition>>>()
         private val authoredControl = building.control.takeIf { CivsBlueprints.hasAuthoredControl(building) }
         protected var index = 0
         private val startedAt = System.nanoTime()
@@ -300,12 +303,21 @@ class CivsWorld(
                 val approachCity = if (repairedPair == null) other else other.copy(buildings = other.buildings.filter {
                     it.id != repairedPair.protectedBuildingId && it.id != repairedPair.offendingBuildingId
                 })
-                requireCivs(civsTerrainKey(position.x, position.z) !in CivAutonomousAccess().standing(approachCity,
-                    repairedPair?.protectedBuildingId ?: building.id), "building-overlap")
+                val standing = if (repairedPair == null) retainedStanding(other)
+                    else CivAutonomousAccess().standing(approachCity, repairedPair.protectedBuildingId)
+                requireCivs(civsTerrainKey(position.x, position.z) !in standing, "building-overlap")
                 requireCivs(other.pendingControls.orEmpty().none { receipt ->
                     receipt.position == position || (other.id != cityId || receipt.buildingId != building.id) &&
                         receipt.approach.orEmpty().any { it.position == position }
                 }, "building-overlap")
+            }
+        }
+
+        /** Only detached building lists are cached; a published geometry change invalidates its city's entry. */
+        private fun retainedStanding(city: Settlement): Map<Long, CivPosition> {
+            standingColumns[city.id]?.let { if (it.first === city.buildings) return it.second }
+            return CivAutonomousAccess().standing(city, building.id).also {
+                standingColumns[city.id] = city.buildings to it
             }
         }
 
@@ -402,7 +414,7 @@ class CivsWorld(
             if (cursor < 3) requireCivs(change == null || change.before == change.after, "autonomy-no-path")
             val after = change?.let { parse(it.after) }
             if (offset == -1) {
-                val support = if (after == null) fullTerraformSupport(block) else after.material in TERRAFORM_GROUND
+                val support = if (after == null) routeTerraformSupport(block) else after.material in TERRAFORM_GROUND
                 if (!support) rejectAt("autonomy-no-path", block)
             } else {
                 val clear = if (after == null) passableTerraform(block) else after.material.isAir
@@ -453,12 +465,22 @@ class CivsWorld(
         fun guarded(action: () -> Unit) {
             if (future.isDone) return
             try { action() } catch (failure: Exception) {
-                synchronized(monitor) { pending.remove(this) }
-                future.completeExceptionally(failure)
+                fail(failure)
             } catch (failure: LinkageError) {
-                synchronized(monitor) { pending.remove(this) }
-                future.completeExceptionally(failure)
+                fail(failure)
             }
+        }
+
+        private fun fail(failure: Throwable) {
+            synchronized(monitor) { pending.remove(this) }
+            val rejection = CivsDiagnostics.rejection(failure)
+            CivsDiagnostics.event("world_scan", "city" to cityId, "building" to building.id,
+                "phase" to javaClass.simpleName.lowercase(), "cells" to index,
+                "elapsed_ms" to (System.nanoTime() - startedAt) / 1_000_000,
+                "outcome" to if (rejection == null) "failed" else "rejected",
+                "reason" to (rejection?.reason ?: CivsDiagnostics.cause(failure)?.javaClass?.simpleName),
+                "detail" to rejection?.values)
+            future.completeExceptionally(failure)
         }
     }
 
@@ -579,15 +601,24 @@ class CivsWorld(
             if (block.type in TERRAFORM_GROUND) leafY = null
             if (naturalLeaves(data)) leafY = currentY
             val tree = leafY?.let { it.toLong() - currentY in 1..MAXIMUM_TREE_READS.toLong() } == true
-            val accessible = canModify(owner, block) && try {
-                checkTerrainOwnership(position, allowUnpublished = true); true
-            } catch (_: CivsRejection) { false }
+            // Air above the terrace stays untouched; schematic capture still validates its own cells.
+            val accessFailure = if (currentY > ground && block.type.isAir) null
+                else if (!canModify(owner, block)) "lands-denied"
+                else try {
+                    checkTerrainOwnership(position, allowUnpublished = true); null
+                } catch (failure: CivsRejection) { failure.reason }
+            val accessible = accessFailure == null
             val safe = naturalTerraform(block, tree) && accessible
             val solid = !Tag.LOGS.isTagged(block.type) && !naturalLeaves(data) && fullTerraformSupport(block)
-            val supportSafe = safe || !strictAutonomous && accessible && solid && block.state !is TileState
+            val supportSafe = safe || accessible && solid && block.state !is TileState
             captured[position] = CivTerraformCell(position, data.asString, safe, solid, passableTerraform(block), supportSafe)
             index++
-            if (currentY <= floor && solid && block.type !in FALLING_GROUND) {
+            val supportingBase = currentY <= floor && solid && block.type !in FALLING_GROUND
+            // A proved obstruction must not wait for all remaining columns and the planning executor.
+            if (position != building.control && !safe && (if (currentY > ground) !block.type.isAir
+                    else !supportSafe && !(supportingBase && block.type == Material.BEDROCK)))
+                rejectAt(accessFailure ?: "autonomy-terrain", block)
+            if (supportingBase) {
                 columns += CivTerraformColumn(x, z, ground, floor, topY, supportY = currentY)
                 columnIndex++; y = null; leafY = null
             } else {
@@ -642,7 +673,8 @@ class CivsWorld(
                 checkTerrainOwnership(position); true
             } catch (_: CivsRejection) { false }
             captured[position] = CivTerraformCell(position, block.blockData.asString, safe,
-                !Tag.LOGS.isTagged(block.type) && !naturalLeaves(block.blockData) && fullTerraformSupport(block), passableTerraform(block))
+                !Tag.LOGS.isTagged(block.type) && !naturalLeaves(block.blockData) &&
+                    (if (column.preserve) routeTerraformSupport(block) else fullTerraformSupport(block)), passableTerraform(block))
             index++
             if (currentY == low) { columnIndex++; y = null; leafY = null } else y = currentY - 1
         }
@@ -830,6 +862,10 @@ class CivsWorld(
             it.minX <= 0.0 && it.minZ <= 0.0 && it.maxX >= 1.0 && it.maxZ >= 1.0 &&
                 it.maxY >= if (block.type in setOf(Material.DIRT_PATH, Material.FARMLAND)) 15.0 / 16.0 else 1.0
         }
+
+    /** Retained paved steps are walkable; foundations still require a full supporting top face. */
+    private fun routeTerraformSupport(block: Block): Boolean = fullTerraformSupport(block) ||
+        civsRetainedRouteStep(block.blockData)
 
     private fun passableTerraform(block: Block): Boolean = block.type.isAir ||
         block.type in AUTONOMOUS_PLANTS && !block.isLiquid &&
@@ -1177,13 +1213,20 @@ class CivsWorld(
         private val TERRAFORM_GROUND = TREE_GROUND + setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
         private val FALLING_GROUND = setOf(Material.SAND, Material.RED_SAND, Material.GRAVEL)
         private val AUTONOMOUS_PLANTS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN,
-            Material.LARGE_FERN, Material.DEAD_BUSH, Material.SNOW, Material.MOSS_CARPET, Material.DANDELION,
+            Material.LARGE_FERN, Material.DEAD_BUSH, Material.SNOW, Material.MOSS_CARPET,
+            Material.LEAF_LITTER, Material.WILDFLOWERS, Material.PINK_PETALS, Material.BUSH, Material.FIREFLY_BUSH,
+            Material.SHORT_DRY_GRASS, Material.TALL_DRY_GRASS, Material.CLOSED_EYEBLOSSOM, Material.OPEN_EYEBLOSSOM,
+            Material.CACTUS_FLOWER, Material.PALE_MOSS_CARPET, Material.PALE_HANGING_MOSS, Material.DANDELION,
             Material.POPPY, Material.BLUE_ORCHID, Material.ALLIUM, Material.AZURE_BLUET, Material.RED_TULIP,
             Material.ORANGE_TULIP, Material.WHITE_TULIP, Material.PINK_TULIP, Material.OXEYE_DAISY,
             Material.CORNFLOWER, Material.LILY_OF_THE_VALLEY, Material.SUNFLOWER, Material.LILAC,
             Material.ROSE_BUSH, Material.PEONY)
     }
 }
+
+/** This route-only exception never grants permission to replace a crafted step or use it as fill support. */
+internal fun civsRetainedRouteStep(data: BlockData): Boolean =
+    data is Stairs && data.half == Bisected.Half.BOTTOM && !data.isWaterlogged
 
 /** Loaded only when the optional Lands provider is present; no reflective integration. */
 private class CivsLandsAccess(plugin: Plugin) {

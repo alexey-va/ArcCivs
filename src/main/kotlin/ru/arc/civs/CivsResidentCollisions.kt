@@ -138,6 +138,16 @@ internal fun citizenResidentNudgeClear(npc: PacketPlayerNpc, from: Location, to:
 
 internal data class CitizenCollisionMove(val position: Vector, val contact: Vector)
 
+/** Owned packet residents use the same full-body sweep as native-player contact. */
+internal fun citizenResidentStepClear(npc: PacketPlayerNpc, from: Location, to: Location,
+    bodies: List<BoundingBox>): Boolean {
+    if (from.world != to.world || from.world != npc.world) return false
+    val half = .3 * npc.scale
+    if (from.x == to.x && from.y == to.y && from.z == to.z)
+        return bodies.none(bodyAt(to.toVector(), half, npc.height, half)::overlaps)
+    return citizenSlideBody(from.toVector(), to.toVector(), half, npc.height, half, bodies) == null
+}
+
 /**
  * Swept AABB with up to three plane clips: a whole move cannot tunnel through a body.
  * A pre-existing overlap only blocks movement deeper than its nearest exit plane.

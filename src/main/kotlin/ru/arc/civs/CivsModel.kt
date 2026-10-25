@@ -193,6 +193,10 @@ data class Settlement(
     val settings: CivSettlementSettings? = null,
     /** Null retains the player-city contract of every existing snapshot. */
     val autonomy: CivAutonomy? = null,
+    /** One funded native tree per lumbermill; the cursor and exact crown survive restart. */
+    val forestryJobs: Map<String, CivForestryJob>? = null,
+    /** Auto mills have one initial planting kit included in their paid construction. */
+    val forestrySeeded: Set<String>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

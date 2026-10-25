@@ -14,8 +14,10 @@ private const val MAX_CAMP_CHUNKS = 256
 private const val MAX_FIRES_PER_CHUNK = 16
 
 internal data class CitizenCampfire(val worldId: UUID, val position: CivPosition)
-internal data class CitizenCampVisit(val fire: CitizenCampfire, val seat: CivPosition, val startedAt: Int,
-                                    var arrivedAt: Int? = null, var greeted: Boolean = false)
+internal data class CitizenCampVisit(val fire: CitizenCampfire?, val seat: CivPosition, val startedAt: Int,
+                                    var arrivedAt: Int? = null, var greeted: Boolean = false,
+                                    val partnerId: UUID? = null, var conversationAt: Int? = null,
+                                    var gestureBeat: Int = -1)
 
 /** Transient social time never grants work, advances a delivery, or survives an actor's retirement. */
 internal class CitizenCampRoutine(private val workerId: UUID) {
@@ -24,7 +26,9 @@ internal class CitizenCampRoutine(private val workerId: UUID) {
     private var lastAttempt: Int? = null
     private var delay = 0
     private var eveningDay: Long? = null
+    private var firstMeetingAt: Int? = null
     val restTicks: Int = 500 + Math.floorMod(workerId.hashCode(), 401)
+    val meetingTicks: Int = 160 + Math.floorMod(workerId.hashCode(), 121)
 
     fun available(tick: Int, day: Long, evening: Boolean): Boolean =
         visit == null && (!evening || eveningDay != day) && lastAttempt?.let { tick - it >= delay } != false
@@ -32,6 +36,15 @@ internal class CitizenCampRoutine(private val workerId: UUID) {
     fun start(fire: CitizenCampfire, seat: CivPosition, tick: Int, day: Long, evening: Boolean) {
         visit = CitizenCampVisit(fire, seat, tick)
         if (evening) eveningDay = day
+    }
+
+    fun meetingAvailable(tick: Int): Boolean {
+        val first = firstMeetingAt ?: (tick + 200 + Math.floorMod(workerId.hashCode(), 301)).also { firstMeetingAt = it }
+        return tick - first >= 0 && available(tick, 0, evening = false)
+    }
+
+    fun startMeeting(partnerId: UUID, seat: CivPosition, tick: Int) {
+        visit = CitizenCampVisit(null, seat, tick, partnerId = partnerId)
     }
 
     fun discoveryMiss(tick: Int) { lastAttempt = tick; delay = 100 }
@@ -43,7 +56,9 @@ internal class CitizenCampRoutine(private val workerId: UUID) {
     }
 
     fun expired(tick: Int): Boolean = visit?.let {
-        tick - (it.arrivedAt ?: it.startedAt) >= if (it.arrivedAt == null) 900 else restTicks
+        if (it.partnerId != null) tick - (it.conversationAt ?: it.startedAt) >=
+            if (it.conversationAt == null) 400 else meetingTicks
+        else tick - (it.arrivedAt ?: it.startedAt) >= if (it.arrivedAt == null) 900 else restTicks
     } ?: false
 }
 

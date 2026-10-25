@@ -2011,7 +2011,7 @@ class CivsUi internal constructor(
         "placement-failed", "delivery-failed", "unreachable", "route-unreachable", "lands-denied",
         "world-changed", "protected-terrain", "building-overlap", "outside-city", "protected-area",
         "storage-unavailable", "injury-pending", "closed", "deleting" -> DANGER
-        "active", "working", "working-field", "watering", "fertilizing", "felling-tree", "digging-mine", "building", "placing",
+        "active", "working", "working-field", "watering", "fertilizing", "planting-tree", "felling-tree", "digging-mine", "building", "placing",
         "delivering", "loading-cargo", "collecting-supplies", "guarding" -> COMMIT
         "to-work", "moving-to-work", "moving-to-storage", "to-store", "moving-to-pickup", "carrying-cargo" -> NAVIGATION
         "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers" -> PERSONAL

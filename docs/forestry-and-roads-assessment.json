@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "title": "ArcCivs native forestry and immediate Trails road registration",
+  "assumptions": [
+    "Scenarios are assumptions, not observed throughput: one level-2 mill, 1/2/4 active hours per player-day, 6/24/72 complete native-grown trees harvested, enough eligible loaded land, paid stock and storage room.",
+    "Before: autonomous FORESTER grants 4/8/12 abstract WOOD by level at a 60000ms base interval; hunger<=6 doubles work duration. Level-2 gross upper potential is 60/120/240 deliveries in those assumed hours, before travel, hunger, pauses and stock capacity.",
+    "After: only a completed real tree job earns the unchanged nominal 4/8/12 abstract WOOD. Plant-only work and partial128-cell batches grant no WOOD. Auto creates no physical log/item payout. Ordinary physical cities retain paid matching saplings and real native drops, with no abstract stock.",
+    "Auto planting/replanting costs1 abstract WOOD per complete plot (one ordinary sapling or four2x2 saplings). A real grown-tree job admitted atzero WOOD defers this exact1-unit debit until its final earned4/8/12 completion, before the same journal writes replacement saplings. Positive-stock jobs pay upfront once; retries/partial batches do not pay again.",
+    "A paid FORESTER costs20 abstract WOOD+12 STONE at level1 and includes one recovery planting kit. Atzero WOOD, a never-used mill may plant one1/4-sapling plot from that prepaid kit; the used-building marker is persisted before planting. A normal paid plant also marks the kit used. This is one-time per building, not a recurring free seed source. Last-WOOD planting can recover through a subsequent real-grown deferred harvest.",
+    "Abstract WOOD is not directly withdrawable as player items, but planting introduces an indirect native-sapling redemption bridge. A plot exchanges1 abstract WOOD for1/4 world saplings; intercepting those seedlings prevents that plot from growing a tree. Live Spawn Decoration.yml disk read2026-10-25 has nominal SELL2 Vault per each supported sapling. This is disk configuration, not a measured sale or a confirmed in-memory quote.",
+    "New physical complete-tree cleanup also collects ordinary native leaf drops. Counts are determined by actual Block.getDrops(tool), growth and bag capacity; no fixed leaf, sapling or money grant is introduced. Receipt128-cell ceiling and one exact durable job per mill bound recovery; no abstract payout per batch. Physical native drops are transferred once with the exact batch that removes their blocks, so a tree larger than the bag does not require a final oversized inventory grant.",
+    "Direct Vault/tokens/player XP change remains zero. Existing item SELL remains a possible independent redemption channel; planned SELL-off is modeled as future only and no future contracts are assumed.",
+    "Trails rates are unchanged and live-read on Spawn: COARSE_DIRT1.2, DIRT_PATH1.3, only-created-trails=true. New roads are registered immediately, not given another speed modifier. Per-worker movement still uses one existing surface multiplier, player preferences unchanged.",
+    "For road-share10/25/50percent and travel-share20/50/80percent, a1.2 travel multiplier yields illustrative whole-cycle throughput factors1.003344/1.021277/1.071429. Pure all-road all-travel upper bound is1.2; stationary production intervals and yields are unchanged. These are derived ceilings, not measured earnings.",
+    "Decision: native planting/growth/felling replaces Auto's abstract timed FORESTER delivery, with paid seed reserve and one unchanged completion payout; no duplicated item/stock payout. Full crowns and large trees require bounded durable work. Road recognition restores the configured benefit without repricing or stacking.",
+    "Alternative resale scenario: if every planted seedling is intercepted and sold at nominal2 Vault,28/100/292 world seedlings would yield56/200/584 Vault. These are not concurrent with the tree-growing WOOD scenarios; assume external existing abstract WOOD funds the intercepted kits and no WOOD harvest payout from those same seedlings. No rate/price is changed.",
+    "Adversarial planting ceiling with ready stock and instant external interception: default3-second planting work implies atmost20 plots/minute per resident before travel, scan, city lock and storage delay; a four-seedling plot is80 saplings/minute or160 nominal Vault/minute until finite WOOD runs out. The one-time recovery kit is atmost4 saplings/8 nominal Vault per paid mill. No fabricated daily limit or observed-network total is asserted."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_forester_completion",
+          "kind": "mint",
+          "source": "ArcCivs/CivsRules.deliveryAmount, CivsForestry completion",
+          "basis": "Abstract stock only, level2 example; upper potential before stock capacity and actual travel/growth.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              60,
+              120,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          }
+        },
+        {
+          "id": "autonomous_prepaid_tree_seedlings",
+          "kind": "burn",
+          "source": "ArcCivs/CivsForestry",
+          "basis": "1 abstract WOOD for one complete planting/replant plot reservation (one or four seedlings), including initial grove start; physical towns pay actual sapling items separately.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              7,
+              25,
+              73
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              7,
+              25,
+              73
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "conditional_seedling_interception_sales",
+          "kind": "mint",
+          "source": "Spawn EconomyShopGUI-Premium/shops/Decoration.yml nominal SELL2",
+          "basis": "Alternative interception scenario, not simultaneous with credited growth/harvest of the same plots; loaded quote and player sales unmeasured.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              28,
+              100,
+              292
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              28,
+              100,
+              292
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "world_saplings": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_planted_saplings",
+          "kind": "item",
+          "source": "ArcCivs/CivsWorksites forestry plot",
+          "basis": "World saplings, not direct inventory items; assumed four seedlings per plot and7/25/73 plots per day. Physical towns pay native sapling items separately.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              7,
+              25,
+              73
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              7,
+              25,
+              73
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

@@ -61,7 +61,8 @@ class CivsService(
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>,
                                   val containersChanged: Boolean, val physicsCells: List<CivPlanBlock>,
                                   val expectedCells: Map<CivPosition, CivPlanBlock>,
-                                  val batch: CivBuildBatch? = null, val nextWorkplace: CivPosition? = null) {
+                                  val batch: CivBuildBatch? = null, val nextWorkplace: CivPosition? = null,
+                                  val roadSurfaces: Set<CivPosition> = emptySet()) {
         var repairing = false
         var feedbackFailed = false
     }
@@ -122,6 +123,8 @@ class CivsService(
     private val autonomyWarnAt = mutableMapOf<UUID, Long>()
     private val autonomousAccessChecked = mutableMapOf<UUID, List<CivBuilding>>()
     private val autonomousAccessRetryAt = mutableMapOf<UUID, Long>()
+    /** Detached columns from the existing saved terrain routes; never a second road journal. */
+    private val forestryRoutes = mutableMapOf<UUID, Pair<UUID, Set<Pair<Int, Int>>>>()
     private var autonomyCursor = 0
     private var nextAutonomyAt = 0L
     private val physics = CivsPhysics(plugin, tasks)
@@ -132,7 +135,9 @@ class CivsService(
     private val blockedRecovery = mutableSetOf<UUID>()
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
     private val protection = CivsProtection(cities = { cities.values.toList() }, available = { ready() }, protectedWorlds = settings.worlds,
-        worldLocked = storage::isWorldLocked)
+        worldLocked = storage::isWorldLocked, forestryPath = { worldId, x, z ->
+            forestryRoutes.values.any { it.first == worldId && (x to z) in it.second }
+        })
     private val sharedProtection = object : ArcBlockProtectionService {
         override fun isProtected(worldId: UUID, x: Int, y: Int, z: Int): Boolean =
             protection.isProtected(worldId, x, y, z)
@@ -177,7 +182,7 @@ class CivsService(
     internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
-        storage::isWorldLocked, { it in busy || it in unhealthy })
+        storage::isWorldLocked, { it in busy || it in unhealthy }, { forestryRoutes[it.id]?.second.orEmpty() })
     private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
         permissions = CivsChunkPermissions(plugin, clock), clock = clock).also { storage.collectedChunkLease = it::retainLoaded }
     private val testingPermissions = CivsChunkPermissions(plugin, clock, CIVS_TESTING_PERMISSION)
@@ -1651,7 +1656,7 @@ class CivsService(
                 rejectIf(city.construction?.id != constructionId, "stale-delivery")
                 citizens.requireConstructionArrival(cityId, workerId, requireNotNull(constructionId))
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
-            } else if (city.autonomy != null) {
+            } else if (city.autonomy != null && building.type != BuildingType.FORESTER) {
                 rejectIf(constructionId != null || city.autonomy.paused, "stale-delivery")
                 citizens.requireAutonomousDelivery(cityId, workerId, CitizenToken(assignment, cycle, nextAt, null))
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }.thenApply { saved ->
@@ -1668,7 +1673,7 @@ class CivsService(
                 else citizens.requireWorldWorkArrival(cityId, workerId, work)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 var completedWork: Settlement? = null
-                inventoryMutation(cityId, { current ->
+                (if (city.autonomy != null) autonomousForestryMutation(city, work, at) else inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
                     if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                     else citizens.requireWorldWorkArrival(cityId, workerId, work)
@@ -1679,7 +1684,7 @@ class CivsService(
                     storage.prepareWork(current, assignment, work.storageInputs(currentWorker), emptyMap(), work.changes)
                 }, keepViewersOpen = true) { _, inventory ->
                     requireNotNull(completedWork).copy(inventory = inventory)
-                }.whenCompleteSync(tasks) { saved, failure ->
+                }).whenCompleteSync(tasks) { saved, failure ->
                     if (failure == null && saved != null) {
                         val completed = saved.workers.first { it.id == workerId }
                         CivsDiagnostics.event("world_work_committed", "city" to cityId, "worker" to workerId,
@@ -1688,7 +1693,11 @@ class CivsService(
                             "point" to work.focus, "blocks" to work.changes.size, "inputs" to work.inputs,
                             "carried_before" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(worker, material) },
                             "carried_after" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(completed, material) },
-                            "storage_inputs" to work.storageInputs(worker), "outputs" to work.outputs,
+                            "storage_inputs" to if (city.autonomy == null) work.storageInputs(worker) else emptyMap<String, Long>(),
+                            "autonomous_wood_delta" to if (city.autonomy != null) saved.stock.wood - city.stock.wood else null,
+                            "seed_deferred" to work.forestry?.job?.seedDeferred,
+                            "initial_seed_kit" to (city.autonomy != null && work.forestry == null && city.stock.wood == 0L),
+                            "outputs" to work.outputs,
                             "mining_step" to work.miningStep)
                     }
                     worksites.invalidate(workerId)
@@ -1707,6 +1716,22 @@ class CivsService(
                 }
             }
         }
+    }
+
+    /** Auto forestry uses the same native journal while retaining its nontransferable stock contract. */
+    private fun autonomousForestryMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val tx = try {
+            worksites.validate(city, work)
+            val worker = city.workers.single { it.id == work.workerId }
+            val after = CivsRules.finishWorldWork(city, work, at)
+            val receipt = CivForestryReceipt(worker, city.stock, city.forestryJobs?.get(work.buildingId.toString()),
+                city.forestryJobs == null, work, at, city.forestrySeeded)
+            CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), worldChanges = work.changes,
+                forestry = receipt).also { storage.seal(it, keepViewersOpen = true) }
+        } catch (failure: Exception) { storage.unlock(id); throw failure }
+        return journalInventory(tx)
     }
 
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
@@ -2954,6 +2979,7 @@ class CivsService(
         autonomyRetryAt.clear()
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
+        forestryRoutes.clear()
         supply.clear()
         supplyObservations.clear()
         loadFailure = null
@@ -3072,7 +3098,7 @@ class CivsService(
             } else runCatching {
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
-                if (city == null) { supply.remove(cityId); supplyObservations.remove(cityId) }
+                if (city == null) { supply.remove(cityId); supplyObservations.remove(cityId); forestryRoutes.remove(cityId) }
                 else if (city.autonomy == null) supply.request(cityId)
                 protection.publish(requireNotNull(prepared))
                 geometryGeneration++
@@ -3449,9 +3475,20 @@ class CivsService(
         require(city.buildings.size <= CivsRules.MAX_SITES)
         val buildings = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }
         val plans = buildings.map { store.loadPlan(it.id) }
-        return CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
-            plans.mapNotNull { it.join() }
-        }, executor)
+        val result = tracked<List<CivPlacementPlan>>()
+        CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
+            val saved = plans.mapNotNull { it.join() }
+            saved to CivAutonomousAccess.from(city, saved).routes.values.flatten().mapTo(hashSetOf()) { it.x to it.z }
+        }, executor).whenCompleteSync(tasks) { captured, failure ->
+            if (closed) result.completeExceptionally(CivsRejection("not-ready"))
+            else if (failure != null) result.completeExceptionally(failure)
+            else {
+                val (saved, columns) = requireNotNull(captured)
+                if (cities[city.id]?.buildings == city.buildings) forestryRoutes[city.id] = city.worldId to columns
+                result.complete(saved)
+            }
+        }
+        return result
     }
 
     private fun loadAutonomousAccess(city: Settlement): CompletableFuture<CivAutonomousAccess> =
@@ -3756,7 +3793,8 @@ class CivsService(
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y && p.z in batch.minimum.z..batch.maximum.z
                 }, containersChanged, cells.filter { it.before != it.after }, cells.associateBy(CivPlanBlock::position),
-                    batch, batches?.getOrNull(order.workDone + 1)?.workplace), batch, plan.copy(blocks = cells))
+                    batch, batches?.getOrNull(order.workDone + 1)?.workplace,
+                    plan.terrain?.preparedRouteSurfaces()?.mapTo(hashSetOf(), CivPlanBlock::position).orEmpty()), batch, plan.copy(blocks = cells))
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
@@ -3882,6 +3920,7 @@ class CivsService(
                 (automaticPreparation || citizens.constructionReady(city.id, order.id))
         }, { cell ->
             lastPlacedTick = Bukkit.getCurrentTick()
+            if (cell.position in access.roadSurfaces) footTraffic.registerSurface(city.id, cell.position)
             constructionFocus[city.id] = ConstructionFocus(order.id, cell.position, lastPlacedTick)
             constructionCosmetic(access, order.id, cell.position) {
                 citizens.constructionPlaced(city.id, order.id, cell.position,
@@ -3947,6 +3986,7 @@ class CivsService(
         val material = access.materials[point] ?: return
         val previous = constructionFocus.put(cityId, ConstructionFocus(orderId, point, Bukkit.getCurrentTick()))
         if (cell.isAir || cell.isBarrier || material.isAir) return
+        if (access.plan.building.type == BuildingType.ROAD) footTraffic.registerSurface(cityId, point)
         // A paired native placement is one gesture and one sound; retain the final accepted focus for the next pulse.
         if (previous?.orderId == orderId && previous.tick == Bukkit.getCurrentTick()) return
         constructionCosmetic(access, orderId, point) { citizens.constructionPlaced(cityId, orderId, point, material) }

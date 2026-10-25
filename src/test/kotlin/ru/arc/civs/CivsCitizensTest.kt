@@ -229,10 +229,10 @@ class CivsCitizensTest : FunSpec({
         cycle.phase shouldBe CitizenPhase.READY
     }
 
-    test("autonomous producers use prepared entrances while personal producers retain their barrels") {
+    test("abstract autonomous producers use prepared entrances while personal producers retain their barrels") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(
             phase = BuildingPhase.SITE, control = CivPosition(15, 67, -1))
-        for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)) {
+        for (type in listOf(BuildingType.QUARRY, BuildingType.FARM)) {
             val factory = building(type, CivPosition(20, 64, 0)).copy(control = CivPosition(24, 67, -1))
             val worker = CivWorker(UUID.randomUUID(), "Producer", factory.id, nextDeliveryAt = 60_000)
             val village = city(listOf(hall, factory), worker, null).copy(autonomy = CivAutonomy())
@@ -1140,31 +1140,32 @@ class CivsCitizensTest : FunSpec({
 
     test("idle wander remains bounded and timed without advancing a production cycle") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(phase = BuildingPhase.SITE)
-        val worker = CivWorker(UUID.randomUUID(), "Свободный", null)
+        val worker = CivWorker(UUID.fromString("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84"), "Свободный", null)
         val city = city(listOf(hall), worker, null)
         val plan = requireNotNull(citizenPlan(city, worker))
         plan.idleReason shouldBe "unassigned"
-        val wander = CitizenWander()
+        val wander = CitizenWander(worker.id)
         val cycle = CitizenCycle(plan.token, plan.workMillis)
-        wander.ready(0) shouldBe true
+        wander.ready(0) shouldBe false
+        wander.ready(3_250) shouldBe true
         val targets = (0..39).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
-        targets.distinct().size shouldBe 40
+        (targets.distinct().size >= 30) shouldBe true
         targets.all { city.contains(it.x, it.z) && it.x * it.x + it.z * it.z <= 64 && it.y in 62..66 } shouldBe true
         targets.take(5).map { it.x to it.z }.distinct().size shouldBe 1
         targets.take(5).map { it.y } shouldBe listOf(64, 65, 63, 66, 62)
         targets[5].let { it.x to it.z } shouldBe targets[9].let { it.x to it.z }
         (targets[0].let { it.x to it.z } != targets[5].let { it.x to it.z }) shouldBe true
-        wander.reject(0)
-        wander.ready(999) shouldBe false
-        wander.ready(1_000) shouldBe true
+        wander.reject(4_000)
+        wander.ready(4_749) shouldBe false
+        wander.ready(5_250) shouldBe true
         wander.step shouldBe 1
-        wander.finish(1_000, true)
+        wander.finish(6_000, true)
         wander.step shouldBe 5
-        wander.ready(2_999) shouldBe false
-        wander.ready(3_000) shouldBe true
-        wander.finish(3_000, false)
-        wander.ready(10_999) shouldBe false
-        wander.ready(11_000) shouldBe true
+        wander.ready(7_999) shouldBe false
+        wander.ready(12_500) shouldBe true
+        wander.finish(13_000, false)
+        wander.ready(20_999) shouldBe false
+        wander.ready(25_000) shouldBe true
         cycle.phase shouldBe CitizenPhase.IDLE
         cycle.beginDelivery(Long.MAX_VALUE) shouldBe null
         worker.completedCycles shouldBe 0L
@@ -1173,6 +1174,33 @@ class CivsCitizensTest : FunSpec({
         repeat(40) { wander.reject(Long.MAX_VALUE) }
         wander.ready(Long.MAX_VALUE - 1) shouldBe false
         wander.ready(Long.MAX_VALUE) shouldBe true
+    }
+
+    test("residents that shared a ring start now have individual random destinations and rest times") {
+        val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(phase = BuildingPhase.SITE, control = null)
+        val ids = listOf("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84", "06254fa5-4795-4a8e-a7c7-783f9fc90cfd")
+            .map(UUID::fromString)
+        val city = city(listOf(hall), CivWorker(ids.first(), "Idle", null), null)
+        val targets = ids.map { id -> (0 until 24).map { round ->
+            requireNotNull(citizenWanderTarget(city, hall.entrance, id, round * 5))
+        } }
+        (targets[0] != targets[1]) shouldBe true
+        targets.forEach { sequence ->
+            (sequence.distinct().size >= 16) shouldBe true
+            (sequence.take(8) != sequence.drop(8).take(8)) shouldBe true
+            (sequence.map { it.x * it.x + it.z * it.z }.distinct().size >= 6) shouldBe true
+        }
+        fun timing(id: UUID): List<Long> {
+            val wander = CitizenWander(id)
+            var now = 0L
+            return (0..8).map {
+                while (!wander.ready(now)) now += 50
+                now.also { wander.finish(now, true) }
+            }
+        }
+        timing(ids[0]) shouldBe timing(ids[0])
+        (timing(ids[0]) != timing(ids[1])) shouldBe true
+        timing(ids[0]).zipWithNext().all { (a, b) -> b - a in 2_000L..6_550L } shouldBe true
     }
 
     test("idle walks keep their workplace or home anchor and reject climbs without limiting a working route") {
@@ -1254,11 +1282,11 @@ class CivsCitizensTest : FunSpec({
             val city = city(listOf(hall), worker, null)
             for (height in listOf(64, 65, 63, 66, 62)) {
                 floorY = height - 1
-                val wander = CitizenWander()
+                val wander = CitizenWander(worker.id)
                 var selected: CivPosition? = null
+                var now = 0L
                 for (pulse in 0..4) {
-                    val now = pulse * 1_000L
-                    wander.ready(now) shouldBe true
+                    while (!wander.ready(now)) now += 50
                     val target = requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, wander.step))
                     if (citizenStandable(world, target)) { selected = target; break }
                     wander.reject(now)

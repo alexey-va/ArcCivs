@@ -271,6 +271,8 @@ object CivsRules {
         val next = city.copy(buildings = city.buildings.filterNot { it.id == buildingId },
             mineProgress = city.mineProgress?.minus(buildingId.toString()),
             minePlans = city.minePlans?.minus(buildingId.toString()),
+            forestryJobs = city.forestryJobs?.minus(buildingId.toString())?.takeIf { it.isNotEmpty() },
+            forestrySeeded = city.forestrySeeded?.minus(buildingId.toString())?.takeIf { it.isNotEmpty() },
             workers = city.workers.map { it.copy(assignment = it.assignment?.takeUnless { id -> id == buildingId },
                 homeId = it.homeId?.takeUnless { id -> id == buildingId }) },
             families = city.families?.filterNot { it.homeId == buildingId },
@@ -633,6 +635,7 @@ object CivsRules {
             }
         } else {
             check(productionAvailable(city, building) && slots(city, building) > 0, "invalid-assignment")
+            check(city.autonomy == null || building.type != BuildingType.FORESTER, "stale-worksite")
             if (city.inventory == null) {
                 val resource = resource(building.type) ?: reject("invalid-assignment")
                 val amount = deliveryAmount(building)
@@ -662,12 +665,26 @@ object CivsRules {
         val building = city.building(work.buildingId) ?: reject("building-not-found")
         check(worker.assignment == building.id && worker.completedCycles == work.cycle && worker.cargo == null, "stale-delivery")
         check(productionAvailable(city, building) && building.type in CivsWorksites.TYPES, "invalid-assignment")
+        val forestry = building.type == BuildingType.FORESTER && (work.forestry != null || work.changes.isNotEmpty())
+        val autonomousForestry = city.autonomy != null && forestry
+        check(city.autonomy == null || autonomousForestry && !city.autonomy.paused, "invalid-assignment")
+        if (forestry) try { CivsForestry.validateWork(city, work) } catch (_: IllegalArgumentException) { reject("stale-worksite") }
         val equipped = work.equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
-        val supplied = if (work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
+        val supplied = if (autonomousForestry || work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
         val produced = if (work.outputs.isNotEmpty())
             CivsEquipment.collectSupplies(supplied, work.outputs) else supplied
         val progressed = produced.copy(completedCycles = add(worker.completedCycles, 1), nextDeliveryAt = add(now, 1_000))
-        val updated = if (work.changes.isEmpty() || work.cropCare) progressed else CivsResidents.trained(progressed, building.type)
+        val forestFinished = work.forestry?.let { it.next == it.job.cells.size } == true
+        val updated = if (work.changes.isEmpty() || work.cropCare || work.forestry != null && !forestFinished) progressed else CivsResidents.trained(progressed, building.type)
+        val forestryJobs = if (work.forestry != null) work.forestry.let { progress ->
+            city.forestryJobs.orEmpty().toMutableMap().also { jobs ->
+                val next = CivsForestry.after(progress)
+                if (next == null) jobs.remove(building.id.toString()) else jobs[building.id.toString()] = next
+            }.takeIf { it.isNotEmpty() }
+        } else city.forestryJobs
+        val stock = if (autonomousForestry) CivsForestry.autoStock(city, work) else city.stock
+        val forestrySeeded = if (autonomousForestry && (work.forestry == null || forestFinished || !work.forestry.job.seedDeferred))
+            city.forestrySeeded.orEmpty() + building.id.toString() else city.forestrySeeded
         check(work.miningPlanVersion == null || work.miningPlanVersion in 2..CivsMinePlan.VERSION && work.miningStep != null,
             "stale-worksite")
         val progress = work.miningStep?.takeIf { work.miningPlanVersion == null }?.let { next ->
@@ -688,7 +705,7 @@ object CivsRules {
                 previous?.takeIf { it.version == 4 && version >= 5 }?.nextStep ?: previous?.v4Step))
         } ?: city.minePlans
         return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
-            mineProgress = progress, minePlans = plans))
+            mineProgress = progress, minePlans = plans, stock = stock, forestryJobs = forestryJobs, forestrySeeded = forestrySeeded))
     }
 
     /** Fail closed at the storage boundary, including missing/null fields from reflection-based JSON decoders. */
@@ -786,6 +803,12 @@ object CivsRules {
                     (plan.v3Step == null || plan.version >= 4 && v3Size != null && plan.v3Step in 0..v3Size.toLong()) &&
                     (plan.v4Step == null || plan.version >= 5 && v4Size != null && plan.v4Step in 0..v4Size.toLong()) &&
                     plan.legacyStep == city.mineProgress?.get(id)
+            }) }
+            city.forestryJobs?.let { jobs -> snapshot(jobs.size <= MAX_BUILDINGS && jobs.all { (id, job) ->
+                CivsForestry.valid(city, id, job) && job.next in 1 until job.cells.size
+            }) }
+            city.forestrySeeded?.let { ids -> snapshot(city.autonomy != null && ids.size <= MAX_BUILDINGS && ids.all { id ->
+                city.buildings.any { it.id.toString() == id && it.type == BuildingType.FORESTER }
             }) }
             val shipments = city.workers.mapNotNull { it.cargo?.id }
             snapshot(shipments.distinct().size == shipments.size)

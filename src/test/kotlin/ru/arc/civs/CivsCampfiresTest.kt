@@ -87,6 +87,29 @@ class CivsCampfiresTest : FunSpec({
         routine.available(10_000, 5, evening = true) shouldBe true
     }
 
+    test("street meetings share social cooldowns but stagger first admission and use a short conversation deadline") {
+        val first = CitizenCampRoutine(UUID(0, 7))
+        val second = CitizenCampRoutine(UUID(0, 29))
+        first.meetingAvailable(0) shouldBe false
+        second.meetingAvailable(0) shouldBe false
+        first.meetingAvailable(207) shouldBe true
+        second.meetingAvailable(207) shouldBe false
+        second.meetingAvailable(229) shouldBe true
+        first.startMeeting(UUID(0, 29), CivPosition(0, 64, 0), 300)
+        first.visit!!.fire shouldBe null
+        first.visit!!.partnerId shouldBe UUID(0, 29)
+        first.expired(699) shouldBe false
+        first.expired(700) shouldBe true
+        first.visit!!.arrivedAt = 320
+        first.visit!!.conversationAt = 340
+        first.expired(340 + first.meetingTicks - 1) shouldBe false
+        first.expired(340 + first.meetingTicks) shouldBe true
+        first.finish(600)
+        first.meetingAvailable(2_399) shouldBe false
+        first.meetingAvailable(3_601) shouldBe true
+        first.available(700, 0, evening = false) shouldBe false
+    }
+
     test("discovery reads one loaded chunk per pulse reuses its cache and invalidates extinguished fires") {
         MockBukkitTestRuntime.open().use {
             val worldId = UUID(0, 1)

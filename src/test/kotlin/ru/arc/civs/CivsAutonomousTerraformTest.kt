@@ -1,12 +1,133 @@
 package ru.arc.civs
 
+import com.google.gson.Gson
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import java.util.UUID
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.MessageDigest
 import kotlin.math.abs
 
 class CivsAutonomousTerraformTest : FunSpec({
+    for ((name, delta) in listOf("short-hump" to 2, "short-hollow" to -2))
+    test("$name is graded to nearby ground instead of copying a short detour in height") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { x, z -> if (delta < 0) {
+            if (z in 6..8) 64 + delta else 64
+        } else 64 + when {
+            abs(x) <= 1 && z in 6..8 -> 2
+            abs(x) <= 2 && z in 5..9 && abs(x) + abs(z - 7) <= 3 -> 1
+            else -> 0
+        } }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface)
+        val cells = terraceCapture(draft, surface)
+        val plan = CivsAutonomousTerraform.materialize(draft, cells)
+        plan.route.map { it.y }.distinct() shouldBe listOf(65)
+        plan.route.map { it.x }.distinct() shouldBe listOf(0)
+        plan.preparedRouteSurfaces().map { it.position }.toSet() shouldBe plan.route.drop(1)
+            .map { it.copy(y = it.y - 1) }.toSet()
+        val foundation = CivPlanBlock(CivPosition(2, 64, 22), "minecraft:air", "minecraft:coarse_dirt")
+        plan.copy(blocks = plan.blocks + foundation).preparedRouteSurfaces() shouldBe plan.preparedRouteSurfaces()
+        draft.columns.filter { it.z in 6..8 && it.x in -1..1 }.all { it.groundY == 64 } shouldBe true
+        checkTerrace(plan, draft, cells)
+        if (delta > 0) {
+            (plan.cutCount > 0) shouldBe true
+            val after = cells.mapValues { it.value.data } + plan.blocks.associate { it.position to it.after }
+            for (x in -2..2) for (z in 5..9) {
+                if (surface.at(x, z)!!.groundY <= 64) continue
+                draft.columns.single { it.x == x && it.z == z }.groundY shouldBe 64
+                after.getValue(CivPosition(x, 65, z)) shouldBe "minecraft:air"
+                after.getValue(CivPosition(x, 64, z)) shouldBe
+                    if (x == 0) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
+            }
+        } else {
+            (plan.fillCount > 0) shouldBe true
+            plan.blocks.filter { it.position.y == 64 && it.position.z in 6..8 }.forEach { block ->
+                block.after shouldBe if (block.position.x == 0) "minecraft:coarse_dirt" else "minecraft:grass_block[snowy=false]"
+            }
+        }
+        exportRoadSection(name, surface, plan.route, plan.blocks)
+    }
+
+    test("a short transverse ridge has a level verge and one block banks without widening the cut beyond radius three") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, z -> if (z in 6..8) 66 else 64 }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface)
+        val cells = terraceCapture(draft, surface)
+        val plan = CivsAutonomousTerraform.materialize(draft, cells)
+        plan.route.map { it.y }.distinct() shouldBe listOf(65)
+        for (side in listOf(-1, 1)) for (z in 6..8) {
+            draft.columns.single { it.x == side * 2 && it.z == z }.groundY shouldBe 64
+            draft.columns.single { it.x == side * 3 && it.z == z }.groundY shouldBe 65
+            draft.columns.none { it.x == side * 4 && it.z == z } shouldBe true
+        }
+        plan.blocks.filter { it.position.z in 6..8 && abs(it.position.x) >= 2 }.all {
+            abs(it.position.x) <= 3 && it.before != "minecraft:air"
+        } shouldBe true
+        checkTerrace(plan, draft, cells)
+        exportRoadSection("short-ridge", surface, plan.route, plan.blocks)
+    }
+
+    for ((name, span, height) in listOf(Triple("long", 6..11, 2), Triple("tall", 6..8, 4)))
+    test("a $name ridge keeps its terrain outside the original three wide corridor") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, z -> if (z in span) 64 + height else 64 }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface)
+        draft.columns.filter { it.z in span }.all { abs(it.x) <= 1 } shouldBe true
+    }
+
+    test("cut feathering preserves unavailable terrain accepted roads and obstacles and rechecks exact native cells") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val unavailable = setOf(civsTerrainKey(-2, 6), civsTerrainKey(2, 6))
+        val surface = terraceSurface { _, z -> if (z in 6..8) 66 else 64 }.let { s ->
+            s.copy(columns = s.columns.mapValues { (key, column) -> when (key) {
+                civsTerrainKey(-2, 6) -> column.copy(natural = false)
+                civsTerrainKey(2, 6) -> column.copy(loaded = false)
+                else -> column
+            } })
+        }
+        val retained = CivPosition(2, 67, 7)
+        val access = CivAutonomousAccess(mapOf(city.buildings.single().id to listOf(retained)))
+        val obstacle = CivBox(CivPosition(-3, 64, 7), CivPosition(-2, 68, 7))
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, access, listOf(obstacle))
+        draft.columns.none { civsTerrainKey(it.x, it.z) in unavailable || it.x == retained.x && it.z == retained.z ||
+            CivsAutonomousGeometry.horizontalContains(obstacle, CivPosition(it.x, it.groundY, it.z)) } shouldBe true
+        val cells = terraceCapture(draft, surface).toMutableMap()
+        val position = CivPosition(-2, 65, 8)
+        cells[position] = CivTerraformCell(position, "minecraft:bricks", false, true, false)
+        shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(draft, cells) }.reason shouldBe "autonomy-terrain"
+    }
+
+    test("a sustained hillside keeps a connected grade to its high destination") {
+        val city = terraceCity()
+        val building = terraceBuilder(city, 70)
+        val surface = terraceSurface { _, z -> 64 + (z.coerceAtLeast(0) / 3).coerceAtMost(6) }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface)
+        val cells = terraceCapture(draft, surface)
+        val plan = CivsAutonomousTerraform.materialize(draft, cells)
+        plan.route.first().y shouldBe 65
+        plan.route.last().y shouldBe 71
+        plan.route.zipWithNext().all { (a, b) -> b.y - a.y in 0..1 } shouldBe true
+        checkTerrace(plan, draft, cells)
+        exportRoadSection("sustained-slope", surface, plan.route, plan.blocks)
+    }
+
+    test("shoulder grade follows the nearest centre and equal distance never adds a high curb") {
+        val route = listOf(CivPosition(0, 65, 0), CivPosition(0, 66, 1), CivPosition(0, 66, 2),
+            CivPosition(1, 65, 2), CivPosition(2, 65, 2))
+        val profile = CivsAutonomousTerraform.roadProfile(route)
+        profile shouldBe CivsAutonomousTerraform.roadProfile(route.reversed())
+        route.forEach { profile.getValue(civsTerrainKey(it.x, it.z)).y shouldBe it.y - 1 }
+        profile.getValue(civsTerrainKey(-1, 1)).y shouldBe 65
+        profile.getValue(civsTerrainKey(1, 1)).y shouldBe 64
+    }
+
     test("real 13 by 13 builder footprint receives supported cut and fill on a twelve block hillside") {
         val city = terraceCity()
         val building = terraceBuilder(city)
@@ -117,6 +238,39 @@ class CivsAutonomousTerraformTest : FunSpec({
         plan.blocks.last().position shouldBe base.copy(y = 64)
     }
 
+    for (ground in listOf(63, 64))
+    test("manual leaf litter planning preserves the exact captured native state at ground $ground") {
+        val building = terraceBuilder(terraceCity())
+        val position = CivPosition(2, 64, 22)
+        val litter = "minecraft:leaf_litter[facing=south,segment_amount=3]"
+        val draft = CivTerraformDraft(building,
+            listOf(CivTerraformColumn(2, 22, ground, 63, 64, supportY = 63)), emptyList(), ground)
+        val cells = (63..66).associate { y -> CivPosition(2, y, 22).let {
+            it to CivTerraformCell(it, when (y) { 63 -> "minecraft:dirt"; 64 -> litter; else -> "minecraft:air" },
+                safe = true, solid = y == 63, passable = y != 63)
+        } }
+        CivsAutonomousTerraform.materialize(draft, cells).blocks shouldBe
+            listOf(CivPlanBlock(position, litter, if (ground == 63) "minecraft:air" else "minecraft:dirt"))
+    }
+
+    for ((stage, y) in listOf("support" to 63, "fill" to 64))
+    test("unsafe $stage materialization reports the exact captured block and position") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val draft = CivTerraformDraft(building, listOf(CivTerraformColumn(2, 22, 64, 63, 64, supportY = 63)),
+            emptyList(), 64)
+        val cells = (63..66).associate { height -> CivPosition(2, height, 22).let {
+            it to CivTerraformCell(it, if (height == 63) "minecraft:stone" else "minecraft:air", true,
+                height == 63, height != 63)
+        } }.toMutableMap()
+        val position = CivPosition(2, y, 22)
+        val data = if (stage == "support") "minecraft:coal_ore" else "minecraft:water[level=0]"
+        cells[position] = CivTerraformCell(position, data, false, stage == "support", false)
+        val failure = shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(draft, cells) }
+        failure.reason shouldBe "autonomy-terrain"
+        failure.values shouldBe mapOf("x" to "2", "y" to y.toString(), "z" to "22", "block" to data, "stage" to stage)
+    }
+
     test("an obstructed source is rejected rather than clearing the worker standing column") {
         val city = terraceCity()
         val b = terraceBuilder(city)
@@ -158,7 +312,8 @@ class CivsAutonomousTerraformTest : FunSpec({
         }
         val plan = CivsAutonomousTerraform.materialize(draft, cells)
         plan.cutCount shouldBe 10
-        plan.blocks.all { it.after == "minecraft:air" } shouldBe true
+        plan.blocks.filter { it.position.y > 64 }.all { it.after == "minecraft:air" } shouldBe true
+        plan.blocks.filter { it.position.y == 64 } shouldBe plan.preparedRouteSurfaces()
         plan.blocks.filter { it.position.x == 2 && it.position.z == 22 }.map { it.position.y } shouldBe (74 downTo 65).toList()
     }
 
@@ -217,6 +372,39 @@ class CivsAutonomousTerraformTest : FunSpec({
     }
 })
 
+/** Small source-derived sections for the existing voxel preview; no native-client claim. */
+internal fun exportRoadSection(name: String, surface: CivTerrainSurface, route: List<CivPosition>,
+    terrain: List<CivPlanBlock> = emptyList(), paving: List<CivSettlementBlock> = emptyList()) {
+    val output = System.getenv("CIVS_ROAD_PREVIEW_OUT")?.let(Path::of) ?: return
+    Files.createDirectories(output)
+    val minX = route.minOf { it.x } - 5; val maxX = route.maxOf { it.x } + 5
+    val minZ = route.minOf { it.z } - 5; val maxZ = route.maxOf { it.z } + 5
+    val bottom = minOf(route.minOf { it.y - 1 },
+        (minX..maxX).minOf { x -> (minZ..maxZ).minOf { z -> requireNotNull(surface.at(x, z)).groundY } }) - 2
+    val before = linkedMapOf<CivPosition, String>()
+    for (x in minX..maxX) for (z in minZ..maxZ) {
+        val top = requireNotNull(surface.at(x, z)).groundY
+        for (y in bottom..top) before[CivPosition(x, y, z)] = when {
+            y == top -> "minecraft:grass_block[snowy=false]"
+            y >= top - 2 -> "minecraft:dirt"
+            else -> "minecraft:stone"
+        }
+    }
+    val after = before.toMutableMap()
+    (terrain.map { CivSettlementBlock(it.position, it.after) } + paving).forEach { cell ->
+        if (cell.position.x in minX..maxX && cell.position.z in minZ..maxZ && cell.position.y >= bottom) {
+            if (cell.after == "minecraft:air") after.remove(cell.position) else after[cell.position] = cell.after
+        }
+    }
+    fun rows(blocks: Map<CivPosition, String>) = blocks.map { (p, data) -> listOf(p.x, p.y, p.z, data) }
+    val hashes = listOf("CivsAutonomousTerraform.kt", "CivsSettlementLayout.kt").associateWith { source ->
+        MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(Path.of("src/main/kotlin/ru/arc/civs/$source")))
+            .joinToString("") { "%02x".format(it) }
+    }
+    Files.writeString(output.resolve("$name.json"), Gson().toJson(mapOf("name" to name,
+        "sourceSha256" to hashes, "route" to route, "before" to rows(before), "after" to rows(after))))
+}
+
 private fun terraceCity(): Settlement {
     val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(0, 64, 0), 0, "fixture",
         CivBox(CivPosition(-4, 64, -8), CivPosition(4, 70, -1)), CivPosition(0, 65, 0), BuildingPhase.SITE,
@@ -239,7 +427,12 @@ private fun terraceCapture(draft: CivTerraformDraft, surface: CivTerrainSurface)
         val top = requireNotNull(surface.at(c.x, c.z)).groundY
         for (y in maxOf(surface.minHeight, c.floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)..maxOf(c.groundY, c.surfaceY) + 2) {
             val p = CivPosition(c.x, y, c.z)
-            val data = when { y == top -> "minecraft:grass_block[snowy=false]"; y < top -> "minecraft:stone"; else -> "minecraft:air" }
+            val data = when {
+                y == top -> "minecraft:grass_block[snowy=false]"
+                y in top - 2 until top -> "minecraft:dirt"
+                y < top -> "minecraft:stone"
+                else -> "minecraft:air"
+            }
             put(p, CivTerraformCell(p, data, true, y <= top, y > top))
         }
     }

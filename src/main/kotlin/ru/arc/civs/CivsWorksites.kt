@@ -23,6 +23,7 @@ data class CivWorldWork(
     val miningGenerator: Boolean = false,
     /** Already inspected passage prefix, distinct from the cursor this receipt will commit. */
     val miningAccessStep: Long? = null,
+    val forestry: CivForestryProgress? = null,
 ) {
     val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
 
@@ -35,7 +36,8 @@ data class CivWorldWork(
 internal class CivsWorksites(private val plugin: Plugin, private val worldAccess: CivsWorld,
     private val stock: (Settlement, UUID) -> Map<String, Long>,
     private val locked: (UUID, CivPosition) -> Boolean,
-    private val isPaused: (UUID) -> Boolean = { false }) {
+    private val isPaused: (UUID) -> Boolean = { false },
+    private val forestryPaths: (Settlement) -> Set<Pair<Int, Int>> = { emptySet() }) {
     private data class Cached(val building: CivBuilding, val worker: CivWorker, val work: CivWorldWork)
     private val cached = hashMapOf<UUID, Cached>()
     private val cursors = hashMapOf<UUID, Int>()
@@ -63,6 +65,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val plan: CivMinePlanState?, val legacyStep: Long?, var activeTicks: Long = 0, var sampledAt: Long? = null,
         var warnedAt: Long? = null)
     private val mineSearches = hashMapOf<UUID, MineSearch>()
+    private data class ForestScan(val building: CivBuilding, val scan: CivsForestry.Scan, val roots: List<CivPosition>)
+    private val forestScans = hashMapOf<UUID, ForestScan>()
+    private data class ForestPlant(val building: CivBuilding, val roots: List<CivPosition>, val timber: String, var next: Int = 0)
+    private val forestPlants = hashMapOf<UUID, ForestPlant>()
+    private var forestChecksRemaining = 0
+    private var forestDeadline = 0L
     private var spotChecksRemaining = 0
     private var spotRaysRemaining = 0
     private var mineChecksRemaining = 0
@@ -78,7 +86,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {
         val building = worker.assignment?.let(city::building) ?: return null
         return cached[worker.id]?.takeIf { it.worker.completedCycles == worker.completedCycles && it.building == building &&
-            it.worker.items == worker.items && it.worker.inventory == worker.inventory }?.work
+            it.worker.items == worker.items && it.worker.inventory == worker.inventory &&
+            (city.autonomy == null || building.type != BuildingType.FORESTER || it.work.forestry != null ||
+                city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) &&
+            (it.work.forestry?.job?.let { job -> city.forestryJobs?.get(building.id.toString())?.let { saved -> saved == job }
+                ?: (job.next == 0 && job.seedDeferred == (city.autonomy != null && city.stock.wood == 0L)) } != false) }?.work
     }
 
     /** Owner cache only: does not revalidate terrain, consume scan budgets or expire exclusions. */
@@ -106,6 +118,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     "standing" to point(work.standing), "miningStep" to work.miningStep,
                     "minePlanVersion" to work.miningPlanVersion, "accessStep" to work.miningAccessStep,
                     "generator" to work.miningGenerator,
+                    "forestry" to work.forestry?.let { mapOf("id" to it.job.id.toString(), "next" to it.job.next,
+                        "until" to it.next, "cells" to it.job.cells.size, "roots" to it.job.roots.size,
+                        "harvestedLogs" to it.job.harvestedLogs, "seedDeferred" to it.job.seedDeferred) },
                     "changes" to sample(work.changes) { mapOf("position" to point(it.position),
                         "before" to it.before, "after" to it.after) },
                     "inputs" to sample(work.inputs.entries) { mapOf("material" to it.key, "amount" to it.value) },
@@ -145,6 +160,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (it.work.status != "securing-mine") mineCursors.remove(it.building.id)
         }
         needs.remove(workerId); workSpots.remove(workerId); mineSafety.remove(workerId)
+        forestScans.remove(workerId)
+        forestPlants.remove(workerId)
     }
 
     /** A failed native route excludes only this work stance, never the mine action or its inputs. */
@@ -173,7 +190,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             (rejected.positions.size >= 16 || standing in rejected.positions)
     }
 
-    /** One worker, 16 field observations/candidate checks each, 32 standing probes and eight short rays per shared pulse. */
+    /** One worker per pulse: 16 columns, forestry capture at most 192 reads/2ms, 32 stances and eight short rays. */
     fun pulse(cities: Collection<Settlement>) {
         check(Bukkit.isPrimaryThread())
         val jobs = cities.flatMap { city -> city.workers.mapNotNull { worker ->
@@ -192,6 +209,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         reportedFarmSelections.keys.retainAll(workerIds)
         reportedMineSelections.keys.retainAll(workerIds)
         mineSearches.keys.retainAll(workerIds)
+        forestScans.keys.retainAll(workerIds)
+        forestPlants.keys.retainAll(workerIds)
         mineCursors.keys.retainAll(jobs.mapTo(hashSetOf()) { it.third.id })
         mineSafety.keys.retainAll(workerIds)
         jobs.forEach { (city, worker, building) -> tickMineSearch(city, worker, building) }
@@ -202,10 +221,13 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         var current = plan(city, worker)
         if (current != null && building.type !in setOf(BuildingType.FARM, BuildingType.QUARRY)) return
         val world = plugin.server.getWorld(city.worldId) ?: return
-        if (world.time in 12_000L..23_000L || city.inventory == null) return
+        if (world.time in 12_000L..23_000L || city.inventory == null &&
+            !(city.autonomy?.paused == false && building.type == BuildingType.FORESTER)) return
         spotChecksRemaining = 32
         spotRaysRemaining = 8
         mineChecksRemaining = 24
+        forestChecksRemaining = 192
+        forestDeadline = System.nanoTime() + 2_000_000L
         spotSearchPending = false
         if (current != null && building.type == BuildingType.QUARRY) {
             // Falling blocks can cover an admitted floor while its worker travels.
@@ -221,7 +243,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         // Refresh while travelling/working, so the next harvest is already known and newly
         // ripe crops can supersede care. A paused receipt keeps its admitted target intact.
         if (current != null && (!current.cropCare || fieldScan!!.harvest.none { !farmClaimed(city, worker, building, it) })) return
-        val work = (if (current == null) equipTool(city, worker, building, world) else null) ?: when (building.type) {
+        val work = (if (current == null && city.autonomy == null) equipTool(city, worker, building, world) else null) ?: when (building.type) {
             BuildingType.FARM -> farm(city, worker, building, world, requireNotNull(fieldScan), harvestOnly = current != null)
             BuildingType.FORESTER -> forest(city, worker, building, world)
             BuildingType.QUARRY -> mine(city, worker, building, world)
@@ -264,6 +286,16 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
         requireCivs(building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id, "invalid-assignment")
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        if (building.type == BuildingType.FORESTER && (work.forestry != null || work.changes.isNotEmpty())) {
+            try { CivsForestry.validateWork(city, work) { point ->
+                read(city, building, world, point, allowOwn = false)?.blockData?.asString
+            } } catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
+            if (work.forestry == null || city.forestryJobs?.get(building.id.toString()) == null) {
+                val roots = work.forestry?.job?.roots ?: work.changes.map { it.position }
+                val timber = work.forestry?.job?.timber ?: requireNotNull(CivsProduction.material(building))
+                requireCivs(CivsForestry.crownClear(city, roots, timber, CivsForestry.paths(city, forestryPaths(city))), "stale-worksite")
+            }
+        }
         if (building.type == BuildingType.QUARRY && work.miningStep != null)
             requireCivs(quarryWorkAccessible(city, building, world, work), "stale-worksite")
         if (work.cropCare) {
@@ -337,7 +369,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (isPaused(city.id)) return currentNeed(city, worker)?.status?.takeIf {
             building.type == BuildingType.FARM && CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) == true
         } ?: "searching-work"
-        return if (CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
+        return if (city.autonomy == null && CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
         else currentNeed(city, worker)?.status ?:
             if (building.type in setOf(BuildingType.FARM, BuildingType.QUARRY)) "searching-work" else "waiting-growth"
     }
@@ -655,91 +687,192 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     private fun forest(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
-        if (!tool(worker).type.name.endsWith("_AXE")) return null
+        if (city.autonomy == null && !tool(worker).type.name.endsWith("_AXE")) return null
+        val paths = CivsForestry.paths(city, forestryPaths(city))
+        city.forestryJobs?.get(building.id.toString())?.let { job ->
+            return forestBatch(city, worker, building, world, job)
+        }
+        // One worker owns a mill's candidate until its first durable receipt. Other mills remain independent.
+        if (city.workers.filter { it.assignment == building.id }.minByOrNull { it.id.toString() }?.id != worker.id) return null
+        forestScans[worker.id]?.takeIf { it.building == building }?.let { scan ->
+            return finishForestScan(city, worker, building, world, scan)
+        }
+        forestPlants[worker.id]?.takeIf { it.building == building }?.let { plant ->
+            return finishForestPlant(city, worker, building, world, plant, paths)
+        }
+        forestScans.remove(worker.id); forestPlants.remove(worker.id)
         val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("forester") ?: return null
         val box = layout.getAsJsonObject("searchBounds")
         val min = CivsWorksiteLayouts.vector(box["min"])
         val max = CivsWorksiteLayouts.vector(box["max"])
         val width = max.x - min.x + 1
         val depth = max.z - min.z + 1
-        val timber = Material.valueOf(requireNotNull(CivsProduction.material(building)))
-        val sapling = timber.name.removeSuffix("_LOG") + "_SAPLING"
+        val timber = requireNotNull(CivsProduction.material(building))
+        val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
+        val required = if (CivsForestry.large(timber)) 4L else 1L
+        // Physical replacements are prepaid; Auto may fund one kit from this exact tree's final harvest.
+        if (city.autonomy == null && forestSupply(city, worker, building, sapling) < if (timber == "DARK_OAK_LOG") 4 else 1)
+            return blocked(worker, "waiting-saplings", sapling, required)
         repeat(16) {
+            if (!forestBudget()) return null
             val index = Math.floorMod(cursors.getOrDefault(worker.id, 0), width * depth)
             cursors[worker.id] = cursors.getOrDefault(worker.id, 0) + 1
             val column = CivsWorksiteLayouts.point(building, CivPosition(min.x + index % width, 0, min.z + index / width))
-            if (!world.isChunkLoaded(column.x shr 4, column.z shr 4)) return@repeat
-            // Surface queries stay in loaded columns; city buildings are never logging candidates.
+            if (!world.isChunkLoaded(column.x shr 4, column.z shr 4) || CivsForestry.blockedColumn(city, column.x, column.z, paths)) return@repeat
             val surface = world.getHighestBlockYAt(column.x, column.z)
-            val roots = (building.anchor.y - 4..minOf(surface, building.anchor.y + 5)).mapNotNull { y ->
-                read(city, building, world, column.copy(y = y), allowOwn = false)?.takeIf { it.type == timber }
-            }
-            val root = roots.firstOrNull { base ->
-                val below = read(city, building, world, CivPosition(base.x, base.y - 1, base.z), allowOwn = false)
-                below?.type in TREE_SOILS
+            var root: Block? = null
+            for (y in building.anchor.y - 4..minOf(surface, building.anchor.y + 5)) {
+                if (!forestBudget()) { cursors[worker.id] = cursors.getValue(worker.id) - 1; return null }
+                forestChecksRemaining--
+                val base = read(city, building, world, column.copy(y = y), allowOwn = false) ?: continue
+                if (base.type.name != timber) continue
+                val below = read(city, building, world, column.copy(y = y - 1), allowOwn = false)
+                if (below?.type?.name in CivsForestry.soils) { root = base; break }
             }
             if (root != null) {
-                val standing = beside(city, worker, building, world, position(root), allowOwn = false) ?: run {
-                    if (spotSearchPending) { cursors[worker.id] = cursors.getValue(worker.id) - 1; return null }
-                    return@repeat
-                }
-                val tree = ArrayDeque<Block>(); tree += root
-                val logs = linkedMapOf<CivPosition, Block>()
-                var leaves = false
-                while (tree.isNotEmpty() && logs.size < 128) {
-                    val log = tree.removeFirst()
-                    val p = position(log)
-                    if (p in logs || log.type != timber) continue
-                    logs[p] = log
-                    for (dx in -1..1) for (dy in 0..1) for (dz in -1..1) {
-                        val q = CivPosition(p.x + dx, p.y + dy, p.z + dz)
-                        if (q.y > root.y + 16) continue
-                        val neighbor = read(city, building, world, q, allowOwn = false) ?: continue
-                        if (neighbor.type.name == timber.name.removeSuffix("_LOG") + "_LEAVES" &&
-                            (neighbor.blockData as? org.bukkit.block.data.type.Leaves)?.isPersistent == false) leaves = true
-                        if (neighbor.type == timber && q !in logs) tree += neighbor
-                    }
-                }
-                if (!leaves || tree.isNotEmpty()) return@repeat // Large trees remain intact rather than losing their inaccessible top.
-                val outputs = linkedMapOf<String, Long>()
-                logs.values.forEach { block -> drops(block, tool(worker)).forEach { (key, amount) -> outputs.merge(key, amount, Long::plus) } }
-                val available = CivsEquipment.available(worker, stock(city, building.id))
-                val roots = if (timber == Material.DARK_OAK_LOG) darkOakPlot(city, building, world, position(root), timber) else listOf(position(root))
-                val replant = roots != null && (available[sapling] ?: 0) >= roots.size
-                val changes = logs.values.sortedByDescending { it.y }.map { block ->
-                    change(block, if (replant && position(block) in roots!!) Material.valueOf(sapling).createBlockData().asString else "minecraft:air")
-                }
-                return work(worker, building, standing, changes, if (replant) mapOf(sapling to roots!!.size.toLong()) else emptyMap(), outputs,
-                    "felling-tree", duration = maxOf(6_000, logs.size * 1_000L))
+                val point = position(requireNotNull(root))
+                if (CivsForestry.rootClaimed(city, building.id, point)) return@repeat
+                val roots = if (CivsForestry.large(timber)) forestPlot(city, building, world, point, Material.valueOf(timber))
+                    ?: if (timber == "DARK_OAK_LOG") return@repeat else listOf(point) else listOf(point)
+                if (!CivsForestry.crownClear(city, roots, timber, paths)) return@repeat
+                if (city.autonomy == null && forestSupply(city, worker, building, sapling) < roots.size)
+                    return blocked(worker, "waiting-saplings", sapling, roots.size.toLong())
+                val scan = ForestScan(building, CivsForestry.Scan(point, timber), roots)
+                forestScans[worker.id] = scan
+                return finishForestScan(city, worker, building, world, scan)
             }
-            // Fill genuine empty ground only, using a delivered sapling.
             val ground = read(city, building, world, column.copy(y = surface), allowOwn = false) ?: return@repeat
-            if (ground.type !in TREE_SOILS) return@repeat
+            // Coarse dirt is also the durable centre of prepared city roads.
+            if (ground.type.name !in CivsForestry.soils || ground.type == Material.COARSE_DIRT) return@repeat
             val air = read(city, building, world, column.copy(y = surface + 1), allowOwn = false) ?: return@repeat
             if (!air.type.isAir) return@repeat
-            val planting = if (timber == Material.DARK_OAK_LOG) darkOakPlot(city, building, world, position(air), Material.AIR)
+            val roots = if (CivsForestry.large(timber)) forestPlot(city, building, world, position(air), Material.AIR)
                 ?: return@repeat else listOf(position(air))
-            if ((CivsEquipment.available(worker, stock(city, building.id))[sapling] ?: 0) < planting.size) {
-                blocked(worker, "waiting-saplings", sapling, planting.size.toLong())
-                return@repeat
-            }
-            val standing = beside(city, worker, building, world, position(air), allowOwn = false) ?: run {
-                if (spotSearchPending) { cursors[worker.id] = cursors.getValue(worker.id) - 1; return null }
-                return@repeat
-            }
-            return work(worker, building, standing, planting.map { p ->
-                change(requireNotNull(read(city, building, world, p, allowOwn = false)), Material.valueOf(sapling).createBlockData().asString)
-            }, mapOf(sapling to planting.size.toLong()), status = "felling-tree")
+            if (!CivsForestry.crownClear(city, roots, timber, paths)) return@repeat
+            if (forestSupply(city, worker, building, sapling) < roots.size)
+                return@repeat // A funded growing tree may still be found in another column.
+            val plant = ForestPlant(building, roots, timber)
+            forestPlants[worker.id] = plant
+            return finishForestPlant(city, worker, building, world, plant, paths)
         }
         return null
     }
 
-    /** Dark oak needs four paid saplings on a supported 2×2 square. */
-    private fun darkOakPlot(city: Settlement, building: CivBuilding, world: World, root: CivPosition, material: Material): List<CivPosition>? {
+    private fun forestBudget(): Boolean = forestChecksRemaining > 0 && System.nanoTime() < forestDeadline
+
+    private fun forestSupply(city: Settlement, worker: CivWorker, building: CivBuilding, sapling: String): Long =
+        if (city.autonomy != null) if (city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) 4L else 0L
+        else CivsEquipment.available(worker, stock(city, building.id))[sapling] ?: 0
+
+    private fun finishForestScan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        pending: ForestScan): CivWorldWork? {
+        while (!pending.scan.complete && !pending.scan.failed && forestBudget()) {
+            forestChecksRemaining -= pending.scan.advance(1) { point ->
+                read(city, building, world, point, allowOwn = false)?.blockData?.asString
+            }
+        }
+        if (!pending.scan.complete && !pending.scan.failed) return blocked(worker, "searching-work")
+        val job = pending.scan.job(pending.roots)?.copy(seedDeferred = city.autonomy != null && city.stock.wood == 0L)
+        if (job == null || !CivsForestry.claimClear(city, building.id, job)) {
+            forestScans.remove(worker.id)
+            return blocked(worker, "waiting-growth", point = pending.scan.root,
+                reason = if (job == null) "tree-not-complete" else "tree-already-claimed")
+        }
+        val work = forestBatch(city, worker, building, world, job)
+        if (work != null) forestScans.remove(worker.id)
+        return work
+    }
+
+    private fun finishForestPlant(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        pending: ForestPlant, paths: Set<Pair<Int, Int>>): CivWorldWork? {
+        val crown = CivsForestry.crownBounds(pending.roots, pending.timber)
+        // A small birch plot must also leave room for a neighbouring young oak or jungle crown.
+        val spacing = 7
+        val bounds = CivBox(crown.min.copy(x = crown.min.x - spacing, z = crown.min.z - spacing),
+            crown.max.copy(x = crown.max.x + spacing, z = crown.max.z + spacing))
+        val width = bounds.max.x - bounds.min.x + 1
+        val count = width * (bounds.max.z - bounds.min.z + 1)
+        if (!CivsForestry.crownClear(city, pending.roots, pending.timber, paths)) {
+            forestPlants.remove(worker.id); return null
+        }
+        // Loaded surface columns catch roads and adjacent crowns before native growth is ever requested.
+        while (pending.next < count && forestBudget()) {
+            val point = CivPosition(bounds.min.x + pending.next % width, bounds.min.y, bounds.min.z + pending.next / width)
+            forestChecksRemaining--
+            val inCrown = point.x in crown.min.x..crown.max.x && point.z in crown.min.z..crown.max.z
+            if (!world.isChunkLoaded(point.x shr 4, point.z shr 4)) {
+                if (inCrown) { forestPlants.remove(worker.id); return null }
+                pending.next++; continue
+            }
+            val top = world.getHighestBlockYAt(point.x, point.z)
+            val block = read(city, building, world, point.copy(y = top), allowOwn = false)
+            // A neighbouring sapling reserves its future crown too; two young plots must not grow into one inseparable tree.
+            if (block?.type?.name?.endsWith("_SAPLING") == true || inCrown && (block == null ||
+                block.type in setOf(Material.DIRT_PATH, Material.COARSE_DIRT) ||
+                top >= bounds.min.y && block.type !in WEEDS && !block.type.isAir)) {
+                forestPlants.remove(worker.id); return null
+            }
+            pending.next++
+        }
+        if (pending.next < count) return blocked(worker, "searching-work")
+        val sapling = pending.timber.removeSuffix("_LOG") + "_SAPLING"
+        if (forestSupply(city, worker, building, sapling) < pending.roots.size) {
+            if (city.autonomy != null) forestPlants.remove(worker.id)
+            return blocked(worker, "waiting-saplings", sapling, pending.roots.size.toLong())
+        }
+        val blocks = pending.roots.map { point ->
+            val block = read(city, building, world, point, allowOwn = false)
+            if (block == null || !block.type.isAir || read(city, building, world, point.copy(y = point.y - 1), allowOwn = false)?.type?.name !in CivsForestry.soils) {
+                forestPlants.remove(worker.id); return null
+            }
+            block
+        }
+        val standing = beside(city, worker, building, world, pending.roots.first(), allowOwn = false) ?: return null
+        forestPlants.remove(worker.id)
+        return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) },
+            mapOf(sapling to pending.roots.size.toLong()), status = "planting-tree", focus = pending.roots.first())
+            .let { if (city.autonomy != null) it.copy(equipmentAfter = null) else it }
+    }
+
+    private fun forestBatch(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        job: CivForestryJob): CivWorldWork? {
+        val existing = city.forestryJobs?.get(building.id.toString())
+        if (existing == null && city.autonomy == null && forestSupply(city, worker, building, job.sapling) < job.roots.size)
+            return blocked(worker, "waiting-saplings", job.sapling, job.roots.size.toLong())
+        val standing = beside(city, worker, building, world, job.root, allowOwn = false) ?: return null
+        val next = CivsForestry.batchEnd(job)
+        val changes = mutableListOf<CivPlanBlock>()
+        val outputs = linkedMapOf<String, Long>()
+        val matcher = CivsForestry.Matcher(job)
+        var logs = 0
+        for (code in job.cells.subList(job.next, next)) {
+            val point = job.position(code)
+            val block = read(city, building, world, point, allowOwn = false) ?: return blocked(worker, "worksite-protected", point = point)
+            if (!block.type.isAir && !matcher.matches(code, block.blockData.asString) { support ->
+                    read(city, building, world, support, allowOwn = false)?.blockData?.asString
+                })
+                return blocked(worker, "worksite-obstacle", point = point, reason = "tree-cell-changed", blockMaterial = block.type.name)
+            if (!block.type.isAir) {
+                if (block.type.name == job.timber) logs++
+                if (city.autonomy == null) drops(block, tool(worker)).forEach { (material, amount) -> outputs.merge(material, amount, Math::addExact) }
+            }
+            val after = if (point in job.roots) CivsForestry.saplingState(job.sapling) else "minecraft:air"
+            if (!block.type.isAir || point in job.roots) changes += change(block, after)
+        }
+        val progress = CivForestryProgress(job, next, outputs, logs)
+        val output = if (city.autonomy == null) outputs else emptyMap()
+        return work(worker, building, standing, changes,
+            if (existing == null && !job.seedDeferred) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap(), output,
+            status = "felling-tree", duration = maxOf(if (job.next == 0) 6_000L else 1_000L, logs * 1_000L), focus = job.root)
+            .copy(forestry = progress).let { if (city.autonomy != null) it.copy(equipmentAfter = null) else it }
+    }
+
+    /** Spruce, jungle and dark oak use four real, supported saplings for native giant variants. */
+    private fun forestPlot(city: Settlement, building: CivBuilding, world: World, root: CivPosition, material: Material): List<CivPosition>? {
         for (dx in listOf(0, -1)) for (dz in listOf(0, -1)) {
             val cells = (0..1).flatMap { x -> (0..1).map { z -> root.copy(x = root.x + dx + x, z = root.z + dz + z) } }
-            if (cells.all { p -> read(city, building, world, p, allowOwn = false)?.type == material &&
-                    read(city, building, world, p.copy(y = p.y - 1), allowOwn = false)?.type in TREE_SOILS }) return cells
+            if (cells.all { point -> read(city, building, world, point, allowOwn = false)?.type == material &&
+                    read(city, building, world, point.copy(y = point.y - 1), allowOwn = false)?.type?.name in CivsForestry.soils }) return cells
         }
         return null
     }
@@ -1291,7 +1424,6 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
         val TYPES = setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY)
         private val SOILS = setOf(Material.DIRT, Material.GRASS_BLOCK, Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.FARMLAND)
-        private val TREE_SOILS = SOILS + Material.PODZOL + Material.MYCELIUM + Material.MOSS_BLOCK
         private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN)
         private val UNBREAKABLE = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME, Material.END_PORTAL, Material.NETHER_PORTAL)
         // Keep the four old adjacent sides first, then examine the rest of the two-block

@@ -16,6 +16,31 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsFootTrafficTest : FunSpec({
+    test("accepted road surface registration needs no online actor and ignores foreign or outside-city targets") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = paper.addSimpleWorld("registered-roads")
+            val plugin = paper.createSimplePlugin("ArcCivsFootsteps")
+            val trails = paper.createSimplePlugin("Trails")
+            val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 1, CivPosition(3, 64, 0), 0,
+                "test", CivBox(CivPosition(2, 64, 0), CivPosition(4, 65, 2)), CivPosition(3, 64, 3), BuildingPhase.ACTIVE)
+            val city = CivsRules.found(UUID.randomUUID(), UUID.randomUUID(), "Roads", world.uid,
+                CivPosition(0, 64, 0), 16, "nordic", hall, 1_000)
+            val api = mockk<TrailsFootTrafficService>()
+            every { api.registerSurface(any()) } returns CompletableFuture.completedFuture(true)
+            paper.server.servicesManager.register(TrailsFootTrafficService::class.java, api, trails, ServicePriority.Normal)
+            val traffic = CivsFootTraffic(plugin) { listOf(city) }
+            val at = CivPosition(1, 64, 1)
+            world.loadChunk(0, 0)
+            world.getBlockAt(1, 64, 1).type = org.bukkit.Material.COARSE_DIRT
+            traffic.registerSurface(city.id, at)
+            verify(exactly = 1) { api.registerSurface(world.getBlockAt(1, 64, 1)) }
+            traffic.registerSurface(city.id, CivPosition(1600, 64, 0))
+            world.isChunkLoaded(100, 0) shouldBe false
+            traffic.registerSurface(UUID.randomUUID(), at)
+            verify(exactly = 1) { api.registerSurface(any()) }
+        }
+    }
+
     test("optional footsteps forward actual movement with an online city member as authority") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("footsteps")

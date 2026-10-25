@@ -2,6 +2,9 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
 import org.bukkit.Bukkit
 import org.bukkit.Material
 import org.bukkit.block.Barrel
@@ -18,6 +21,35 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
 class CivsWorldTest : FunSpec({
+    test("the retained route step exception accepts only dry bottom stair block states") {
+        worldScenario { _ ->
+            for (material in listOf("cobblestone", "oak")) for (facing in listOf("north", "east", "south", "west"))
+                for (half in listOf("bottom", "top")) for (wet in listOf(false, true)) {
+                    val data = Bukkit.createBlockData("minecraft:${material}_stairs[facing=$facing,half=$half,shape=straight,waterlogged=$wet]")
+                    civsRetainedRouteStep(data) shouldBe (half == "bottom" && !wet)
+                }
+            civsRetainedRouteStep(Bukkit.createBlockData(Material.COBBLESTONE)) shouldBe false
+            civsRetainedRouteStep(Bukkit.createBlockData(Material.WATER)) shouldBe false
+        }
+    }
+
+    for (wet in listOf(false, true))
+    test("preserved route capture ${if (wet) "rejects waterlogged" else "retains dry"} paved stairs without rewriting them") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
+            s.cities += city
+            val data = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=$wet]"
+            s.world.getBlockAt(-1, 63, 0).blockData = Bukkit.createBlockData(data)
+            val draft = CivTerraformDraft(building, listOf(CivTerraformColumn(-1, 0, 63, 63, 63, preserve = true)),
+                listOf(building.entrance), 64)
+            val captured = s.subject.captureTerraform(city, draft, java.util.concurrent.Executor(Runnable::run))
+            repeat(5) { if (!captured.isDone) s.scheduler.tick() }
+            if (wet) failureReason(captured) shouldBe "autonomy-no-path" else completed(captured).blocks shouldBe emptyList()
+            s.world.getBlockAt(-1, 63, 0).blockData.asString shouldBe data
+        }
+    }
+
     for (type in listOf(BuildingType.ROAD, BuildingType.GATE))
     test("a planned $type containing its depot source permits a validated route through its own footprint") {
         worldScenario(collisionWorld = true) { s ->
@@ -1303,6 +1335,58 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    for (plant in listOf(Material.LEAF_LITTER, Material.WILDFLOWERS, Material.PINK_PETALS, Material.BUSH,
+        Material.FIREFLY_BUSH, Material.SHORT_DRY_GRASS, Material.TALL_DRY_GRASS, Material.CLOSED_EYEBLOSSOM,
+        Material.OPEN_EYEBLOSSOM, Material.CACTUS_FLOWER, Material.PALE_MOSS_CARPET, Material.PALE_HANGING_MOSS))
+    test("strict autonomous admission treats native $plant ground cover as clearable vegetation") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(anchor = CivPosition(0, 63, 0))
+            s.world.getBlockAt(0, 63, 0).type = Material.DIRT
+            val block = s.world.getBlockAt(0, 64, 0).also { it.type = plant }
+            val before = block.blockData.asString
+            val capture = s.subject.captureAutonomousSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                building, worldSchematicCells(building))
+            s.scheduler.tick()
+            completed(capture).blocks.single().before shouldBe before
+            block.type shouldBe plant
+        }
+    }
+
+    for (ground in listOf(63, 64))
+    test("native leaf litter ${if (ground == 63) "clears" else "fills"} through terrain overlay - MockBukkit lacks LeafLitter properties")
+        .config(enabled = false) {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 66, 0)))
+                .copy(anchor = CivPosition(0, ground, 0), entrance = CivPosition(-1, ground + 1, 0))
+            val position = CivPosition(0, 64, 0)
+            // MockBukkit 4.116.3 cannot parse LeafLitter's facing/segment_amount, including terrain-ledger replay.
+            // Keep this native scenario explicit; enabled material-admission and exact detached-planner cases cover their layers.
+            val litterData = Bukkit.createBlockData("minecraft:leaf_litter[facing=south,segment_amount=3]")
+            val litter = litterData.asString
+            s.world.getBlockAt(0, 63, 0).type = Material.DIRT
+            s.world.getBlockAt(0, 64, 0).blockData = litterData
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val cells = worldSchematicCells(building)
+            // Without a terrain overlay, strict schematic admission must recognise the same plant.
+            val direct = s.subject.captureAutonomousSite(cityId, owner, s.world.uid, building, cells)
+            s.scheduler.tick()
+            completed(direct).blocks.first { it.position == position }.before shouldBe litter
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid,
+                building, cells, java.util.concurrent.Executor(Runnable::run), autonomous = true)
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(preparation))
+            val after = if (ground == 63) "minecraft:air" else "minecraft:dirt"
+            terrain.blocks.filter { it.position.x == 0 } shouldBe listOf(CivPlanBlock(position, litter, after))
+            // Capturing the final plan also revalidates the exact original earthwork cell.
+            val capture = s.subject.captureAutonomousSite(cityId, owner, s.world.uid, building, cells, terrain)
+            s.scheduler.tick()
+            completed(capture).blocks.first { it.position == position }.before shouldBe after
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(0, 64, 0).blockData.asString shouldBe litter
+        }
+    }
+
     for (platform in listOf(Material.OAK_PLANKS, Material.STONE_BRICKS))
     test("ordinary manual foundation reuses an unchanged $platform platform without creating terrain") {
         worldScenario(collisionWorld = true) { s ->
@@ -1348,18 +1432,50 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    for (published in listOf(false, true))
-    test("${if (published) "published" else "unpublished"} autonomous foundation still refuses a crafted platform") {
+    for (published in listOf(false, true)) for (platform in listOf(Material.OAK_PLANKS, Material.STONE_BRICKS, Material.COAL_ORE))
+    test("${if (published) "published" else "unpublished"} autonomous foundation retains an unchanged $platform base") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(worldBox(0, 0)).copy(anchor = CivPosition(0, 63, 0))
             val city = worldCity(s.world.uid, building).copy(buildings = emptyList(), autonomy = CivAutonomy())
             if (published) s.cities += city
-            s.world.getBlockAt(0, 63, 0).type = Material.OAK_PLANKS
+            s.world.getBlockAt(0, 63, 0).type = platform
+            val cells = worldSchematicCells(building)
             val preparation = s.subject.captureManualFoundation(city.id, city.owner, s.world.uid,
-                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run), autonomous = !published)
+                building, cells, java.util.concurrent.Executor(Runnable::run), autonomous = !published)
             s.scheduler.tick()
-            failureReason(preparation) shouldBe "autonomy-terrain"
-            s.world.getBlockAt(0, 63, 0).type shouldBe Material.OAK_PLANKS
+            completed(preparation) shouldBe null
+            val capture = s.subject.captureAutonomousSite(city.id, city.owner, s.world.uid, building, cells)
+            s.scheduler.tick()
+            completed(capture).terrain shouldBe null
+            s.world.getBlockAt(0, 63, 0).type shouldBe platform
+        }
+    }
+
+    test("autonomous foundation retains ore and crafted fill support without authorizing a crafted schematic replacement") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 66, 0), CivPosition(0, 70, 0)))
+                .copy(anchor = CivPosition(0, 68, 0), entrance = CivPosition(-1, 69, 0))
+            s.world.getBlockAt(0, 65, 0).type = Material.COAL_ORE
+            s.world.getBlockAt(0, 67, 0).type = Material.STONE_BRICKS
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val cells = worldSchematicCells(building)
+            val preparation = s.subject.captureManualFoundation(cityId, owner, s.world.uid,
+                building, cells, java.util.concurrent.Executor(Runnable::run), autonomous = true)
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(preparation))
+            terrain.blocks.filter { it.position.x == 0 } shouldBe listOf(
+                CivPlanBlock(CivPosition(0, 66, 0), "minecraft:air", "minecraft:dirt"),
+                CivPlanBlock(CivPosition(0, 68, 0), "minecraft:air", "minecraft:dirt"))
+            val capture = s.subject.captureAutonomousSite(cityId, owner, s.world.uid, building, cells, terrain)
+            s.scheduler.tick()
+            val failure = rejection(capture)
+            failure.reason shouldBe "autonomy-terrain"
+            failure.values["block"] shouldBe "STONE_BRICKS"
+            failure.values["y"] shouldBe "67"
+            s.world.getBlockAt(0, 65, 0).type shouldBe Material.COAL_ORE
+            s.world.getBlockAt(0, 67, 0).type shouldBe Material.STONE_BRICKS
+            s.world.getBlockAt(0, 66, 0).type shouldBe Material.AIR
         }
     }
 
@@ -1431,17 +1547,82 @@ class CivsWorldTest : FunSpec({
     }
 
     for (obstacle in listOf(Material.WATER, Material.CHEST))
-    test("manual foundation refuses $obstacle in a deep support column without changing it") {
+    test("manual foundation refuses $obstacle in its first deep column before scanning the rest or dispatching planning") {
         worldScenario(collisionWorld = true) { s ->
-            val building = worldBuilding(CivBox(CivPosition(0, 96, 0), CivPosition(0, 98, 0)))
-                .copy(anchor = CivPosition(0, 98, 0), entrance = CivPosition(-1, 99, 0))
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(12, 105, 12)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
             s.world.getBlockAt(0, 70, 0).type = obstacle
+            val work = mutableListOf<Runnable>()
             val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
-                building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+                building, worldSchematicCells(building), java.util.concurrent.Executor(work::add))
             s.scheduler.tick()
-            failureReason(preparation) shouldBe "autonomy-terrain"
+            val failure = rejection(preparation)
+            failure.reason shouldBe "autonomy-terrain"
+            failure.values shouldBe mapOf("block" to obstacle.name, "x" to "0", "y" to "70", "z" to "0",
+                "world" to s.world.uid.toString(), "world_name" to s.world.name)
+            work shouldBe emptyList()
             s.world.getBlockAt(0, 70, 0).type shouldBe obstacle
-            s.world.getBlockAt(0, 96, 0).type shouldBe Material.AIR
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("a denied manual base keeps its Lands reason and emits one failed scan event") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0)).copy(anchor = CivPosition(0, 63, 0))
+            s.world.getBlockAt(0, 63, 0).type = Material.COAL_ORE
+            val lands = s.paper.createSimplePlugin("Lands")
+            lands.server.pluginManager.disablePlugin(lands)
+            val events = mutableListOf<Pair<String, Map<String, Any?>>>()
+            mockkObject(CivsDiagnostics)
+            every { CivsDiagnostics.event(any(), *anyVararg()) } answers {
+                events += firstArg<String>() to secondArg<Array<Pair<String, Any?>>>().toMap()
+                Unit
+            }
+            try {
+                val work = mutableListOf<Runnable>()
+                val preparation = s.subject.captureManualFoundation(UUID.randomUUID(), UUID.randomUUID(), s.world.uid,
+                    building, worldSchematicCells(building), java.util.concurrent.Executor(work::add), autonomous = true)
+                s.scheduler.tick(3)
+                val failure = rejection(preparation)
+                failure.reason shouldBe "lands-denied"
+                failure.values["block"] shouldBe "COAL_ORE"
+                failure.values["y"] shouldBe "63"
+                work shouldBe emptyList()
+                val event = events.filter { it.first == "world_scan" }.single().second
+                event["phase"] shouldBe "manualfoundationcapture"
+                event["cells"] shouldBe 3
+                event["outcome"] shouldBe "rejected"
+                event["reason"] shouldBe "lands-denied"
+                event["detail"] shouldBe failure.values
+                ((event["elapsed_ms"] as Long) >= 0) shouldBe true
+                s.world.getBlockAt(0, 63, 0).type shouldBe Material.COAL_ORE
+            } finally { unmockkObject(CivsDiagnostics) }
+        }
+    }
+
+    test("manual foundation refreshes retained entrance protection after a building list changes between slices") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                var nanos = 0L
+                WorldScenario(paper, collisionWorld = true) { nanos.also { nanos += CivsWorld.NANOS_PER_TICK } }.use { s ->
+                    val building = worldBuilding(worldBox(0, 1))
+                    val existing = worldBuilding(worldBox(5, 5)).copy(phase = BuildingPhase.ACTIVE,
+                        entrance = CivPosition(8, 65, 0))
+                    val city = worldCity(s.world.uid, existing)
+                    s.cities += city
+                    val preparation = s.subject.captureManualFoundation(city.id, city.owner, s.world.uid,
+                        building, worldSchematicCells(building), java.util.concurrent.Executor(Runnable::run))
+                    s.scheduler.tick(4)
+                    preparation.isDone shouldBe false
+                    s.cities[0] = city.copy(buildings = listOf(existing.copy(entrance = CivPosition(1, 65, 0))))
+                    s.scheduler.tick(3)
+                    val failure = rejection(preparation)
+                    failure.reason shouldBe "building-overlap"
+                    failure.values["x"] shouldBe "1"
+                    failure.values["y"] shouldBe "64"
+                    s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+                }
+            }
         }
     }
 

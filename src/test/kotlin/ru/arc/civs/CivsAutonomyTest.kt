@@ -138,7 +138,7 @@ class CivsAutonomyTest : FunSpec({
         CivsRules.autoAssign(assigned, city.owner, 400_000) shouldBe assigned
     }
 
-    test("real trip receipts sustain eleven buildings including three houses through level two without outside inputs") {
+    test("accepted production and forestry receipts sustain eleven buildings including three houses through level two without outside inputs") {
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
         val completed = mutableListOf<Pair<BuildingType, Int>>()
@@ -171,7 +171,8 @@ class CivsAutonomyTest : FunSpec({
                 val job = worker.assignment?.let(city::building) ?: continue
                 val resource = CivsRules.resource(job.type) ?: continue
                 if (now >= worker.nextDeliveryAt && CivsRules.productionAvailable(city, job) &&
-                    CivsRules.capacity(city) - city.stock[resource] >= CivsRules.deliveryAmount(job)) city = autonomyTrip(city, worker, now)
+                    CivsRules.capacity(city) - city.stock[resource] >= CivsRules.deliveryAmount(job)) city =
+                    if (job.type == BuildingType.FORESTER) autonomyForestryReceipt(city, worker, now) else autonomyTrip(city, worker, now)
             }
             city = CivsPopulation.advance(city, city.workers.filter { it.assignment != null }.mapTo(hashSetOf()) { it.id }, CivsNames::name)
             city = CivsAutonomy.activeMinute(city)
@@ -214,6 +215,23 @@ private fun autonomyOrder(building: CivBuilding, rows: Int) = CivConstruction(UU
 
 private fun autonomyTrip(city: Settlement, worker: CivWorker, now: Long): Settlement = CivsRules.deliver(city, city.owner,
     worker.id, requireNotNull(worker.assignment), worker.completedCycles, worker.nextDeliveryAt, now)
+
+/** Accepted domain observation only; native growth and route arrival are separate platform checks. */
+private fun autonomyForestryReceipt(city: Settlement, worker: CivWorker, now: Long): Settlement {
+    val building = requireNotNull(worker.assignment?.let(city::building))
+    val root = city.center.copy(y = city.center.y + 1)
+    val centre = (15 shl 5) or 15
+    val job = CivForestryJob(UUID.randomUUID(), root, "OAK_SAPLING", listOf(root),
+        listOf("minecraft:oak_log[axis=y]", "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"),
+        listOf((1 shl 16) or (5 shl 10) or centre) + (4 downTo 0).map { (it shl 10) or centre },
+        seedDeferred = city.stock.wood == 0L)
+    val work = CivWorldWork(worker.id, worker.completedCycles, building.id, root.copy(x = root.x - 1),
+        job.cells.map { code -> CivPlanBlock(job.position(code), job.state(code),
+            if (job.position(code) == root) "minecraft:oak_sapling[stage=0]" else "minecraft:air") },
+        inputs = if (job.seedDeferred) emptyMap() else mapOf("OAK_SAPLING" to 1L), status = "felling-tree", focus = root,
+        forestry = CivForestryProgress(job, job.cells.size, harvestedLogs = 5))
+    return CivsRules.finishWorldWork(city, work, now)
+}
 
 private fun autonomyRoundtrip(city: Settlement): Settlement = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
 

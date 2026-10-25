@@ -44,13 +44,15 @@ class CivsProtection(
     private val available: () -> Boolean = { true },
     private val protectedWorlds: Set<String> = emptySet(),
     private val worldLocked: (UUID, CivPosition) -> Boolean = { _, _ -> false },
+    private val forestryPath: (UUID, Int, Int) -> Boolean = { _, _, _ -> false },
 ) : Listener {
     internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>,
         val barrelRestorers: Set<UUID> = emptySet())
     internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
         val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>,
         val cropCells: Set<Pair<UUID, CivPosition>>,
-        val autonomousControls: Map<Pair<UUID, CivPosition>, Boolean> = emptyMap())
+        val autonomousControls: Map<Pair<UUID, CivPosition>, Boolean> = emptyMap(),
+        val growthWorlds: Map<UUID, IndexNode> = emptyMap(), val growthGeometry: List<Footprint> = emptyList())
     internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
         fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false): Boolean = bounds.contains(x, y, z) &&
             (boxes.any { it.bounds.contains(x, y, z) &&
@@ -69,7 +71,8 @@ class CivsProtection(
     fun refresh(): Boolean {
         val prepared = prepare(cities())
         if (prepared.geometry == snapshot.geometry && prepared.controlEditors == snapshot.controlEditors &&
-            prepared.cropCells == snapshot.cropCells && prepared.autonomousControls == snapshot.autonomousControls) return false
+            prepared.cropCells == snapshot.cropCells && prepared.autonomousControls == snapshot.autonomousControls &&
+            prepared.growthGeometry == snapshot.growthGeometry) return false
         return publish(prepared)
     }
 
@@ -112,12 +115,16 @@ class CivsProtection(
                     }
                 }
             }.distinct()
+            val growth = current.map { it.copy(bounds = CivBox(it.bounds.min.copy(y = -4_096), it.bounds.max.copy(y = 4_096))) } +
+                cities.flatMap { city -> CivsForestry.paths(city).map { (x, z) ->
+                    Footprint(city.worldId, CivBox(CivPosition(x, -4_096, z), CivPosition(x, 4_096, z)), emptySet())
+                } }
             return Snapshot(current, current.groupBy { it.worldId }.mapValues { (_, footprints) ->
                 index(footprints)
             }, cities.flatMap { city -> city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.members + city.owner) } }.toMap(), crops,
                 cities.filter { it.autonomy != null }.flatMap { city ->
                     city.buildings.mapNotNull { it.control }.map { (city.worldId to it) to (city.pendingDeletion == null) }
-                }.toMap())
+                }.toMap(), growth.groupBy { it.worldId }.mapValues { (_, footprints) -> index(footprints) }, growth)
         }
 
         /** Area-independent memory preserves old large footprints without enumerating their chunks. */
@@ -297,7 +304,12 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun tree(event: StructureGrowEvent) {
-        if (protected(event.location) || event.blocks.any { protected(it.location) }) event.isCancelled = true
+        fun blocked(location: Location): Boolean = location.world?.let { world ->
+            worldLocked(world.uid, CivPosition(location.blockX, location.blockY, location.blockZ)) || protected(location) ||
+                snapshot.growthWorlds[world.uid]?.contains(location.blockX, location.blockY, location.blockZ, null) == true ||
+                forestryPath(world.uid, location.blockX, location.blockZ)
+        } ?: false
+        if (blocked(event.location) || event.blocks.any { blocked(it.location) }) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

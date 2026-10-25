@@ -914,6 +914,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.navigate()
             h.owner.pulse(3_000)
             h.owner.status(h.workerId) shouldBe "workers.status.retreating"
+            // A child may have made its harmless idle gesture before the threat pulse spotted the monster.
+            clearMocks(victim, answers = false, recordedCalls = true)
             for (tick in 0 until 2_000) {
                 val before = victim.location
                 h.navigate()
@@ -1000,7 +1002,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("full autonomous storage permits leisure then resumes at real delivery points fullBeforeWork=$fullBeforeWork") {
         residentRuntime { h ->
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
-            val producer = h.assignFarm().copy(type = BuildingType.FORESTER, production = null,
+            val producer = h.assignQuarry().copy(production = null,
                 bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)), control = null)
             h.world.getBlockAt(20, 64, 0).type = Material.AIR
             val hall = h.city.buildings.first().copy(
@@ -1008,7 +1010,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
                 buildings = listOf(hall, producer)))
             val token = requireNotNull(citizenPlan(h.city, h.city.workers.single())).token
-            val full = Stock(wood = CivsRules.capacity(h.city))
+            val full = Stock(stone = CivsRules.capacity(h.city))
             if (fullBeforeWork) h.city = h.city.copy(stock = full)
             h.onDelivery = {
                 it shouldBe token
@@ -1069,7 +1071,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.pendingDelivery.complete(h.city)
             h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
             h.city.workers.single().completedCycles shouldBe 1L
-            h.city.stock.wood shouldBe CivsRules.deliveryAmount(producer)
+            h.city.stock.stone shouldBe CivsRules.deliveryAmount(producer)
             h.deliveries shouldBe 1
         }
     }
@@ -1138,10 +1140,9 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    for (type in listOf(BuildingType.FORESTER, BuildingType.QUARRY))
-    test("autonomous $type walks a complete production trip beside a floating hall SITE barrel") {
+    test("autonomous quarry walks a complete production trip beside a floating hall SITE barrel") {
         residentRuntime { h ->
-            val producer = h.assignFarm().copy(type = type, production = null,
+            val producer = h.assignQuarry().copy(production = null,
                 bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)),
                 control = CivPosition(22, 67, -2))
             h.world.getBlockAt(20, 64, 0).type = Material.AIR
@@ -1211,7 +1212,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.pendingDelivery.complete(h.city)
             h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
             h.city.workers.single().completedCycles shouldBe 1L
-            h.city.stock[CivsRules.resource(type)!!] shouldBe CivsRules.deliveryAmount(producer)
+            h.city.stock.stone shouldBe CivsRules.deliveryAmount(producer)
             h.deliveries shouldBe 1
             shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
             h.workPlans shouldBe 0
@@ -1640,7 +1641,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a sleeping place occupied during travel releases its finished route and chooses another place") {
+    test("a sleeping place occupied during travel releases its reservation before contact and chooses another place") {
         residentRuntime { h ->
             for (x in -2..2) for (z in -2..1) h.world.loadChunk(x, z)
             val home = h.city.buildings.single().copy(bounds = CivBox(CivPosition(-4, 64, -4), CivPosition(4, 68, 4)))
@@ -1658,24 +1659,20 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.world.time = 13_000
             h.owner.pulse(3_000)
             val reserved = Location(h.world, 1.5, 64.0, .5)
-            // Another resident occupies the place after its reservation. The real
-            // owner must revalidate the pose even when its route has completed.
+            // Another resident occupies the place after reservation. Revalidate before
+            // arrival: the physical collision guard must never let this route finish inside it.
             visitor.teleport(reserved)
-            for (tick in 1..512) {
-                h.navigate()
-                if (resident.location.distanceSquared(reserved) < .000001) break
-            }
-            withClue("location=${resident.location} ${h.navigationState()}") {
-                resident.location.toVector() shouldBe reserved.toVector()
-            }
-            // Let the route owner retire its final waypoint before the arrival pulse.
-            h.navigate()
             h.owner.pulse(4_000)
             resident.pose shouldBe PacketNpcPose.STANDING
             var slept = false
             for (tick in 1..400) {
                 h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(4_000 + tick * 50L)
+                val at = resident.location
+                val feet = BoundingBox(at.x - .3, at.y, at.z - .3, at.x + .3, at.y + 1.8, at.z + .3)
+                if (resident.pose != PacketNpcPose.SLEEPING)
+                    feet.overlaps(BoundingBox(reserved.x - .3, reserved.y, reserved.z - .3,
+                        reserved.x + .3, reserved.y + 1.8, reserved.z + .3)) shouldBe false
                 if (resident.pose == PacketNpcPose.SLEEPING) { slept = true; break }
             }
             withClue("location=${resident.location} ${h.navigationState()}") { slept shouldBe true }
@@ -1962,6 +1959,160 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.spawns shouldBe 2
             h.city shouldBe saved
             h.deliveries shouldBe 0
+        }
+    }
+
+    test("five residents walk and pause independently and separate an exact overlap without work or teleport credit") {
+        residentRuntime(workerId = UUID.fromString("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84")) { h ->
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val ids = listOf(h.workerId, UUID.fromString("06254fa5-4795-4a8e-a7c7-783f9fc90cfd"),
+                UUID(0, 101), UUID(0, 102), UUID(0, 103))
+            h.city = h.city.copy(workers = ids.mapIndexed { index, id -> CivWorker(id, "Idle $index", null) })
+            repeat(3) { h.owner.pulse(2_000L + it * 1_000) }
+            h.navigationNow = 4_000
+            val city = h.city
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            actors.size shouldBe 5
+            fun body(npc: PacketPlayerNpc): BoundingBox = npc.location.let {
+                BoundingBox(it.x - .3, it.y, it.z - .3, it.x + .3, it.y + 1.8, it.z + .3)
+            }
+            fun separated() = ids.indices.all { first -> (first + 1 until ids.size).all { second ->
+                !body(actors.getValue(ids[first])).overlaps(body(actors.getValue(ids[second])))
+            } }
+            separated() shouldBe true // Initial and fallback admission never share a body.
+            val same = Location(h.world, 4.5, 64.0, 4.5)
+            actors.getValue(ids[0]).teleport(same)
+            actors.getValue(ids[1]).teleport(same)
+            repeat(20) {
+                val previous = actors.mapValues { it.value.location }
+                h.navigate()
+                actors.forEach { (id, npc) -> (previous.getValue(id).distance(npc.location) <= .118251) shouldBe true }
+            }
+            h.clearRecordedCalls()
+            separated() shouldBe true
+            val walked = ids.associateWith { 0.0 }.toMutableMap()
+            val moving = ids.associateWith { mutableListOf<Boolean>() }
+            val starts = ids.associateWith { linkedSetOf<Long>() }
+            var mixedMotionTicks = 0
+            for (tick in 1..1_200) {
+                val previous = actors.mapValues { it.value.location }
+                h.navigate()
+                if (tick % 20 == 0) {
+                    h.owner.pulse(requireNotNull(h.navigationNow))
+                    val entries = h.owner.debug(city.id, null)["entries"] as List<*>
+                    val targets = entries.mapNotNull { entry ->
+                        val state = entry as Map<*, *>
+                        val route = state["route"] as? Map<*, *> ?: return@mapNotNull null
+                        starts.getValue(state["worker"] as UUID) += route["started_at"] as Long
+                        route["target"] as CitizenPoint
+                    }
+                    targets.distinct().size shouldBe targets.size
+                    h.clearRecordedCalls() // Keep the 60-second behavioral trace, not millions of MockK property-call records.
+                }
+                var movingNow = 0
+                actors.forEach { (id, npc) ->
+                    val distance = previous.getValue(id).distance(npc.location)
+                    (distance <= .118251) shouldBe true
+                    walked[id] = walked.getValue(id) + distance
+                    moving.getValue(id) += distance > .000001
+                    if (distance > .000001) movingNow++
+                }
+                if (movingNow in 1..4) mixedMotionTicks++
+                withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") { separated() shouldBe true }
+            }
+            withClue("walked=$walked starts=$starts") {
+                walked.values.all { it >= 4.0 } shouldBe true
+                starts.values.all { it.size >= 2 } shouldBe true
+                moving.values.all { ticks -> ticks.count { it } >= 40 && ticks.count { !it } >= 40 } shouldBe true
+                (mixedMotionTicks >= 100) shouldBe true
+                (moving.getValue(ids[0]) != moving.getValue(ids[1])) shouldBe true
+                (starts.getValue(ids[0]) != starts.getValue(ids[1])) shouldBe true
+            }
+            h.spawns shouldBe 5
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
+            h.city shouldBe city
+        }
+    }
+
+    test("idle neighbours meet without a campfire face each other gesture briefly then resume separate walks") {
+        residentRuntime(workerId = UUID(0, 7)) { h ->
+            val actors = h.startSocialPair()
+            val city = h.city
+            h.awaitConversation()
+            val start = requireNotNull(h.navigationNow)
+            val initial = actors.associate { it.uniqueId to it.location }
+            val firstState = h.socialState(actors.first().uniqueId)
+            val secondState = h.socialState(actors.last().uniqueId)
+            firstState["partner"] shouldBe actors.last().uniqueId
+            secondState["partner"] shouldBe actors.first().uniqueId
+            (firstState["seat"] != secondState["seat"]) shouldBe true
+            val beforeGestures = actors.associate { it.uniqueId to h.gestures.getOrDefault(it.uniqueId, 0) }
+            var endedAt: Long? = null
+            for (tick in 1..320) {
+                h.navigate()
+                if (tick % 20 == 0) {
+                    h.owner.pulse(requireNotNull(h.navigationNow))
+                    h.clearRecordedCalls()
+                }
+                if (actors.all { h.socialState(it.uniqueId)["visit"] == false }) { endedAt = h.navigationNow; break }
+                if (tick >= 20) for ((npc, other) in listOf(actors.first() to actors.last(), actors.last() to actors.first())) {
+                    val desired = citizenLookDirection(npc.location.add(0.0, npc.eyeHeight, 0.0),
+                        other.location.add(0.0, other.eyeHeight, 0.0)).first
+                    (kotlin.math.abs(citizenAngleChange(npc.bodyYaw, desired)) <= 20f) shouldBe true
+                    npc.location.toVector() shouldBe initial.getValue(npc.uniqueId).toVector()
+                    h.owner.status(npc.uniqueId) shouldBe "workers.status.talking"
+                }
+            }
+            withClue("social=${actors.map { h.socialState(it.uniqueId) }}") {
+                (endedAt != null) shouldBe true
+                (requireNotNull(endedAt) - start in 7_000L..14_000L) shouldBe true
+            }
+            actors.forEach { npc -> (h.gestures.getOrDefault(npc.uniqueId, 0) - beforeGestures.getValue(npc.uniqueId) in 1..4) shouldBe true }
+            for (tick in 1..400) {
+                h.navigate()
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if (actors.all { it.location.distanceSquared(initial.getValue(it.uniqueId)) > 1.0 }) break
+            }
+            actors.all { it.location.distanceSquared(initial.getValue(it.uniqueId)) > 1.0 } shouldBe true
+            actors.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
+            h.city shouldBe city
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
+        }
+    }
+
+    test("street partners release both visits when work a threat night or departure takes priority") {
+        for (interruption in listOf("work", "threat", "night", "departure")) {
+            residentRuntime(workerId = UUID(0, 7)) { h ->
+                val actors = h.startSocialPair()
+                h.awaitConversation()
+                when (interruption) {
+                    "work" -> {
+                        val farm = h.assignFarm(h.workerId)
+                        h.city.workers.single { it.id != h.workerId }.assignment shouldBe null
+                        h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(22, 64, 0), emptyList(),
+                            durationMillis = 1_000, status = "working-field")
+                    }
+                    "threat" -> actors.first().location.let { h.monsterAt(it.x + 1.0, it.z) }
+                    "night" -> h.world.time = 13_000
+                    "departure" -> h.city = h.city.copy(workers = h.city.workers.filter { it.id != actors.last().uniqueId })
+                }
+                h.owner.pulse(requireNotNull(h.navigationNow) + 1)
+                h.navigate()
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                val remaining = h.owner.collisionActors()
+                withClue(interruption) {
+                    remaining.size shouldBe if (interruption == "departure") 1 else 2
+                    remaining.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
+                    remaining.all { h.owner.status(it.uniqueId) !in setOf("workers.status.meeting", "workers.status.talking") } shouldBe true
+                    if (interruption == "work") {
+                        h.phase(h.workerId) shouldBe CitizenPhase.TO_WORK
+                        h.phase(h.city.workers.single { it.id != h.workerId }.id) shouldBe CitizenPhase.IDLE
+                    }
+                    h.deliveries shouldBe 0
+                }
+            }
         }
     }
 
@@ -2761,16 +2912,18 @@ private fun runtimeSleepingBody(npc: PacketPlayerNpc): BoundingBox {
     }
 }
 
-private fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, block: (ResidentRuntime) -> Unit) {
+private fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, workerId: UUID = UUID.randomUUID(),
+    block: (ResidentRuntime) -> Unit) {
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open().use { paper ->
-            val fixture = ResidentRuntime(paper, useOwnedNavigationExecutor)
+            val fixture = ResidentRuntime(paper, useOwnedNavigationExecutor, workerId)
             try { block(fixture) } finally { fixture.close() }
         }
     }
 }
 
-private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean) : AutoCloseable {
+private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean,
+    val workerId: UUID) : AutoCloseable {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
     private val navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val navigationWork = BudgetedTaskQueue(navigationTasks, nanoTime = { 0L })
@@ -2778,7 +2931,6 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val logger get() = plugin.logger
     val world = ResidentRuntimeWorld().also(paper.server::addWorld)
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
-    val workerId = UUID.randomUUID()
     var viewing = true
     var background = false
     var spawns = 0
@@ -2814,6 +2966,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var onPickup: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> }
     val pendingPickup = CompletableFuture<Settlement>()
     val steps = mutableListOf<Pair<Location, Location>>()
+    val gestures = mutableMapOf<UUID, Int>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
     var constructionWorkplace: CivPosition? = null
@@ -2877,6 +3030,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
                     Unit
                 }
                 every { setEquipment(EquipmentSlot.HAND, any()) } answers { displayedHand = secondArg<ItemStack>().type; Unit }
+                every { swingMainHand() } answers { gestures[profile.uuid] = gestures.getOrDefault(profile.uuid, 0) + 1; Unit }
                 every { remove() } answers { valid = false; Unit }
             }
         }
@@ -2957,10 +3111,35 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         holdNavigation = false
         while (navigationWorkers.isNotEmpty()) navigationWorkers.removeFirst().run()
     }
+    fun clearRecordedCalls() = clearMocks(packets, *owner.collisionActors().toTypedArray(),
+        answers = false, recordedCalls = true, childMocks = false)
+    fun socialState(worker: UUID): Map<*, *> =
+        (((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["social"] as Map<*, *>)
+    fun startSocialPair(): List<PacketPlayerNpc> {
+        for (x in -2..1) for (z in -2..1) world.loadChunk(x, z)
+        city = city.copy(workers = city.workers + CivWorker(UUID(0, 29), "Neighbour", null))
+        navigationNow = 2_000
+        owner.pulse(2_000)
+        return owner.collisionActors().toList().also { it.size shouldBe 2 }
+    }
+    fun awaitConversation() {
+        for (tick in 1..2_400) {
+            navigate()
+            if (tick % 20 == 0) {
+                owner.pulse(requireNotNull(navigationNow))
+                clearRecordedCalls()
+                val actors = owner.collisionActors()
+                if (actors.size == 2 && actors.all { socialState(it.uniqueId)["conversation_at"] != null }) return
+            }
+        }
+        error("No street conversation: ${owner.debug(city.id, null)}")
+    }
     override fun close() {
+        val actors = owner.collisionActors().toTypedArray()
         try { owner.closeAsync().join() } finally {
             navigationWork.close()
             navigationTasks.close()
+            clearMocks(packets, *actors)
         }
     }
     private fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
@@ -3018,14 +3197,16 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         idleReason = "waiting-growth"
         pendingDelivery.complete(city)
     }
-    fun assignFarm(): CivBuilding {
+    fun assignFarm(assignedWorker: UUID? = null): CivBuilding {
         val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, CivPosition(20, 64, 0), 0,
             "farm1", CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)), CivPosition(20, 64, 0),
             BuildingPhase.ACTIVE, control = CivPosition(20, 64, 0), production = "WHEAT")
         for (z in -1..1) world.loadChunk(2, z)
         world.getBlockAt(20, 64, 0).type = Material.BARREL
         city = CivsRules.validate(city.copy(buildings = city.buildings + farm,
-            workers = city.workers.map { it.copy(assignment = farm.id, nextDeliveryAt = 1) },
+            workers = city.workers.map {
+                if (assignedWorker == null || it.id == assignedWorker) it.copy(assignment = farm.id, nextDeliveryAt = 1) else it
+            },
             inventory = CivInventory(CivStorageMode.PHYSICAL)))
         return farm
     }

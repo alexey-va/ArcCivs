@@ -646,19 +646,19 @@ class CivsServiceTest : FunSpec({
     test("autonomous production requires entrance arrival and a durable unique trip receipt without physical inventory") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
-            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
+            val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY,
                 control = CivPosition(10, 64, 0))
-            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1)
-            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(hall, forester),
+            val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1)
+            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(hall, quarry),
                 workers = listOf(worker))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
             h.start()
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            fun complete() = deliver.invoke(h.service, village.id, worker.id, forester.id, worker.completedCycles,
+            fun complete() = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
-            val token = CitizenToken(forester.id, worker.completedCycles, worker.nextDeliveryAt, null)
+            val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
             every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
             h.saves shouldBe emptyList()
@@ -668,7 +668,7 @@ class CivsServiceTest : FunSpec({
             h.service.settlements().single().stock shouldBe village.stock
             h.commit(); delivered.join()
             val saved = h.service.settlements().single()
-            saved.stock shouldBe village.stock.copy(wood = village.stock.wood + CivsRules.deliveryAmount(forester))
+            saved.stock shouldBe village.stock.copy(stone = village.stock.stone + CivsRules.deliveryAmount(quarry))
             saved.workers.single().completedCycles shouldBe 1L
             saved.inventory shouldBe null
             saved.workers.single().items shouldBe null
@@ -681,10 +681,10 @@ class CivsServiceTest : FunSpec({
 
     test("autonomous delivery rechecks observed arrival after waiting for another city revision") {
         serviceScenario { h ->
-            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER,
+            val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY,
                 control = CivPosition(10, 67, 0))
-            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1)
-            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(h.city.buildings.first(), forester),
+            val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1)
+            val village = h.city.copy(autonomy = CivAutonomy(), buildings = listOf(h.city.buildings.first(), quarry),
                 workers = listOf(worker))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
             h.start()
@@ -695,9 +695,9 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            val token = CitizenToken(forester.id, worker.completedCycles, worker.nextDeliveryAt, null)
+            val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
             every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns Unit
-            val queued = deliver.invoke(h.service, village.id, worker.id, forester.id, worker.completedCycles,
+            val queued = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             queued.isDone shouldBe false
             verify(exactly = 0) { h.citizens.requireAutonomousDelivery(any(), any(), any()) }

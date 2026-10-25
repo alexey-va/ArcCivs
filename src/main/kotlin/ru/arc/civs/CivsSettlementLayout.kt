@@ -173,7 +173,7 @@ internal object CivsSettlementLayout {
         val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
             access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
         val streetCells = if (reserveUnbuiltStreets)
-            frame.streets.flatMap { streetPoints(it).flatMap(::shoulders) }.mapTo(hashSetOf(), ::key) else emptySet()
+            frame.streets.flatMap { CivsAutonomousTerraform.roadProfile(streetPoints(it)).values }.mapTo(hashSetOf(), ::key) else emptySet()
         val exterior = current.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
         fun placed(entry: CivPosition, turns: Int): CivBuilding {
             val entryOffset = rotate(current.entrance, turns)
@@ -372,14 +372,26 @@ internal object CivsSettlementLayout {
         val roads = linkedMapOf<Long, CivPosition>()
         for (route in pavingRoutes) {
             if (!acceptsRoute(frame, route)) { reject("route-crosses-wall"); continue }
-            for (p in route) for (shoulder in shoulders(p)) {
+            for ((column, shoulder) in CivsAutonomousTerraform.roadProfile(route)) {
                 if (!city.contains(shoulder.x, shoulder.z) || key(shoulder) in used ||
                     frame.gates.any { contains(it.passage, shoulder) } || occupied.any { contains(it, shoulder) }) continue
                 val terrain = surface.at(shoulder.x, shoulder.z)
-                val floor = routeFloors[key(shoulder)] ?: p.y - 1
+                val floor = routeFloors[column] ?: shoulder.y
                 if (terrain?.loaded != true || !terrain.natural || abs(terrain.groundY - floor) > CivsAutonomousTerraform.MAXIMUM_CHANGE) continue
                 roads.putIfAbsent(key(shoulder), shoulder.copy(y = floor))
             }
+        }
+        val pavedFloors = pieces.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
+            .flatMap { it.transit }.associate { key(it) to it.y - 1 } + roads.mapValues { it.value.y }
+        fun pavement(floor: CivPosition): String {
+            val lower = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).filter { (dx, dz) ->
+                pavedFloors[key(floor.x + dx, floor.z + dz)] == floor.y - 1
+            }.singleOrNull() ?: return path
+            val (dx, dz) = lower
+            val next = pavedFloors[key(floor.x - dx, floor.z - dz)] ?: return path
+            if (next !in floor.y..floor.y + 1) return path
+            val facing = when { dx == 1 -> "west"; dx == -1 -> "east"; dz == 1 -> "north"; else -> "south" }
+            return "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
         }
         // Fixed horizontal rectangles retain each column's own grade, including stepped roads.
         // Accepted rectangles were removed above, so later routes never repartition earlier orders.
@@ -395,7 +407,7 @@ internal object CivsSettlementLayout {
             val transit = mutableListOf<CivPosition>()
             for (x in p.x until p.x + width) for (z in p.z until p.z + depth) {
                 val floor = requireNotNull(roads.remove(key(x, z)))
-                cells += CivSettlementBlock(floor, path)
+                cells += CivSettlementBlock(floor, pavement(floor))
                 for (dy in 1..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:air")
                 transit += floor.copy(y = floor.y + 1)
             }
@@ -427,7 +439,6 @@ internal object CivsSettlementLayout {
     private fun key(x: Int, z: Int) = civsTerrainKey(x, z)
     private fun center(box: CivBox) = CivPosition((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2)
     private fun manhattan(a: CivPosition, b: CivPosition) = abs(a.x - b.x) + abs(a.z - b.z)
-    private fun shoulders(p: CivPosition) = (-1..1).flatMap { dx -> (-1..1).map { dz -> p.copy(x = p.x + dx, z = p.z + dz) } }
     private fun streetPoints(street: CivSettlementStreet): List<CivPosition> {
         val dx = (street.to.x - street.from.x).compareTo(0)
         val dz = (street.to.z - street.from.z).compareTo(0)

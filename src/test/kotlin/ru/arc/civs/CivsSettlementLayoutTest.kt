@@ -11,6 +11,30 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 class CivsSettlementLayoutTest : FunSpec({
+    for ((facing, direction) in listOf("east" to (1 to 0), "west" to (-1 to 0),
+        "south" to (0 to 1), "north" to (0 to -1)))
+    test("paved $facing rises use dry bottom cobblestone stairs and flat landings remain full blocks") {
+        val city = layoutFixtureCity()
+        val route = (0..8).map { index -> CivPosition(12 + direction.first * index,
+            65 + index / 3, 12 + direction.second * index) }
+        val profile = CivsAutonomousTerraform.roadProfile(route)
+        val surface = layoutSurface(city, "flat").let { base -> base.copy(columns = base.columns +
+            profile.mapValues { (_, p) -> CivTerrainSurfaceColumn(p.y, true) }) }
+        val result = CivsSettlementLayout.infrastructure(city, CivsSettlementLayout.frame(city), surface, listOf(route))
+        val roads = result.pieces.filter { it.type == BuildingType.ROAD }
+        val cells = roads.flatMap { it.blocks }.associate { it.position to it.after }
+        for (index in listOf(3, 6)) {
+            val surfacePoint = route[index].copy(y = route[index].y - 1)
+            cells[surfacePoint] shouldBe "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
+            cells[surfacePoint.copy(y = surfacePoint.y + 1)] shouldBe "minecraft:air"
+            cells[surfacePoint.copy(y = surfacePoint.y + 2)] shouldBe "minecraft:air"
+            roads.flatMap { it.transit }.contains(route[index]) shouldBe true
+        }
+        for (index in listOf(1, 4, 7))
+            cells[route[index].copy(y = route[index].y - 1)] shouldBe "minecraft:cobblestone"
+        exportRoadSection("paved-slope-$facing", surface, route, paving = roads.flatMap { it.blocks })
+    }
+
     test("the hall frame has three explicit passages and disjoint perimeter strips in every rotation") {
         for (rotation in listOf(0, 90, 180, 270)) {
             val city = layoutFixtureCity(rotation)

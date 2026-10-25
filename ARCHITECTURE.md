@@ -20,12 +20,23 @@ created autonomous snapshots to a version without this mode.
 `CivsAutonomy` chooses one paid goal from nine building types, with three
 HOUSE sites (eleven service buildings), ending at level two. It uses aggregate `Stock` and always has `inventory == null`; migration
 to native item stores excludes this mode. Complete schematic details are covered
-by a one-time wood/stone/food price at `reserveBuild`. Producers bypass natural
+by a one-time wood/stone/food price at `reserveBuild`. FARM and QUARRY bypass natural
 world work and exact inputs, but retain the normal NPC journey, work duration,
 depot arrival check and unique cycle receipt before stock is credited. No elapsed
 time, teleport recovery or forecast alone credits a delivery. This is deliberately
 abstract resource production, not evidence of actual crop/ore harvesting.
-Autonomous producers walk between the completed workplace entrance and the depot
+FORESTER instead plants and harvests native trees through the forestry receipt
+described below. One abstract WOOD pays a complete planting kit (one sapling or
+four for a giant plot); a completed, replanted tree credits the existing 4/8/12
+WOOD once. A mill's paid construction includes one initial kit if its first
+planting encounters zero WOOD. `forestrySeeded` records its use in that same
+receipt, and normal paid planting also consumes that one-use eligibility.
+At zero WOOD a real tree can instead reserve `seedDeferred` on its exact job:
+the final observed harvest pays the one-WOOD kit from its output before replanting.
+Without harvested logs that deferred final receipt cannot plant or grant stock.
+Positive-WOOD jobs prepay once and survive later construction spending unchanged.
+The mill never also produces transferable timber, leaf drops or timed stock.
+The remaining autonomous producers walk between the completed workplace entrance and the depot
 entrance, including a founding SITE hall whose authored barrel is above unfinished
 ground. The final receipt rechecks the observed production building, cycle, mode,
 world, delivery phase and safe native endpoint after waiting for another city save.
@@ -459,12 +470,36 @@ partial field passes or valid targets. An incomplete field search holds the farm
 in place; waiting for growth requires a completed pass without actionable work.
 Care retains field reach, protection and receipt validation; it grants no drops,
 profession training or hoe wear. Existing hunger still applies while working.
-FORESTER fells a real tree of at most 128 logs per
-action, taking max(6 seconds, 1 second per log), yields native tool drops and
-replants only after spending locally stocked saplings: one for ordinary trees,
-four in a 2×2 plot for dark oak. Each tree receipt records at most 128 exact
-physical block changes. Native Unbreaking durability applies only to changed
-non-air source blocks.
+FORESTER plants near its assigned mill and waits for native growth without bone
+meal or a fabricated mature tree. Spruce, jungle and dark oak use supported 2×2
+plots; ordinary species use one sapling. The prospective crown avoids buildings,
+authored fields, approaches, transit columns and retained terrain roads. Nearby
+saplings reserve space for their future crowns too. `StructureGrowEvent` cancels
+the entire generated tree if its actual crown reaches one of those columns or
+an origin/generated cell is still locked by a native receipt.
+Tree discovery follows diagonal and downward branches and face-connected natural
+leaves in resumable slices of at most 192 observations and two milliseconds,
+beside the existing 16 candidate-column probes. A complete tree fits within 2,048
+cells, 15 blocks horizontally from its root and 47 blocks above it; an incomplete,
+unloaded or independently rooted connected crown is left intact.
+`Settlement.forestryJobs` stores one compact state table, relative cell codes and
+cursor per mill. A field-local Base64 codec stores three bytes per cell, with
+size, coordinate and palette bounds checked before admission; fifteen maximal
+crowns with all native vine face states fit the production snapshot limit.
+Vines join a capture only when they face its tree or hang from an attached vine
+above; they cannot connect discovery to an unrelated vine wall or second tree.
+The first native receipt prepays its exact one/four physical replanting saplings
+or records the Auto funding contract above. Later receipts remove at most 128
+captured cells, clear attached vines and leaves before the trunk, and plant all
+reserved roots together at the end. Other mills cannot claim overlapping captured
+cells while that durable job exists. Physical drops leave
+each actual batch once, so a Silk Touch crown larger than the resident's bag can
+be unloaded by the existing courier flow between batches. Auto towns receive no
+items and credit their nominal abstract output only at final completion. The
+same existing inventory/world journal preserves both modes across restart and
+rejects changed cells instead of overwriting later edits. Native Unbreaking wear
+applies to physical tools and changed non-air blocks. Capture/receipt tests do not
+establish native random-tick growth or client acceptance.
 QUARRY advances an authored real shaft across multiple floors. Before excavation,
 the miner needs a pickaxe and carried ladders, torches and cobblestone. If any
 supply runs out, one storage receipt tops the bag up to 16 ladders, 8 torches and

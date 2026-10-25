@@ -60,6 +60,34 @@ class CivsResidentCollisionsTest : FunSpec({
         near(touching.position.x, -.6)
     }
 
+    test("packet resident steps and recovery probes respect full bodies while existing overlap can escape") {
+        val terrain = mockk<World>()
+        val npc = mockk<PacketPlayerNpc> {
+            every { world } returns terrain
+            every { scale } returns 1.0
+            every { height } returns 1.8
+        }
+        fun clear(from: Location, to: Location) = citizenResidentStepClear(npc, from, to, listOf(resident))
+        val left = Location(terrain, -1.0, 64.0, 0.0)
+        clear(left, Location(terrain, 1.0, 64.0, 0.0)) shouldBe false
+        val occupied = Location(terrain, 0.0, 64.0, 0.0)
+        clear(occupied, occupied) shouldBe false
+        clear(occupied, occupied.clone().add(.05, 0.0, 0.0)) shouldBe true
+        val touching = Location(terrain, -.6, 64.0, 0.0)
+        clear(touching, touching) shouldBe true
+        clear(touching, touching.clone().add(0.0, 0.0, .2)) shouldBe true
+        val above = Location(terrain, 0.0, 65.8, 0.0)
+        clear(above, above) shouldBe true
+        clear(above, above.clone().add(.2, 0.0, 0.0)) shouldBe true
+        val child = mockk<PacketPlayerNpc> {
+            every { world } returns terrain
+            every { scale } returns .5
+            every { height } returns .9
+        }
+        val childBeside = Location(terrain, -.45, 64.0, 0.0)
+        citizenResidentStepClear(child, childBeside, childBeside, listOf(resident)) shouldBe true
+    }
+
     test("Creative contact makes the resident yield without rewriting player movement or velocity") {
         collisionScenario { f ->
             f.mode = GameMode.CREATIVE

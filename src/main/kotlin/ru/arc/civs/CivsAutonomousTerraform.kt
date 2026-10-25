@@ -97,6 +97,7 @@ internal object CivsAutonomousTerraform {
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
+        val profile = roadProfile(route)
         fun add(x: Int, z: Int, ground: Int, floor: Int, preserve: Boolean = false) {
             if (!city.contains(x, z) || obstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, ground, z)) })
                 throw CivsRejection("building-overlap")
@@ -130,9 +131,41 @@ internal object CivsAutonomousTerraform {
                 // Unavailable shoulder terrain does not invalidate a safe centre corridor. It is
                 // left untouched; native body/step validation remains authoritative.
                 val native = surface.at(x, z)
-                if (native == null || !native.loaded || !native.natural || abs(native.groundY - ground) > MAXIMUM_CHANGE) continue
-                add(x, z, ground, ground)
+                val shoulderGround = profile.getValue(key).y
+                if (native == null || !native.loaded || !native.natural || abs(native.groundY - shoulderGround) > MAXIMUM_CHANGE) continue
+                add(x, z, shoulderGround, shoulderGround)
             }
+        }
+        // Short bumps return to the same grade at both ends. Ease only their cut banks;
+        // the next ring rises by one block, while long hills and all paving keep their width.
+        var start = 0
+        while (start < route.size) {
+            val point = route[start]
+            val ground = point.y - 1
+            if (surface.at(point.x, point.z)!!.groundY <= ground) { start++; continue }
+            var end = start + 1
+            while (end < route.size && route[end].y == point.y &&
+                surface.at(route[end].x, route[end].z)!!.groundY > ground) end++
+            val before = route.getOrNull(start - 1)
+            val after = route.getOrNull(end)
+            if (end - start <= 5 && before != null && after != null && before.y == point.y && after.y == point.y &&
+                surface.at(before.x, before.z)!!.groundY <= ground &&
+                surface.at(after.x, after.z)!!.groundY <= ground &&
+                (start until end).all { surface.at(route[it].x, route[it].z)!!.groundY <= ground + 3 }) {
+                for (index in start until end) for (dx in -3..3) for (dz in -3..3) {
+                    val x = route[index].x + dx; val z = route[index].z + dz
+                    val key = civsTerrainKey(x, z)
+                    val shoulder = ground + (maxOf(abs(dx), abs(dz)) - 2).coerceAtLeast(0)
+                    if (key in profile || key in standing || !city.contains(x, z) ||
+                        CivsAutonomousGeometry.horizontalContains(building.bounds, CivPosition(x, shoulder, z)) ||
+                        routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, CivPosition(x, shoulder, z)) }) continue
+                    val native = surface.at(x, z)
+                    if (native == null || !native.loaded || !native.natural || native.groundY !in shoulder + 1..ground + 3 ||
+                        columns[key]?.groundY?.let { it <= shoulder } == true) continue
+                    add(x, z, shoulder, shoulder)
+                }
+            }
+            start = end
         }
         CivsAutonomousGeometry.approach(building).forEach { point ->
             add(point.x, point.z, building.entrance.y - 1, building.entrance.y - 1,
@@ -154,11 +187,14 @@ internal object CivsAutonomousTerraform {
     /** Exact before-images, ordered approach-first, with cuts top-down and fill from real support up. */
     fun materialize(draft: CivTerraformDraft, cells: Map<CivPosition, CivTerraformCell>): CivTerraformPlan {
         val result = linkedMapOf<CivPosition, CivPlanBlock>()
+        val routeColumns = draft.route.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         fun at(x: Int, y: Int, z: Int) = cells[CivPosition(x, y, z)] ?: throw CivsRejection("invalid-plan")
+        fun rejectTerrain(cell: CivTerraformCell, stage: String): Nothing = throw CivsRejection("autonomy-terrain",
+            mapOf("x" to cell.position.x.toString(), "y" to cell.position.y.toString(),
+                "z" to cell.position.z.toString(), "block" to cell.data, "stage" to stage))
         fun change(cell: CivTerraformCell, after: String) {
             if (cell.position == draft.building.control || cell.data == after) return
-            if (!cell.safe) throw CivsRejection("autonomy-terrain", mapOf("x" to cell.position.x.toString(),
-                "y" to cell.position.y.toString(), "z" to cell.position.z.toString(), "block" to cell.data))
+            if (!cell.safe) rejectTerrain(cell, "change")
             result[cell.position] = CivPlanBlock(cell.position, cell.data, after)
             if (result.size > MAXIMUM_CHANGED_CELLS) throw CivsRejection("autonomy-search-budget")
         }
@@ -175,7 +211,7 @@ internal object CivsAutonomousTerraform {
             val base = at(x, support, z)
             if (!base.safe && !(draft.route.isEmpty() && base.supportSafe) &&
                 base.data != "minecraft:bedrock" && base.position != draft.building.control)
-                throw CivsRejection("autonomy-terrain")
+                rejectTerrain(base, "support")
             // Clearing first also makes ascent headroom usable before the next route column is reached.
             for (y in maxOf(column.surfaceY, ground) + 2 downTo ground + 1) {
                 val cell = at(x, y, z)
@@ -185,14 +221,20 @@ internal object CivsAutonomousTerraform {
                 val cell = at(x, y, z)
                 if (cell.position == draft.building.control) continue
                 if (draft.route.isEmpty() && cell.solid && cell.supportSafe) continue
-                if (!cell.safe) throw CivsRejection("autonomy-terrain")
+                if (!cell.safe) rejectTerrain(cell, "fill")
                 if (!cell.solid) change(cell, when {
                     draft.route.isEmpty() -> "minecraft:dirt"
-                    y == ground -> "minecraft:coarse_dirt"
+                    y == ground -> if (civsTerrainKey(x, z) in routeColumns ||
+                        CivsAutonomousGeometry.horizontalContains(draft.building.bounds, cell.position)) "minecraft:coarse_dirt"
+                        else "minecraft:grass_block[snowy=false]"
                     y >= ground - 2 -> "minecraft:dirt"
                     else -> "minecraft:stone"
                 })
             }
+            if (civsTerrainKey(x, z) in routeColumns) change(at(x, ground, z), "minecraft:coarse_dirt")
+            else if (draft.route.isNotEmpty() && column.surfaceY > ground &&
+                !CivsAutonomousGeometry.horizontalContains(draft.building.bounds, CivPosition(x, ground, z)))
+                change(at(x, ground, z), "minecraft:grass_block[snowy=false]")
         }
         val points = result.keys + draft.route
         if (points.isEmpty()) return CivTerraformPlan(draft.building.bounds, emptyList(), emptyList(), draft.groundY, 0, 0)
@@ -201,6 +243,21 @@ internal object CivsAutonomousTerraform {
         val blocks = result.values.toList()
         return CivTerraformPlan(bounds, blocks, draft.route.toList(), draft.groundY,
             blocks.count { air(it.after) }, blocks.count { !air(it.after) })
+    }
+
+    /** Three-wide road surface. Equal-distance shoulders use the lower grade, never a raised curb. */
+    fun roadProfile(route: List<CivPosition>): Map<Long, CivPosition> {
+        val owners = linkedMapOf<Long, CivPosition>()
+        for (point in route) for (dx in -1..1) for (dz in -1..1) {
+            val x = point.x + dx; val z = point.z + dz
+            val key = civsTerrainKey(x, z)
+            val previous = owners[key]
+            val distance = abs(dx) + abs(dz)
+            val previousDistance = previous?.let { abs(it.x - x) + abs(it.z - z) }
+            if (previous == null || distance < requireNotNull(previousDistance) ||
+                distance == previousDistance && point.y < previous.y) owners[key] = point
+        }
+        return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
     }
 
     private fun sources(city: Settlement, building: CivBuilding): List<CivPosition> =
@@ -265,7 +322,8 @@ internal object CivsAutonomousTerraform {
                 }
                 if (repeatedColumn) continue
                 val native = requireNotNull(surface.at(candidate.x, candidate.z))
-                val cost = current.cost + 10 + abs(candidate.y - n.y) * 2 + abs(native.groundY - candidate.y) * 2
+                // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
+                val cost = current.cost + 10 + abs(candidate.y - n.y) * 8 + abs(native.groundY - candidate.y) * 2
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
                 costs[candidate] = cost; parents[candidate] = n
                 open += Open(candidate, cost, cost + distance(candidate), ordinal++)
@@ -277,4 +335,10 @@ internal object CivsAutonomousTerraform {
     private fun air(data: String) = data.substringBefore('[') in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
     private val DIRECTIONS = listOf(0 to 1, 1 to 0, 0 to -1, -1 to 0)
     private val FALLING_GROUND = setOf("minecraft:sand", "minecraft:red_sand", "minecraft:gravel")
+}
+
+/** Only exact journaled centreline surfaces qualify; similarly coloured foundation fill does not. */
+internal fun CivTerraformPlan.preparedRouteSurfaces(): List<CivPlanBlock> {
+    val surfaces = route.mapTo(hashSetOf()) { it.copy(y = it.y - 1) }
+    return blocks.filter { it.position in surfaces && it.after == "minecraft:coarse_dirt" }
 }

@@ -128,13 +128,14 @@ data class CivInventoryTransaction(
     val worldChanges: List<CivPlanBlock>? = null,
     val resurrection: CivResurrectionDebit? = null,
     val collected: CivCollectedTransfer? = null,
+    val forestry: CivForestryReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
-        require(after.inventory != null || resurrection != null || collected != null || after.autonomy != null && residentTransfer != null)
-        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected).size <= 1)
+        require(after.inventory != null || resurrection != null || collected != null || forestry != null || after.autonomy != null && residentTransfer != null)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry).size <= 1)
         collected?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -143,7 +144,11 @@ data class CivInventoryTransaction(
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
-        if (after.inventory == null) require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
+        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || worldChanges.orEmpty().isEmpty()))
+        forestry?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
+            it.validated(after)
+        }
         residentTransfer?.validated(after)
         require(worldChanges.orEmpty().size <= 128 && worldChanges.orEmpty().map { it.position }.distinct().size == worldChanges.orEmpty().size)
         worldChanges.orEmpty().forEach { cell ->
@@ -418,6 +423,7 @@ class CivsStorage(private val plugin: Plugin,
             require(transaction.after.copy(workers = transaction.after.workers.map { if (it.id == worker.id) worker else it },
                 revision = claim.city.revision) == claim.city)
         }
+        transaction.forestry?.let { require(it.before(transaction.after) == claim.city) }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
         }
