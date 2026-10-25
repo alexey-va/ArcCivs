@@ -86,11 +86,12 @@ object CivsLogistics {
     }
 
     internal fun desiredStock(city: Settlement, building: CivBuilding): Map<String, Long> {
+        if (building.type == BuildingType.UNIVERSITY) return CivsProduction.inputs(city, building)
         // Automatic carpentry reserves only an accepted batch, in the supply allocator.
         if (building.type == BuildingType.SAWMILL) return emptyMap()
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
-        return (CivsProduction.inputs(building) + when (building.type) {
+        return (CivsProduction.inputs(city, building) + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
             BuildingType.QUARRY -> quarrySupplies(building) + ("IRON_PICKAXE" to 1L)
@@ -177,7 +178,7 @@ object CivsLogistics {
         val building = worker.assignment?.let(city::building)
         if (building == null) return mapOf("BREAD" to 16L)
         val inputs = if (CivsRules.isBuilder(city, building)) CivsMaterials.unpaid(city.construction?.materials.orEmpty())
-            else if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(building)
+            else if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(city, building)
         return inputs + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) {
                 "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"

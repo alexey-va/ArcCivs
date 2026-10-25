@@ -73,6 +73,9 @@ internal fun civsWorkplaceItems(type: BuildingType): List<Material> = when (type
     BuildingType.BLACKSMITH -> listOf(Material.IRON_AXE, Material.IRON_INGOT, Material.COAL)
     BuildingType.STONEMASON -> listOf(Material.IRON_PICKAXE, Material.BRICK, Material.FLINT)
     BuildingType.LIBRARY -> listOf(Material.BOOK, Material.FEATHER, Material.INK_SAC)
+    BuildingType.UNIVERSITY -> listOf(Material.WRITABLE_BOOK, Material.PAPER, Material.FEATHER)
+    BuildingType.SMELTERY -> listOf(Material.IRON_INGOT, Material.CHARCOAL, Material.RAW_IRON)
+    BuildingType.CRUSHER -> listOf(Material.IRON_PICKAXE, Material.FLINT, Material.RAW_IRON)
     BuildingType.TAVERN -> listOf(Material.BREAD, Material.APPLE, Material.PAPER)
     BuildingType.BAKERY -> listOf(Material.WHEAT, Material.BREAD, Material.SUGAR)
     BuildingType.GUARD_TOWER -> listOf(Material.IRON_SWORD, Material.PAPER, Material.FEATHER)
@@ -87,7 +90,7 @@ internal fun civsWorkplacePieces(type: BuildingType, rotation: Int): List<CivsWo
         Transformation(facing.transform(position), Quaternionf(facing), size, Quaternionf()), block = true)
     val lining = when (type) {
         BuildingType.FARM, BuildingType.FORESTER, BuildingType.SAWMILL -> Material.GREEN_WOOL
-        BuildingType.TOWN_HALL, BuildingType.LIBRARY -> Material.BLUE_WOOL
+        BuildingType.TOWN_HALL, BuildingType.LIBRARY, BuildingType.UNIVERSITY -> Material.BLUE_WOOL
         BuildingType.WAREHOUSE -> Material.BROWN_WOOL
         else -> Material.GRAY_WOOL
     }

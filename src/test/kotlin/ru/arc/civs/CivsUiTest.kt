@@ -4,6 +4,7 @@ import com.google.gson.GsonBuilder
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldNotContain
+import io.kotest.matchers.collections.shouldContain
 import io.kotest.matchers.shouldBe
 import io.kotest.matchers.shouldNotBe
 import io.kotest.matchers.string.shouldContain
@@ -53,6 +54,130 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("research follows the selected Auto through start pause and retained project progress") {
+        withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val personal = settlement(h.player)
+            var village = autonomousSettlement(h.player, "Selected research Auto")
+            val projectId = UUID.randomUUID()
+            h.city = personal
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            every { h.host.settlements() } answers { listOf(personal, village) }
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("planning")
+            every { h.host.research(h.player, village.id) } answers { CivsResearch.view(village) }
+            every { h.host.beginResearch(h.player, village.id, CivResearchId.MATERIALS) } answers {
+                village = village.copy(research = CivResearchState(project = CivResearchProject(projectId,
+                    CivResearchId.MATERIALS, CivResearchCost(stock = Stock(24, 16, 4)), 3)))
+                CompletableFuture.completedFuture(Unit)
+            }
+            every { h.host.setResearchPaused(h.player, village.id, projectId, any()) } answers {
+                village = village.copy(research = village.research!!.copy(project = village.research!!.project!!.copy(paused = arg(3))))
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openAutonomous(h.player, village.id)
+            h.click("research"); h.click("research_materials")
+            h.body() shouldContain village.name
+            h.body().contains(personal.name) shouldBe false
+            h.click("start"); h.paper.performTicks(2)
+            h.body() shouldContain "Ожидает материалы"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "research-auto-waiting-ru", h.screen, listOf(640, 360)) }
+            village = village.copy(research = village.research!!.copy(project = village.research!!.project!!.copy(funded = true, workDone = 1)))
+            h.click("refresh")
+            h.body() shouldContain "1 / 3"
+            h.body() shouldContain "Материалы уже выделены"
+            h.click("pause"); h.paper.performTicks(2)
+            h.body() shouldContain "Проект на паузе"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "research-auto-paused-ru", h.screen, listOf(640, 360)) }
+            h.click("pause"); h.paper.performTicks(2)
+            village.research!!.project!!.workDone shouldBe 1
+            village.research!!.project!!.funded shouldBe true
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.click("pause"); h.paper.performTicks(2)
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            verify(exactly = 1) { h.host.beginResearch(h.player, village.id, CivResearchId.MATERIALS) }
+            verify(exactly = 1) { h.host.setResearchPaused(h.player, village.id, projectId, true) }
+            verify(exactly = 1) { h.host.setResearchPaused(h.player, village.id, projectId, false) }
+            verify(exactly = 0) { h.host.research(h.player, personal.id); h.host.beginResearch(h.player, personal.id, any()) }
+        }
+    }
+
+    test("Auto visitors can inspect research and closed products without management actions") {
+        for (language in listOf("ru", "en")) for (font in listOf("", "arc:dialog_ui")) withUi(realHistory = true, decorationFont = font) { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val personal = settlement(h.player)
+            val base = autonomousSettlement(h.player, "Research village")
+            val university = base.buildings.first { it.type == BuildingType.UNIVERSITY }
+            val village = base.copy(owner = UUID.randomUUID(), autonomy = base.autonomy!!.copy(products =
+                mapOf(CivIndustryProduct.RAW_IRON to 12L, CivIndustryProduct.CHARCOAL to 2L)), research = CivResearchState(setOf(CivResearchId.MATERIALS),
+                CivResearchProject(UUID.randomUUID(), CivResearchId.METALLURGY, CivsResearch.cost(base, CivResearchId.METALLURGY), 5, 2, true)))
+            h.city = personal
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            every { h.host.settlements() } returns listOf(personal, village)
+            every { h.host.inspectBuilding(h.player, village.id, university.id) } returns village
+            every { h.host.research(h.player, village.id) } returns CivsResearch.view(village)
+            every { h.host.industry(h.player, village.id) } returns CivsIndustry.view(village)
+            fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                exportUiScreen(it, "$id-${if (font.isEmpty()) "plain-" else ""}$language", h.screen, listOf(640, 360))
+            } }
+            h.ui.openBuildingInspection(h.player, village.id, university.id); h.click("research")
+            h.screen.id shouldBe "civs.research"
+            h.body() shouldContain "2 / 5"
+            export("research-overview")
+            h.click("research_metallurgy")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.body() shouldContain if (language == "ru") "Материалы уже выделены" else "Materials already paid"
+            export("research-funded")
+            h.click("history"); h.click("research_engineering")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("refresh")
+            h.body() shouldContain if (language == "ru") "университет уровня 2" else "level 2 university"
+            export("research-locked")
+            h.click("history"); h.click("industry")
+            // Native wrapping and font spacers may split a sentence without changing its meaning.
+            h.body().replace(Regex("\\p{Co}"), "").replace(Regex("\\s+"), " ") shouldContain
+                if (language == "ru") "в предметы не превращаются" else "never become inventory items"
+            h.body() shouldContain "12"
+            export("industry-auto-stock")
+            verify(exactly = 0) { h.host.beginResearch(any(), any(), any()); h.host.setResearchPaused(any(), any(), any(), any()); h.host.setProduction(any(), any(), any()) }
+        }
+    }
+
+    test("personal industry shows exact batch inputs and gates the new catalogue without hiding existing tools") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val base = settlement(h.player)
+            val smeltery = base.buildings.last().copy(type = BuildingType.SMELTERY, production = "CHARCOAL")
+            h.city = base.copy(buildings = base.buildings + smeltery.copy(id = UUID.randomUUID()))
+            val actual = h.city!!.buildings.last()
+            every { h.host.industry(h.player, base.id) } answers { CivsIndustry.view(h.city!!) }
+            every { h.host.setProduction(h.player, actual.id, "STONE") } answers {
+                h.city = h.city!!.copy(buildings = h.city!!.buildings.map { if (it.id == actual.id) it.copy(production = "STONE") else it })
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openBuilding(h.player, base.id, actual.id); h.click("production")
+            h.screen.id shouldBe "civs.industry-building"
+            h.body() shouldContain "× 8"
+            h.body() shouldContain "× 1"
+            h.body() shouldContain "→"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "industry-native-$language", h.screen, listOf(640, 360)) }
+            h.click("production_1"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.setProduction(h.player, actual.id, "STONE") }
+            h.city = h.city!!.copy(research = CivResearchState(CivResearchId.entries.toSet()))
+            h.ui.openBuilding(h.player, base.id, actual.id); h.click("production")
+            h.screen.buttons.count { it.id.value.startsWith("production_") } shouldBe 4
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "industry-native-unlocked-$language", h.screen, listOf(640, 360)) }
+            h.city = h.city!!.copy(research = null)
+            h.open(); h.click("buildings"); h.click("catalog")
+            h.click("offer_15")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("research")
+            h.body() shouldContain if (language == "ru") "Материаловедение" else "Materials"
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "industry-locked-offer-$language", h.screen, listOf(640, 360)) }
+            h.click("history"); h.click("next")
+            h.screen.buttons.filter { it.id.value.startsWith("offer_") }.size shouldBe 1
+            h.click("offer_0")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("research")
+        }
+    }
+
     test("an administrator places a board in the selected Auto while keeping their personal town") {
         withUi(realHistory = true) { h ->
             val personal = settlement(h.player)
@@ -159,7 +284,7 @@ class CivsUiTest : FunSpec({
                 h.player.setLocale(Locale.forLanguageTag(locale))
                 h.city = settlement(h.player)
                 h.open()
-                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "upgrade", "hall_inventory", "guide")
+                h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide")
                 h.body().codePoints().anyMatch { it in 0xF9000..0xF9FFF } shouldBe font.isNotEmpty()
                 h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0xFA300..0xFAF1B } } shouldBe
                     if (font.isEmpty()) 0 else 1
@@ -255,7 +380,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Припасы: 16"
             h.body() shouldContain "Древесина: 12"
             h.body().contains(personal.name) shouldBe false
-            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "pause", "refresh", "villages")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "research", "industry", "plan_board", "pause", "refresh", "villages")
             export("resources")
             h.click("buildings")
             h.screen.id shouldBe "civs.autonomous-buildings"
@@ -367,7 +492,7 @@ class CivsUiTest : FunSpec({
             every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("blocked", BuildingType.BUILDER_HUT, 2, "autonomy-no-path")
             every { h.host.retryConstruction(h.player, village.id) } returns CompletableFuture.completedFuture(Unit)
             h.ui.openAutonomous(h.player, village.id)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "retry", "pause", "refresh", "villages")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "research", "industry", "plan_board", "retry", "pause", "refresh", "villages")
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "autonomy-construction-paused-ru", h.screen) }
             h.click("retry"); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.retryConstruction(h.player, village.id) }
@@ -464,7 +589,7 @@ class CivsUiTest : FunSpec({
                         h.screen.id shouldBe "civs.autonomous-city"
                         h.body().contains("Personal") shouldBe false
                         h.body().contains("future-stage") shouldBe false
-                        h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "pause", "refresh", "villages")
+                        h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "research", "industry", "plan_board", "pause", "refresh", "villages")
                         export(stage)
                     }
                     village = base.copy(workers = emptyList(), buildings = emptyList())
@@ -1037,7 +1162,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "1 / 2"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-infrastructure-$language", h.screen) }
             h.click("catalog")
-            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 14
+            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 16
             val labels = h.screen.buttons.map { plainText(it.label) }
             for (type in infrastructure.map { it.type }.distinct()) {
                 val name = plainText(CivsText.fromYaml(civsLocaleSource()).building(h.player, type))
@@ -1071,12 +1196,12 @@ class CivsUiTest : FunSpec({
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
             val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
-            offers.size shouldBe 14
+            offers.size shouldBe 16
             h.screen.columns shouldBe 2
-            offers.map { it.label.color() }.distinct().size shouldBe 14
-            h.screen.buttons.map { it.id.value } shouldNotContain "next"
+            offers.map { it.label.color() }.distinct().size shouldBe 16
+            h.screen.buttons.map { it.id.value } shouldContain "next"
             export("workshops-catalog-first-ru")
-            offers.takeLast(4).map { plainText(it.label) } shouldBe
+            offers.take(14).takeLast(4).map { plainText(it.label) } shouldBe
                 listOf("Таверна ›", "Пекарня ›", "Сторожевая башня ›", "План поселения ›")
             h.click("offer_7")
             h.body() shouldContain "1 → 2 → 3"
@@ -2488,7 +2613,7 @@ class CivsUiTest : FunSpec({
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             h.city = settlement(h.player)
             h.open()
-            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "upgrade", "hall_inventory", "guide")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("management", "buildings", "workers", "research", "industry", "upgrade", "hall_inventory", "guide")
             plainText(h.screen.buttons.first().label) shouldBe "Управление поселением ›"
             h.click("management")
             h.screen.id shouldBe "civs.management"

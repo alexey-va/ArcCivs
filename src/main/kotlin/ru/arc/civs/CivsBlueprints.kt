@@ -280,6 +280,9 @@ class CivsBlueprints(
                 BuildingType.BAKERY -> "craftsmanship/luxury/baker"
                 BuildingType.GUARD_TOWER -> "military/guardtower"
                 BuildingType.PLAN_BOARD -> return CivsPlanBoardBlueprint.SCHEMATIC_ID
+                BuildingType.UNIVERSITY -> "education/university"
+                BuildingType.SMELTERY -> "craftsmanship/metallurgy/smeltery"
+                BuildingType.CRUSHER -> "craftsmanship/masonry/crusher"
                 BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD ->
                     return "civs/infrastructure/$style/${type.name.lowercase()}$level"
             }

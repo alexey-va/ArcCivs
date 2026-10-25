@@ -81,13 +81,13 @@ class CivsBlueprintsTest : FunSpec({
         }
     }
 
-    test("catalog selects all 126 authored levels only from the private upgrade-aligned namespace") {
+    test("catalog selects all 153 authored levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
             BuildingType.entries.filterNot { it.isInfrastructure || it == BuildingType.PLAN_BOARD }
                 .flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
-        ids.size shouldBe 126
-        ids.toSet().size shouldBe 126
+        ids.size shouldBe 153
+        ids.toSet().size shouldBe 153
         ids.all { it.startsWith("civs/minecolonies/") } shouldBe true
         CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 1) shouldBe
             "civs/minecolonies/nordic/fundamentals/townhall1"
@@ -97,7 +97,8 @@ class CivsBlueprintsTest : FunSpec({
             BuildingType.BLACKSMITH to "craftsmanship/metallurgy/blacksmith",
             BuildingType.STONEMASON to "craftsmanship/masonry/stonemason", BuildingType.LIBRARY to "education/library",
             BuildingType.TAVERN to "fundamentals/tavern", BuildingType.BAKERY to "craftsmanship/luxury/baker",
-            BuildingType.GUARD_TOWER to "military/guardtower")) {
+            BuildingType.GUARD_TOWER to "military/guardtower", BuildingType.UNIVERSITY to "education/university",
+            BuildingType.SMELTERY to "craftsmanship/metallurgy/smeltery", BuildingType.CRUSHER to "craftsmanship/masonry/crusher")) {
             for (style in CivsBlueprints.STYLES) for (level in 1..3)
                 CivsBlueprints.schematicId(style, type, level) shouldBe "civs/minecolonies/$style/$family$level"
         }

@@ -79,6 +79,12 @@ internal fun civsMovedEntrance(point: CivPosition, direction: CivsPreviewMove, f
 
 /** Main-thread UI port. Every mutation validates authority in its owning service. */
 interface CivsUiHost {
+    fun research(player: Player, cityId: UUID): CivResearchView = throw CivsRejection("not-authorized")
+    fun beginResearch(player: Player, cityId: UUID, research: CivResearchId): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
+    fun setResearchPaused(player: Player, cityId: UUID, projectId: UUID, paused: Boolean): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
+    fun industry(player: Player, cityId: UUID): CivIndustryView = throw CivsRejection("not-authorized")
     fun beginAutonomousSelection(player: Player, name: String, style: String): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun autonomyStatus(cityId: UUID): CivsAutonomyView? = null

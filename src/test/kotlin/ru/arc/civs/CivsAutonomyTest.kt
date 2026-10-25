@@ -8,7 +8,7 @@ import java.util.UUID
 
 class CivsAutonomyTest : FunSpec({
     test("the infrastructure cap leaves ordinary village upgrades eligible") {
-        val base = autonomyCity().copy(buildings = (CivsAutonomy.profile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
+        val base = autonomyCity().copy(buildings = (CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
             .map { autonomyBuilding(it).copy(phase = BuildingPhase.ACTIVE) })
         val upgrade = requireNotNull(CivsAutonomy.nextGoal(base))
         upgrade.type shouldBe BuildingType.TOWN_HALL
@@ -121,7 +121,7 @@ class CivsAutonomyTest : FunSpec({
     }
 
     test("essential jobs precede the guard and second producer slots") {
-        val buildings = CivsAutonomy.profile.map { autonomyBuilding(it, 2, BuildingPhase.ACTIVE) }
+        val buildings = CivsAutonomy.baseProfile.map { autonomyBuilding(it, 2, BuildingPhase.ACTIVE) }
         val hall = buildings.first { it.type == BuildingType.TOWN_HALL }
         val house = buildings.first { it.type == BuildingType.HOUSE }
         val workers = (0..7).map { index -> CivWorker(UUID(50, index.toLong()), "Resident $index", null,
@@ -239,7 +239,7 @@ class CivsAutonomyTest : FunSpec({
         var now = 300_000L
         val completed = mutableListOf<Pair<BuildingType, Int>>()
         var minutes = 0
-        while (CivsAutonomy.nextGoal(city) != null && minutes++ < 1_000) {
+        while (completed.size < 22 && CivsAutonomy.nextGoal(city) != null && minutes++ < 1_000) {
             val goal = requireNotNull(CivsAutonomy.nextGoal(city))
             if (goal.ready) {
                 val building = goal.buildingId?.let(city::building)?.copy(level = goal.targetLevel,
@@ -274,9 +274,10 @@ class CivsAutonomyTest : FunSpec({
             city = CivsAutonomy.activeMinute(city)
         }
         (minutes < 1_000) shouldBe true
-        completed.take(9).map { it.first } shouldBe CivsAutonomy.profile
+        completed.take(9).map { it.first } shouldBe CivsAutonomy.baseProfile
         completed.size shouldBe 22
-        CivsAutonomy.nextGoal(city) shouldBe null
+        CivsAutonomy.nextGoal(city)!!.type shouldBe BuildingType.UNIVERSITY
+        CivsAutonomy.nextGoal(city)!!.targetLevel shouldBe 1
         city.buildings.size shouldBe 11
         city.buildings.all { it.level == 2 && it.phase == BuildingPhase.ACTIVE } shouldBe true
         city.workers.size shouldBe minOf(CivsRules.populationLimit(city), CivsRules.beds(city))

@@ -1,0 +1,1987 @@
+{
+  "version": 1,
+  "title": "ArcCivs proposed university, smeltery and crusher industry economy assessment",
+  "assumptions": [
+    "Design values approved for implementation; source/package checks and active runtime remain separate. Low/base/high use 1/4/6 participating city owners, 0.25/1/4 active hours per day, and 2/8/24 successful batches for regular recipes versus 4/16/48 for Crusher recipes. These are supplied activity assumptions, not measured cadence. They imply 8/8/6 regular batches per active hour and 16/16/12 Crusher batches per active hour. Each industry building has one worker; each recipe row is one selected recipe for that worker, and alternatives must not be summed as if one worker ran every recipe simultaneously. A 60-second work interval is only a floor before walking and sleeping; supplied behavior says hunger may double the effective cycle. No offline catch-up or skill-speed bonus is assumed.",
+    "The package is University + Smeltery + Crusher + the existing Auto Blacksmith target: 11 to 15 ordinary Auto buildings, leaving one of 16 building slots for the Plan Board. Infrastructure 96, population 12 per city and NPC 48 remain unchanged. Four industry workers per city are 24 workers at six high-scenario owners, before accounting for all other existing NPC use; they cannot be added on top of the 12-person city or 48-NPC backend limits.",
+    "Auto mode uses separate closed city-stock units and has no conversion into native physical items. Each of seven new products (RAW_IRON, CHARCOAL, GRAVEL, SAND, GLASS, IRON_INGOT, IRON_TOOL_KIT) has a 64-unit on-hand cap. Calculator rows show gross committed item input/output batches, not ending stocks; only committed downstream recipe consumption can free room under the cap, and there is no native withdrawal API. A full output or missing input rejects the batch atomically without debit or output. The assessment does not assume same-day recipe chaining or price these closed stocks.",
+    "Native mode uses physical item inputs and outputs; no native conversion is applied to Auto stock. Existing forge recipes stay unchanged; only Engineering-gated BUCKET (3 IRON_INGOT -> 1) and SHEARS (2 IRON_INGOT -> 1) are added here. The Auto toolkit recipe's shorthand IRON is read as the listed IRON_INGOT unit. The Auto quarry ORE output is read as the listed closed RAW_IRON unit. Parent confirmed both identifier mappings.",
+    "Research is one funding event per city per project, charged before work and never reset by rebuilding. Auto research consumes closed W/S/F and product stock; native research consumes physical items. These are alternative funding modes and are not added together. The one-time resource totals are in the companion Markdown; they are not multiplied by seven or treated as recurring daily flows. Twenty-one real 60-second sessions total across the four projects; no offline catch-up. If one researcher performs them sequentially, the nominal minimum is 21 active minutes, before travel/sleep/hunger.",
+    "Auto L1 building prices are internal raw stock (University 48 WOOD/32 STONE/8 FOOD; Smeltery 32/24/0; Crusher 24/24/0; Blacksmith 32/24/0). Target levels 2 and 3 use the existing squared target-level multiplier; this assessment charges each target level once when purchased. Curated University, Smeltery and Crusher schematic files exist for 3 styles × L1-L3 (27 files/9 families), but the curation report and manifest contain volume/size and heart metadata rather than material palette counts. Their maximum volume is 31,104 cells, an upper bound that includes clearing/air and marker cells, not a solid-block count or construction cost; no native construction cost or money conversion is asserted.",
+    "Direct ArcCivs Vault, tokens and player XP remain 0 before/after. One completed resident job session adds 1 existing internal resident job-XP, capped at 40 per worker; the calculator's resident_job_xp row is a one-worker selected-recipe sensitivity, not player XP or money. Research sessions contribute 21 one-time internal job-XP across all projects if all sessions are credited; no cash value is assigned.",
+    "The calculator's participants are active owner cities; network-week arithmetic is gross per-owner daily item amount times participants times seven. Resource/item rows are separate units and must not be added to Vault/tokens/XP or across alternative recipes. `disposable_per_player_day` stays zero because net stock after committed downstream consumption is not established; no native withdrawal API is assumed. This does not mean gross item flows are zero. No `prices` are entered because neither current SELL nor contract terms are assumed to be a fixed quote for these proposed outputs.",
+    "Fresh read-only 168-hour ledger artifact (2026-10-18T14:16:43Z to 2026-10-25T14:16:43Z): 2,728 records, 33,058 operations, 23 players. Currency coverage is split: Vault has 495 unclassified operations and 20,443,625.26 absolute Vault amount, with 31.8372% classified-amount coverage; tokens have 2 unclassified operations and 12 tokens absolute amount, with 88.3495% classified-amount coverage. These currency amounts are separate and are not summed. This aggregate is not a normal-player income baseline. Requested-material shop selection found only COBBLESTONE, GLASS, GRAVEL, OAK_LOG and SAND rows; missing materials mean no observation, not zero sale price.",
+    "EconomyShopGUI SELL and AutoSellChests remain current; planned SELL-off is a separate future state. Native glass, gravel and sand have recent shop-sales observations, but historical effective averages are not current quotes. Raw iron and iron ingot may also match active ARC contracts, whose dated inventory lists base rates and a shared weekly cap, without a fresh active-offer/budget verification. No item is assumed sold through both routes, no new industry Vault mint is forecast, and SELL-off does not automatically imply contract demand. Auto closed stock cannot enter native SELL/contracts under the no-native-conversion rule.",
+    "The existing quarry L1/L2/L3 yields are three separate baseline alternatives, each evaluated across all supplied activity cases [2,8,24] trips per owner-day. New Auto quarry output is one closed RAW_IRON/ORE unit per real cycle instead of the old stone payout, never both.",
+    "Automatic progression after Engineering intentionally opens existing Town Hall L3 (population reachability8to12), but no automatic old-producer/warehouse/house/builder/BlacksmithL3 upgrade goals. OnlynewUniversity/Smeltery/CrusherL3 areautomatic. Existingcaps16buildings/96infrastructure/12population/48activeNPC andallpertypeyields/costsremain unchanged; fouradditionaladmissionscost48FOODonce, atmost40FOOD/hour addedfeedingatfullwork underexistingrules.",
+    "AllfourL1-L3buildingpaths inone-time table are purchasablemaxima, nottheactualautoplan. New3L1-L3paths+BlacksmithL1+HallL3+researchfees are1928WOOD1464STONE196FOOD beforeintermediateproductionandfeeding; intermediatesadd12WOOD32STONEwithwholebatchleftovers1CHARCOAL5IRON.",
+    "Liveconfiguredshopquotes2026-10-25T14:43UTC arebasequotes, effectivepricesunobserved. Cobble2buy/.05sell,gravel16/1.5,sand4/.5,glass13/4. Conditionalnewgathered-cobble→gravelmargin1.40Vault/session gives5.6/22.4/67.2ownerdayand39.2/627.2/2822.4networkweek, alternative tosellinginputs/notdirectpayout. Bought-inputloopscheckednegativeinMarkdown. Auto closedproducts neverredeemed."
+  ],
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "conditional_external_sell_gathered_cobble_lot_or_processed_gravel",
+          "kind": "mint",
+          "source": "Existing EconomyShopGUI SELL, configured base quotes only, separate from zero direct ArcCivs payout",
+          "basis": "Controlled alternative: sell the same two gathered COBBLESTONE for0.10 Vault before, or one funded Crusher GRAVEL for1.50 after; selected Crusher batches4/16/48, no contract stacking, effective runtime quote unverified. This is conditional indirect redemption, not a new payout or forecast.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0.10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1.50",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": []
+    },
+    "resident_job_xp_per_selected_worker": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "resident_job_xp_per_selected_worker_session",
+          "kind": "item",
+          "source": "Parent-provided industry proposal and existing resident job-XP rule; not implemented",
+          "basis": "Existing resident job progression awards +1 per completed session, with the existing per-worker cap of 40; one worker and one selected recipe only, no skill-speed bonus.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_stock_quarry_stone_before_l1": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "existing_quarry_stone_l1",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:156-159 plus parent proposal",
+          "basis": "Before-change quarry yield is 3*level STONE per completed trip (existing CivsRules.deliveryAmount); L1 is one of three independent baseline alternatives, each evaluated at all supplied low/base/high trip counts. After-change this output is replaced by one ORE/RAW_IRON unit per real cycle.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "closed_stock_quarry_stone_before_l2": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "existing_quarry_stone_l2",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:156-159 plus parent proposal",
+          "basis": "Before-change quarry yield is 3*level STONE per completed trip (existing CivsRules.deliveryAmount); L2 is one of three independent baseline alternatives, each evaluated at all supplied low/base/high trip counts. After-change this output is replaced by one ORE/RAW_IRON unit per real cycle.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "closed_stock_quarry_stone_before_l3": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "existing_quarry_stone_l3",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:156-159 plus parent proposal",
+          "basis": "Before-change quarry yield is 3*level STONE per completed trip (existing CivsRules.deliveryAmount); L3 is one of three independent baseline alternatives, each evaluated at all supplied low/base/high trip counts. After-change this output is replaced by one ORE/RAW_IRON unit per real cycle.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          },
+          "after": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "9",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_raw_iron": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_raw_iron_auto_quarry_ore",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross RAW_IRON units produced per committed Auto batch for auto_quarry_ore; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_wood_for_auto_charcoal": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_wood_auto_charcoal",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross WOOD units consumed per committed Auto batch for auto_charcoal; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_charcoal": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_charcoal_auto_charcoal",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units produced per committed Auto batch for auto_charcoal; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_stone_for_auto_gravel": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_stone_auto_gravel",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross STONE units consumed per committed Auto batch for auto_gravel; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_gravel_from_stone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_gravel_auto_gravel",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GRAVEL units produced per committed Auto batch for auto_gravel; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_gravel_for_auto_sand": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_gravel_auto_sand",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GRAVEL units consumed per committed Auto batch for auto_sand; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_sand": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_sand_auto_sand",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross SAND units produced per committed Auto batch for auto_sand; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_raw_iron_for_auto_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_raw_iron_auto_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross RAW_IRON units consumed per committed Auto batch for auto_iron_ingot; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_charcoal_for_auto_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_charcoal_auto_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units consumed per committed Auto batch for auto_iron_ingot; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_iron_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_iron_ingot_auto_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_INGOT units produced per committed Auto batch for auto_iron_ingot; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_sand_for_auto_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_sand_auto_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross SAND units consumed per committed Auto batch for auto_glass; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_charcoal_for_auto_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_charcoal_auto_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units consumed per committed Auto batch for auto_glass; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_glass_auto_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GLASS units produced per committed Auto batch for auto_glass; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_iron_ingot_for_toolkit": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_iron_ingot_auto_iron_tool_kit",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_INGOT units consumed per committed Auto batch for auto_iron_tool_kit; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_wood_for_toolkit": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_wood_auto_iron_tool_kit",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross WOOD units consumed per committed Auto batch for auto_iron_tool_kit; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "closed_autostock_iron_tool_kit": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_iron_tool_kit_auto_iron_tool_kit",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_TOOL_KIT units produced per committed Auto batch for auto_iron_tool_kit; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_oak_logs_for_charcoal": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_oak_log_native_charcoal",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross OAK_LOG units consumed per committed native batch for native_charcoal; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_oak_planks_for_charcoal": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_oak_planks_native_charcoal",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross OAK_PLANKS units consumed per committed native batch for native_charcoal; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "6",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_charcoal": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_charcoal_native_charcoal",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units produced per committed native batch for native_charcoal; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_cobblestone_for_stone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_cobblestone_native_stone",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross COBBLESTONE units consumed per committed native batch for native_stone; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_charcoal_for_stone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_charcoal_native_stone",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units consumed per committed native batch for native_stone; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_stone": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_stone_native_stone",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross STONE units produced per committed native batch for native_stone; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_raw_iron_for_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_raw_iron_native_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross RAW_IRON units consumed per committed native batch for native_iron_ingot; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_charcoal_for_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_charcoal_native_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units consumed per committed native batch for native_iron_ingot; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_iron_ingot": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_iron_ingot_native_iron_ingot",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_INGOT units produced per committed native batch for native_iron_ingot; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_sand_for_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_sand_native_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross SAND units consumed per committed native batch for native_glass; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_charcoal_for_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_charcoal_native_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross CHARCOAL units consumed per committed native batch for native_glass; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_glass": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_glass_native_glass",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GLASS units produced per committed native batch for native_glass; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_cobblestone_for_gravel": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_cobblestone_native_crush_gravel",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross COBBLESTONE units consumed per committed native batch for native_crush_gravel; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "native_gravel": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_gravel_native_crush_gravel",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GRAVEL units produced per committed native batch for native_crush_gravel; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "native_gravel_for_sand": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_gravel_native_crush_sand",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross GRAVEL units consumed per committed native batch for native_crush_sand; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "native_sand": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_sand_native_crush_sand",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross SAND units produced per committed native batch for native_crush_sand; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              16,
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "native_iron_ingot_for_bucket": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_iron_ingot_blacksmith_bucket",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_INGOT units consumed per committed native batch for blacksmith_bucket; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_bucket": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_bucket_blacksmith_bucket",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross BUCKET units produced per committed native batch for blacksmith_bucket; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_iron_ingot_for_shears": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "input_iron_ingot_blacksmith_shears",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross IRON_INGOT units consumed per committed native batch for blacksmith_shears; this row is an input quantity, not money burn. Missing input or output capacity must reject the whole batch without debit.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    },
+    "native_shears": {
+      "minor_per_unit": 1,
+      "disposable_per_player_day": {
+        "before": [
+          "0",
+          "0",
+          "0"
+        ],
+        "after": [
+          "0",
+          "0",
+          "0"
+        ]
+      },
+      "flows": [
+        {
+          "id": "output_shears_blacksmith_shears",
+          "kind": "item",
+          "source": "Parent-provided industry proposal dated 2026-10-25; not implemented",
+          "basis": "Gross SHEARS units produced per committed native batch for blacksmith_shears; the recipe consumes its listed inputs. This is an item flow, not Vault/token/player-XP issuance.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              2,
+              8,
+              24
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

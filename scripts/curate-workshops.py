@@ -22,6 +22,16 @@ SKIPS = {"minecraft:air", "minecraft:cave_air", "minecraft:void_air", "minecraft
 FAMILIES = ("craftsmanship/carpentry/sawmill", "craftsmanship/metallurgy/blacksmith",
             "craftsmanship/masonry/stonemason", "education/library")
 STYLES = ("nordic", "medievaloak", "caledonia")
+# A reviewed family may take its common front from another level. Source cells
+# still share the same hut-relative union frame and native rigid rotation.
+PLACEMENT_LEVELS = {}
+
+
+def placement_reference_index(style, family):
+    level = PLACEMENT_LEVELS.get((style, family), 1)
+    if type(level) is not int or level not in (1, 2, 3):
+        raise ValueError(f"Invalid family placement level: {style}/{family}: {level}")
+    return level - 1
 
 
 def module(name, path):
@@ -137,9 +147,10 @@ def main():
             minimum = [min(-row[3][a] for row in source) for a in range(3)]
             maximum = [max(row[0][a] - 1 - row[3][a] for row in source) for a in range(3)]
             union_size = [maximum[a] - minimum[a] + 1 for a in range(3)]
-            first_shift = [-minimum[a] - source[0][3][a] for a in range(3)]
-            placement = dict(plans[identifiers[0]]["placement"])
-            placement["sourceApproach"] = [placement["sourceApproach"][a] + first_shift[a] for a in range(3)]
+            reference = placement_reference_index(style, family)
+            reference_shift = [-minimum[a] - source[reference][3][a] for a in range(3)]
+            placement = dict(plans[identifiers[reference]]["placement"])
+            placement["sourceApproach"] = [placement["sourceApproach"][a] + reference_shift[a] for a in range(3)]
             canonical = None
             for level, (identifier, (size, palette, cells, primary)) in enumerate(zip(identifiers, source), 1):
                 shift = [-minimum[a] - primary[a] for a in range(3)]
@@ -187,9 +198,10 @@ def main():
             family_reports.append({"style": style, "family": family, "ids": ["civs/" + key for key in identifiers],
                 "sourceUnionMinimumRelativeToPrimary": minimum, "sourceUnionMaximumRelativeToPrimary": maximum,
                 "size": canonical[0], "origin": canonical[1], "primaryControl": canonical[2],
-                "quarterTurnsClockwise": placement["quarterTurnsClockwise"], "allLevelFramesIdentical": True})
+                "quarterTurnsClockwise": placement["quarterTurnsClockwise"], "allLevelFramesIdentical": True,
+                **({"placementReferenceLevel": reference + 1} if reference else {})})
     report = {"schemaVersion": 1, "assetsNotice": "Private local/server use only; never publish third-party schematics in public Git.",
-        "policy": "Reuse pinned v4 native rotations and reconstruction; align source frames by primary hut; fill only added union cells with clearing air; share L1 front and ground approach outside the south face.",
+        "policy": "Reuse pinned v4 native rotations and reconstruction; align source frames by primary hut; fill only added union cells with clearing air; share the reviewed family front (L1 by default) and ground approach outside the south face.",
         "scriptSha256": digest(Path(__file__).read_bytes()), "normalizerSha256": NORMALIZER_SHA,
         "nativeRotationMapSha256": ROTATIONS_SHA, "placementPlanSha256": digest(plan_path.read_bytes()),
         "summary": {"files": len(files), "families": len(family_reports), "allLevelFramesIdentical": True,

@@ -119,9 +119,12 @@ class CivsWorkplaceDecorTest : FunSpec({
             civsWorkplaceItems(type).distinct().size shouldBe 3
         }
         civsWorkplaceItems(BuildingType.BUILDER_HUT) shouldBe listOf(Material.IRON_SHOVEL, Material.BRICK, Material.PAPER)
+        // These props use the flat generated/handheld transform; SAND has a cube model.
+        civsWorkplaceItems(BuildingType.CRUSHER) shouldBe listOf(Material.IRON_PICKAXE, Material.FLINT, Material.RAW_IRON)
         System.getenv("CIVS_NATIVE_PREVIEW_OUT")?.let { directory ->
             val out = Path.of(directory); Files.createDirectories(out)
-            val states = listOf(BuildingType.BUILDER_HUT, BuildingType.FARM, BuildingType.QUARRY, BuildingType.LIBRARY).map { type ->
+            val states = listOf(BuildingType.BUILDER_HUT, BuildingType.FARM, BuildingType.QUARRY, BuildingType.LIBRARY,
+                BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER).map { type ->
                 mapOf("id" to type.name.lowercase(), "pieces" to civsWorkplacePieces(type, 0).map { piece ->
                     val transform = piece.transform
                     mapOf("kind" to if (piece.block) "block" else "item",

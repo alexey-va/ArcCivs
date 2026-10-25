@@ -193,8 +193,8 @@ class CivsCommandTest : FunSpec({
         }
     }
 
-    test("all debug emits one parseable console line for each of the ten supported systems") {
-        val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
+    test("all debug emits one parseable console line for each of the twelve supported systems") {
+        val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "research", "industry")
         val city = UUID.randomUUID()
         val worker = UUID.randomUUID()
         val messages = mutableListOf<String>()
@@ -211,7 +211,7 @@ class CivsCommandTest : FunSpec({
         router.onCommand(sender, mockk(), "civs", arrayOf("debug", "all", city.toString(), worker.toString())) shouldBe true
         CivsDebug.systems shouldBe systems
         requests shouldBe systems.map { Triple(it, city, worker) }
-        messages.size shouldBe 10
+        messages.size shouldBe 12
         messages.map { line ->
             line.startsWith("ARCCIVS_DEBUG ") shouldBe true
             line.contains('\n') shouldBe false
@@ -349,7 +349,7 @@ class CivsCommandTest : FunSpec({
         CivsCommand.completions(true, true, arrayOf("debug", "lay")) shouldBe listOf("layout")
         CivsCommand.completions(true, true, arrayOf("debug", "layout", UUID.randomUUID().toString(), "t")) shouldBe listOf("terrain")
         CivsCommand.completions(true, false, arrayOf("debug", "layout", UUID.randomUUID().toString(), "t")) shouldBe emptyList()
-        val systems = listOf("all", "overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "layout")
+        val systems = listOf("all", "overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "research", "industry", "layout")
         val router = CivsCommand(mockk(), mockk(), mockk(), mockk())
         for ((use, admin) in listOf(false to true, true to false, true to true)) {
             val sender = mockk<CommandSender> {

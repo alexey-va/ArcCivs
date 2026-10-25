@@ -237,10 +237,14 @@ class CivsUi internal constructor(
                 Resource.entries.map { text.resource(player, it) }, DialogTables.Frame.COMMON, 320, listOf(1, 1, 1)),
             body(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help"),
             error?.let(::body),
-        ), listOf(
-            button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) },
-            button(player, "refresh", "autonomy.refresh", NAVIGATION) { showBuildingInspection(player, cityId, buildingId) },
-        ), reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
+        ), buildList {
+            if (building.type == BuildingType.UNIVERSITY)
+                add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
+            if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.QUARRY))
+                add(button(player, "industry", "industry.open", STOCK) { showIndustryBuilding(player, cityId, buildingId) })
+            add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) })
+            add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showBuildingInspection(player, cityId, buildingId) })
+        }, reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
     }
 
     private fun openInspectionInventory(player: Player, cityId: UUID, buildingId: UUID) {
@@ -410,6 +414,8 @@ class CivsUi internal constructor(
             add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             add(button(player, "buildings", "buildings.open", LAND) { showBuildings(player) })
             add(button(player, "workers", "workers.open", PEOPLE) { showWorkers(player) })
+            add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
+            add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) })
             if (hall != null && canUpgrade(city, hall)) add(button(player, "upgrade", "upgrades.hall-start", COMMIT, appearance = Action.UPGRADE) {
                 perform(player, "civs.overview", "city.title", { host.upgradeBuilding(player, hall.id) },
                     success = { showOverview(player) }, failure = { showOverview(player, it) }, workingKey = "upgrades.starting")
@@ -419,6 +425,228 @@ class CivsUi internal constructor(
                     .copy(tooltip = tr(player, "city.hall-inventory-help")))
             add(button(player, "guide", "guide.open", NAVIGATION) { showGuide(player) })
         }, reopen = { showOverview(player) }, cityId = city.id)
+    }
+
+    private fun showResearch(player: Player, cityId: UUID, error: Component? = null) {
+        val view = try { host.research(player, cityId) } catch (failure: Exception) {
+            present(player, "civs.research", "research.title", listOf(body(text.failure(player, failure))), emptyList(),
+                reopen = { showResearch(player, cityId) }, cityId = cityId)
+            return
+        }
+        val viewedCity = selectedCity(player, cityId) ?: return
+        present(player, "civs.research", "research.title", listOfNotNull(
+            body(tint(text.literal(viewedCity.name), LAND)),
+            presentation.summary(Component.join(Component.newline(), buildList {
+                add(tr(player, "research.completed-count", "count" to view.completed.size, "total" to CivResearchId.entries.size))
+                view.project?.let { project ->
+                    add(tint(researchName(player, project.research), PERSONAL))
+                    add(researchProgress(player, project))
+                    add(researchStatus(player, view, project.research))
+                } ?: add(tr(player, "research.idle"))
+            })),
+            presentation.paragraph(tr(player, "research.work-help")),
+            if (view.universityId == null) body(player, "reason.university-required") else null,
+            if (view.autonomous) body(player, "research.auto-help") else null,
+            if (!canManageSelected(player, viewedCity)) body(player, "research.read-only") else null,
+            error?.let(::body),
+        ), buildList {
+            CivResearchId.entries.forEach { id ->
+                add(valueButton(player, "research_${id.name.lowercase(Locale.ROOT)}", "common.destination", researchName(player, id),
+                    if (id in view.completed) COMMIT else PERSONAL,
+                    researchStatus(player, view, id).append(Component.newline()).append(tr(player, "research.effect.${id.name.lowercase(Locale.ROOT)}"))) {
+                    showResearchDetail(player, cityId, id)
+                })
+            }
+            add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, cityId) })
+            add(button(player, "refresh", "research.refresh", NAVIGATION) { showResearch(player, cityId) })
+        }, reopen = { showResearch(player, cityId) }, cityId = cityId)
+    }
+
+    private fun showResearchDetail(player: Player, cityId: UUID, research: CivResearchId, error: Component? = null) {
+        val view = try { host.research(player, cityId) } catch (failure: Exception) {
+            return showResearch(player, cityId, text.failure(player, failure))
+        }
+        val viewedCity = selectedCity(player, cityId) ?: return
+        val offer = view.offers.firstOrNull { it.research == research }
+        val project = view.project?.takeIf { it.research == research }
+        val cost = project?.cost ?: offer?.cost
+        val prerequisites = CivsResearch.prerequisites(research)
+        val canManage = canManageSelected(player, viewedCity)
+        present(player, "civs.research-detail", "research.detail-title", listOfNotNull(
+            body(tint(text.literal(viewedCity.name), LAND)),
+            presentation.summary(Component.join(Component.newline(), listOfNotNull(
+                tint(researchName(player, research), PERSONAL), researchStatus(player, view, research),
+                project?.let { researchProgress(player, it) },
+            ))),
+            presentation.paragraph(tr(player, "research.effect.${research.name.lowercase(Locale.ROOT)}")),
+            presentation.paragraph(Component.join(Component.newline(), listOfNotNull(
+                if (prerequisites.isNotEmpty()) tr(player, "research.prerequisites", "names" to
+                    Component.join(text.literal(" · "), prerequisites.map { researchName(player, it) })) else tr(player, "research.materials-prerequisites"),
+                if (research == CivResearchId.ENGINEERING) tr(player, "research.university-level") else null,
+                if (project == null && research !in view.completed && offer != null)
+                    tr(player, "research.duration", "sessions" to offer.workRequired) else null,
+            ))),
+            if (research !in view.completed && cost != null) presentation.paragraph(Component.join(Component.newline(), listOf(
+                tint(tr(player, if (project?.funded == true) "research.cost-paid" else "research.cost"), STOCK),
+                researchCost(player, cost),
+            ))) else null,
+            listOfNotNull(
+                project?.let { tr(player, when {
+                    it.paused -> "research.pause-help"
+                    it.funded -> "research.funded-help"
+                    view.autonomous -> "research.auto-funding-help"
+                    else -> "research.native-funding-help"
+                }) },
+                offer?.reason?.takeIf { project == null && research !in view.completed }?.let { text.reason(player, it) },
+                if (!canManage) tr(player, "research.read-only") else null,
+            ).takeIf { it.isNotEmpty() }?.let { presentation.paragraph(Component.join(Component.newline(), it)) },
+            error?.let(::body),
+        ), buildList {
+            if (canManage && offer?.available == true && view.project == null) add(button(player, "start", "research.start", COMMIT, appearance = Action.START) {
+                if (selectedCity(player, cityId)?.let { canManageSelected(player, it) } != true)
+                    showResearchDetail(player, cityId, research, text.reason(player, "not-authorized"))
+                else perform(player, "civs.research-detail", "research.detail-title", { host.beginResearch(player, cityId, research) },
+                    success = { showResearchDetail(player, cityId, research) }, failure = { showResearchDetail(player, cityId, research, it) })
+            })
+            if (canManage && project != null) add(button(player, "pause", if (project.paused) "research.resume" else "research.pause",
+                if (project.paused) COMMIT else STOCK, appearance = if (project.paused) Action.START else null) {
+                if (selectedCity(player, cityId)?.let { canManageSelected(player, it) } != true)
+                    showResearchDetail(player, cityId, research, text.reason(player, "not-authorized"))
+                else perform(player, "civs.research-detail", "research.detail-title",
+                    { host.setResearchPaused(player, cityId, project.id, !project.paused) },
+                    success = { showResearchDetail(player, cityId, research) }, failure = { showResearchDetail(player, cityId, research, it) })
+            })
+            if (!view.autonomous && canManage && view.universityId != null)
+                add(button(player, "university", "research.university-open", LAND) { showBuilding(player, view.universityId) })
+            add(button(player, "refresh", "research.refresh", NAVIGATION) { showResearchDetail(player, cityId, research) })
+        }, reopen = { showResearchDetail(player, cityId, research) }, cityId = cityId)
+    }
+
+    private fun showIndustry(player: Player, cityId: UUID, page: Int = 0, error: Component? = null) {
+        val view = try { host.industry(player, cityId) } catch (failure: Exception) {
+            present(player, "civs.industry", "industry.title", listOf(body(text.failure(player, failure))), emptyList(),
+                reopen = { showIndustry(player, cityId, page) }, cityId = cityId)
+            return
+        }
+        val viewedCity = selectedCity(player, cityId) ?: return
+        val current = page.coerceIn(0, lastPage(view.buildings.size))
+        present(player, "civs.industry", "industry.title", listOfNotNull(
+            body(tint(text.literal(viewedCity.name), LAND)),
+            presentation.paragraph(tr(player, if (view.autonomous) "industry.auto-help" else "industry.native-help")),
+            if (view.autonomous) presentation.summary(Component.join(Component.newline(), listOf(
+                tint(tr(player, "industry.stock"), STOCK),
+                Component.join(text.literal(" · "), CivIndustryProduct.entries.map { product ->
+                    tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to (view.products[product] ?: 0L))
+                }),
+            ))) else null,
+            if (view.buildings.isEmpty()) body(player, "industry.empty") else null,
+            error?.let(::body),
+        ), buildList {
+            view.buildings.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, building ->
+                val level = viewedCity.building(building.buildingId)?.level ?: 1
+                val recipe = building.recipes.firstOrNull { it.id == building.activeRecipe }
+                add(valueButton(player, "industry_$index", "common.destination", buildingName(player, building.type, level),
+                    buildingColor(building.type), recipe?.let { industryRecipe(player, view.autonomous, it) } ?: tr(player, "industry.no-recipe")) {
+                    showIndustryBuilding(player, cityId, building.buildingId)
+                })
+            }
+            pages(player, current, view.buildings.size) { showIndustry(player, cityId, it) }
+            add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
+            add(button(player, "refresh", "research.refresh", NAVIGATION) { showIndustry(player, cityId, current) })
+        }, reopen = { showIndustry(player, cityId, current) }, cityId = cityId)
+    }
+
+    private fun showIndustryBuilding(player: Player, cityId: UUID, buildingId: UUID, error: Component? = null) {
+        val view = try { host.industry(player, cityId) } catch (failure: Exception) {
+            return showIndustry(player, cityId, error = text.failure(player, failure))
+        }
+        val viewedCity = selectedCity(player, cityId) ?: return
+        val building = view.buildings.firstOrNull { it.buildingId == buildingId } ?: return showIndustry(player, cityId)
+        val nativeBuilding = viewedCity.building(buildingId) ?: return showIndustry(player, cityId)
+        val canChoose = !view.autonomous && canManageSelected(player, viewedCity) && !host.cityBusy(player) &&
+            viewedCity.construction?.buildingId != buildingId && nativeBuilding.phase == BuildingPhase.ACTIVE
+        present(player, "civs.industry-building", "industry.building-title", listOfNotNull(
+            body(tint(text.literal(viewedCity.name), LAND).append(Component.newline())
+                .append(buildingName(player, building.type, nativeBuilding.level))),
+            presentation.paragraph(tr(player, if (view.autonomous) "industry.auto-help" else "industry.native-help")),
+            building.waitingReason?.let { body(text.reason(player, it)) },
+            if (building.recipes.isEmpty()) body(player, "industry.no-recipe") else null,
+            if (building.recipes.isNotEmpty()) presentation.paragraph(Component.join(Component.newline(), buildList {
+                building.recipes.firstOrNull { it.id == building.activeRecipe }?.let { recipe ->
+                    add(tint(tr(player, "industry.active-recipe", "item" to industryOutput(player, view.autonomous, recipe.output)), COMMIT))
+                }
+                building.recipes.forEach { recipe -> add(tint(industryRecipe(player, view.autonomous, recipe),
+                    if (recipe.id == building.activeRecipe) COMMIT else STOCK)) }
+            })) else null,
+            if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER)) presentation.paragraph(
+                tr(player, if (building.type == BuildingType.CRUSHER) "industry.crusher-gates"
+                    else if (view.autonomous) "industry.auto-smeltery-gates" else "industry.smeltery-gates")
+                    .append(Component.newline()).append(tr(player, "industry.level-gates"))) else null,
+            error?.let(::body),
+        ), buildList {
+            if (canChoose) building.choices.forEachIndexed { index, choice ->
+                val recipe = building.recipes.firstOrNull { it.id == choice || it.output == choice }
+                add(valueButton(player, "production_$index", if (choice == building.production) "common.selected" else "common.choice",
+                    industryOutput(player, false, recipe?.output ?: choice), if (choice == building.production) COMMIT else WHITE,
+                    recipe?.let { industryRecipe(player, false, it) } ?: Component.empty()) {
+                    if (selectedCity(player, cityId)?.let { canManageSelected(player, it) } != true)
+                        showIndustryBuilding(player, cityId, buildingId, text.reason(player, "not-authorized"))
+                    else if (choice == building.production) showIndustryBuilding(player, cityId, buildingId)
+                    else perform(player, "civs.industry-building", "industry.building-title",
+                        { host.setProduction(player, buildingId, choice) }, success = { showIndustryBuilding(player, cityId, buildingId) },
+                        failure = { showIndustryBuilding(player, cityId, buildingId, it) })
+                })
+            }
+            add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
+            add(button(player, "refresh", "research.refresh", NAVIGATION) { showIndustryBuilding(player, cityId, buildingId) })
+        }, reopen = { showIndustryBuilding(player, cityId, buildingId) }, cityId = cityId)
+    }
+
+    private fun selectedCity(player: Player, cityId: UUID): Settlement? =
+        host.settlements().firstOrNull { it.id == cityId } ?: host.city(player)?.takeIf { it.id == cityId }
+
+    private fun canManageSelected(player: Player, city: Settlement): Boolean =
+        if (city.autonomy != null) isAdmin(player) else city.canManage(player.uniqueId)
+
+    private fun researchName(player: Player, id: CivResearchId): Component = tr(player, "research.name.${id.name.lowercase(Locale.ROOT)}")
+    private fun industryProductName(player: Player, product: CivIndustryProduct): Component = tr(player, "industry.product.${product.name.lowercase(Locale.ROOT)}")
+    private fun researchProgress(player: Player, project: CivResearchProject): Component =
+        tr(player, "research.progress", "done" to project.workDone, "total" to project.workRequired)
+    private fun researchStatus(player: Player, view: CivResearchView, id: CivResearchId): Component {
+        val project = view.project?.takeIf { it.research == id }
+        val key = when {
+            id in view.completed -> "completed"
+            project?.paused == true -> "paused"
+            project?.funded == false -> "waiting-materials"
+            project != null -> "in-progress"
+            view.offers.any { it.research == id && it.available } -> "available"
+            else -> "locked"
+        }
+        return tint(tr(player, "research.state.$key"), if (key in setOf("completed", "in-progress")) COMMIT else STOCK)
+    }
+
+    private fun researchCost(player: Player, cost: CivResearchCost): Component = Component.join(text.literal(" · "), buildList {
+        Resource.entries.filter { cost.stock[it] > 0 }.forEach { resource ->
+            add(tr(player, "industry.amount", "item" to text.resource(player, resource), "amount" to cost.stock[resource]))
+        }
+        cost.products.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to count)) }
+        cost.materials.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to count)) }
+    })
+
+    private fun industryOutput(player: Player, autonomous: Boolean, output: String): Component =
+        if (autonomous) CivIndustryProduct.entries.firstOrNull { it.name == output }?.let { industryProductName(player, it) }
+            ?: materialName(player, output) else materialName(player, output)
+
+    private fun industryRecipe(player: Player, autonomous: Boolean, recipe: CivIndustryRecipeView): Component {
+        val inputs = buildList {
+            Resource.entries.filter { recipe.inputStock[it] > 0 }.forEach { resource ->
+                add(tr(player, "industry.amount", "item" to text.resource(player, resource), "amount" to recipe.inputStock[resource]))
+            }
+            recipe.inputProducts.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to count)) }
+            recipe.inputs.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to count)) }
+        }
+        return tr(player, "industry.chain", "inputs" to if (inputs.isEmpty()) tr(player, "industry.gathering")
+            else Component.join(text.literal(" + "), inputs), "output" to industryOutput(player, autonomous, recipe.output), "amount" to recipe.outputAmount)
     }
 
     private fun showGuide(player: Player) {
@@ -801,15 +1029,19 @@ class CivsUi internal constructor(
 
     private fun showOffer(player: Player, type: BuildingType, error: Component? = null) {
         val city = city(player) ?: return
-        val eligible = CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS
+        val requiredResearch = CivsResearch.required(type, 1)?.takeUnless { CivsResearch.has(city, it) }
+        val eligible = CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS && requiredResearch == null
         present(player, "civs.offer", "buildings.offer-title", listOfNotNull(
             body(buildingName(player, type, 1)), body(player, "building-purpose.${type.name.lowercase(Locale.ROOT)}"),
-            if (type in setOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.SAWMILL) || CivsProduction.options(type).isNotEmpty())
+            if (type !in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER) &&
+                (type in setOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.SAWMILL) || CivsProduction.options(type).isNotEmpty()))
                 body(player, "buildings.workplaces-levels") else null,
             body(player, "buildings.site-help"),
+            requiredResearch?.let { body(tr(player, "research.building-required", "name" to researchName(player, it))) },
             if (CivsRules.buildingCount(city) >= CivsRules.MAX_BUILDINGS) body(player, "reason.building-limit") else null,
             error?.let(::body),
         ), buildList {
+            if (requiredResearch != null) add(button(player, "research", "research.open", PERSONAL) { showResearchDetail(player, city.id, requiredResearch) })
             if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT, appearance = Action.FOUND) {
                 beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
             })
@@ -855,6 +1087,8 @@ class CivsUi internal constructor(
                 }
             }), body(player, "buildings.control-help"),
             if (canUpgrade(city, building)) upgradeSummary(player, city, building) else null,
+            CivsResearch.required(building.type, building.level + 1)?.takeIf { building.level < building.type.maxLevel && !CivsResearch.has(city, it) }
+                ?.let { body(tr(player, "research.upgrade-required", "name" to researchName(player, it), "level" to building.level + 1)) },
             if (legacyControl) body(player, "control.legacy-help") else null,
             if (legacyControl && city.construction?.buildingId == buildingId) body(player, "reason.construction-busy") else null,
             request?.let { body(tint(if (requestTool != null) tr(player, "workers.tool-request-$requestTool")
@@ -884,6 +1118,8 @@ class CivsUi internal constructor(
             if (queued || CivsRules.isBuilder(city, building) && city.constructionQueue.orEmpty().isNotEmpty())
                 add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
             if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
+            if (building.type == BuildingType.UNIVERSITY || CivsResearch.required(building.type, building.level + 1) != null)
+                add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
             if (building.type == BuildingType.WAREHOUSE && city.inventory != null)
                 add(button(player, "logistics", "logistics.open", STOCK) { showSupplyRequests(player, buildingId) })
             if ((building.type == BuildingType.SAWMILL || CivsProduction.options(building.type).isNotEmpty()) &&
@@ -1175,7 +1411,8 @@ class CivsUi internal constructor(
         val building = city.building(buildingId) ?: return showBuildings(player)
         if (CivsRules.isBuilder(city, building)) return showBuilding(player, buildingId)
         if (building.type == BuildingType.SAWMILL) return showCarpentry(player, buildingId)
-        val options = CivsProduction.options(building.type)
+        if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER)) return showIndustryBuilding(player, city.id, buildingId, error)
+        val options = CivsProduction.options(city, building)
         val selected = CivsProduction.material(building)
         val inputs = CivsProduction.inputs(building)
         val available = if (inputs.isNotEmpty()) runCatching { host.localMaterials(player, buildingId) } else null
@@ -1193,9 +1430,12 @@ class CivsUi internal constructor(
             if (inputs.isNotEmpty()) body(tr(player, "production.recipe-output", "item" to materialName(player, requireNotNull(selected)),
                 "amount" to CivsProduction.amount(building))) else null,
             available?.exceptionOrNull()?.let { body(text.failure(player, it)) },
+            if (building.type == BuildingType.BLACKSMITH && !CivsResearch.has(city, CivResearchId.ENGINEERING)) body(player, "industry.forge-gates") else null,
             if (city.construction?.buildingId == buildingId) body(player, "reason.construction-busy") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
+            if (building.type == BuildingType.BLACKSMITH && !CivsResearch.has(city, CivResearchId.ENGINEERING))
+                add(button(player, "research", "research.open", PERSONAL) { showResearchDetail(player, city.id, CivResearchId.ENGINEERING) })
             if (!locked && (inputs.isEmpty() || options.size > 1)) options.forEachIndexed { index, material ->
                 val recipe = building.copy(production = material)
                 val recipeInputs = CivsProduction.inputs(recipe)
@@ -1372,10 +1612,12 @@ class CivsUi internal constructor(
         val hallRequired = building.type != BuildingType.TOWN_HALL && target > city.level()
         val queued = queuePosition(city, building.id)
         val buildingInProgress = city.construction?.buildingId == building.id
-        val eligible = !hallRequired && !buildingInProgress && queued == null && building.phase == BuildingPhase.ACTIVE
+        val requiredResearch = CivsResearch.required(building.type, target)?.takeUnless { CivsResearch.has(city, it) }
+        val eligible = !hallRequired && !buildingInProgress && queued == null && building.phase == BuildingPhase.ACTIVE && requiredResearch == null
         present(player, "civs.upgrade", "upgrades.detail-title", listOfNotNull(
             body(buildingName(player, building.type, building.level)),
             upgradeSummary(player, city, building), body(player, "upgrades.materials-help"),
+            requiredResearch?.let { body(tr(player, "research.upgrade-required", "name" to researchName(player, it), "level" to target)) },
             when {
                 queued != null -> body(tr(player, "queue.materials-help", "position" to queued))
                 buildingInProgress -> body(player, "reason.construction-busy")
@@ -1383,6 +1625,7 @@ class CivsUi internal constructor(
                 else -> null
             }, error?.let(::body),
         ), buildList {
+            if (requiredResearch != null) add(button(player, "research", "research.open", PERSONAL) { showResearchDetail(player, city.id, requiredResearch) })
             if (eligible) add(button(player, "upgrade", "upgrades.start", COMMIT, appearance = Action.UPGRADE) {
                 perform(player, "civs.upgrade", "upgrades.detail-title", { host.upgradeBuilding(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showUpgrade(player, buildingId, it) },
@@ -1637,6 +1880,8 @@ class CivsUi internal constructor(
         ), buildList {
             add(button(player, "buildings", "buildings.open", LAND) { showAutonomousBuildings(player, city.id) })
             add(button(player, "workers", "workers.open", PEOPLE) { showAutonomousWorkers(player, city.id) })
+            add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
+            add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) })
             if (host.ready() && host.foundingAllowed() && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
                 add(button(player, "plan_board", "plan-board.place", PERSONAL, appearance = Action.FOUND) {
                     if (!isAdmin(player)) autonomyDenied(player)
@@ -1790,7 +2035,8 @@ class CivsUi internal constructor(
 
     private fun canUpgrade(city: Settlement, building: CivBuilding): Boolean =
         building.level < building.type.maxLevel && building.phase == BuildingPhase.ACTIVE && queuePosition(city, building.id) == null &&
-            city.construction?.buildingId != building.id && (building.type == BuildingType.TOWN_HALL || building.level < city.level())
+            city.construction?.buildingId != building.id && (building.type == BuildingType.TOWN_HALL || building.level < city.level()) &&
+            CivsResearch.required(building.type, building.level + 1).let { it == null || CivsResearch.has(city, it) }
 
     private fun upgradeSummary(player: Player, city: Settlement, building: CivBuilding): PaperDialogBody = presentation.paragraph(Component.join(Component.newline(), buildList {
         val target = building.level + 1
@@ -1819,6 +2065,8 @@ class CivsUi internal constructor(
         BuildingType.FORESTER -> tr(player, "upgrades.forest-worker")
         BuildingType.QUARRY -> tr(player, "upgrades.mining", "before" to building.level, "after" to building.level + 1)
         BuildingType.SAWMILL -> tr(player, "upgrades.carpentry", "level" to building.level + 1)
+        BuildingType.UNIVERSITY -> tr(player, "research.university-upgrade")
+        BuildingType.SMELTERY, BuildingType.CRUSHER -> tr(player, "industry.processor-upgrade")
         BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.BAKERY -> tr(player, "upgrades.processor")
         else -> tr(player, "upgrades.production", "before" to CivsProduction.amount(building),
             "after" to CivsProduction.amount(building.copy(level = building.level + 1)))
@@ -2008,8 +2256,8 @@ class CivsUi internal constructor(
     private fun screenColor(id: String): TextColor = when (id) {
         "civs.workers", "civs.worker", "civs.members", "civs.member", "civs.member-add", "civs.building-workers" -> PEOPLE
         "civs.stock", "civs.warehouse", "civs.materials", "civs.building-materials", "civs.builder-materials", "civs.logistics",
-        "civs.containers", "civs.container" -> STOCK
-        "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings" -> PERSONAL
+        "civs.containers", "civs.container", "civs.industry", "civs.industry-building" -> STOCK
+        "civs.management", "civs.upgrades", "civs.upgrade", "civs.worker-skills", "civs.production", "civs.carpentry-recipes", "civs.storage-mode", "civs.testing-settings", "civs.research", "civs.research-detail" -> PERSONAL
         "civs.guide", "civs.remote" -> NAVIGATION
         "civs.delete-city", "civs.delete-building" -> DANGER
         else -> LAND
@@ -2045,6 +2293,9 @@ class CivsUi internal constructor(
         BuildingType.WALL, BuildingType.GATE -> 0xB8BBC4
         BuildingType.ROAD -> 0xBDAE98
         BuildingType.PLAN_BOARD -> 0xD9BE85
+        BuildingType.UNIVERSITY -> 0xD6B7F2
+        BuildingType.SMELTERY -> 0xF5A46B
+        BuildingType.CRUSHER -> 0xA8BDD8
     })
 
     override fun close() {

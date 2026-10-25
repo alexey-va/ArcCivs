@@ -92,6 +92,7 @@ class CivsService(
     private val constructionFocus = mutableMapOf<UUID, ConstructionFocus>()
     private val constructionSupplyNeeds = mutableMapOf<UUID, ConstructionSupplyNeed>()
     private var testingSupplyCursor = 0
+    private var researchCursor = 0
     private val supplyNoopDiagnostics = linkedMapOf<UUID, String>()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
     private val populationPending = mutableSetOf<UUID>()
@@ -355,6 +356,8 @@ class CivsService(
         fun rows(transform: (Settlement) -> Map<String, Any?>): Map<String, Any?> = mapOf(
             "total" to total, "truncated" to (total > selected.size), "entries" to selected.map(transform))
         return when (system) {
+            "research" -> rows { city -> mapOf("city" to city.id, "revision" to city.revision, "view" to CivsResearch.view(city)) }
+            "industry" -> rows { city -> mapOf("city" to city.id, "revision" to city.revision, "view" to CivsIndustry.view(city)) }
             "autonomy" -> rows { city -> mapOf("city" to city.id, "enabled" to (city.autonomy != null),
                 "state" to city.autonomy, "progress" to autonomyStatus(city.id), "stock" to city.stock,
                 "request" to autonomyRequests[city.id], "retry_at" to autonomyRetryAt[city.id],
@@ -623,9 +626,44 @@ class CivsService(
             ?: CivsAutonomyView("planning", goal.type, goal.targetLevel)
     }
 
+    private fun researchCity(player: Player, cityId: UUID, mutation: Boolean): Settlement {
+        requireReady(player)
+        val city = cities[cityId] ?: throw CivsRejection("no-city")
+        if (city.autonomy != null) {
+            rejectIf(player.world.uid != city.worldId || mutation && !player.hasPermission("arccivs.admin"), "not-authorized")
+        } else rejectIf(!city.canManage(player.uniqueId), "not-authorized")
+        rejectIf(city.id in unhealthy, "storage-unavailable")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        return city
+    }
+
+    override fun research(player: Player, cityId: UUID): CivResearchView = CivsResearch.view(researchCity(player, cityId, false))
+    override fun industry(player: Player, cityId: UUID): CivIndustryView = CivsIndustry.view(researchCity(player, cityId, false))
+
+    override fun beginResearch(player: Player, cityId: UUID, research: CivResearchId): CompletableFuture<Unit> =
+        action("research_begin", player, "city" to cityId, "research" to research) {
+            researchCity(player, cityId, true)
+            afterCityAvailable(cityId) {
+                rejectIf(!player.isOnline, "player-offline")
+                researchCity(player, cityId, true)
+                mutate(cityId) { current -> CivsResearch.begin(current, research, UUID.randomUUID(), now()) }.thenApply { Unit }
+            }
+        }
+
+    override fun setResearchPaused(player: Player, cityId: UUID, projectId: UUID, paused: Boolean): CompletableFuture<Unit> =
+        action("research_pause", player, "city" to cityId, "project" to projectId, "paused" to paused) {
+            researchCity(player, cityId, true)
+            afterCityAvailable(cityId) {
+                rejectIf(!player.isOnline, "player-offline")
+                researchCity(player, cityId, true)
+                mutate(cityId) { CivsResearch.setPaused(it, projectId, paused, now()) }.thenApply { Unit }
+            }
+        }
+
     override fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit> = action("begin_building_selection", player, "type" to type) {
         val city = managed(player)
         rejectIf(type == BuildingType.TOWN_HALL || type.isInfrastructure, "invalid-building")
+        CivsResearch.required(type, 1)?.let { rejectIf(!CivsResearch.has(city, it), "research-required") }
         rejectIf(player.world.uid != city.worldId, "outside-city")
         beginSelection(player, city.id, city.name, city.style, type)
     }
@@ -699,6 +737,7 @@ class CivsService(
         rejectIf(city.construction?.buildingId == buildingId, "construction-busy")
         rejectIf(building.phase != BuildingPhase.ACTIVE, "invalid-building")
         rejectIf(building.level >= building.type.maxLevel, "invalid-level")
+        CivsResearch.required(building.type, building.level + 1)?.let { rejectIf(!CivsResearch.has(city, it), "research-required") }
         rejectIf(building.type != BuildingType.TOWN_HALL && building.level >= city.level(), "town-hall-level-required")
         near(player, city.worldId, building.entrance)
         if (buildingId in city.constructionQueue.orEmpty()) return@action CompletableFuture.completedFuture(Unit)
@@ -1489,7 +1528,7 @@ class CivsService(
         toolRequest(player, workerId)?.let { return CivsBuildingRequest(it.material, 1, it.canGive) }
         val building = worker.assignment?.let(city::building) ?: return null
         return supplyRequest(player, city, building, worker)?.let { request ->
-            request.copy(canGive = request.canGive && CivsEquipment.supplyRoom(worker, request.material) > 0)
+            request.copy(canGive = request.canGive && (building.type == BuildingType.UNIVERSITY || CivsEquipment.supplyRoom(worker, request.material) > 0))
         }
     }
 
@@ -1499,7 +1538,8 @@ class CivsService(
             rejectIf(request.material.name != material, "resident-item-missing")
             val worker = city.workers.first { it.id == workerId }
             if (CivsEquipment.requestedTool(city, worker)?.name == material) giveRequestedTool(player, workerId)
-            else giveRequestedSupply(player, city, requireNotNull(worker.assignment), material, workerId)
+            else giveRequestedSupply(player, city, requireNotNull(worker.assignment), material,
+                workerId.takeUnless { city.building(requireNotNull(worker.assignment))?.type == BuildingType.UNIVERSITY })
         }
 
     override fun buildingRequest(player: Player, buildingId: UUID): CivsBuildingRequest? {
@@ -1519,13 +1559,14 @@ class CivsService(
 
     private fun supplyRequest(player: Player, city: Settlement, building: CivBuilding, worker: CivWorker?): CivsBuildingRequest? {
         if (city.inventory == null || building.phase != BuildingPhase.ACTIVE) return null
-        val available = storage.buildingAvailable(city, building.id).let { stock -> worker?.let { CivsEquipment.available(it, stock) } ?: stock }
+        val available = storage.buildingAvailable(city, building.id).let { stock ->
+            if (building.type == BuildingType.UNIVERSITY) stock else worker?.let { CivsEquipment.available(it, stock) } ?: stock }
         val productionInputs = if (building.type == BuildingType.SAWMILL) {
             if (worker == null) craftRequired(city, building.id) else craftPlan(city, worker)?.inputs.orEmpty()
-        } else CivsProduction.inputs(building)
+        } else CivsProduction.inputs(city, building)
         val requirements = worker?.let { worksites.requirement(city, it) }?.let { listOf(it) }
             ?: productionInputs.entries.sortedBy { (material, count) -> (available[material] ?: 0) >= count }
-                .map { (material, count) -> material to if (building.type == BuildingType.SAWMILL) count
+                .map { (material, count) -> material to if (building.type in setOf(BuildingType.SAWMILL, BuildingType.UNIVERSITY)) count
                     else maxOf(count, Material.matchMaterial(material)?.maxStackSize?.toLong() ?: 1) }
         for ((material, need) in requirements) {
             val missing = need - (available[material] ?: 0)
@@ -1670,9 +1711,35 @@ class CivsService(
                 rejectIf(city.construction?.id != constructionId, "stale-delivery")
                 citizens.requireConstructionArrival(cityId, workerId, requireNotNull(constructionId))
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
+            } else if (building.type == BuildingType.UNIVERSITY) {
+                rejectIf(constructionId != null, "stale-delivery")
+                val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                val plan = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
+                rejectIf(plan.token.completedCycles != cycle || plan.token.nextDeliveryAt != nextAt, "stale-delivery")
+                val projectId = plan.token.researchProjectId ?: throw CivsRejection("stale-research")
+                if (city.autonomy != null) citizens.requireAutonomousDelivery(cityId, workerId, plan.token)
+                else citizens.requireSelectedWorkDelivery(cityId, workerId, plan.token)
+                mutate(cityId) { CivsResearch.complete(it, workerId, cycle, nextAt, projectId, at) }.thenApply { saved ->
+                    CivsDiagnostics.event("research_session_committed", "city" to cityId, "worker" to workerId, "cycle" to cycle,
+                        "project" to projectId, "research" to city.research?.project?.research,
+                        "work_done" to (saved.research?.project?.workDone ?: city.research?.project?.workRequired),
+                        "completed" to (saved.research?.project == null), "revision" to saved.revision)
+                    saved
+                }
             } else if (city.autonomy != null && building.type != BuildingType.FORESTER) {
                 rejectIf(constructionId != null || city.autonomy.paused, "stale-delivery")
-                citizens.requireAutonomousDelivery(cityId, workerId, CitizenToken(assignment, cycle, nextAt, null))
+                val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                rejectIf(worker.completedCycles != cycle || worker.nextDeliveryAt != nextAt, "stale-delivery")
+                val plan = citizens.requireAutonomousDelivery(cityId, workerId, CitizenToken(assignment, cycle, nextAt, null))
+                plan.industryWork?.let { work ->
+                    return@afterCityAvailable mutate(cityId) { CivsIndustry.complete(it, workerId, cycle, nextAt, work, at) }.thenApply { saved ->
+                        CivsDiagnostics.event("autonomous_industry_committed", "city" to cityId, "worker" to workerId,
+                            "cycle" to cycle, "recipe" to work.recipe.id, "inputs_stock" to work.recipe.stock,
+                            "inputs_products" to work.recipe.products, "product" to work.recipe.product,
+                            "amount" to work.recipe.amount, "products" to saved.autonomy?.products, "revision" to saved.revision)
+                        saved
+                    }
+                }
                 mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }.thenApply { saved ->
                     CivsDiagnostics.event("autonomous_resource_delivered", "city" to cityId, "worker" to workerId,
                         "cycle" to cycle, "resource" to CivsRules.resource(building.type),
@@ -1720,6 +1787,13 @@ class CivsService(
                 rejectIf(constructionId != null, "stale-delivery")
                 // Automatic carpentry must carry its immutable accepted batch through the actor callback.
                 rejectIf(building.type == BuildingType.SAWMILL, "stale-delivery")
+                if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER) ||
+                    building.type == BuildingType.BLACKSMITH && CivsProduction.material(building) in setOf("BUCKET", "SHEARS")) {
+                    val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                    val plan = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
+                    rejectIf(plan.token.completedCycles != cycle || plan.token.nextDeliveryAt != nextAt, "stale-delivery")
+                    citizens.requireSelectedWorkDelivery(cityId, workerId, plan.token)
+                }
                 citizens.requireStorageArrival(cityId, workerId, assignment)
                 if (city.inventory == null) return@afterCityAvailable mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
                 // Validate the observed trip before reserving space; repeated callbacks cannot mint again.
@@ -1827,17 +1901,24 @@ class CivsService(
 
     /** Local stock permits the trip to storage; work still requires the subsequent physical pickup. */
     internal fun productionReady(city: Settlement, worker: CivWorker): Boolean {
-        if (city.autonomy != null) return true
         val building = worker.assignment?.let(city::building) ?: return true
+        if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
+        if (city.autonomy != null) return (citizens.acceptedIndustryWork(city, worker) ?: CivsIndustry.autonomousWork(city, building))
+            ?.let { CivsIndustry.inputsReady(city, it) && CivsIndustry.room(city, it) }
+            ?: (building.type !in CivsIndustry.processorTypes)
+        if (building.type in CivsIndustry.processorTypes && CivsProduction.material(building) !in CivsProduction.options(city, building)) return false
         if (CivsRules.isBuilder(city, building) || building.type in CivsWorksites.TYPES) return true
         val inputs = if (building.type == BuildingType.SAWMILL) craftPlan(city, worker)?.inputs ?: return false
-            else CivsProduction.inputs(building)
+            else CivsProduction.inputs(city, building)
         return CivsEquipment.inputsReady(worker, inputs, localStocks(city)(building.id))
     }
 
     internal fun workInputsReady(city: Settlement, worker: CivWorker): Boolean {
-        if (city.autonomy != null) return true
         val building = worker.assignment?.let(city::building) ?: return true
+        if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
+        if (city.autonomy != null) return (citizens.acceptedIndustryWork(city, worker) ?: CivsIndustry.autonomousWork(city, building))
+            ?.let { CivsIndustry.inputsReady(city, it) }
+            ?: (building.type !in CivsIndustry.processorTypes)
         if (CivsRules.isBuilder(city, building)) {
             val order = city.construction ?: return true
             if (order.payment == null || order.payment.reservedBatch != null) return true
@@ -1849,7 +1930,7 @@ class CivsService(
         }
         if (building.type in CivsWorksites.TYPES) return true
         val inputs = if (building.type == BuildingType.SAWMILL) craftPlan(city, worker)?.inputs ?: return false
-            else CivsProduction.inputs(building)
+            else CivsProduction.inputs(city, building)
         return CivsEquipment.inputsReady(worker, inputs, emptyMap())
     }
 
@@ -1899,7 +1980,7 @@ class CivsService(
                         } else {
                             rejectIf(!CivsRules.productionAvailable(city, source) || source.type in CivsWorksites.TYPES, "invalid-assignment")
                             required = if (source.type == BuildingType.SAWMILL) requireCraftJob(city, worker, craftJobId).inputs
-                                else CivsProduction.inputs(source)
+                                else CivsProduction.inputs(city, source)
                             storage.prepareResidentPickup(city, workerId, buildingId,
                                 CivsEquipment.storageInputs(worker, requireNotNull(required)))
                         }
@@ -2749,12 +2830,7 @@ class CivsService(
 
     override fun setProduction(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit> = cityAction("production_select", player, "building" to buildingId, "material" to material) { managedCity ->
         mutate(managedCity.id) { city ->
-            val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
-            rejectIf(material !in CivsProduction.options(building.type), "invalid-production")
-            rejectIf(city.construction?.buildingId == buildingId, "construction-busy")
-            if (building.production == material) city else CivsRules.validate(city.copy(buildings = city.buildings.map {
-                if (it.id == buildingId) it.copy(production = material) else it
-            }, revision = city.revision + 1))
+            CivsRules.setProduction(city, player.uniqueId, buildingId, material, now())
         }.thenApply { Unit }
     }
 
@@ -3152,6 +3228,7 @@ class CivsService(
             pulseDeletions()
             pulseControls()
             pulseImmigration()
+            pulseResearch()
             pulseAutoAssignments()
             pulsePopulation()
             pulseMemberNames()
@@ -3446,6 +3523,44 @@ class CivsService(
             memberNamesPending -= city.id
             if (failure != null) log("remember city member names ${city.id}", failure, city.id)
         } }.onFailure { memberNamesPending -= city.id; log("remember city member names ${city.id}", it, city.id) }
+    }
+
+    private fun pulseResearch() {
+        val candidates = cities.values.filter { city -> city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
+            city.autonomy?.paused != true && settlementActive(city) && CivsResearch.university(city) != null &&
+            (CivsResearch.canFund(city) || city.autonomy != null && city.research?.project == null &&
+                CivResearchId.entries.any { CivsResearch.reason(city, it) == null }) }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(researchCursor++, candidates.size)]
+        val project = city.research?.project
+        val future = runCatching {
+            if (project == null) {
+                val research = CivResearchId.entries.first { CivsResearch.reason(city, it) == null }
+                mutate(city.id) { CivsResearch.begin(it, research, UUID.randomUUID(), now()) }
+            } else if (city.autonomy != null) mutate(city.id) { CivsResearch.fund(it, project.id, now()) }
+            else inventoryMutation(city.id, { current ->
+                CivsResearch.project(current, project.id)
+                rejectIf(!CivsResearch.canFund(current), "research-unfunded")
+                val university = CivsResearch.university(current) ?: throw CivsRejection("university-required")
+                storage.prepareWork(current, university.id, project.cost.materials, emptyMap(), emptyList())
+            }, keepViewersOpen = true) { current, inventory ->
+                CivsResearch.fund(current, project.id, now(), nativePaid = true).copy(inventory = inventory)
+            }
+        }
+        future.onSuccess { accepted -> accepted.whenCompleteSync(tasks) { saved, failure ->
+            if (failure != null) {
+                if (CivsDiagnostics.rejection(failure)?.reason !in setOf("materials-missing", "research-unfunded", "storage-unavailable", "chunk-unloaded"))
+                    log("advance research funding ${city.id}", failure, city.id)
+            } else {
+                val current = requireNotNull(saved).research?.project
+                CivsDiagnostics.event(if (project == null) "research_started" else "research_funded", "city" to city.id,
+                    "project" to current?.id, "research" to current?.research, "cost" to current?.cost,
+                    "work_required" to current?.workRequired, "revision" to saved.revision)
+            }
+        } }.onFailure { failure ->
+            if (CivsDiagnostics.rejection(failure)?.reason !in setOf("materials-missing", "research-unfunded", "storage-unavailable", "chunk-unloaded"))
+                log("prepare research funding ${city.id}", failure, city.id)
+        }
     }
 
     private fun pulseAutoAssignments() {

@@ -254,20 +254,44 @@ internal object CivsProduction {
         BuildingType.QUARRY -> listOf("COBBLESTONE", "STONE", "COBBLED_DEEPSLATE")
         BuildingType.FARM -> listOf("WHEAT", "CARROT", "POTATO")
         BuildingType.SAWMILL -> listOf("OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS")
-        BuildingType.BLACKSMITH -> listOf("IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE")
+        BuildingType.BLACKSMITH -> listOf("IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE", "BUCKET", "SHEARS")
+        BuildingType.SMELTERY -> listOf("CHARCOAL", "STONE", "IRON_INGOT", "GLASS")
+        BuildingType.CRUSHER -> listOf("GRAVEL", "SAND")
         BuildingType.STONEMASON -> listOf("STONE_BRICKS")
         BuildingType.LIBRARY -> listOf("WRITABLE_BOOK")
         BuildingType.BAKERY -> listOf("BREAD")
         else -> emptyList()
     }
 
-    fun amount(building: CivBuilding): Long = when (material(building)) {
-        "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE", "BREAD" -> 1L
+    fun options(city: Settlement, building: CivBuilding): List<String> = options(building.type).filter { material -> when {
+        building.type == BuildingType.SMELTERY && material == "IRON_INGOT" -> CivsResearch.has(city, CivResearchId.METALLURGY)
+        building.type == BuildingType.SMELTERY && material == "GLASS" -> CivsResearch.has(city, CivResearchId.GLASSWORK)
+        building.type == BuildingType.CRUSHER && material == "SAND" -> building.level >= 2 && CivsResearch.has(city, CivResearchId.MATERIALS)
+        building.type == BuildingType.BLACKSMITH && material in setOf("BUCKET", "SHEARS") -> CivsResearch.has(city, CivResearchId.ENGINEERING)
+        else -> true
+    } }
+
+    fun amount(building: CivBuilding): Long = if (building.type == BuildingType.SMELTERY) 8
+        else if (building.type == BuildingType.CRUSHER) 1 else when (material(building)) {
+        "BOOK", "WRITABLE_BOOK", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE", "BREAD", "BUCKET", "SHEARS" -> 1L
         "OAK_PLANKS", "SPRUCE_PLANKS", "BIRCH_PLANKS", "JUNGLE_PLANKS", "ACACIA_PLANKS", "DARK_OAK_PLANKS", "STONE_BRICKS" -> 4L
         else -> CivsRules.deliveryAmount(building)
     }
 
-    fun inputs(building: CivBuilding): Map<String, Long> = when (val material = material(building)) {
+    fun inputs(city: Settlement, building: CivBuilding): Map<String, Long> =
+        if (building.type == BuildingType.UNIVERSITY) CivsResearch.inputs(city, building) else inputs(building)
+
+    fun inputs(building: CivBuilding): Map<String, Long> = if (building.type == BuildingType.SMELTERY) when (material(building)) {
+        "CHARCOAL" -> mapOf("OAK_LOG" to 8L, "OAK_PLANKS" to 6L)
+        "STONE" -> mapOf("COBBLESTONE" to 8L, "CHARCOAL" to 1L)
+        "IRON_INGOT" -> mapOf("RAW_IRON" to 8L, "CHARCOAL" to 1L)
+        "GLASS" -> mapOf("SAND" to 8L, "CHARCOAL" to 1L)
+        else -> emptyMap()
+    } else if (building.type == BuildingType.CRUSHER) when (material(building)) {
+        "GRAVEL" -> mapOf("COBBLESTONE" to 2L)
+        "SAND" -> mapOf("GRAVEL" to 2L)
+        else -> emptyMap()
+    } else when (val material = material(building)) {
         "BOOK" -> mapOf("PAPER" to 3L, "LEATHER" to 1L)
         "WRITABLE_BOOK" -> mapOf("BOOK" to 1L, "FEATHER" to 1L, "INK_SAC" to 1L)
         "BREAD" -> mapOf("WHEAT" to 3L)
@@ -277,6 +301,8 @@ internal object CivsProduction {
         "IRON_SHOVEL" -> mapOf("IRON_INGOT" to 1L, "STICK" to 2L)
         "IRON_AXE", "IRON_PICKAXE" -> mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
         "IRON_HOE" -> mapOf("IRON_INGOT" to 2L, "STICK" to 2L)
+        "BUCKET" -> mapOf("IRON_INGOT" to 3L)
+        "SHEARS" -> mapOf("IRON_INGOT" to 2L)
         else -> emptyMap()
     }
 

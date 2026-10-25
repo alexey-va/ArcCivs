@@ -38,7 +38,8 @@ object CivsRules {
         }
         val base = when (type) {
             BuildingType.BUILDER_HUT, BuildingType.SAWMILL, BuildingType.BLACKSMITH,
-            BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.BAKERY -> Stock() // Native construction reserves exact materials.
+            BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.BAKERY,
+            BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER -> Stock() // Native construction reserves exact materials.
             BuildingType.WAREHOUSE -> Stock(32, 16)
             BuildingType.HOUSE -> Stock(24, 12)
             BuildingType.FORESTER -> Stock(20, 12)
@@ -68,7 +69,9 @@ object CivsRules {
 
     fun populationLimit(city: Settlement): Int = minOf(MAX_POPULATION, maxOf(CivsPopulation.IMMIGRANT_POPULATION, city.level() * 4))
 
-    fun slots(building: CivBuilding): Int = if (building.type == BuildingType.BUILDER_HUT) {
+    fun slots(building: CivBuilding): Int = if (building.type in setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
+        if (building.phase == BuildingPhase.ACTIVE) 1 else 0
+    } else if (building.type == BuildingType.BUILDER_HUT) {
         if (building.phase == BuildingPhase.ACTIVE) building.level else 1
     }
     else if (building.phase != BuildingPhase.ACTIVE) 0 else when (building.type) {
@@ -85,8 +88,12 @@ object CivsRules {
         city.buildings.any { it.type == BuildingType.TOWN_HALL && it.phase == BuildingPhase.ACTIVE }
 
     fun slots(city: Settlement, building: CivBuilding): Int =
-        if (city.autonomy != null) {
-            if (building.type in setOf(BuildingType.BUILDER_HUT, BuildingType.GUARD_TOWER) || resource(building.type) != null) slots(building) else 0
+        if (building.type == BuildingType.UNIVERSITY) {
+            if (CivsResearch.university(city)?.id == building.id) slots(building) else 0
+        } else if (city.autonomy != null) {
+            if (building.type == BuildingType.BLACKSMITH && building.phase == BuildingPhase.ACTIVE) 1
+            else if (building.type in setOf(BuildingType.BUILDER_HUT, BuildingType.GUARD_TOWER, BuildingType.SMELTERY,
+                    BuildingType.CRUSHER) || resource(building.type) != null) slots(building) else 0
         }
         else if (building.type == BuildingType.WAREHOUSE && city.inventory == null) 0
         else if (building.type == BuildingType.TOWN_HALL && isBuilder(city, building)) {
@@ -127,8 +134,10 @@ object CivsRules {
         constructionWorkers(city, buildingId).fold(materials) { remaining, worker -> CivsEquipment.storageInputs(worker, remaining) }
 
     fun productionAvailable(city: Settlement, building: CivBuilding): Boolean =
-        building.phase == BuildingPhase.ACTIVE && !isBuilder(city, building) &&
-            CivsProduction.options(building.type).isNotEmpty() && city.construction?.buildingId != building.id
+        building.phase == BuildingPhase.ACTIVE && !isBuilder(city, building) && city.construction?.buildingId != building.id &&
+            (if (building.type == BuildingType.UNIVERSITY) CivsResearch.university(city)?.id == building.id &&
+                city.research?.project?.let { it.funded && !it.paused } == true
+            else CivsProduction.options(building.type).isNotEmpty() || city.autonomy != null && building.type == BuildingType.BLACKSMITH)
 
     fun resource(type: BuildingType): Resource? = when (type) {
         BuildingType.FORESTER -> Resource.WOOD
@@ -150,6 +159,9 @@ object CivsRules {
         BuildingType.WAREHOUSE -> "courier"
         BuildingType.BAKERY -> "baker"
         BuildingType.GUARD_TOWER -> "guard"
+        BuildingType.UNIVERSITY -> "researcher"
+        BuildingType.SMELTERY -> "smelter"
+        BuildingType.CRUSHER -> "crusher"
         else -> "unassigned"
     }
 
@@ -215,6 +227,7 @@ object CivsRules {
         val site = building.copy(phase = BuildingPhase.SITE)
         city.building(site.id)?.let { check(it == site, "invalid-building"); return city }
         check(site.type != BuildingType.TOWN_HALL && site.level == 1, "invalid-level")
+        CivsResearch.required(site.type, site.level)?.let { check(CivsResearch.has(city, it), "research-required") }
         requireBuildingSlot(city, site.type, ESSENTIAL_BUILDINGS + BuildingType.BUILDER_HUT)
         check(!intersectsApproach(city, site), "building-overlap")
         check(validBuilding(city, site) && city.buildings.none { it.bounds.overlaps(site.bounds) } &&
@@ -292,6 +305,17 @@ object CivsRules {
     fun recruitFunded(city: Settlement, actor: UUID, workerId: UUID, name: String): Settlement {
         authorized(city, actor)
         reject("population-natural")
+    }
+
+    fun setProduction(city: Settlement, actor: UUID, buildingId: UUID, material: String, now: Long): Settlement {
+        authorized(city, actor)
+        val building = city.building(buildingId) ?: reject("building-not-found")
+        check(material in CivsProduction.options(city, building), "invalid-production")
+        check(city.construction?.buildingId != buildingId, "construction-busy")
+        if (building.production == material) return city
+        return changed(city, city.copy(buildings = city.buildings.map { if (it.id == buildingId) it.copy(production = material) else it },
+            workers = city.workers.map { worker -> if (worker.assignment == buildingId) worker.copy(
+                nextDeliveryAt = maxOf(add(worker.nextDeliveryAt, 1), add(now, deliveryInterval(city, building)))) else worker }))
     }
 
     fun assign(city: Settlement, actor: UUID, workerId: UUID, buildingId: UUID?, now: Long): Settlement {
@@ -462,6 +486,8 @@ object CivsRules {
             return city
         }
         val existing = city.building(plan.id)
+        if (existing?.phase != BuildingPhase.SITE && plan.id !in city.constructionQueue.orEmpty())
+            CivsResearch.required(plan.type, plan.level)?.let { check(CivsResearch.has(city, it), "research-required") }
         if (city.constructionQueue.orEmpty().isNotEmpty())
             check(city.constructionQueue!!.first() == plan.id, "construction-busy")
         check(plan.type == BuildingType.TOWN_HALL || plan.level <= city.level(), "town-hall-level-required")
@@ -795,6 +821,7 @@ object CivsRules {
             snapshot(city.workers.size in 0..MAX_POPULATION &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
             CivsCorpses.validate(city)
+            CivsResearch.validate(city)
             city.mineProgress?.let { progress -> snapshot(progress.size <= MAX_BUILDINGS && progress.all { (id, step) ->
                 java.util.UUID.fromString(id).toString() == id && step in 0..100_000 }) }
             city.minePlans?.let { plans -> snapshot(plans.size <= MAX_BUILDINGS && plans.all { (id, plan) ->
@@ -920,7 +947,7 @@ object CivsRules {
         if (building.type in setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH,
                 BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TAVERN, BuildingType.BAKERY,
                 BuildingType.GUARD_TOWER, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD,
-                BuildingType.PLAN_BOARD) && order.payment == null) return false
+                BuildingType.PLAN_BOARD, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER) && order.payment == null) return false
         val batches = order.batches
         if (batches == null) return order.payment == null && building.type in setOf(BuildingType.TOWN_HALL,
             BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM) &&

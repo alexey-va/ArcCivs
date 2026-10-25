@@ -48,6 +48,152 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("unfunded research journals the exact university barrel bill once before any researcher is assigned") {
+        serviceScenario { h ->
+            val university = h.city.buildings.last().copy(type = BuildingType.UNIVERSITY,
+                control = CivPosition(10, 63, 0))
+            val prerequisites = listOf(BuildingType.FORESTER, BuildingType.QUARRY).mapIndexed { index, type ->
+                university.copy(id = UUID.randomUUID(), type = type, anchor = CivPosition(20 + index * 10, 64, 0),
+                    bounds = CivBox(CivPosition(18 + index * 10, 63, -2), CivPosition(22 + index * 10, 68, 2)),
+                    entrance = CivPosition(20 + index * 10, 64, -2), control = CivPosition(20 + index * 10, 63, 0))
+            }
+            val base = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList(),
+                buildings = listOf(h.city.buildings.first(), university) + prerequisites)
+            val before = CivsResearch.begin(base, CivResearchId.MATERIALS, UUID.randomUUID(), h.time)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, ItemStack(Material.BOOK, 1))
+            barrel.setItem(1, ItemStack(Material.PAPER, 8))
+            barrel.setItem(2, ItemStack(Material.COBBLESTONE, 8))
+            barrel.setItem(3, ItemStack(Material.DIAMOND, 2))
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            h.paper.addPlayer("ResearchFundingWitness").teleport(Location(h.world, .5, 65.0, .5))
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseResearch").also { it.isAccessible = true }
+            pulse.invoke(h.service)
+            val tx = requireNotNull(receipt)
+            tx.changes.map { it.container }.distinct() shouldBe listOf(university.control)
+            tx.changes.map { it.before!!.material to it.before!!.amount }.toMap() shouldBe
+                mapOf("BOOK" to 1, "PAPER" to 8, "COBBLESTONE" to 8)
+            tx.changes.all { it.after == null } shouldBe true
+            barrel.getItem(0)!!.amount shouldBe 1
+            h.service.city(h.player)!!.research!!.project!!.funded shouldBe false
+            h.saves shouldBe emptyList()
+            pulse.invoke(h.service)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            journal.complete(tx)
+            h.tickUntil("exact research debit and pending city credit") { h.saves.isNotEmpty() }
+            barrel.getItem(0) shouldBe null
+            barrel.getItem(1) shouldBe null
+            barrel.getItem(2) shouldBe null
+            barrel.getItem(3) shouldBe ItemStack(Material.DIAMOND, 2)
+            h.service.city(h.player)!!.research!!.project!!.funded shouldBe false
+            tx.after.research!!.project!!.funded shouldBe true
+            tx.after.workers shouldBe emptyList()
+            tx.after.stock shouldBe Stock()
+            h.commit()
+            pulse.invoke(h.service); h.tick()
+            val funded = h.service.city(h.player)!!
+            funded.research!!.project!!.funded shouldBe true
+            funded.research!!.project!!.workDone shouldBe 0
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(tx.id) }
+        }
+    }
+
+    test("research session requires the selected observed trip and commits progress cycle and training together once") {
+        serviceScenario { h ->
+            val university = h.city.buildings.last().copy(type = BuildingType.UNIVERSITY, control = CivPosition(10, 63, 0))
+            val prerequisites = listOf(BuildingType.FORESTER, BuildingType.QUARRY).mapIndexed { index, type ->
+                university.copy(id = UUID.randomUUID(), type = type, anchor = CivPosition(20 + index * 10, 64, 0),
+                    bounds = CivBox(CivPosition(18 + index * 10, 63, -2), CivPosition(22 + index * 10, 68, 2)),
+                    entrance = CivPosition(20 + index * 10, 64, -2), control = CivPosition(20 + index * 10, 63, 0))
+            }
+            val base = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = listOf(h.city.buildings.first(), university) + prerequisites,
+                workers = listOf(h.city.workers.first().copy(assignment = university.id, nextDeliveryAt = 1)))
+            val begun = CivsResearch.begin(base, CivResearchId.MATERIALS, UUID.randomUUID(), 1_000)
+            val ready = CivsResearch.fund(begun, begun.research!!.project!!.id, 2_000, nativePaid = true)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            h.start()
+            val worker = ready.workers.single()
+            val plan = requireNotNull(citizenPlan(ready, worker))
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            fun complete() = deliver.invoke(h.service, ready.id, worker.id, university.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            every { h.citizens.requireSelectedWorkDelivery(ready.id, worker.id, plan.token) } throws CivsRejection("route-unreachable")
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
+            h.saves shouldBe emptyList()
+            every { h.citizens.requireSelectedWorkDelivery(ready.id, worker.id, plan.token) } returns Unit
+            val completed = complete()
+            completed.isDone shouldBe false
+            h.service.city(h.player) shouldBe ready
+            h.saves.single().first.let { saved ->
+                saved.research!!.project!!.workDone shouldBe 1
+                saved.workers.single().completedCycles shouldBe 1L
+                saved.workers.single().skills shouldBe mapOf("UNIVERSITY" to 1L)
+                saved.stock shouldBe Stock()
+                saved.inventory shouldBe ready.inventory
+                saved.revision shouldBe ready.revision + 1
+            }
+            h.commit(); completed.join()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "stale-delivery"
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("research keeps the explicit Auto city public for reads and rechecks admin permission after a pending save") {
+        serviceScenario { h ->
+            val university = h.city.buildings.last().copy(type = BuildingType.UNIVERSITY, control = CivPosition(10, 63, 0))
+            val prerequisites = listOf(BuildingType.FORESTER, BuildingType.QUARRY).mapIndexed { index, type ->
+                university.copy(id = UUID.randomUUID(), type = type, anchor = CivPosition(20 + index * 10, 64, 0),
+                    bounds = CivBox(CivPosition(18 + index * 10, 63, -2), CivPosition(22 + index * 10, 68, 2)),
+                    entrance = CivPosition(20 + index * 10, 64, -2), control = CivPosition(20 + index * 10, 63, 0))
+            }
+            val personal = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL), workers = emptyList(),
+                buildings = listOf(h.city.buildings.first(), university) + prerequisites)
+            val auto = personal.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Independent research",
+                stock = Stock(96, 96, 24), inventory = null, autonomy = CivAutonomy(paused = true))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(personal, auto))
+            h.start()
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.service.research(h.player, auto.id).cityId shouldBe auto.id
+            h.service.industry(h.player, auto.id).autonomous shouldBe true
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> {
+                h.service.beginResearch(h.player, auto.id, CivResearchId.MATERIALS).join()
+            })?.reason shouldBe "not-authorized"
+            val otherWorld = h.paper.addSimpleWorld("research_other")
+            every { h.player.world } returns otherWorld
+            shouldThrow<CivsRejection> { h.service.research(h.player, auto.id) }.reason shouldBe "not-authorized"
+            every { h.player.world } returns h.world
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            val mutate = CivsService::class.java.declaredMethods.single { it.name == "mutate" }.also { it.isAccessible = true }
+            val unrelated: (Settlement) -> Settlement = { it.copy(revision = it.revision + 1) }
+            val pending = mutate.invoke(h.service, auto.id, false, unrelated) as CompletableFuture<*>
+            val queued = h.service.beginResearch(h.player, auto.id, CivResearchId.MATERIALS)
+            queued.isDone shouldBe false
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.commit(); pending.join()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { h.await(queued) })?.reason shouldBe "not-authorized"
+            h.saves.size shouldBe 1
+            h.service.settlements().single { it.id == auto.id }.research shouldBe null
+            h.service.city(h.player) shouldBe personal
+            val acceptedPersonal = h.service.beginResearch(h.player, personal.id, CivResearchId.MATERIALS)
+            h.saves.last().first.id shouldBe personal.id
+            h.saves.last().first.research!!.project!!.cost.materials shouldBe mapOf("BOOK" to 1L, "PAPER" to 8L, "COBBLESTONE" to 8L)
+            h.commit(); acceptedPersonal.join()
+            h.service.settlements().single { it.id == auto.id }.research shouldBe null
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
     test("both asynchronous persistence fences hold city authority and delay the exact ground credit") {
         lateinit var storage: CivsStorage
         serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
@@ -662,7 +808,7 @@ class CivsServiceTest : FunSpec({
             every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
             h.saves shouldBe emptyList()
-            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns Unit
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns requireNotNull(citizenPlan(village, worker))
             val delivered = complete()
             delivered.isDone shouldBe false
             h.service.settlements().single().stock shouldBe village.stock
@@ -696,7 +842,7 @@ class CivsServiceTest : FunSpec({
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
             val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
-            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns Unit
+            every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns requireNotNull(citizenPlan(village, worker))
             val queued = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             queued.isDone shouldBe false

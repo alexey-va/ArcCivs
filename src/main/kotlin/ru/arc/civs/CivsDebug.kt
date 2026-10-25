@@ -5,7 +5,7 @@ import java.util.UUID
 
 /** Bounded, read-only operator snapshots. Each section is a separate parseable console line. */
 internal object CivsDebug {
-    val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents")
+    val systems = listOf("overview", "autonomy", "citizens", "worksites", "supply", "storage", "chunks", "construction", "resources", "residents", "research", "industry")
     val explicitSystems = listOf("terrain")
     private const val USAGE = "civs debug [all|system] [city UUID] [worker UUID]"
     private val gson = GsonBuilder().serializeNulls().create()

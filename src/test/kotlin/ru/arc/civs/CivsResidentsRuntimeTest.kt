@@ -1292,6 +1292,65 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (ore in listOf(false, true)) test("full stone stock blocks ordinary stone but permits an accepted ore walk ore=$ore") {
+        residentRuntime { h ->
+            val producer = h.assignQuarry().copy(production = null,
+                bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)),
+                control = CivPosition(22, 67, -2))
+            h.world.getBlockAt(20, 64, 0).type = Material.AIR
+            val hall = h.city.buildings.first().copy(phase = BuildingPhase.SITE,
+                bounds = CivBox(CivPosition(-2, 64, -4), CivPosition(2, 68, -1)), control = CivPosition(0, 67, -2))
+            for (building in listOf(hall, producer)) building.control!!.let {
+                h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
+            }
+            h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                stock = Stock(stone = CivsRules.capacity(h.city)), buildings = listOf(hall, producer),
+                research = if (ore) CivResearchState(setOf(CivResearchId.MATERIALS)) else null))
+            val before = h.city
+            var observed: CitizenPlan? = null
+            h.onDelivery = { observed = h.owner.requireAutonomousDelivery(h.city.id, h.workerId, it) }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            if (!ore) {
+                h.phase() shouldBe CitizenPhase.PAUSED
+                h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+                repeat(40) { h.navigate() }
+                h.deliveries shouldBe 0
+                h.city shouldBe before
+            } else {
+                val actor = h.owner.collisionActors().single()
+                var walked = 0.0
+                for (tick in 1..2_400) {
+                    val previous = actor.location
+                    h.navigate()
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    val step = previous.distance(actor.location)
+                    (step <= .215001) shouldBe true
+                    walked += step
+                    if (h.deliveries == 1) break
+                }
+                withClue("at=${actor.location} walked=$walked ${h.navigationState()}") {
+                    h.deliveries shouldBe 1
+                    (walked > 35) shouldBe true
+                }
+                val work = requireNotNull(observed?.industryWork)
+                work.recipe.id shouldBe "RAW_IRON"
+                h.city shouldBe before
+                val worker = h.city.workers.single()
+                h.city = CivsIndustry.complete(h.city, worker.id, worker.completedCycles, worker.nextDeliveryAt,
+                    work, requireNotNull(h.navigationNow))
+                h.pendingDelivery.complete(h.city)
+                h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+                h.city.stock shouldBe before.stock
+                h.city.autonomy!!.products shouldBe mapOf(CivIndustryProduct.RAW_IRON to 1L)
+                h.city.workers.single().completedCycles shouldBe 1L
+                h.city.inventory shouldBe null
+                h.city.workers.single().items shouldBe null
+                h.deliveries shouldBe 1
+            }
+        }
+    }
+
     test("autonomous quarry walks a complete production trip beside a floating hall SITE barrel") {
         residentRuntime { h ->
             val producer = h.assignQuarry().copy(production = null,

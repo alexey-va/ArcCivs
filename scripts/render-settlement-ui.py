@@ -9,16 +9,97 @@ from __future__ import annotations
 
 import argparse
 from hashlib import sha256
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
 import sys
+from zipfile import ZipFile
 
 import yaml
 
 
 def digest(path: Path) -> str:
     return sha256(path.read_bytes()).hexdigest()
+
+
+def is_private(character: str) -> bool:
+    point = ord(character)
+    return 0xE000 <= point <= 0xF8FF or 0xF0000 <= point <= 0xFFFFD or 0x100000 <= point <= 0x10FFFD
+
+
+def bind_font(bindings: dict[str, str], character: str, font: str) -> None:
+    if character in bindings and bindings[character] != font:
+        raise ValueError(f"Conflicting fonts for U+{ord(character):04X}: {bindings[character]} and {font}")
+    bindings[character] = font
+
+
+def component_fonts(value: object, inherited: str = "minecraft:default") -> dict[str, str]:
+    """Read inherited Adventure font keys without changing the exported text."""
+    result: dict[str, str] = {}
+    if isinstance(value, list):
+        children = value
+        font = inherited
+    elif isinstance(value, dict):
+        font = value.get("font", inherited)
+        if not isinstance(font, str) or not font:
+            raise ValueError(f"Invalid component font: {font!r}")
+        text = value.get("text")
+        if isinstance(text, str):
+            for character in text:
+                if is_private(character):
+                    bind_font(result, character, font)
+        children = [child for child in value.values() if isinstance(child, (dict, list))]
+    else:
+        return result
+    for child in children:
+        for character, child_font in component_fonts(child, font).items():
+            bind_font(result, character, child_font)
+    return result
+
+
+def fixture_glyphs(exported: dict, registry: dict) -> dict[str, str]:
+    bindings = component_fonts(exported.get("components", {}))
+    used = {character for value in exported["content"].values() for character in value if is_private(character)}
+    named = {glyph["character"] for glyph in registry["glyphs"]}
+    named.update(chr(int(point[2:], 16)) for point in registry["spaces"])
+    default = set(map(chr, [*range(0xE540, 0xE5A0), *range(0xE600, 0xE606), *range(0xF0F01, 0xF0F13)]))
+    # Older exports contain raw components for the body only. Their existing
+    # button glyphs retain the explicit registry mapping, also checked in-pack.
+    for character in used - bindings.keys():
+        if character in named:
+            bindings[character] = registry["font"]
+        elif character in default:
+            bindings[character] = "minecraft:default"
+        else:
+            raise ValueError(f"Unregistered private-use glyph: U+{ord(character):04X}")
+    return {character: bindings[character] for character in sorted(used)}
+
+
+def validate_glyphs(bindings: dict[str, str], resource_pack: Path, client_jar: Path, core) -> None:
+    """Use the canonical resolver, including references and client fallbacks."""
+    with ZipFile(resource_pack) as pack, ZipFile(client_jar) as client:
+        for font in sorted(set(bindings.values())):
+            providers = core.resolve_providers(pack, font, fallback_archives=(client,))
+            supported = set()
+            for provider in providers:
+                if provider.get("type") == "space":
+                    supported.update(provider.get("advances", {}))
+                elif provider.get("type") == "bitmap":
+                    supported.update("".join(provider.get("chars", [])))
+            for character, actual_font in bindings.items():
+                if actual_font == font and character not in supported:
+                    raise ValueError(f"Font {font} does not define U+{ord(character):04X}")
+
+
+def load_renderer(path: Path):
+    spec = importlib.util.spec_from_file_location("civs_surface_renderer", path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"Cannot load canonical surface renderer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> None:
@@ -42,7 +123,7 @@ def main() -> None:
     registry_path = args.ops_root / "docs/assets/dialogue-ui/library.json"
     registry = json.loads(registry_path.read_text())
     fixtures = [args.fixtures / f"{name}.json" for name in args.only] if args.only else sorted(args.fixtures.glob("*.json"))
-    sources, dialogs, values, provenance = {}, [], [], {}
+    sources, dialogs, bindings, provenance = {}, [], {}, {}
     for path in fixtures:
         exported = json.loads(path.read_text())
         if "dialog" not in exported:
@@ -57,19 +138,13 @@ def main() -> None:
         dialog = exported["dialog"]
         dialog["viewport"] = [640, 360]
         dialogs.append(dialog)
-        values.extend(content.values())
+        for character, font in fixture_glyphs(exported, registry).items():
+            bind_font(bindings, character, font)
         provenance[identifier] = {"fixtureSha256": digest(path), "sourceSha256": exported["sourceSha256"]}
     if not dialogs:
         raise ValueError("No actual dialog exports were selected")
-    characters = set("".join(values))
-    named = {glyph["character"] for glyph in registry["glyphs"]}
-    named.update(chr(int(point[2:], 16)) for point in registry["spaces"])
-    default = set(map(chr, [*range(0xE540, 0xE5A0), *range(0xE600, 0xE606), *range(0xF0F01, 0xF0F13)]))
-    used_private = {char for char in characters if 0xE000 <= ord(char) <= 0xF8FF or 0xF0000 <= ord(char) <= 0xFFFFD}
-    if unknown := used_private - named - default:
-        raise ValueError(f"Unregistered private-use glyphs: {sorted(hex(ord(char)) for char in unknown)}")
-    glyphs = [{"character": char, "provider": registry["font"] if char in named else "minecraft:default"}
-              for char in sorted(used_private)]
+    validate_glyphs(bindings, args.resource_pack, args.client_jar, load_renderer(args.surface_renderer).CORE)
+    glyphs = [{"character": character, "provider": bindings[character]} for character in sorted(bindings)]
     manifest = {
         "schema": 1, "plugin": "ArcCivs — settlement dialogs",
         "minecraft-version": "1.21.11", "minecraft-client-sha1": "ba2df812c2d12e0219c489c4cd9a5e1f0760f5bd",
@@ -92,6 +167,7 @@ def main() -> None:
         "guiScale": args.gui_scale, "physicalViewport": [640 * args.gui_scale, 360 * args.gui_scale],
         "resourcePackSha256": digest(args.resource_pack), "registrySha256": digest(registry_path),
         "rendererExitCode": completed.returncode, "exports": provenance,
+        "glyphFonts": {f"U+{ord(character):04X}": font for character, font in sorted(bindings.items())},
     }, indent=2, ensure_ascii=False))
     raise SystemExit(completed.returncode)
 

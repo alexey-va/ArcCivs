@@ -5,7 +5,7 @@ import java.util.UUID
 enum class Resource { WOOD, STONE, FOOD }
 enum class BuildingType {
     TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY,
-    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD, PLAN_BOARD;
+    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD, PLAN_BOARD, UNIVERSITY, SMELTERY, CRUSHER;
 
     val isInfrastructure: Boolean get() = this == WALL || this == GATE || this == ROAD
     val isResidence: Boolean get() = this == HOUSE || this == TAVERN
@@ -197,6 +197,8 @@ data class Settlement(
     val forestryJobs: Map<String, CivForestryJob>? = null,
     /** Auto mills have one initial planting kit included in their paid construction. */
     val forestrySeeded: Set<String>? = null,
+    /** Null preserves pre-research settlements and grants neither discoveries nor products. */
+    val research: CivResearchState? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

@@ -4,7 +4,9 @@ import java.util.UUID
 
 /** Only active minutes advance recruitment; pausing or restarting never catches up offline time. */
 data class CivAutonomy(val paused: Boolean = false, val recruitmentMinutes: Int = 0,
-    val layoutHalfWidth: Int? = null)
+    val layoutHalfWidth: Int? = null,
+    /** Closed abstract city products; these quantities never become native inventory items. */
+    val products: Map<CivIndustryProduct, Long>? = null)
 
 data class CivAutonomyGoal(
     val type: BuildingType,
@@ -19,9 +21,11 @@ data class CivAutonomyGoal(
 /** Abstract village stock pays complete buildings once; it never becomes transferable vanilla items. */
 object CivsAutonomy {
     const val RECRUITMENT_MINUTES = 2
-    val profile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
+    val baseProfile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
         BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE,
         BuildingType.TAVERN, BuildingType.GUARD_TOWER)
+    private val industryProfile = listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
+    val profile = baseProfile + industryProfile
     val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD)
     private val upgrades = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
         BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.TAVERN, BuildingType.GUARD_TOWER)
@@ -29,6 +33,16 @@ object CivsAutonomy {
     fun cost(type: BuildingType, targetLevel: Int): Stock {
         if (type !in allowedTypes || targetLevel !in 1..type.maxLevel) throw CivsRejection("invalid-building")
         if (type == BuildingType.TOWN_HALL && targetLevel == 1) return Stock(32, 24, 4)
+        val industry = when (type) {
+            BuildingType.UNIVERSITY -> Stock(48, 32, 8)
+            BuildingType.SMELTERY, BuildingType.BLACKSMITH -> Stock(32, 24)
+            BuildingType.CRUSHER -> Stock(24, 24)
+            else -> null
+        }
+        if (industry != null) {
+            val multiplier = targetLevel.toLong() * targetLevel
+            return Stock(industry.wood * multiplier, industry.stone * multiplier, industry.food * multiplier)
+        }
         val regular = CivsRules.cost(type, targetLevel)
         return if (type == BuildingType.BUILDER_HUT) {
             val multiplier = targetLevel.toLong() * targetLevel
@@ -50,7 +64,7 @@ object CivsAutonomy {
         val hut = city.buildings.firstOrNull { it.type == BuildingType.BUILDER_HUT }
         if (hut == null) return goal(city, BuildingType.BUILDER_HUT, 1, null)
         if (hut.phase == BuildingPhase.SITE) return goal(hut)
-        val hallReady = profile.takeWhile { it != BuildingType.TOWN_HALL }.all { type ->
+        val hallReady = baseProfile.takeWhile { it != BuildingType.TOWN_HALL }.all { type ->
             city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
         }
         city.constructionQueue.orEmpty().mapNotNull(city::building).firstOrNull {
@@ -58,7 +72,7 @@ object CivsAutonomy {
         }?.let { return goal(it) }
         city.buildings.filter { it.phase == BuildingPhase.SITE && it.type != BuildingType.TOWN_HALL }
             .minByOrNull { profile.indexOf(it.type) }?.let { return goal(it) }
-        for (type in profile) {
+        for (type in baseProfile) {
             val existing = city.buildings.firstOrNull { it.type == type }
             if (existing == null) return goal(city, type, 1, null)
             if (existing.phase == BuildingPhase.SITE) return goal(existing)
@@ -70,6 +84,26 @@ object CivsAutonomy {
         for (type in upgrades) {
             val building = city.buildings.firstOrNull { it.type == type && it.level < 2 } ?: continue
             return goal(city, type, 2, building.id)
+        }
+        for (type in industryProfile) {
+            if (type == BuildingType.BLACKSMITH && !CivsResearch.has(city, CivResearchId.METALLURGY)) continue
+            if (CivsResearch.required(type, 1)?.let { !CivsResearch.has(city, it) } == true) continue
+            val building = city.buildings.firstOrNull { it.type == type }
+            if (building == null) return goal(city, type, 1, null)
+            if (building.phase == BuildingPhase.SITE) return goal(building)
+        }
+        if (CivsResearch.has(city, CivResearchId.MATERIALS)) {
+            for (type in listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
+                val building = city.buildings.firstOrNull { it.type == type && it.level < 2 } ?: continue
+                return goal(city, type, 2, building.id)
+            }
+        }
+        if (CivsResearch.has(city, CivResearchId.ENGINEERING)) {
+            if (hall.level < 3) return goal(city, BuildingType.TOWN_HALL, 3, hall.id)
+            for (type in listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
+                val building = city.buildings.firstOrNull { it.type == type && it.level < 3 } ?: continue
+                return goal(city, type, 3, building.id)
+            }
         }
         return null
     }
@@ -83,7 +117,7 @@ object CivsAutonomy {
 
     internal fun infrastructureDue(city: Settlement, ordinary: CivAutonomyGoal?): Boolean =
         city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
-            (ordinary == null || ordinary.targetLevel > 1) && profile.all { type ->
+            (ordinary == null || ordinary.targetLevel > 1) && baseProfile.all { type ->
                 city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
             }
 
@@ -95,19 +129,41 @@ object CivsAutonomy {
         val builder = city.construction?.takeIf { CivsRules.constructionWorkers(city, it.buildingId).isEmpty() }?.let {
             city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) }
         }
-        val target = builder ?: if (city.stock.food < CivsRules.RECRUIT_FOOD) city.buildings.firstOrNull {
-            it.type == BuildingType.FARM && CivsRules.productionAvailable(city, it) && unstaffed(it)
-        } else null
+        val hungryFarm = city.buildings.firstOrNull { it.type == BuildingType.FARM && city.stock.food < CivsRules.RECRUIT_FOOD &&
+            CivsRules.productionAvailable(city, it) && unstaffed(it) }
+        // Existing food/builder recovery may borrow the last raw producer. Industry keeps one of every raw job.
+        val urgent = builder ?: hungryFarm
+        val industry = CivsIndustry.desiredBuilding(city)
+        val missingProducer = industry?.let { listOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY).firstNotNullOfOrNull { type ->
+            city.buildings.firstOrNull { it.type == type && CivsRules.productionAvailable(city, it) && unstaffed(it) }
+        } }
+        val target = urgent ?: missingProducer ?: industry?.takeIf(::unstaffed)
         target ?: return null
         val worker = city.workers.sortedBy { it.assignment != null }.firstOrNull { worker ->
             !CivsResidents.isChild(worker) && worker.cargo == null && worker.hasCollectedItems != true &&
                 worker.assignment?.toString() !in city.forestryJobs.orEmpty() &&
                 !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
-                // Keep the only food source until ordinary paid recruitment can supply another builder.
-                !(city.stock.food < CivsRules.RECRUIT_FOOD &&
-                    worker.assignment?.let(city::building)?.type == BuildingType.FARM) && canReassign(worker.id)
+                dispensable(city, worker, preserveRaw = urgent == null) && canReassign(worker.id)
         } ?: return null
         return worker.id to target.id
+    }
+
+    private fun dispensable(city: Settlement, worker: CivWorker, preserveRaw: Boolean = true): Boolean {
+        val assigned = worker.assignment?.let(city::building) ?: return true
+        if ((assigned.type == BuildingType.FARM || preserveRaw && assigned.type in setOf(BuildingType.FORESTER, BuildingType.QUARRY)) &&
+            city.workers.firstOrNull { it.assignment?.let(city::building)?.type == assigned.type }?.id == worker.id) return false
+        if (CivsRules.isBuilder(city, assigned) && (city.construction != null || city.constructionQueue.orEmpty().isNotEmpty())) return false
+        return true
+    }
+
+    /** Finish an accepted trip first; the next cycle exposes the ordinary safe-idle reassignment seam. */
+    internal fun waitingReassignment(city: Settlement, worker: CivWorker): Boolean {
+        if (city.autonomy?.paused != false || city.pendingDeletion != null || !dispensable(city, worker) || worker.cargo != null ||
+            worker.hasCollectedItems == true || worker.assignment?.toString() in city.forestryJobs.orEmpty()) return false
+        val target = CivsIndustry.desiredBuilding(city)?.takeIf { building -> city.workers.none { it.assignment == building.id } } ?: return false
+        if (worker.assignment == target.id || city.workers.any { !CivsResidents.isChild(it) && it.assignment == null && it.cargo == null }) return false
+        return worker.assignment?.let(city::building)?.type in setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY,
+            BuildingType.BUILDER_HUT, BuildingType.GUARD_TOWER, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
     }
 
     fun setPaused(city: Settlement, paused: Boolean): Settlement {

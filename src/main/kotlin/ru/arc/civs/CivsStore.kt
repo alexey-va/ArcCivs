@@ -470,6 +470,8 @@ class CivsStore(
         constructionQueue = city.constructionQueue?.toList(),
         mineProgress = city.mineProgress?.toMap(),
         minePlans = city.minePlans?.toMap(),
+        research = CivsResearch.detached(city.research),
+        autonomy = city.autonomy?.let { it.copy(products = it.products?.toMap()) },
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {

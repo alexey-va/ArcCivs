@@ -8,18 +8,19 @@ import java.util.UUID
 /** Spatial contracts only: private schematic voxels are neither fixtures nor test dependencies. */
 class CivsAutonomousProfileGeometryTest : FunSpec({
     for (style in CivsBlueprints.STYLES) for (rotation in listOf(0, 90, 180, 270)) {
-        test("$style profile fits real family bounds at radius96 with hall rotation$rotation") {
+        test("$style researched fifteen-building profile fits real family bounds at radius96 with hall rotation$rotation") {
             val hall = profileBuilding(style, BuildingType.TOWN_HALL, 1, CivPosition(120, 64, -80), rotation)
                 .copy(phase = BuildingPhase.SITE)
             // Service founds around the authored control, which is offset from the entrance.
+            // Completed research isolates the entire spatial profile from its funding/work progression.
             var city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Geometry", UUID.randomUUID(),
                 requireNotNull(hall.control), 96, style, Stock(100_000, 100_000, 100_000),
-                listOf(hall), emptyList(), autonomy = CivAutonomy())
+                listOf(hall), emptyList(), autonomy = CivAutonomy(), research = CivResearchState(CivResearchId.entries.toSet()))
             var goals = 0
             var newSites = 0
             while (true) {
                 val goal = CivsAutonomy.nextGoal(city) ?: break
-                check(++goals <= 22) { "Autonomous profile did not finish" }
+                check(++goals <= 33) { "Autonomous profile did not finish" }
                 val existing = goal.buildingId?.let(city::building)
                 if (existing != null) {
                     val upgraded = profileBuilding(style, existing.type, goal.targetLevel, existing.anchor,
@@ -49,9 +50,18 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 newSites++
             }
 
-            newSites shouldBe 10
+            goals shouldBe 33
+            newSites shouldBe 14
+            city.buildings.size shouldBe 15
+            city.buildings.count { it.type == BuildingType.HOUSE } shouldBe 3
             city.buildings.map { it.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
-            city.buildings.all { it.level == 2 && it.phase == BuildingPhase.ACTIVE } shouldBe true
+            city.buildings.all { building ->
+                building.phase == BuildingPhase.ACTIVE && building.level == when (building.type) {
+                    BuildingType.TOWN_HALL, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER -> 3
+                    BuildingType.BLACKSMITH -> 1
+                    else -> 2
+                }
+            } shouldBe true
             city.buildings.forEach { building ->
                 val bounds = CivsAutonomousGeometry.futureBounds(city, building)
                 city.contains(bounds.min.x, bounds.min.z) shouldBe true
@@ -122,25 +132,43 @@ private data class ProfileFrame(val min: CivPosition, val max: CivPosition, val 
  * arccivs-20261017/curated/curation-report.json, identical L1..3 frames. The later chest
  * overlay retains warehouse dimensions. Builder: deployed nine-file header inventory
  * 2026-10-23, RCNet job cfde06dcfc77d03f26a2c978b506a0347c27caa31238f84087e72b2c2516803c;
- * each style has identical L1..3 size and WorldEditOffset. Producer frames and full farm
- * soil/irrigation coordinates come directly from the versioned worksites.json contract. */
+ * each style has identical L1..3 size and WorldEditOffset. Industry: hash-verified
+ * arccivs-industry-20261025/curated-entry-v2/curation-report.json
+ * SHA-256 7923864f34d404fdce1c5773d98aff93984468217e8de2a8924df8b61f6f9786.
+ * Blacksmith: arccivs-workshops-20261019/curated/curation-report.json
+ * SHA-256 c0bc2cab967bbed720468b8764b2f32e2fbfa93fb457d0f4a634b22f2a279af5.
+ * Both reports verify identical L1..3 frames; controls below are relative to the origin.
+ * Producer frames and full farm soil/irrigation coordinates come directly from the
+ * versioned worksites.json contract. */
 private val profileFrames = mapOf(
     "nordic" to mapOf(
         BuildingType.TOWN_HALL to ProfileFrame(CivPosition(-16, -1, -26), CivPosition(11, 26, -1), CivPosition(2, 1, -18)),
         BuildingType.BUILDER_HUT to ProfileFrame(CivPosition(-7, -1, -12), CivPosition(10, 22, -1)),
         BuildingType.HOUSE to ProfileFrame(CivPosition(-5, 0, -11), CivPosition(9, 23, -1)),
         BuildingType.WAREHOUSE to ProfileFrame(CivPosition(-11, -1, -31), CivPosition(10, 21, -1)),
+        BuildingType.UNIVERSITY to ProfileFrame(CivPosition(-14, -1, -22), CivPosition(14, 28, -1), CivPosition(0, 6, -6)),
+        BuildingType.SMELTERY to ProfileFrame(CivPosition(-4, -1, -21), CivPosition(4, 15, -1), CivPosition(2, 1, -9)),
+        BuildingType.CRUSHER to ProfileFrame(CivPosition(-6, 0, -16), CivPosition(10, 20, -1), CivPosition(0, 6, -11)),
+        BuildingType.BLACKSMITH to ProfileFrame(CivPosition(-7, -5, -14), CivPosition(6, 11, -1), CivPosition(1, 1, -5)),
     ),
     "medievaloak" to mapOf(
         BuildingType.TOWN_HALL to ProfileFrame(CivPosition(-11, -3, -15), CivPosition(10, 22, -1), CivPosition(2, 2, -9)),
         BuildingType.BUILDER_HUT to ProfileFrame(CivPosition(-3, -4, -14), CivPosition(7, 15, -1)),
         BuildingType.HOUSE to ProfileFrame(CivPosition(-2, 0, -15), CivPosition(11, 18, -1)),
         BuildingType.WAREHOUSE to ProfileFrame(CivPosition(-4, -1, -23), CivPosition(20, 26, -1)),
+        BuildingType.UNIVERSITY to ProfileFrame(CivPosition(-12, -1, -36), CivPosition(19, 25, -1), CivPosition(-10, 4, -8)),
+        BuildingType.SMELTERY to ProfileFrame(CivPosition(-5, -1, -17), CivPosition(9, 13, -1), CivPosition(4, 2, -4)),
+        BuildingType.CRUSHER to ProfileFrame(CivPosition(-6, -4, -14), CivPosition(9, 23, -1), CivPosition(-1, 1, -5)),
+        BuildingType.BLACKSMITH to ProfileFrame(CivPosition(-12, -1, -11), CivPosition(7, 13, -1), CivPosition(0, 1, -4)),
     ),
     "caledonia" to mapOf(
         BuildingType.TOWN_HALL to ProfileFrame(CivPosition(-8, 0, -19), CivPosition(10, 35, -1), CivPosition(1, 4, -14)),
         BuildingType.BUILDER_HUT to ProfileFrame(CivPosition(-6, -4, -13), CivPosition(6, 12, -1)),
         BuildingType.HOUSE to ProfileFrame(CivPosition(-7, 0, -19), CivPosition(5, 16, -1)),
         BuildingType.WAREHOUSE to ProfileFrame(CivPosition(-8, 0, -19), CivPosition(10, 17, -1)),
+        BuildingType.UNIVERSITY to ProfileFrame(CivPosition(-8, 0, -19), CivPosition(10, 31, -1), CivPosition(-5, 2, -13)),
+        BuildingType.SMELTERY to ProfileFrame(CivPosition(-7, 0, -19), CivPosition(5, 13, -1), CivPosition(-1, 1, -5)),
+        BuildingType.CRUSHER to ProfileFrame(CivPosition(-14, 0, -13), CivPosition(4, 18, -1), CivPosition(-5, 6, -7)),
+        BuildingType.BLACKSMITH to ProfileFrame(CivPosition(-13, 0, -13), CivPosition(5, 13, -1), CivPosition(-8, 1, -7)),
     ),
 )
