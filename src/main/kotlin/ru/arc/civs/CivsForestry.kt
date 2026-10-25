@@ -305,60 +305,173 @@ internal object CivsForestry {
         require(changed.position == focus && changed.before == saplingState(sapling) && changed.after == saplingState(sapling, 1))
     }
 
-    /** Detached captured strings only. Native reads are supplied one at a time under the shared pulse budget. */
-    class Scan(val root: CivPosition, val timber: String) {
+    /** Capture complete trunks before foliage: touching leaves must not flood into the whole forest. */
+    class Scan(val root: CivPosition, val timber: String, private val roots: List<CivPosition> = listOf(root)) {
         private val queue = ArrayDeque<CivPosition>().apply { add(root) }
         private val seen = hashSetOf<CivPosition>()
         private val found = linkedMapOf<CivPosition, String>()
+        private val crownSeeds = linkedMapOf<CivPosition, String>()
         private val vines = linkedMapOf<CivPosition, String>()
         private val ground = hashSetOf<CivPosition>()
-        var failed: Boolean = false
+        private var trunks = true
+        private var ownership: Iterator<Unit>? = null
+        private var naturalCrown = false
+        var failureReason: String? = null
             private set
-        val complete: Boolean get() = !failed && queue.isEmpty()
+        var failurePoint: CivPosition? = null
+            private set
+        var retainedCrownReason: String? = null
+            private set
+        var groundedRoots: Int = 0
+            private set
+        var examined: Int = 0
+            private set
+        val failed: Boolean get() = failureReason != null
+        val complete: Boolean get() = !failed && queue.isEmpty() && ownership == null
         val size: Int get() = found.size
+        val pending: Int get() = queue.size
+        val phase: String get() = when { failed -> "failed"; complete -> "complete"; trunks -> "trunks";
+            ownership != null -> "ownership"; else -> "crown" }
 
+        private fun fail(reason: String, point: CivPosition = root) {
+            failureReason = reason
+            failurePoint = point
+        }
+
+        private fun bounded(point: CivPosition): Boolean = abs(point.x.toLong() - root.x) <= MAX_RADIUS &&
+            abs(point.z.toLong() - root.z) <= MAX_RADIUS && point.y in root.y..root.y + MAX_HEIGHT
+
+        private fun neighbours(point: CivPosition, facesOnly: Boolean = false): List<CivPosition> = buildList {
+            for (dx in -1..1) for (dy in -1..1) for (dz in -1..1) {
+                if (dx == 0 && dy == 0 && dz == 0 || facesOnly && abs(dx) + abs(dy) + abs(dz) != 1) continue
+                add(CivPosition(point.x + dx, point.y + dy, point.z + dz))
+            }
+        }
+
+        /** Shared or incompletely observed foliage stays native; no unseen branch may become a partial timber job. */
+        private fun retainCrown(reason: String) {
+            retainedCrownReason = reason
+            found.entries.removeIf { material(it.value) != timber }
+            vines.clear()
+            queue.clear()
+        }
+
+        /** One detached node per step keeps ownership under the caller's same read/time allowance. */
+        private fun finishTrunks(): Iterator<Unit> = sequence {
+            val supported = hashSetOf<CivPosition>()
+            for (point in found.keys) {
+                if (point.copy(y = point.y - 1) in ground) supported += point
+                yield(Unit)
+            }
+            groundedRoots = supported.size
+            if (roots.any { it !in supported }) { fail("tree-root-changed"); return@sequence }
+            val foreign = supported - roots.toSet()
+            if (foreign.isNotEmpty()) {
+                val passes = mutableListOf<Map<CivPosition, Int>>()
+                for (sources in listOf(roots, foreign)) {
+                    val distances = hashMapOf<CivPosition, Int>()
+                    val pending = java.util.PriorityQueue<Pair<Int, CivPosition>>(compareBy { it.first })
+                    for (point in sources) {
+                        distances[point] = 0
+                        pending.add(0 to point)
+                        yield(Unit)
+                    }
+                    while (pending.isNotEmpty()) {
+                        val (distance, point) = pending.remove()
+                        if (distance == distances[point]) for (next in neighbours(point)) if (next in found) {
+                            // A diagonal connection costs its axial steps: an adjacent root must not tie every block above this trunk.
+                            val nextDistance = distance + abs(next.x - point.x) + abs(next.y - point.y) + abs(next.z - point.z)
+                            if (nextDistance < (distances[next] ?: Int.MAX_VALUE)) {
+                                distances[next] = nextDistance
+                                pending.add(nextDistance to next)
+                            }
+                        }
+                        yield(Unit)
+                    }
+                    passes += distances
+                }
+                val (ownDistance, foreignDistance) = passes
+                // Equal-distance joins remain intact. Every retained trunk still has its own grounded root.
+                val cells = found.keys.iterator()
+                while (cells.hasNext()) {
+                    val point = cells.next()
+                    if (ownDistance.getValue(point) >= foreignDistance.getValue(point)) cells.remove()
+                    yield(Unit)
+                }
+            }
+            val seeds = linkedMapOf<CivPosition, String>()
+            for ((point, state) in crownSeeds) {
+                if (neighbours(point).any { it in found }) seeds[point] = state
+                yield(Unit)
+            }
+            naturalCrown = seeds.values.any { naturalLeaf(it, timber) }
+            if (!naturalCrown) { fail("tree-no-natural-crown"); return@sequence }
+            if (foreign.isNotEmpty()) { retainCrown("shared-trunks"); return@sequence }
+            seen.clear()
+            queue.addAll(seeds.keys)
+        }.iterator()
+
+        /** Charged units include native observations and bounded detached ownership steps. */
         fun advance(budget: Int, read: (CivPosition) -> String?): Int {
             var used = 0
-            while (queue.isNotEmpty() && used < budget && !failed) {
+            while (used < budget && !failed) {
+                val partition = ownership
+                if (partition != null) {
+                    if (partition.hasNext()) { partition.next(); used++ } else ownership = null
+                    continue
+                }
+                if (queue.isEmpty()) break
                 val point = queue.removeFirst()
                 if (!seen.add(point)) continue
                 used++
+                examined++
                 val state = read(point)
-                if (state == null) { failed = true; break }
+                if (state == null) {
+                    if (trunks) fail("tree-trunk-unavailable", point) else retainCrown("crown-unavailable")
+                    break
+                }
                 val log = material(state) == timber
-                if (material(state) in soils) ground += point
-                val vine = vine(state)
-                if (!log && !naturalLeaf(state, timber) && !vine) continue
-                if (abs(point.x.toLong() - root.x) > MAX_RADIUS || abs(point.z.toLong() - root.z) > MAX_RADIUS ||
-                    point.y !in root.y..root.y + MAX_HEIGHT || found.size + vines.size == MAX_CELLS) { failed = true; break }
-                if (vine) {
+                if (trunks) {
+                    if (material(state) in soils) ground += point
+                    if (naturalLeaf(state, timber) || vine(state)) crownSeeds[point] = state
+                    if (!log) continue
+                    if (!bounded(point)) { fail("tree-trunk-bounds", point); break }
+                    if (found.size == MAX_CELLS) { fail("tree-trunk-too-large", point); break }
+                    found[point] = state
+                    neighbours(point).filterTo(queue) { it !in seen }
+                    continue
+                }
+                // Leaves can connect to another independently rooted tree, including a different wood species.
+                if (material(state).let { it.endsWith("_LOG") || it.endsWith("_WOOD") || it.endsWith("_STEM") || it.endsWith("_HYPHAE") }) {
+                    if (point !in found) { retainCrown("shared-crown"); break }
+                    continue
+                }
+                val hanging = vine(state)
+                if (!naturalLeaf(state, timber) && !hanging) continue
+                if (!bounded(point)) { retainCrown("crown-bounds"); break }
+                if (found.size + vines.size == MAX_CELLS) { retainCrown("crown-too-large"); break }
+                if (hanging) {
                     vines[point] = state
                     // A hanging chain cannot connect this capture to another tree or an unrelated vine wall.
                     point.copy(y = point.y - 1).takeIf { it !in seen }?.let(queue::add)
                     continue
                 }
                 found[point] = state
-                // Logs may branch diagonally or downward. Leaves use native face connectivity.
-                for (dx in -1..1) for (dy in -1..1) for (dz in -1..1) {
-                    if (dx == 0 && dy == 0 && dz == 0 || !log && abs(dx) + abs(dy) + abs(dz) != 1) continue
-                    val next = CivPosition(point.x + dx, point.y + dy, point.z + dz)
-                    if (next !in seen) queue.add(next)
-                }
+                neighbours(point, facesOnly = true).filterTo(queue) { it !in seen }
             }
+            if (queue.isEmpty() && !failed && trunks) { trunks = false; ownership = finishTrunks() }
             return used
         }
 
         fun job(roots: List<CivPosition>): CivForestryJob? {
-            if (!complete || found.values.none { naturalLeaf(it, timber) } || roots.any { material(found[it] ?: "") != timber }) return null
-            // Touching crowns must not turn an adjacent, independently rooted tree into this mill's harvest.
-            if (found.filter { (point, state) -> material(state) == timber && point.copy(y = point.y - 1) in ground }
-                    .keys != roots.toSet()) return null
+            if (!complete || !naturalCrown || roots.toSet() != this.roots.toSet() ||
+                roots.any { material(found[it] ?: "") != timber }) return null
             val captured = found + attachedVines(found, vines)
             val order = captured.entries.sortedWith(compareBy<Map.Entry<CivPosition, String>> {
                 when { vine(it.value) -> 0; it.key in roots -> 3; material(it.value) == timber -> 2; else -> 1 }
             }.thenByDescending { it.key.y }.thenBy { it.key.x }.thenBy { it.key.z })
             val states = order.map { it.value }.distinct()
-            if (states.size > 64) return null
+            if (states.size > 64) { fail("tree-state-limit"); return null }
             return CivForestryJob(UUID.randomUUID(), root, timber.removeSuffix("_LOG") + "_SAPLING", roots, states,
                 order.map { (point, state) -> (states.indexOf(state) shl 16) or ((point.y - root.y) shl 10) or
                     ((point.z - root.z + 15) shl 5) or (point.x - root.x + 15) })

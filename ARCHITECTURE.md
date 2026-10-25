@@ -226,9 +226,13 @@ height includes paths and slabs. Player movement is never cancelled or rewritten
 by resident contact. Overlapping residents yield by at most 0.05 blocks per tick
 into supported, collision-free space or a free side. Contact never writes player
 velocity; even a trapped resident remains passable. Navigation still yields to
-real players without creating native NPC entities. Native world work uses a
-three-block eye-to-focus reach and unobstructed ray, stopping travel as soon as
-that real block is reachable. Storage accepts any visible valid side of its
+real players without creating native NPC entities. An accepted resident yield
+and its bounded hold suspend the no-progress clock for both participants;
+sidesteps never earn route progress or reset retry counters. Native world work
+requires supported feet (including a valid ladder), a three-block eye-to-focus
+reach and an unobstructed ray. A transient point during a step or fall cannot
+cancel navigation or admit work merely because that block is in reach.
+Storage accepts any visible valid side of its
 actual barrel. A courier shows one compact back parcel only while carrying goods;
 it remains inside the normal resident's horizontal body envelope.
 No duplicated pools, schematic cache or display transport. No schematic IO or future waiting on the gameplay thread.
@@ -477,11 +481,19 @@ authored fields, approaches, transit columns and retained terrain roads. Nearby
 saplings reserve space for their future crowns too. `StructureGrowEvent` cancels
 the entire generated tree if its actual crown reaches one of those columns or
 an origin/generated cell is still locked by a native receipt.
-Tree discovery follows diagonal and downward branches and face-connected natural
-leaves in resumable slices of at most 192 observations and two milliseconds,
-beside the existing 16 candidate-column probes. A complete tree fits within 2,048
-cells, 15 blocks horizontally from its root and 47 blocks above it; an incomplete,
-unloaded or independently rooted connected crown is left intact.
+Tree discovery captures diagonal and downward log branches before foliage in
+resumable slices of at most 192 work units and two milliseconds, beside the
+existing 16 candidate-column probes. A captured tree fits within 2,048 cells,
+15 blocks horizontally from its root and 47 blocks above it. Joined trunks are
+partitioned by shortest axial-step distance from their grounded roots; equal
+distance joins and foreign-root timber stay intact. Ownership work shares the
+same resumable budget. Unavailable or oversized connected log captures reject
+without mutation. Touching, unavailable or escaping foliage stays native for
+normal decay, rather than flooding discovery into every neighbouring tree;
+an isolated attributable crown retains its existing collection behavior.
+An exhausted, unpaid stance candidate yields to later trees or planting plots;
+budget-pending candidates and paid durable jobs are retained. The worksites
+debug snapshot exposes forest cursors, capture phase and precise rejection.
 `Settlement.forestryJobs` stores one compact state table, relative cell codes and
 cursor per mill. A field-local Base64 codec stores three bytes per cell, with
 size, coordinate and palette bounds checked before admission; fifteen maximal

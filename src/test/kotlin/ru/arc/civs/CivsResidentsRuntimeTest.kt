@@ -2222,6 +2222,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             }
             var yielded = false
             val afterYield = actors.keys.associateWith { 2.0 }.toMutableMap()
+            val passingRoutes = mutableMapOf<UUID, Triple<CitizenPacketRoute, Double, CitizenPhase>>()
+            var passingResumed = 0
             for (tick in 1..4_000) {
                 val previous = actors.mapValues { it.value.location }
                 val progress = actors.keys.associateWith { h.routeMotion(it) to h.routeProgress(it) }
@@ -2235,6 +2237,10 @@ class CivsResidentsRuntimeTest : FunSpec({
                             (afterYield.getValue(id) >= 2.0) shouldBe true
                         }
                         afterYield[id] = 0.0
+                        val passing = requireNotNull(h.yieldPassing(id))
+                        h.routeMotion(passing)?.takeIf { !it.searching && !it.finished }?.let { motion ->
+                            passingRoutes[passing] = Triple(motion, motion.forwardProgress, h.phase(passing))
+                        }
                     } else {
                         val prior = if (progress.getValue(id).first === h.routeMotion(id)) progress.getValue(id).second ?: 0.0 else 0.0
                         val walked = ((h.routeProgress(id) ?: 0.0) - prior).coerceAtLeast(0.0)
@@ -2243,6 +2249,16 @@ class CivsResidentsRuntimeTest : FunSpec({
                     if (id in yielding) {
                         (previous.getValue(id).distance(npc.location) <= .050001) shouldBe true
                         h.routeProgress(id) shouldBe yielding.getValue(id)
+                    }
+                    passingRoutes[id]?.let { (motion, startProgress, phase) ->
+                        if (h.phase(id) != phase || motion.finished) passingRoutes.remove(id)
+                        else if (motion.forwardProgress > startProgress + .000001) {
+                            withClue("Passing worker replanned on its first clear step: $id ${h.navigationState(id)}") {
+                                (h.routeMotion(id) === motion) shouldBe true
+                            }
+                            passingRoutes.remove(id)
+                            passingResumed++
+                        }
                     }
                 }
                 val bodies = actors.values.map { npc -> npc.location.let { at ->
@@ -2256,6 +2272,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             }
             withClue("received=$received ${h.owner.debug(h.city.id, null)}") {
                 yielded shouldBe true
+                (passingResumed > 0) shouldBe true
                 received.containsAll(listOf(h.workerId, minerId)) shouldBe true
             }
             (h.city.workers.first { it.id == h.workerId }.completedCycles >= 114) shouldBe true
@@ -2323,6 +2340,51 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.deliveries shouldBe 0
             h.city.stock shouldBe Stock()
             h.city.workers.first { it.id == h.workerId }.completedCycles shouldBe 0L
+        }
+    }
+
+    test("a working route resumes after resident yielding without spending its stall interval") {
+        residentRuntime(workerId = UUID.fromString("06254fa5-4795-4a8e-a7c7-783f9fc90cfd")) { h ->
+            h.autonomousTrafficTown(headOn = false)
+            val requester = UUID(0, 98)
+            h.navigationNow = 2_000
+            repeat(2) { h.owner.pulse(2_000) }
+            for (tick in 1..3_000) {
+                h.navigate()
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if ((h.routeProgress(h.workerId) ?: 0.0) >= 3.0) break
+            }
+            withClue(h.navigationState()) { ((h.routeProgress(h.workerId) ?: 0.0) >= 3.0) shouldBe true }
+            h.city = h.city.copy(workers = h.city.workers + CivWorker(requester, "Returning neighbour", null))
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            val actor = h.owner.collisionActors().single { it.uniqueId == h.workerId }
+            val motion = requireNotNull(h.routeMotion(h.workerId))
+            val before = actor.location
+            val progress = motion.forwardProgress
+            h.requestYieldAsReturning(requester, h.workerId, before.clone().add(.8, 0.0, 0.0))
+            withClue(h.owner.debug(h.city.id, null)) { h.yielding(h.workerId) shouldBe true }
+            var ticks = 0
+            while (h.yielding(h.workerId) && ticks++ < 100) {
+                val previous = actor.location
+                h.navigate()
+                (previous.distance(actor.location) <= .050001) shouldBe true
+                motion.forwardProgress shouldBe progress
+            }
+            h.yielding(h.workerId) shouldBe false
+            (ticks >= 45) shouldBe true
+            (before.distance(actor.location) > 1.2) shouldBe true
+            // The next ready frame is a real rejoin opportunity, not a failed journey.
+            h.navigate()
+            withClue(h.navigationState()) { (h.routeMotion(h.workerId) === motion) shouldBe true }
+            h.deliveries shouldBe 0
+            h.city = h.city.copy(workers = h.city.workers.filter { it.id != requester })
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            for (tick in 1..1_000) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (h.phase() == CitizenPhase.WORKING) break
+            }
+            withClue(h.navigationState()) { h.phase() shouldBe CitizenPhase.WORKING }
         }
     }
 
@@ -2730,13 +2792,14 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     test("a full bag is offered at rest and its accepted courier meeting prevents a new walk before the hold") {
-        residentRuntime { h ->
+        // Wander destinations are seeded by worker identity; keep this encounter reproducible.
+        residentRuntime(workerId = UUID(0, 42)) { h ->
             val farm = h.assignFarm()
             val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
                 anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
                 bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
             h.world.getBlockAt(10, 64, 0).type = Material.BARREL
-            val courierId = UUID.randomUUID()
+            val courierId = UUID(0, 43)
             val fullBag = List(CivsEquipment.SLOTS) { slot ->
                 if (slot >= CivsEquipment.BAG) CivResidentItem("COAL", 64) else null
             }
@@ -2761,7 +2824,9 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                 if (producer.location.distanceSquared(origin) > 4.0 && h.routeIdentity() != null) break
             }
-            (producer.location.distanceSquared(origin) > 4.0) shouldBe true
+            withClue("origin=$origin actual=${producer.location} ${h.navigationState()} ${h.owner.status(h.workerId)}") {
+                (producer.location.distanceSquared(origin) > 4.0) shouldBe true
+            }
             requireNotNull(h.routeIdentity())
             h.owner.courierSupplySources(h.city.id) shouldBe emptyMap()
             h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
@@ -3186,6 +3251,33 @@ class CivsResidentsRuntimeTest : FunSpec({
             shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }
             h.pendingDelivery.isDone shouldBe false
             h.city.workers.single().completedCycles shouldBe 0
+        }
+    }
+
+    test("an unsupported worker cannot begin or admit work merely because its hand reaches the block") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 22.5, 64.5, .5))
+            val focus = CivPosition(23, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                durationMillis = 1_500, status = "working-field", focus = focus)
+            citizenCanReachBlock(actor, focus) shouldBe true
+            actor.location.let { citizenPacketSupported(h.world, CitizenPoint(it.x, it.y, it.z)) } shouldBe false
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            withClue(h.navigationState()) { h.phase() shouldBe CitizenPhase.TO_WORK }
+            h.deliveries shouldBe 0
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, requireNotNull(h.work)) }
+            for (tick in 1..300) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (h.phase() == CitizenPhase.WORKING) break
+            }
+            withClue(h.navigationState()) { h.phase() shouldBe CitizenPhase.WORKING }
+            actor.location.let { citizenPacketSupported(h.world, CitizenPoint(it.x, it.y, it.z)) } shouldBe true
+            h.deliveries shouldBe 0
         }
     }
 
@@ -3665,6 +3757,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         return Triple(farm, quarry, forester)
     }
     fun yielding(worker: UUID): Boolean = (field(owner, "actors") as Map<*, *>)[worker]?.let { field(it, "residentYield") } != null
+    fun yieldPassing(worker: UUID): UUID? = (field(owner, "actors") as Map<*, *>)[worker]
+        ?.let { field(it, "residentYield") }?.let { field(it, "passing") as UUID }
     fun routeMotion(worker: UUID): CitizenPacketRoute? = routeIdentity(worker)?.let { field(it, "motion") as CitizenPacketRoute }
     fun routeProgress(worker: UUID): Double? = routeMotion(worker)?.forwardProgress
     fun routeFinished(worker: UUID): Boolean = routeIdentity(worker)?.let { (field(it, "motion") as CitizenPacketRoute).finished } == true

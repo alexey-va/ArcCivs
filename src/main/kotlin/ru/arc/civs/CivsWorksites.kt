@@ -108,10 +108,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         fun <T> sample(values: Collection<T>, describe: (T) -> Any?): Map<String, Any?> = mapOf(
             "total" to values.size, "truncated" to (values.size > 8), "entries" to values.take(8).map(describe))
         val ids = (cached.keys + needs.keys + workSpots.keys + farmScans.keys + mineSafety.keys +
-            rejectedMineSpots.keys + cursors.keys + mineSearches.keys).filter { workerIds == null || it in workerIds }
+            rejectedMineSpots.keys + cursors.keys + mineSearches.keys + forestSearches.keys + forestScans.keys +
+            forestPlants.keys).filter { workerIds == null || it in workerIds }
         val buildings = buildingIds ?: ids.mapNotNullTo(hashSetOf()) { id -> cached[id]?.building?.id ?: needs[id]?.building?.id ?:
             workSpots[id]?.buildingId ?: farmScans[id]?.building?.id ?: mineSafety[id]?.building?.id ?:
-            rejectedMineSpots[id]?.key?.building?.id }
+            rejectedMineSpots[id]?.key?.building?.id ?: forestSearches[id]?.building?.id ?:
+            forestScans[id]?.building?.id ?: forestPlants[id]?.building?.id }
         return sample(ids) { id ->
             val item = cached[id]
             val need = needs[id]
@@ -144,6 +146,16 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 "farmScan" to farm?.let { mapOf("building" to it.building.id.toString(), "next" to it.next,
                     "examined" to it.examined, "plots" to it.plots.size, "harvest" to it.harvest.size,
                     "field" to it.field.size, "care" to it.care.size, "lastFocus" to point(it.lastFocus)) },
+                "forestSearch" to forestSearches[id]?.let { mapOf("building" to it.building.id.toString(),
+                    "column" to it.next, "y" to it.y, "surface" to it.surface, "saplings" to it.saplings,
+                    "care" to it.care.size, "planting" to it.planting.size) },
+                "forestScan" to forestScans[id]?.let { mapOf("building" to it.building.id.toString(),
+                    "root" to point(it.scan.root), "roots" to it.roots.size, "phase" to it.scan.phase,
+                    "examined" to it.scan.examined, "pending" to it.scan.pending, "cells" to it.scan.size,
+                    "groundedRoots" to it.scan.groundedRoots, "retainedCrownReason" to it.scan.retainedCrownReason,
+                    "failureReason" to it.scan.failureReason, "failurePoint" to point(it.scan.failurePoint)) },
+                "forestPlant" to forestPlants[id]?.let { mapOf("building" to it.building.id.toString(),
+                    "roots" to it.roots.map(::point), "timber" to it.timber, "checkedColumns" to it.next) },
                 "mineSafety" to safety?.let { mapOf("building" to it.building.id.toString(),
                     "target" to point(it.target), "progress" to it.progress, "next" to it.next,
                     "excavation" to point(it.excavation), "deferredAirWalls" to it.deferredAirWalls.size) },
@@ -154,7 +166,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                         "expiresAtTick" to it.value, "remainingTicks" to (it.value - tick).coerceAtLeast(0)) }) })
         } + mapOf("source" to "owner-cache", "tick" to tick,
             "remainingPulseBudget" to mapOf("standingChecks" to spotChecksRemaining,
-                "rays" to spotRaysRemaining, "mineChecks" to mineChecksRemaining, "searchPending" to spotSearchPending),
+                "rays" to spotRaysRemaining, "mineChecks" to mineChecksRemaining, "forestWorkUnits" to forestChecksRemaining,
+                "searchPending" to spotSearchPending),
             "mineCursors" to sample(mineCursors.entries.filter { workerIds == null || it.key in buildings }) {
                 mapOf("building" to it.key.toString(), "level" to it.value.first,
                     "committedStep" to it.value.second, "scanStep" to it.value.third) })
@@ -761,7 +774,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     blocked(worker, "waiting-saplings", sapling, roots.size.toLong())
                     continue
                 }
-                val scan = ForestScan(building, CivsForestry.Scan(point, timber), roots)
+                val scan = ForestScan(building, CivsForestry.Scan(point, timber, roots), roots)
                 forestScans[worker.id] = scan
                 return finishForestScan(city, worker, building, world, scan)
             }
@@ -846,11 +859,13 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val job = pending.scan.job(pending.roots)?.copy(seedDeferred = city.autonomy != null && city.stock.wood == 0L)
         if (job == null || !CivsForestry.claimClear(city, building.id, job)) {
             forestScans.remove(worker.id)
-            return blocked(worker, "waiting-growth", point = pending.scan.root,
-                reason = if (job == null) "tree-not-complete" else "tree-already-claimed")
+            return blocked(worker, "waiting-growth", point = pending.scan.failurePoint ?: pending.scan.root,
+                reason = if (job == null) pending.scan.failureReason ?: "tree-scan-incomplete" else "tree-already-claimed")
         }
         val work = forestBatch(city, worker, building, world, job)
-        if (work != null) forestScans.remove(worker.id)
+        if (work != null || !spotSearchPending && currentNeed(city, worker)?.status in
+            setOf("worksite-no-access", "worksite-obstacle", "worksite-protected"))
+            forestScans.remove(worker.id)
         return work
     }
 
@@ -899,7 +914,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             block
         }
-        val standing = beside(city, worker, building, world, pending.roots.first(), allowOwn = false) ?: return null
+        val standing = beside(city, worker, building, world, pending.roots.first(), allowOwn = false) ?: run {
+            if (!spotSearchPending) forestPlants.remove(worker.id)
+            return null
+        }
         forestPlants.remove(worker.id)
         forestSearches.remove(worker.id)
         return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) },

@@ -233,7 +233,10 @@ class CivsCitizens(
     /** One resident yields; two approaching bodies need not overlap before either can step aside. */
     private fun beginResidentYield(actor: Actor): Boolean {
         val other = actor.collisionResident?.let(actors::get) ?: return false
-        if (actor.residentYield != null || other.residentYield != null) return true
+        if (actor.residentYield != null || other.residentYield != null) {
+            actor.route?.progressTick = navigationTick
+            return true
+        }
         if (actor.yieldProgress < 2.0) return false
         val candidates = listOf(actor, other).filter { canYield(it) && it.yieldProgress >= 2.0 }.sortedWith(
             compareBy<Actor> { yieldPriority(it) }.thenByDescending { it.workerId })
@@ -264,6 +267,9 @@ class CivsCitizens(
                 }) continue
             actor.yieldProgress = 0.0
             yielding.yieldProgress = 0.0
+            // Both routes deliberately wait while the corridor opens; this earns no walk credit.
+            yielding.route?.progressTick = navigationTick
+            passing.route?.progressTick = navigationTick
             yielding.residentYield = ResidentYield(passing.workerId, from.point(), to.point(), navigationTick + 80)
             CivsDiagnostics.event("citizen_resident_yield", "city" to yielding.cityId, "worker" to yielding.workerId,
                 "passing" to passing.workerId, "action" to "start", "actual" to from.point().coordinates(),
@@ -276,6 +282,7 @@ class CivsCitizens(
     /** Shares the four-actor separation budget; every accepted packet step is at most 0.05 block. */
     private fun advanceResidentYield(actor: Actor): Boolean {
         val yielding = actor.residentYield ?: return false
+        actor.route?.progressTick = navigationTick
         fun finish(reason: String) {
             actor.residentYield = null
             actor.yieldRetryAfter = navigationTick + 80
@@ -1115,7 +1122,11 @@ class CivsCitizens(
                     continue
                 }
             }
-            if (actor.residentYield != null) continue
+            if (actor.residentYield != null) {
+                // A skipped separation-budget frame is still owned by the bounded yield.
+                actor.route?.progressTick = navigationTick
+                continue
+            }
             val route = actor.route
             if (npc.isValid) {
                 val previous = actor.observedYaw
@@ -2648,6 +2659,8 @@ class CivsCitizens(
     }?.token?.assignmentId?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
 
     private fun canWorkFrom(actor: Actor, work: CivWorldWork): Boolean {
+        // Reach during a step or fall is transient: keep walking until the feet have support.
+        if (!citizenPacketSupported(actor.npc.world, actor.npc.location.point())) return false
         if (actor.plan.type == BuildingType.QUARRY && work.miningStep != null) {
             val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
             val mine = city.building(work.buildingId) ?: return false

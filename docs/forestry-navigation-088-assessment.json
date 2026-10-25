@@ -1,0 +1,98 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.88 forestry and navigation repair",
+  "assumptions": [
+    "The modeled population is one affected level-1 forester/owner in each low/base/high scenario (participants 1/1/1); it is not the whole network.",
+    "The supplied baseline records zero completed tree outputs in affected deadlocked stands. The bounded active-0.1.87 observation was2026-10-25 19:20..19:44UTC; zero is not extrapolated to a per-day rate. Uncounted seed costs for any incomplete pre-change cycles are not estimated.",
+    "The after scenarios assume 6/24/72 completed replanted real-tree plots per owner-day at 0.25/1/4 active hours. These are explicit sensitivities, not telemetry, a guaranteed rate, or a hard cap.",
+    "At mill level 1, each completed real-tree plot retains the nominal 4 abstract WOOD output and 1 abstract WOOD seed-plot debit. The sensitivity assumes one recurring seed debit per completed replacement plot and excludes initial grove stock and unfinished work. Partial work or planting alone yields zero WOOD.",
+    "Mill levels 2 and 3 retain their nominal 8 and 12 abstract WOOD per completed replanted real tree. The calculator isolates the affected level-1 cohort; a healthy isolated stand is unchanged before and after and is not added as a second population.",
+    "Auto abstract WOOD is not a physical log payout. Physical towns keep native tree log drops and the existing sapling debit. The safe ownership rule for touching crowns retains foreign, shared, and out-of-bounds leaves for native decay while isolated owned crowns remain collectible. Leaf loot location or timing may differ; this assessment promises no extra item quantity.",
+    "Physical item quantities, current SELL quotes, contract acceptance, and restored production throughput are not known here. No item is converted into money. EconomyShopGUI SELL remains current; the planned SELL-off and contract transition is future state.",
+    "Direct Vault, tokens, and player XP flows remain zero in separate units. No price, payout, cap, production-duration, or boost changes. The 2,048-cell mutation bound remains; unavailable/protected/oversized trunks still reject, while unavailable/shared/escaping foliage is preserved unmodified. Recovered availability may remove false-yield replans, but its indirect throughput effect is unmeasured."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "completed_replanted_tree_level_1",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsForestry.kt:completed-tree output",
+          "basis": "L1 keeps its existing 4 abstract WOOD per completed replanted real tree. The supplied affected-stand baseline has zero completed events; after counts are hypothetical sensitivities, not telemetry.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "6",
+              "24",
+              "72"
+            ]
+          }
+        },
+        {
+          "id": "seed_plot_for_completed_replant_level_1",
+          "kind": "burn",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsForestry.kt:seed-plot cost",
+          "basis": "One abstract WOOD per modeled completed replacement plot, paired with the same-cycle completed-tree sensitivity. No unobserved partial planting count is invented.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "6",
+              "24",
+              "72"
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  }
+}

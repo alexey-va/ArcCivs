@@ -244,6 +244,166 @@ class CivsForestryTest : FunSpec({
         }
     }
 
+    test("Auto2 shaped adjacent oaks complete paid native receipts and replant before free care without touching foreign trunks") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("forestry-auto2-joined", Material.DIRT).also(paper.server::addWorld)
+            val plugin = paper.createSimplePlugin("ForestryAuto2Joined")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            try {
+                val mill = spatialBuilding("caledonia", "lumberjack", 1, CivPosition(0, 63, 0), 180)
+                var worker = spatialWorker(mill, "IRON_AXE").copy(items = null, inventory = null)
+                var city = spatialCity(world.uid, listOf(mill), worker)
+                    .copy(style = "caledonia", inventory = null, autonomy = CivAutonomy(), stock = Stock(4))
+                val roots = (-20..-18).map { CivPosition(it, 64, -2) }
+                val remainingTrunks = linkedMapOf<CivPosition, String>()
+                for (root in roots) for (y in 64..67) {
+                    val point = root.copy(y = y)
+                    remainingTrunks[point] = "minecraft:oak_log[axis=y]"
+                    world.getBlockAt(point.x, point.y, point.z).blockData = paper.server.createBlockData(remainingTrunks.getValue(point))
+                }
+                val leaves = (-21..-17).map { CivPosition(it, 68, -2) }
+                leaves.forEach { world.getBlockAt(it.x, it.y, it.z).blockData = paper.server.createBlockData(
+                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]") }
+                for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    CivsStorage(plugin).use { storage ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        runtime.pulse(listOf(city))
+                        val before = runtime.debug(setOf(worker.id))
+                        val entry = (before["entries"] as List<*>).single() as Map<*, *>
+                        (entry["forestSearch"] != null) shouldBe true
+                        runtime.debug(setOf(worker.id)) shouldBe before
+                        repeat(3) { cycle ->
+                            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                            val work = requireNotNull(runtime.plan(city, worker))
+                            work.status shouldBe "felling-tree"
+                            work.outputs shouldBe emptyMap()
+                            work.inputs shouldBe mapOf("OAK_SAPLING" to 1L)
+                            val root = requireNotNull(work.forestry).job.root
+                            work.changes.filter { CivsForestry.material(it.before) == "OAK_LOG" }.map { it.position }.toSet() shouldBe
+                                (64..67).mapTo(hashSetOf()) { root.copy(y = it) }
+                            runtime.validate(city, work)
+                            val receipt = forestryReceipt(city, work, 1_000L + cycle * 2_000L)
+                            receipt.validated()
+                            storage.replaceCities(listOf(city))
+                            storage.reserve(city, receipt.id)
+                            storage.seal(receipt)
+                            storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                            storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                            storage.unlock(receipt.id)
+                            city = receipt.after
+                            city.stock.wood shouldBe 4L + (cycle + 1) * 3L
+                            city.forestryJobs shouldBe null
+                            world.getBlockAt(root.x, root.y, root.z).blockData.asString shouldBe "minecraft:oak_sapling[stage=0]"
+                            remainingTrunks.keys.removeAll(work.changes.map { it.position }.toSet())
+                            remainingTrunks.forEach { (point, state) -> world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe state }
+                            // Shared foliage remains native until the last neighbouring trunk has also been harvested.
+                            if (cycle < 2) leaves.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.OAK_LEAVES }
+                            worker = city.workers.single()
+                            runtime.invalidate(worker.id)
+                        }
+                        repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                        val care = requireNotNull(runtime.plan(city, worker))
+                        care.status shouldBe "watering"
+                        care.inputs shouldBe emptyMap()
+                        runtime.validate(city, care)
+                        CivsRules.finishWorldWork(city, care, 8_000).stock shouldBe city.stock
+                    }
+                }
+            } finally { tasks.close() }
+        }
+    }
+
+    for (planting in listOf(false, true)) test("an exhausted unaccepted ${if (planting) "planting plot" else "tree stance"} yields to later work") {
+        forestryWorksite("forestry-inaccessible-$planting") { world, runtime, city ->
+            val worker = city.workers.single()
+            val blockedRoot = CivPosition(-15, 64, -26)
+            for (x in blockedRoot.x - 2..blockedRoot.x + 2) for (z in blockedRoot.z - 2..blockedRoot.z + 2)
+                if (x != blockedRoot.x || z != blockedRoot.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            val laterRoot = CivPosition(10, 64, -26)
+            if (!planting) {
+                forestrySmallOak(world, blockedRoot)
+                forestrySmallOak(world, laterRoot)
+            }
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe if (planting) "planting-tree" else "felling-tree"
+            (work.focus != blockedRoot) shouldBe true
+            if (!planting) work.focus shouldBe laterRoot
+            runtime.validate(city, work)
+            if (!planting) {
+                val blockedCells = (64..66).associate { blockedRoot.copy(y = it) to "minecraft:oak_log[axis=y]" } + mapOf(
+                    blockedRoot.copy(y = 63) to "minecraft:dirt", blockedRoot.copy(y = 67) to
+                        "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+                val scan = CivsForestry.Scan(blockedRoot, "OAK_LOG")
+                while (!scan.complete && !scan.failed) scan.advance(13) { blockedCells[it] ?: "minecraft:air" }
+                val paid = requireNotNull(scan.job(listOf(blockedRoot))).copy(next = 1)
+                val committed = city.copy(forestryJobs = mapOf(work.buildingId.toString() to paid))
+                runtime.invalidate(worker.id)
+                var blocked = false
+                repeat(100) {
+                    runtime.pulse(listOf(committed))
+                    if (runtime.idleReason(committed, worker) == "worksite-no-access") blocked = true
+                }
+                runtime.plan(committed, worker) shouldBe null
+                committed.forestryJobs?.get(work.buildingId.toString()) shouldBe paid
+                blocked shouldBe true
+            }
+        }
+    }
+
+    for (protectionDenied in listOf(false, true)) test("a complete unpaid tree capture yields after ${if (protectionDenied) "protection denial" else "a changed block"} during stance search") {
+        val locked = hashSetOf<CivPosition>()
+        forestryWorksite("forestry-stale-capture-$protectionDenied", locked = locked) { world, runtime, city ->
+            val worker = city.workers.single()
+            val firstRoot = CivPosition(-15, 64, -26)
+            val laterRoot = CivPosition(10, 64, -26)
+            forestrySmallOak(world, firstRoot)
+            forestrySmallOak(world, laterRoot)
+            // Leave no supported stance initially so capture completes before its bounded stance search.
+            for (x in firstRoot.x - 2..firstRoot.x + 2) for (z in firstRoot.z - 2..firstRoot.z + 2)
+                if (x != firstRoot.x || z != firstRoot.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            var delayed = false
+            repeat(2_000) {
+                if (!delayed) {
+                    runtime.pulse(listOf(city))
+                    val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+                    val scan = entry["forestScan"] as? Map<*, *>
+                    delayed = scan?.get("phase") == "complete" && entry["candidateSearch"] != null
+                }
+            }
+            delayed shouldBe true
+            runtime.plan(city, worker) shouldBe null
+            val changed = firstRoot.copy(y = 67)
+            if (protectionDenied) locked += changed else world.getBlockAt(changed.x, changed.y, changed.z).type = Material.STONE
+            // A lower stance is still ahead of the search cursor; the actual batch must now observe the stale capture.
+            for (x in firstRoot.x - 2..firstRoot.x + 2) for (z in firstRoot.z - 2..firstRoot.z + 2)
+                if (x != firstRoot.x || z != firstRoot.z) world.getBlockAt(x, 61, z).type = Material.STONE
+            val expectedStatus = if (protectionDenied) "worksite-protected" else "worksite-obstacle"
+            var rejected = false
+            repeat(3_000) {
+                if (runtime.plan(city, worker) == null) {
+                    runtime.pulse(listOf(city))
+                    if (runtime.idleReason(city, worker) == expectedStatus) rejected = true
+                }
+            }
+            rejected shouldBe true
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe laterRoot
+            work.changes.none { it.position.x == firstRoot.x && it.position.z == firstRoot.z } shouldBe true
+            runtime.validate(city, work)
+            city.stock.wood shouldBe 0L
+            worker.completedCycles shouldBe 0L
+            city.forestryJobs shouldBe null
+            val after = CivsRules.finishWorldWork(city, work, 1_000)
+            after.stock.wood shouldBe 3L
+            after.workers.single().completedCycles shouldBe 1L
+            for (y in 64..66) world.getBlockAt(firstRoot.x, y, firstRoot.z).type shouldBe Material.OAK_LOG
+            world.getBlockAt(changed.x, changed.y, changed.z).type shouldBe if (protectionDenied) Material.OAK_LEAVES else Material.STONE
+        }
+    }
+
     test("detached capture crosses the old height and 128-log ceilings follows downward branches and yields by its read allowance") {
         val (scan, cells, roots) = forestryCapture()
         var pulses = 0
@@ -251,7 +411,7 @@ class CivsForestryTest : FunSpec({
             var reads = 0
             val used = scan.advance(7) { point -> reads++; cells[point] ?: "minecraft:air" }
             (used <= 7) shouldBe true
-            reads shouldBe used
+            (reads <= used) shouldBe true
         }
         scan.failed shouldBe false
         (pulses > 1) shouldBe true
@@ -262,22 +422,104 @@ class CivsForestryTest : FunSpec({
         CivsForestry.valid(forestryCity(), forestryCity().buildings.last().id.toString(), job) shouldBe true
     }
 
-    test("incomplete unloaded or independently rooted touching crowns never become a partial harvest") {
+    test("unavailable timber stays rejected while a joined rooted trunk keeps its independent neighbour") {
         val (_, captured, roots) = forestryCapture()
-        val missing = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
+        val missing = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
         while (!missing.complete && !missing.failed) missing.advance(32) { point ->
             if (point.y == 90) null else captured[point] ?: "minecraft:air"
         }
         missing.job(roots) shouldBe null
+        missing.failureReason shouldBe "tree-trunk-unavailable"
         val joined = captured.toMutableMap()
         for (y in 64..98) joined[CivPosition(5, y, 5)] = "minecraft:spruce_log[axis=y]"
         joined[CivPosition(5, 63, 5)] = "minecraft:dirt"
-        val connected = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
+        val connected = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
         while (!connected.complete && !connected.failed) connected.advance(64) { joined[it] ?: "minecraft:air" }
-        connected.job(roots) shouldBe null
-        val sapling = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
-        sapling.advance(8) { "minecraft:spruce_sapling[stage=1]" }
+        val separated = requireNotNull(connected.job(roots))
+        separated.roots shouldBe roots
+        separated.cells.all { CivsForestry.material(separated.state(it)) == "SPRUCE_LOG" } shouldBe true
+        separated.cells.none { separated.position(it).let { p -> p.x == 5 && p.z == 5 } } shouldBe true
+        connected.retainedCrownReason shouldBe "shared-crown"
+        val sapling = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
+        repeat(8) {
+            if (!sapling.complete && !sapling.failed) sapling.advance(8) { "minecraft:spruce_sapling[stage=1]" }
+        }
+        sapling.failed shouldBe true
         sapling.job(roots) shouldBe null
+        sapling.failureReason shouldBe "tree-root-changed"
+    }
+
+    test("adjacent grounded oaks keep whole vertical trunks and leave shared connecting wood and foliage native") {
+        val root = CivPosition(0, 64, 0)
+        val cells = linkedMapOf<CivPosition, String>()
+        for (x in listOf(0, 2)) {
+            cells[CivPosition(x, 63, 0)] = "minecraft:dirt"
+            for (y in 64..68) cells[CivPosition(x, y, 0)] = "minecraft:oak_log[axis=y]"
+        }
+        val bridge = CivPosition(1, 65, 0)
+        cells[bridge] = "minecraft:oak_log[axis=x]"
+        for (x in -1..3) cells[CivPosition(x, 69, 0)] = "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"
+        val scan = CivsForestry.Scan(root, "OAK_LOG")
+        var ownershipPulses = 0
+        while (!scan.complete && !scan.failed) {
+            if (scan.phase == "ownership") ownershipPulses++
+            var reads = 0
+            val used = scan.advance(7) { point -> reads++; cells[point] ?: "minecraft:air" }
+            (reads <= used) shouldBe true
+            (reads <= 7) shouldBe true
+        }
+        val job = requireNotNull(scan.job(listOf(root)))
+        job.cells.map(job::position).toSet() shouldBe (64..68).mapTo(hashSetOf()) { root.copy(y = it) }
+        (bridge in job.cells.map(job::position)) shouldBe false
+        scan.groundedRoots shouldBe 2
+        (ownershipPulses > 1) shouldBe true
+        scan.retainedCrownReason shouldBe "shared-trunks"
+        scan.failureReason shouldBe null
+    }
+
+    for (otherRootX in listOf(6, 24)) test("a leaf-connected oak at distance $otherRootX cannot expand or invalidate the selected trunk") {
+        val root = CivPosition(0, 64, 0)
+        val cells = linkedMapOf<CivPosition, String>()
+        for (x in listOf(0, otherRootX)) {
+            cells[CivPosition(x, 63, 0)] = "minecraft:dirt"
+            for (y in 64..66) cells[CivPosition(x, y, 0)] = "minecraft:oak_log[axis=y]"
+        }
+        for (x in 0..otherRootX) cells[CivPosition(x, 67, 0)] =
+            "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"
+        val scan = CivsForestry.Scan(root, "OAK_LOG")
+        while (!scan.complete && !scan.failed) scan.advance(5) { cells[it] ?: "minecraft:air" }
+        val job = requireNotNull(scan.job(listOf(root)))
+        job.cells.map(job::position).toSet() shouldBe (64..66).mapTo(hashSetOf()) { root.copy(y = it) }
+        scan.retainedCrownReason shouldBe if (otherRootX == 6) "shared-crown" else "crown-bounds"
+        scan.failureReason shouldBe null
+    }
+
+    test("a large connected crown stays native while excessive or unavailable timber never yields a partial job") {
+        val root = CivPosition(0, 64, 0)
+        val trunk = (64..66).associate { root.copy(y = it) to "minecraft:oak_log[axis=y]" }
+        val crown = linkedMapOf<CivPosition, String>().apply {
+            put(root.copy(y = 63), "minecraft:dirt")
+            putAll(trunk)
+            for (x in -15..15) for (y in 67..90) for (z in -15..15)
+                put(CivPosition(x, y, z), "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+        }
+        val foliage = CivsForestry.Scan(root, "OAK_LOG")
+        while (!foliage.complete && !foliage.failed) foliage.advance(31) { crown[it] ?: "minecraft:air" }
+        requireNotNull(foliage.job(listOf(root))).cells.size shouldBe trunk.size
+        foliage.retainedCrownReason shouldBe "crown-too-large"
+        for (reason in listOf("tree-trunk-bounds", "tree-trunk-too-large", "tree-trunk-unavailable")) {
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            while (!scan.complete && !scan.failed) scan.advance(17) { p -> when {
+                reason == "tree-trunk-unavailable" && p == root.copy(y = 65) -> null
+                reason == "tree-trunk-bounds" && p.y == 64 && p.z == 0 && p.x in 0..16 -> "minecraft:oak_log[axis=x]"
+                reason == "tree-trunk-too-large" && p.x in 0..14 && p.y in 64..75 && p.z in 0..14 -> "minecraft:oak_log[axis=y]"
+                p.y == 63 -> "minecraft:dirt"
+                else -> trunk[p] ?: "minecraft:air"
+            } }
+            scan.job(listOf(root)) shouldBe null
+            scan.failureReason shouldBe reason
+            (scan.size <= CivsForestry.MAX_CELLS) shouldBe true
+        }
     }
 
     test("only vines facing this tree and their hanging chain join the bounded captured crown") {
@@ -288,7 +530,7 @@ class CivsForestryTest : FunSpec({
         attached.forEach { cells[it] = vine }
         val unrelated = CivPosition(-5, 98, 2)
         cells[unrelated] = "minecraft:vine[east=false,north=false,south=false,up=false,west=true]"
-        val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
+        val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
         while (!scan.complete && !scan.failed) scan.advance(11) { cells[it] ?: "minecraft:air" }
         val job = requireNotNull(scan.job(roots))
         job.cells.take(attached.size).map(job::position) shouldBe attached
@@ -326,7 +568,7 @@ class CivsForestryTest : FunSpec({
             val leaf = "minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]"
             blocks[target.copy(y = 80)] = leaf
             blocks[target.copy(z = -1)] = leaf
-            val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
+            val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
             while (!scan.complete && !scan.failed) scan.advance(19) { blocks[it] ?: "minecraft:air" }
             val job = requireNotNull(scan.job(roots))
             (job.cells.count { CivsForestry.material(job.state(it)) == "VINE" } > 128) shouldBe true
@@ -405,7 +647,7 @@ class CivsForestryTest : FunSpec({
         // Capture the real remaining block-state sample, proving that the trunk still looks independently harvestable.
         val (_, cells, roots) = forestryCapture()
         val partial = cells.toMutableMap().also { map -> first.changes.forEach { map[it.position] = it.after } }
-        val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG")
+        val scan = CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots)
         while (!scan.complete && !scan.failed) scan.advance(64) { partial[it] ?: "minecraft:air" }
         val recaptured = requireNotNull(scan.job(roots))
         CivsForestry.claimClear(after, secondMill.id, recaptured) shouldBe false
@@ -842,7 +1084,7 @@ private fun forestryCapture(): Triple<CivsForestry.Scan, Map<CivPosition, String
         cells[point] = "minecraft:spruce_log[axis=x]"
     for (y in 97..98) for (x in -4..5) for (z in -4..5) cells.putIfAbsent(CivPosition(x, y, z),
         "minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]")
-    return Triple(CivsForestry.Scan(roots.first(), "SPRUCE_LOG"), cells, roots)
+    return Triple(CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots), cells, roots)
 }
 
 private fun forestryTestJob(): CivForestryJob {
