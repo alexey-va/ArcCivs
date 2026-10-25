@@ -29,6 +29,8 @@ import ru.arc.paper.api.ArcSchematicBlock
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
+import kotlin.math.abs
+import kotlin.math.floor
 
 /**
  * Settlement-specific placement policy; Core remains the sole schematic mutation owner.
@@ -312,9 +314,34 @@ class CivsWorld(
         val future = CitizenPoint(p.x + .5, p.y + top, p.z + .5)
         requireCivs(citizenPacketBodyClear(world, future, false, collision = ::collision), "autonomy-no-path")
         requireCivs(citizenPacketCampfireClear(world, future), "autonomy-no-path")
+        upkeep.routeOverride?.let { repair ->
+            for (index in repair.changed()) {
+                val oldFloor = repair.originalRoute[index].let { it.copy(y = it.y - 1) }
+                requireCivs(read(oldFloor).type.isAir, "world-changed")
+            }
+            val at = repair.changed().first()
+            val section = repair.route.subList(at - 1, minOf(repair.route.size, at + 3))
+            for (feet in section) {
+                val surface = read(feet.copy(y = feet.y - 1))
+                val support = read(feet.copy(y = feet.y - 2))
+                requireCivs(surface.state !is TileState && !surface.isLiquid &&
+                    (surface.blockData as? Waterlogged)?.isWaterlogged != true &&
+                    (roadUpkeepGround(surface) || CivsRoadMaintenance.surface(surface.blockData.asString)), "protected-terrain")
+                requireCivs(roadUpkeepGround(support) && fullTerraformSupport(support) ||
+                    CivsRoadMaintenance.surface(support.blockData.asString) && civsRetainedRouteStep(support.blockData), "autonomy-no-path")
+            }
+            requireCivs(roadHalfStepWalk(world, section, ::collision) != null, "autonomy-no-path")
+        }
+        if (upkeep.routeOverride == null) city.roadRouteOverrides?.get(upkeep.source.id.toString())?.let { repair ->
+            val at = repair.changed().first()
+            val section = repair.route.subList(at - 1, minOf(repair.route.size, at + 3))
+            if (section.any { abs(it.x.toLong() - p.x) <= 1L && abs(it.z.toLong() - p.z) <= 1L })
+                requireCivs(roadHalfStepWalk(world, section, ::collision) != null, "autonomy-no-path")
+        }
         for (neighbour in upkeep.neighbours) {
             val floor = read(neighbour)
-            if (!roadUpkeepGround(floor) && !civsRetainedRouteStep(floor.blockData)) continue
+            if (!roadUpkeepGround(floor) && !civsRetainedRouteStep(floor.blockData) &&
+                !CivsRoadMaintenance.landing(floor.blockData.asString)) continue
             val top = floor.collisionShape.boundingBoxes.filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }
                 .maxOfOrNull { it.maxY } ?: continue
             val beside = CitizenPoint(neighbour.x + .5, neighbour.y + top, neighbour.z + .5)
@@ -332,7 +359,8 @@ class CivsWorld(
 
     /** These ordinary plants attach below, never to the side of the changed column. */
     private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
-        civsRetainedRouteStep(block.blockData) || block.type == Material.SHORT_GRASS || block.type == Material.FERN
+        civsRetainedRouteStep(block.blockData) || CivsRoadMaintenance.landing(block.blockData.asString) ||
+        block.type == Material.SHORT_GRASS || block.type == Material.FERN
 
     private fun roadUpkeepReplaceable(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
         CivsRoadMaintenance.surface(block.blockData.asString) && civsRetainedRouteStep(block.blockData)
@@ -1468,9 +1496,59 @@ class CivsWorld(
 internal fun civsRetainedRouteStep(data: BlockData): Boolean =
     data is Stairs && data.half == Bisected.Half.BOTTOM && !data.isWaterlogged
 
+/** Walk the actual tread contacts with a resident-width body, not a one-block jumping envelope. */
+internal fun roadHalfStepWalk(world: World, route: List<CivPosition>,
+    collision: ((Int, Int, Int) -> CitizenCollisionSnapshot)? = null): List<CitizenPoint>? {
+    require(route.size in 2..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH)
+    val cache = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
+    fun state(x: Int, y: Int, z: Int): CitizenCollisionSnapshot = cache.getOrPut(CivPosition(x, y, z)) {
+        collision?.invoke(x, y, z) ?: world.getBlockAt(x, y, z).let { block ->
+            val boxes = block.collisionShape.boundingBoxes.map { it.clone() }
+            CitizenCollisionSnapshot(block.isLiquid, citizenRouteOpenable(block.blockData) != null, boxes,
+                boxes.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
+        }
+    }
+    val walk = mutableListOf<CitizenPoint>()
+    for ((a, b) in route.zipWithNext()) {
+        require(abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) == 1L)
+        for (index in 0..4) {
+            if (walk.isNotEmpty() && index == 0) continue
+            val t = index / 4.0
+            val x = a.x + .5 + (b.x - a.x) * t
+            val z = a.z + .5 + (b.z - a.z) * t
+            val expected = a.y + (b.y - a.y) * t
+            var top: Double? = null
+            for (bx in floor(x - .299).toInt()..floor(x + .299).toInt())
+                for (bz in floor(z - .299).toInt()..floor(z + .299).toInt()) {
+                    if (!citizenChunkReady(world, bx shr 4, bz shr 4)) return null
+                    for (by in floor(expected).toInt() - 2..floor(expected).toInt()) {
+                        if (by !in world.minHeight until world.maxHeight) return null
+                        val cell = state(bx, by, bz)
+                        if (cell.liquid || cell.door) return null
+                        for (box in cell.boxes) if (box.maxX > x - .299 && box.minX < x + .299 &&
+                            box.maxZ > z - .299 && box.minZ < z + .299)
+                            top = maxOf(top ?: box.maxY, box.maxY)
+                    }
+                }
+            val point = CitizenPoint(x, top ?: return null, z)
+            if (!citizenPacketBodyClear(world, point, false, collision = ::state)) return null
+            walk.lastOrNull()?.let { before ->
+                val rise = abs(point.y - before.y)
+                val lower = minOf(point.y, before.y)
+                val pathLip = rise <= 9.0 / 16.0 + .0001 && abs(lower - floor(lower) - 15.0 / 16.0) < .0001
+                if (rise > .5001 && !pathLip || !citizenPacketStepClear(world, before, point, false, ::state) ||
+                    !citizenPacketStepClear(world, point, before, false, ::state)) return null
+            }
+            walk += point
+        }
+    }
+    return walk
+}
+
 /** Exact collision union for the deliberately small paving palette, including native corner shapes. */
 internal fun roadUpkeepBoxes(data: BlockData): List<CitizenTerrainBox> {
-    if (data.material == Material.COBBLESTONE) return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+    if (data.material == Material.COBBLESTONE || CivsRoadMaintenance.landing(data.asString))
+        return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
     if (data.material == Material.DIRT_PATH) return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0))
     require(CivsRoadMaintenance.surface(data.asString) && data is Stairs &&
         data.half == Bisected.Half.BOTTOM && !data.isWaterlogged)

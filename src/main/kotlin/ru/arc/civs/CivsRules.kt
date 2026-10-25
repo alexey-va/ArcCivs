@@ -285,6 +285,7 @@ object CivsRules {
         val next = city.copy(buildings = city.buildings.filterNot { it.id == buildingId },
             mineProgress = city.mineProgress?.minus(buildingId.toString()),
             minePlans = city.minePlans?.minus(buildingId.toString()),
+            roadRouteOverrides = city.roadRouteOverrides?.minus(buildingId.toString())?.takeIf { it.isNotEmpty() },
             forestryJobs = city.forestryJobs?.minus(buildingId.toString())?.takeIf { it.isNotEmpty() },
             forestrySeeded = city.forestrySeeded?.minus(buildingId.toString())?.takeIf { it.isNotEmpty() },
             workers = city.workers.map { it.copy(assignment = it.assignment?.takeUnless { id -> id == buildingId },
@@ -718,6 +719,20 @@ object CivsRules {
         val forestrySeeded = if (autonomousForestry && !CivsForestry.care(work) &&
             (work.forestry == null || forestFinished || !work.forestry.job.seedDeferred))
             city.forestrySeeded.orEmpty() + building.id.toString() else city.forestrySeeded
+        val (progress, plans) = miningProgressAfter(city, building, work)
+        return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
+            mineProgress = progress, minePlans = plans, stock = stock, forestryJobs = forestryJobs, forestrySeeded = forestrySeeded))
+    }
+
+    internal fun finishAutonomousVisual(city: Settlement, work: CivWorldWork): Settlement {
+        CivsAutonomousWorksites.validate(city, work)
+        val building = city.building(work.buildingId) ?: reject("building-not-found")
+        val (progress, plans) = miningProgressAfter(city, building, work)
+        return validate(city.copy(mineProgress = progress, minePlans = plans, revision = add(city.revision, 1)))
+    }
+
+    private fun miningProgressAfter(city: Settlement, building: CivBuilding, work: CivWorldWork):
+        Pair<Map<String, Long>?, Map<String, CivMinePlanState>?> {
         check(work.miningPlanVersion == null || work.miningPlanVersion in 2..CivsMinePlan.VERSION && work.miningStep != null,
             "stale-worksite")
         val progress = work.miningStep?.takeIf { work.miningPlanVersion == null }?.let { next ->
@@ -737,8 +752,7 @@ object CivsRules {
                 previous?.takeIf { it.version == 3 && version >= 4 }?.nextStep ?: previous?.v3Step,
                 previous?.takeIf { it.version == 4 && version >= 5 }?.nextStep ?: previous?.v4Step))
         } ?: city.minePlans
-        return changed(city, city.copy(workers = city.workers.map { if (it.id == worker.id) updated else it },
-            mineProgress = progress, minePlans = plans, stock = stock, forestryJobs = forestryJobs, forestrySeeded = forestrySeeded))
+        return progress to plans
     }
 
     /** Fail closed at the storage boundary, including missing/null fields from reflection-based JSON decoders. */
@@ -822,6 +836,14 @@ object CivsRules {
                 city.workers.map { it.id }.distinct().size == city.workers.size)
             CivsCorpses.validate(city)
             CivsResearch.validate(city)
+            city.roadRouteOverrides?.let { overrides ->
+                snapshot(city.autonomy != null && overrides.isNotEmpty() && overrides.size <= MAX_BUILDINGS)
+                overrides.forEach { (id, override) ->
+                    val source = requireNotNull(city.building(UUID.fromString(id)))
+                    snapshot(source.id.toString() == id)
+                    override.validated(city, source)
+                }
+            }
             city.mineProgress?.let { progress -> snapshot(progress.size <= MAX_BUILDINGS && progress.all { (id, step) ->
                 java.util.UUID.fromString(id).toString() == id && step in 0..100_000 }) }
             city.minePlans?.let { plans -> snapshot(plans.size <= MAX_BUILDINGS && plans.all { (id, plan) ->

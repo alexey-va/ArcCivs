@@ -4,6 +4,8 @@ import com.google.gson.Gson
 import com.google.gson.JsonParser
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.bukkit.Bukkit
+import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
@@ -33,6 +35,32 @@ class CivsSettlementLayoutTest : FunSpec({
         for (index in listOf(1, 4, 7))
             cells[route[index].copy(y = route[index].y - 1)] shouldBe "minecraft:dirt_path"
         exportRoadSection("paved-slope-$facing", surface, route, paving = roads.flatMap { it.blocks })
+    }
+
+    test("new road construction separates a rising right angle with a full wood intermediate block") {
+        val city = layoutFixtureCity()
+        val route = listOf(CivPosition(12, 65, 12), CivPosition(12, 66, 13), CivPosition(12, 66, 14),
+            CivPosition(13, 67, 14), CivPosition(14, 67, 14))
+        val profile = CivsAutonomousTerraform.roadProfile(route)
+        val surface = layoutSurface(city, "flat").let { base -> base.copy(columns = base.columns +
+            profile.mapValues { (_, p) -> CivTerrainSurfaceColumn(p.y, true) }) }
+        val roads = CivsSettlementLayout.infrastructure(city, CivsSettlementLayout.frame(city), surface, listOf(route))
+            .pieces.filter { it.type == BuildingType.ROAD }.flatMap { it.blocks }.associate { it.position to it.after }
+        roads[CivPosition(12, 65, 14)] shouldBe "minecraft:${CivsSettlementLayout.wood(city.style)}_planks"
+        roads[CivPosition(12, 65, 13)] shouldBe
+            "minecraft:${CivsSettlementLayout.wood(city.style)}_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        roads[CivPosition(13, 66, 14)] shouldBe
+            "minecraft:${CivsSettlementLayout.wood(city.style)}_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+        roads[CivPosition(14, 66, 14)] shouldBe "minecraft:dirt_path"
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("new-road-landing", collisionForData = { data ->
+                if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
+            }).also(paper.server::addWorld)
+            world.loadChunk(0, 0)
+            roads.forEach { (p, data) -> world.getBlockAt(p.x, p.y, p.z).setBlockData(Bukkit.createBlockData(data), false) }
+            (roadHalfStepWalk(world, route) != null) shouldBe true
+            (roadHalfStepWalk(world, route.reversed()) != null) shouldBe true
+        }
     }
 
     test("the hall frame has three explicit passages and disjoint perimeter strips in every rotation") {

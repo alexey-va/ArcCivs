@@ -34,8 +34,10 @@ internal fun citizenSkin(skins: List<CitizenSkin>, worker: CivWorker): CitizenSk
 
 internal fun citizenScale(worker: CivWorker): Double = if (CivsResidents.isChild(worker)) .5 else 1.0
 
-/** Optional scene props only. Cargo has one attached parcel; work tools come from the actual HAND slot. */
+/** Scene props never enter inventory. Actual HAND equipment takes priority over paid Auto worksite props. */
 internal fun citizenTool(plan: CitizenPlan): Material? = when (plan.type) {
+    BuildingType.FARM -> if (plan.worldWork?.autonomousVisual == true) Material.IRON_HOE else null
+    BuildingType.QUARRY -> if (plan.worldWork?.autonomousVisual == true) Material.IRON_PICKAXE else null
     BuildingType.TOWN_HALL -> Material.BOOK
     BuildingType.LIBRARY -> Material.FEATHER
     else -> null

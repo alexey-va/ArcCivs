@@ -266,7 +266,7 @@ internal object CivsAutonomousTerraform {
                 abs(it.x - building.entrance.x) + abs(it.z - building.entrance.z)
             }
 
-    private data class Node(val x: Int, val y: Int, val z: Int)
+    private data class Node(val x: Int, val y: Int, val z: Int, val direction: Int = -1, val climbed: Boolean = false)
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
 
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
@@ -275,7 +275,12 @@ internal object CivsAutonomousTerraform {
         val to = building.entrance
         val target = Node(to.x, to.y - 1, to.z)
         val goalApproach = CivsAutonomousGeometry.approach(building).map { civsTerrainKey(it.x, it.z) }.toSet()
-        fun distance(n: Node) = (abs(n.x - target.x) + abs(n.z - target.z)) * 10 + abs(n.y - target.y) * 4
+        fun distance(n: Node): Int {
+            val horizontal = abs(n.x - target.x) + abs(n.z - target.z)
+            val vertical = abs(n.y - target.y)
+            // Every vertical change also consumes a horizontal step; both terms are lower bounds on real cost.
+            return maxOf(horizontal, vertical) * 10 + vertical * 8
+        }
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
             val p = CivPosition(x, y, z)
@@ -299,7 +304,7 @@ internal object CivsAutonomousTerraform {
             val current = open.remove()
             if (costs[current.node] != current.cost || !closed.add(current.node)) continue
             val n = current.node
-            if (n == target) {
+            if (n.x == target.x && n.y == target.y && n.z == target.z) {
                 val reversed = mutableListOf(n)
                 var cursor = n
                 while (cursor != start) { cursor = parents[cursor] ?: return null; reversed += cursor }
@@ -307,8 +312,14 @@ internal object CivsAutonomousTerraform {
                     return null
                 return reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) }
             }
-            for ((dx, dz) in DIRECTIONS) for (dy in 0..2) {
-                val candidate = Node(n.x + dx, n.y + when (dy) { 1 -> -1; 2 -> 1; else -> 0 }, n.z + dz)
+            for ((direction, offset) in DIRECTIONS.withIndex()) for (dy in 0..2) {
+                val (dx, dz) = offset
+                val rise = when (dy) { 1 -> -1; 2 -> 1; else -> 0 }
+                // A full turning landing joins the incoming high tread and outgoing high/low tread.
+                // Arrival history is part of Node, so another viable approach to this column is retained.
+                if (n.direction >= 0 && n.direction != direction && (n.climbed || rise < 0)) continue
+                if (n.climbed && rise < 0) continue // A one-column crest would need a full-block jump from one side.
+                val candidate = Node(n.x + dx, n.y + rise, n.z + dz, direction, rise > 0)
                 if (candidate in closed || !allowed(candidate.x, candidate.y, candidate.z) ||
                     candidate.x == start.x && candidate.z == start.z) continue
                 // A column has exactly one finished ground height. A cheap 3-D route can otherwise

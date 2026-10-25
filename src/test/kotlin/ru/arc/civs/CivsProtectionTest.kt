@@ -446,6 +446,38 @@ class CivsProtectionTest : FunSpec({
         }
     }
 
+    test("Auto field grows naturally while player harvesting and transient receipt writes remain protected") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("auto-growth")
+            val owner = paper.addPlayer("AutoOwner")
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(0, 63, 0))
+            val worker = CivWorker(UUID.randomUUID(), "Farmer", farm.id)
+            val city = spatialCity(world.uid, listOf(farm), worker).copy(owner = owner.uniqueId,
+                inventory = null, autonomy = CivAutonomy())
+            val crop = CivsWorksiteLayouts.field(farm).first().let { it.copy(y = it.y + 1) }
+            val block = world.getBlockAt(crop.x, crop.y, crop.z).also { it.type = Material.WHEAT }
+            var locked = false
+            var available = true
+            val listener = CivsProtection({ listOf(city) }, { available }, setOf(world.name),
+                worldLocked = { _, point -> locked && point == crop })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("AutoFieldProtection"))
+            fun grow(): BlockGrowEvent {
+                val after = block.state
+                after.blockData = (after.blockData as Ageable).also { it.age = 1 }
+                return paper.callEvent(BlockGrowEvent(block, after))
+            }
+            grow().isCancelled shouldBe false
+            paper.callEvent(BlockBreakEvent(block, owner)).isCancelled shouldBe true
+            locked = true
+            grow().isCancelled shouldBe true
+            locked = false
+            available = false
+            grow().isCancelled shouldBe true
+            available = true
+            grow().isCancelled shouldBe false
+        }
+    }
+
     // MockBukkit 4.116.3 does not implement Inventory.getHolder(false) for native container events.
     test("members can remodel finished buildings with drops and containers while strangers stay blocked").config(enabled = false) {
         protectionScenario { paper ->

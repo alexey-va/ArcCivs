@@ -9,8 +9,36 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.math.abs
+import org.bukkit.Bukkit
+import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a new hillside route reserves a flat turn between flights that walk in both directions") {
+        val city = terraceCity()
+        val original = terraceBuilder(city, 70)
+        fun east(p: CivPosition) = p.copy(x = p.x + 8)
+        val building = original.copy(anchor = east(original.anchor), entrance = east(original.entrance),
+            bounds = CivBox(east(original.bounds.min), east(original.bounds.max)), control = original.control?.let(::east))
+        val surface = terraceSurface { _, z -> 64 + (z.coerceAtLeast(0) / 3).coerceAtMost(6) }
+        val route = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface).route
+        CivsSettlementLayout.turnFloors(route).isNotEmpty() shouldBe true
+        (route.maxOf { it.y } > route.minOf { it.y }) shouldBe true
+        val profile = CivsAutonomousTerraform.roadProfile(route)
+        val heights = profile.mapValues { it.value.y }
+        val turns = CivsSettlementLayout.turnFloors(route)
+        val states = profile.values.associateWith { p -> CivsSettlementLayout.pathPavement(p, heights, city.style,
+            atTurn = p in turns, downhill = CivsSettlementLayout.routeDownhill(p, route)) }
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("planned-road-turn", collisionForData = { data ->
+                if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
+            }).also(paper.server::addWorld)
+            profile.values.forEach { p -> world.loadChunk(p.x shr 4, p.z shr 4) }
+            states.forEach { (p, data) -> world.getBlockAt(p.x, p.y, p.z).setBlockData(Bukkit.createBlockData(data), false) }
+            (roadHalfStepWalk(world, route) != null) shouldBe true
+            (roadHalfStepWalk(world, route.reversed()) != null) shouldBe true
+        }
+    }
+
     for ((name, delta) in listOf("short-hump" to 2, "short-hollow" to -2))
     test("$name is graded to nearby ground instead of copying a short detour in height") {
         val city = terraceCity()

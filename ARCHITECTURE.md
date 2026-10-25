@@ -664,6 +664,18 @@ Monster attacks interrupt work: nearby adult residents assist, while children an
 badly injured adults retreat. Combat uses actual carried weapons and native monster
 damage events; neither NPC combat nor corpse rendering grants currency or player XP.
 
+Known authored Auto farms and quarries also run native scenery work through typed
+world receipts, separately from their economic session. Subactions conserve the
+worker token, stock, inventory and skills; only observed WORKING time followed by
+the ordinary real depot arrival can earn the existing abstract payout. Exact Auto
+worksite cells are read-only for normal players, with administrator RW and natural
+authored crop growth outside transient receipt locks. See
+[the native-work contract](docs/autonomous-native-work-090.md).
+
+Couriers can intercept moving source residents through a bounded ephemeral route
+target. The producer keeps its work and movement; the actual encounter and surplus
+are rechecked before sealing the immutable item transfer.
+
 All item movement uses exact native slot before/after receipts stored by Core
 AtomicFileStore on the I/O executor before native writes. Synchronous planning
 freezes source membership, then only native containers changed by the exact receipt

@@ -118,7 +118,7 @@ class CivsSupplyDispatcherTest : FunSpec({
         allocateCivSupplies(input.copy(retained = plans)).plans shouldBe plans
     }
 
-    test("a moved producer clears its old meeting before the same courier can accept the new meeting") {
+    test("a moved producer retains the observed cargo while other couriers can serve another request") {
         val producer = CivSupplyWorkerSource(UUID(0, 300), SUPPLY_TARGET, CivPosition(4, 64, 0),
             mapOf("IRON_INGOT" to 32L))
         val input = supplyFixture().copy(requests = emptyList(), workerSources = listOf(producer))
@@ -127,15 +127,17 @@ class CivsSupplyDispatcherTest : FunSpec({
         val moved = producer.copy(meeting = CivPosition(6, 64, 0))
         val changed = input.copy(retained = original, workerSources = listOf(moved),
             requests = listOf(CivSupplyRequest(SUPPLY_TARGET, "STICK", 64, 0)))
-        val cleared = allocateCivSupplies(changed).plans
-        cleared[SUPPLY_COURIER] shouldBe null
-        cleared.getValue(SUPPLY_SECOND).cargo.material shouldBe "STICK"
-        cleared.values.none { it.cargo.sourceWorkerId == producer.workerId } shouldBe true
+        val retained = allocateCivSupplies(changed).plans
+        retained.getValue(SUPPLY_COURIER) shouldBe original.getValue(SUPPLY_COURIER)
+        retained.getValue(SUPPLY_SECOND).cargo.material shouldBe "STICK"
+        retained.values.count { it.cargo.sourceWorkerId == producer.workerId } shouldBe 1
+        retained.getValue(SUPPLY_COURIER).cargo.sourceEntrance shouldBe producer.meeting
+        allocateCivSupplies(changed.copy(retained = retained)).plans shouldBe retained
 
-        val replanned = allocateCivSupplies(changed.copy(retained = cleared)).plans
-        replanned.getValue(SUPPLY_SECOND) shouldBe cleared.getValue(SUPPLY_SECOND)
-        replanned.getValue(SUPPLY_COURIER).cargo.sourceEntrance shouldBe moved.meeting
-        replanned.getValue(SUPPLY_COURIER).cargo.id shouldBe original.getValue(SUPPLY_COURIER).cargo.id
+        for (stale in listOf(emptyList(), listOf(moved.copy(buildingId = UUID(0, 999))),
+                listOf(moved.copy(excess = mapOf("IRON_INGOT" to 31L))))) {
+            allocateCivSupplies(changed.copy(workerSources = stale)).plans[SUPPLY_COURIER] shouldBe null
+        }
     }
 
     test("construction keeps priority while age and courier waiting order prevent ordinary first-match bias") {

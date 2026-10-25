@@ -210,7 +210,7 @@ class CivsCitizens(
     private fun canYield(actor: Actor): Boolean = actor.npc.isValid && !actor.sleeping &&
         actor.route?.let { it.completion != null || it.motion.finished || it.motion.failure != null } != true &&
         actor.attacker == null && actor.supplyPickup == null && actor.collectedPending == null &&
-        !actor.courierHeld && actor.workerId !in pendingHarm &&
+        actor.workerId !in pendingHarm &&
         (if (actor.sheltering) actor.route != null else actor.cycle.phase in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED,
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
 
@@ -431,7 +431,7 @@ class CivsCitizens(
             val world = plugin.server.getWorld(city.worldId)
             // Native inventory slots can change before the canonical cargo revision is published.
             // Keep this exact transfer stationary until its receipt resolves instead of choosing a new request.
-            val plan = currentPlan(actor, city, worker, nowMillis)
+            val plan = currentPlan(actor, city, worker)
             val reason = when {
                 actor.cityId != city.id || actor.worldId != city.worldId -> "unavailable"
                 world == null -> "world-unloaded"
@@ -572,7 +572,7 @@ class CivsCitizens(
             val world = actor.npc.world
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
                 !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
-            val plan = currentPlan(actor, city, worker, nowMillis) ?: continue
+            val plan = currentPlan(actor, city, worker) ?: continue
             if (plan.worldWork == null && plan.idleReason != "searching-work" || !plan.chunksReady(world) ||
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                 actor.route?.chunks?.ready(world) == false) continue
@@ -589,7 +589,7 @@ class CivsCitizens(
         // Field workers retain all eight slots; at most four idle actors share the normal wander budget.
         val idle = actors.values.filter { it.plan.idleReason == "unassigned" && it.workerId !in pendingHarm &&
             it.npc.isValid && !it.sleeping && !it.sheltering && it.attacker == null && it.foodSource == null &&
-            it.supplyPickup == null && it.collectedPending == null && !it.courierHeld && it.social.visit == null }.take(4)
+            it.supplyPickup == null && it.collectedPending == null && it.social.visit == null }.take(4)
         for (actor in idle) {
             citizenRotateAfterAdmission(actors, actor.workerId)
             val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue
@@ -597,7 +597,7 @@ class CivsCitizens(
             val world = actor.npc.world
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
                 !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
-            val plan = currentPlan(actor, city, worker, nowMillis)?.takeIf { it.idleReason == "unassigned" } ?: continue
+            val plan = currentPlan(actor, city, worker)?.takeIf { it.idleReason == "unassigned" } ?: continue
             if (!plan.chunksReady(world) || !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                 actor.route?.chunks?.ready(world) == false || !reconcilePlan(actor, plan)) continue
             try {
@@ -610,14 +610,9 @@ class CivsCitizens(
         }
     }
 
-    /** New work cannot replace an accepted meeting; a changed producer token releases it first. */
-    private fun currentPlan(actor: Actor, city: Settlement, worker: CivWorker, now: Long): CitizenPlan? {
-        if (actor.courierHeld && (worker.assignment != actor.plan.token.assignmentId ||
-                worker.completedCycles != actor.plan.token.completedCycles)) {
-            actors.values.filter { it.courierPickupStartedAt != null && it.plan.courier?.cargo?.sourceWorkerId == worker.id }
-                .forEach { pause(it, "route-unreachable", now) }
-        }
-        return if (actor.supplyPickup != null || actor.collectedPending != null || actor.courierHeld) actor.plan
+    /** Native transfers keep their observed plan; an approaching courier never owns a producer's work. */
+    private fun currentPlan(actor: Actor, city: Settlement, worker: CivWorker): CitizenPlan? {
+        return if (actor.supplyPickup != null || actor.collectedPending != null) actor.plan
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
     }
 
@@ -630,7 +625,8 @@ class CivsCitizens(
             mineEpisode?.buildingId == nextPlan.token.assignmentId && mineEpisode?.cycle == nextPlan.token.completedCycles
         actor.mineRouteEpisode.retain(if (discoveringMineWork) mineEpisode else if (mineActive)
             nextPlan.worldWork?.let { CivsMineRouteEpisode.key(it) } else null)
-        if (actor.plan != nextPlan && (!citizenPlansContinue(actor.plan, nextPlan) ||
+        val restartVisual = actor.cycle.phase == CitizenPhase.CLOSED && nextPlan.worldWork?.autonomousVisual == true
+        if (restartVisual || actor.plan != nextPlan && (!citizenPlansContinue(actor.plan, nextPlan) ||
                 actor.plan.courier?.carrying != nextPlan.courier?.carrying)) {
             if (citizenStorageNeedsReset(actor.plan.storage, nextPlan.storage, actor.npc.location.point())) {
                 remove(actor, "waiting")
@@ -643,6 +639,9 @@ class CivsCitizens(
             if (actor.plan.storage != nextPlan.storage || actor.plan.workplace != nextPlan.workplace) actor.targets.clear()
             actor.plan = nextPlan
             actor.cycle = nextPlan.cycle()
+            if (nextPlan.worldWork == null && nextPlan.autonomousWork != null &&
+                actor.autonomousVisualSession?.let { it.token == nextPlan.token && it.ready } == true)
+                actor.cycle.returnWithObservedWork()
             actor.returningToWarehouse = false
             actor.wander = CitizenWander(actor.workerId)
             actor.equipmentItems = null
@@ -665,7 +664,6 @@ class CivsCitizens(
                 if (actor?.collectedPending != null) return "workers.status.loading-cargo"
                 if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
                 if (actor?.collectionSeek != null) return "workers.status.walking"
-                if (actor?.courierHeld == true) return "workers.status.waiting-courier"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
                 actor?.social?.visit?.let {
                     return "workers.status.${if (it.partnerId != null) {
@@ -755,7 +753,8 @@ class CivsCitizens(
                         "timeout_ms" to it.timeoutMillis, "storage_reason" to it.storageReason) },
                     "shelter" to mapOf("seeking" to actor.sheltering, "sleeping" to actor.sleeping,
                         "target" to actor.shelter, "search_cursor" to actor.shelterSearchIndex, "sleep_origin" to actor.sleepOrigin?.point()),
-                    "courier" to mapOf("held" to actor.courierHeld, "pickup_started_at" to actor.courierPickupStartedAt,
+                    "courier" to mapOf("pickup_started_at" to actor.courierPickupStartedAt,
+                        "source_observed" to actor.courierSourceObserved, "retarget_after" to actor.courierTargetAfter,
                         "returning_to_warehouse" to actor.returningToWarehouse, "shipment" to actor.plan.courier?.cargo?.id,
                         "source_worker" to actor.plan.courier?.cargo?.sourceWorkerId, "carrying" to actor.plan.courier?.carrying),
                     "combat" to mapOf("attacker" to actor.attacker?.uniqueId, "until" to actor.combatUntil,
@@ -772,7 +771,7 @@ class CivsCitizens(
     internal fun workingResidentIds(cityId: UUID): Set<UUID> {
         checkMainThread()
         return actors.values.filter { actor ->
-            actor.cityId == cityId && actor.npc.isValid && actor.workerId !in pendingHarm && !actor.sheltering && !actor.courierHeld &&
+            actor.cityId == cityId && actor.npc.isValid && actor.workerId !in pendingHarm && !actor.sheltering &&
                 actor.plan.idleReason in listOf(null, "placing") &&
                 actor.cycle.phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED)
         }.mapTo(hashSetOf()) { it.workerId }
@@ -787,7 +786,7 @@ class CivsCitizens(
             actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
             actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
             actor.supplyPickup == null && actor.foodSource == null &&
-            !actor.courierHeld && actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
+            actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
             actor.collectedPending == null && actor.collectionSeek == null && actor.collectionHome == null &&
             actor.collectionCycle == null && actor.terrainObstructedAt == null
     }
@@ -894,6 +893,22 @@ class CivsCitizens(
         return observed
     }
 
+    internal fun autonomousVisualWork(cityId: UUID, workerId: UUID): CivWorldWork? {
+        checkMainThread()
+        return actors[workerId]?.takeIf { it.cityId == cityId }?.plan?.worldWork?.takeIf { it.autonomousVisual }
+    }
+
+    internal fun requireAutonomousObservedSession(cityId: UUID, workerId: UUID) {
+        checkMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId } ?: throw CivsRejection("route-unreachable")
+        val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        val session = actor.autonomousVisualSession ?: throw CivsRejection("work-not-observed")
+        if (session.token != actor.plan.token || session.building != worker.assignment?.let(city::building) ||
+            session.token.completedCycles != worker.completedCycles || session.token.nextDeliveryAt != worker.nextDeliveryAt ||
+            !session.ready) throw CivsRejection("work-not-observed")
+    }
+
     internal fun acceptedIndustryWork(city: Settlement, worker: CivWorker): CivIndustryWork? {
         checkMainThread()
         val actor = actors[worker.id]?.takeIf { it.cityId == city.id } ?: return null
@@ -915,12 +930,13 @@ class CivsCitizens(
         requireStorageArrival(cityId, workerId, requireNotNull(token.assignmentId))
     }
 
-    /** Only observed, safe producers can offer a fixed meeting point; no item is reserved here. */
+    /** The position estimates a trip; the producer remains free to walk and work. */
     internal fun courierSources(cityId: UUID, courierId: UUID): Map<UUID, CivPosition> {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return emptyMap()
         return city.workers.mapNotNull { worker ->
-            val source = actors[worker.id]?.takeIf { it.workerId != courierId && sourceReady(it, city, worker) } ?: return@mapNotNull null
+            val source = actors[worker.id]?.takeIf { it.workerId != courierId && sourceReady(it, city, worker) &&
+                sourceOffersCargo(it, city, worker) } ?: return@mapNotNull null
             if (source.courierRetry.exhausted && courierObservedAt >= source.courierRetryAfter) source.courierRetry = CitizenRetry()
             if (!source.courierRetry.ready(courierObservedAt) || actors.values.any { other ->
                     other.workerId != courierId && other.cityId == cityId && other.plan.courier?.let {
@@ -948,16 +964,28 @@ class CivsCitizens(
     }
 
     /** One city-wide observation; the dispatcher reserves an offered producer for one courier. */
-    internal fun courierSupplySources(cityId: UUID): Map<UUID, CivPosition> {
+    internal fun courierSupplySources(cityId: UUID, retainedSources: Set<UUID> = emptySet()): Map<UUID, CivPosition> {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return emptyMap()
         return city.workers.mapNotNull { worker ->
-            val actor = actors[worker.id]?.takeIf { sourceReady(it, city, worker) } ?: return@mapNotNull null
+            val actor = actors[worker.id]?.takeIf { sourceReady(it, city, worker) &&
+                (worker.id in retainedSources || sourceOffersCargo(it, city, worker)) }
+                ?: return@mapNotNull null
             if (actor.courierRetry.exhausted && courierObservedAt >= actor.courierRetryAfter) actor.courierRetry = CitizenRetry()
             if (!actor.courierRetry.ready(courierObservedAt)) return@mapNotNull null
             val feet = actor.npc.location
             worker.id to CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
         }.toMap()
+    }
+
+    /** Acceptance retains the observed cargo, independently of the producer's current position or next job. */
+    internal fun courierSourceCurrent(cityId: UUID, cargo: CivCargo): Boolean {
+        checkMainThread()
+        val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return false
+        val worker = city.workers.firstOrNull { it.id == cargo.sourceWorkerId } ?: return false
+        val source = actors[worker.id] ?: return false
+        return worker.assignment == cargo.sourceBuildingId && sourceReady(source, city, worker) &&
+            (CivsLogistics.workerExcess(city, worker)[cargo.material] ?: 0L) >= cargo.amount
     }
 
     /** Rechecked after a city wait: a barrel arrival can never authorize a remote bag debit. */
@@ -968,41 +996,61 @@ class CivsCitizens(
         val sourceId = cargo.sourceWorkerId ?: throw CivsRejection("stale-delivery")
         val source = actors[sourceId] ?: throw CivsRejection("route-unreachable")
         val worker = city.workers.firstOrNull { it.id == sourceId } ?: throw CivsRejection("stale-delivery")
+        val offered = courier.plan.courier?.takeIf { !it.carrying }?.cargo
         if (closed.get() || courier.workerId in pendingHarm || courier.cycle.phase != CitizenPhase.PICKING_UP ||
-            courier.plan.courier?.cargo?.id != cargo.id || courier.sheltering || courier.attacker != null ||
-            worker.assignment != cargo.sourceBuildingId || !sourceReady(source, city, worker) ||
-            !citizenNearEndpoint(source.npc.location.point(), cargo.sourceEntrance) || !courierMeetsSource(courier, source, cargo))
+            offered == null || cargo.amount !in 1..offered.amount || offered.copy(amount = cargo.amount) != cargo || courier.sheltering ||
+            courier.attacker != null || courier.foodSource != null || courier.supplyPickup != null ||
+            city.workers.firstOrNull { it.id == workerId }?.assignment != cargo.warehouseId ||
+            worker.assignment != cargo.sourceBuildingId || !courierSourceCurrent(cityId, cargo) ||
+            !courierMeetsSource(courier, source))
             throw CivsRejection("route-unreachable")
     }
 
     private fun sourceReady(actor: Actor, city: Settlement, worker: CivWorker): Boolean {
-        if (actor.cityId != city.id || !actor.npc.isValid || actor.npc.world.uid != city.worldId || actor.sleeping || actor.sheltering ||
+        if (actor.cityId != city.id || worker.id != actor.workerId || worker.cargo != null || CivsResidents.isChild(worker) ||
+            !actor.npc.isValid || actor.npc.world.uid != city.worldId || actor.sleeping || actor.sheltering ||
             actor.attacker != null || actor.workerId in pendingHarm || actor.supplyPickup != null || actor.foodSource != null ||
-            actor.route != null || actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
+            actor.collectedPending != null || actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
             actor.cycle.phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED)) return false
+        val feet = actor.npc.location
+        // Actual collision/support follows fractional farm paths and stair steps; it is not an integer floor test.
+        return citizenChunkReady(actor.npc.world, feet.blockX shr 4, feet.blockZ shr 4) &&
+            citizenPacketBodyClear(actor.npc.world, feet.point(), false) &&
+            citizenPacketCampfireClear(actor.npc.world, feet.point()) &&
+            (citizenPacketSupported(actor.npc.world, feet.point()) || actor.route?.motion?.let { !it.searching && it.navigating } == true)
+    }
+
+    private fun sourceOffersCargo(actor: Actor, city: Settlement, worker: CivWorker): Boolean {
         val excess = CivsLogistics.workerExcess(city, worker)
         if (excess.isEmpty()) return false
         // Finish useful work while a stack accumulates; idle or blocked producers can hand over a partial stack.
-        if (!actor.courierHeld && actor.plan.worldWork != null && actor.cycle.phase != CitizenPhase.PAUSED &&
-            excess.values.none { it >= CivsLogistics.MAX_CARGO } &&
-            hasCapacity(city, actor.plan)) return false
-        val feet = actor.npc.location
-        val point = CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
-        return citizenChunkReady(actor.npc.world, point.x shr 4, point.z shr 4) &&
-            abs(feet.y - point.y) <= .125 && citizenStandable(actor.npc.world, point) &&
-            (0..1).none { actor.npc.world.getBlockAt(point.x, point.y + it, point.z).type == Material.LADDER }
+        return actor.plan.worldWork == null || actor.cycle.phase == CitizenPhase.PAUSED ||
+            excess.values.any { it >= CivsLogistics.MAX_CARGO } || !hasCapacity(city, actor.plan)
     }
 
-    private fun courierMeetsSource(courier: Actor, source: Actor, cargo: CivCargo): Boolean =
-        courier.npc.world.uid == source.npc.world.uid && courier.npc.location.distanceSquared(source.npc.location) <= 2.5 * 2.5 &&
-            citizenCanReachBlock(courier.npc, cargo.sourceEntrance.copy(y = cargo.sourceEntrance.y + 1))
+    private fun courierMeetsSource(courier: Actor, source: Actor): Boolean {
+        if (courier.npc.world.uid != source.npc.world.uid ||
+            courier.npc.location.distanceSquared(source.npc.location) > 2.5 * 2.5 ||
+            !citizenPacketBodyClear(courier.npc.world, courier.npc.location.point(), false)) return false
+        return courierInteractionClear(courier.npc.location.clone().add(0.0, courier.npc.eyeHeight, 0.0), source)
+    }
+
+    private fun courierInteractionClear(eye: Location, source: Actor): Boolean {
+        val aim = source.npc.location.clone().add(0.0, source.npc.height * .5, 0.0)
+        if (!citizenBlockTraceReady(source.npc.world, eye, CivPosition(aim.blockX, aim.blockY, aim.blockZ))) return false
+        val delta = aim.toVector().subtract(eye.toVector())
+        val distance = delta.length()
+        return distance < .001 || source.npc.world.rayTraceBlocks(eye, delta.multiply(1.0 / distance), distance,
+            FluidCollisionMode.ALWAYS, true) == null
+    }
 
     private fun releaseCourierSource(courier: Actor, now: Long, success: Boolean = false) {
         if (courier.courierPickupStartedAt == null) return
         courier.courierPickupStartedAt = null
+        courier.courierSourceObserved = null
+        courier.courierTargetAfter = 0L
+        courier.plan.workplace?.let(courier.targets::remove)
         val source = courier.plan.courier?.cargo?.sourceWorkerId?.let(actors::get) ?: return
-        source.courierHeld = false
-        source.cycle.deferWork(now)
         if (success) source.courierRetry = CitizenRetry()
         else {
             source.courierRetry.fail(now)
@@ -1010,31 +1058,86 @@ class CivsCitizens(
         }
     }
 
-    /** The producer waits on its real floor; a failed or expired rendezvous releases it immediately. */
-    private fun holdCourierSource(courier: Actor, city: Settlement, now: Long): Boolean {
+    /** Retarget at most once a second; source work and its route are never owned by the courier. */
+    private fun trackCourierSource(courier: Actor, city: Settlement, now: Long): Boolean {
         val plan = courier.plan.courier?.takeIf { !it.carrying && it.cargo.sourceWorkerId != null } ?: return true
+        // A durable callback rechecks the actual encounter after its city wait. Keep its ticket until completion.
+        if (courier.cycle.phase == CitizenPhase.PICKING_UP) return true
         val source = actors[plan.cargo.sourceWorkerId]
         val worker = city.workers.firstOrNull { it.id == plan.cargo.sourceWorkerId }
-        if (courier.cycle.phase == CitizenPhase.PAUSED) { releaseCourierSource(courier, now); return false }
+        if (courier.cycle.phase == CitizenPhase.PAUSED) {
+            releaseCourierSource(courier, now)
+            courier.cycle.retry(now)
+            if (courier.cycle.phase == CitizenPhase.PAUSED) return false
+        }
         val fresh = courier.courierPickupStartedAt == null
         val started = courier.courierPickupStartedAt ?: now.also { courier.courierPickupStartedAt = it }
         if (courier.sheltering || courier.attacker != null ||
             courier.npc.world.time in 12_000L..23_000L || now - started >= 90_000L || source == null || worker == null ||
             city.workers.firstOrNull { it.id == courier.workerId }?.assignment != plan.cargo.warehouseId ||
-            worker.assignment != plan.cargo.sourceBuildingId || !sourceReady(source, city, worker) ||
-            !citizenNearEndpoint(source.npc.location.point(), plan.cargo.sourceEntrance)) {
+            worker.assignment != plan.cargo.sourceBuildingId || !source.npc.isValid || source.workerId in pendingHarm ||
+            source.npc.world.uid != city.worldId || source.sleeping || source.sheltering || source.attacker != null ||
+            (CivsLogistics.workerExcess(city, worker)[plan.cargo.material] ?: 0L) < plan.cargo.amount) {
             releaseCourierSource(courier, now)
             if (courier.cycle.phase != CitizenPhase.PAUSED) pause(courier, "route-unreachable", now)
             return false
         }
-        cancelRoute(source)
-        source.cycle.deferWork(now)
-        source.courierHeld = true
-        statuses[source.workerId] = "waiting-courier"
-        if (fresh) CivsDiagnostics.event("cargo_rendezvous_started", "city" to city.id, "worker" to courier.workerId,
+        if (fresh) CivsDiagnostics.event("cargo_interception_started", "city" to city.id, "worker" to courier.workerId,
             "source_worker" to source.workerId, "shipment" to plan.cargo.id, "material" to plan.cargo.material,
-            "amount" to plan.cargo.amount, "point" to plan.cargo.sourceEntrance)
+            "amount" to plan.cargo.amount, "point" to plan.cargo.sourceEntrance, "actual" to source.npc.location.point())
+        if (!sourceReady(source, city, worker)) {
+            cancelRoute(courier)
+            courier.cycle.deferWork(now)
+            statuses[courier.workerId] = "waiting"
+            return false
+        }
+        if (courierMeetsSource(courier, source)) return true
+        if (courier.cycle.phase in setOf(CitizenPhase.WORKING, CitizenPhase.PICKUP_READY)) {
+            cancelRoute(courier)
+            courier.cycle = courier.plan.cycle().also(CitizenCycle::start)
+        }
+        if (now < courier.courierTargetAfter) return courier.plan.workplace?.let(courier.targets::containsKey) == true
+        courier.courierTargetAfter = now + 1_000L
+        val at = source.npc.location.point()
+        if (courier.route != null && courier.courierSourceObserved?.distanceSquared(at)?.let { it <= 1.0 } == true &&
+            courier.route?.motion?.navigating == true) return true
+        val target = courierInterceptTarget(courier, source, city) ?: run {
+            cancelRoute(courier)
+            courier.cycle.deferWork(now)
+            statuses[courier.workerId] = "waiting"
+            return false
+        }
+        val authored = requireNotNull(courier.plan.workplace)
+        if (courier.targets[authored] != target) {
+            cancelRoute(courier)
+            courier.targets[authored] = target
+        }
+        courier.courierSourceObserved = at
         return true
+    }
+
+    private fun courierInterceptTarget(courier: Actor, source: Actor, city: Settlement): CivPosition? {
+        val from = source.npc.location
+        val next = source.route?.motion?.takeIf { !it.searching && it.navigating }?.destination
+        val dx = (next?.x ?: from.x) - from.x
+        val dz = (next?.z ?: from.z) - from.z
+        val length = kotlin.math.hypot(dx, dz)
+        val lead = if (length > .001) minOf(1.5, length) / length else 0.0
+        val ahead = CivPosition(kotlin.math.floor(from.x + dx * lead).toInt(), from.y.roundToInt(),
+            kotlin.math.floor(from.z + dz * lead).toInt())
+        val actual = CivPosition(from.blockX, from.y.roundToInt(), from.blockZ)
+        val allowed = citizenRouteBuildings(city, courier.plan, requireNotNull(courier.plan.workplace),
+            CivPosition(courier.npc.location.blockX, courier.npc.location.blockY, courier.npc.location.blockZ))
+        // Thirty short loaded support probes at most; the existing bounded navigator proves the full route.
+        return listOf(ahead, actual).distinct().asSequence().flatMap { anchor ->
+            listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1).asSequence().flatMap { (x, z) ->
+                listOf(0, -1, 1).asSequence().map { y -> anchor.copy(x = anchor.x + x, y = anchor.y + y, z = anchor.z + z) }
+            }
+        }.firstOrNull { point -> point.point().distanceSquared(from.point()) <= 2.5 * 2.5 &&
+            citizenRouteCellAllowed(city, allowed, point.x, point.z) && citizenControlClear(city, point) &&
+            CitizenChunks.between(courier.npc.location.blockX, courier.npc.location.blockZ, point.x, point.z).ready(source.npc.world) &&
+            citizenStandable(source.npc.world, point) &&
+            courierInteractionClear(point.location(source.npc.world).add(0.0, courier.npc.eyeHeight, 0.0), source) }
     }
 
     /** The receipt owner rechecks the same real block after an asynchronous city wait. */
@@ -1054,6 +1157,25 @@ class CivsCitizens(
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
         var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
         if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
+        val building = worker.assignment?.let(city::building)
+        val nativeAuto = building?.let { CivsAutonomousWorksites.supports(city, it) } == true && base.autonomousWork != null
+        val actor = actors[worker.id]
+        val session = if (nativeAuto && actor != null) {
+            val required = CivsResidents.workDuration(worker, base.workMillis)
+            actor.autonomousVisualSession?.takeIf { it.token == base.token && it.building == building }?.also {
+                it.required(required)
+            } ?: CivAutonomousVisualSession(base.token, requireNotNull(building), required).also {
+                actor.autonomousVisualSession = it
+            }
+        } else null
+        if (!nativeAuto) actor?.autonomousVisualSession = null
+        if (session?.ready == true && hasCapacity(city, base)) {
+            // Complete the already observed native subaction before taking its economic trip.
+            val currentActor = requireNotNull(actor)
+            if (currentActor.plan.worldWork?.autonomousVisual == true && currentActor.cycle.phase in setOf(
+                    CitizenPhase.TO_WORK, CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING)) return currentActor.plan
+            return base.copy(workMillis = 0)
+        }
         if (base.type == BuildingType.BUILDER_HUT && base.idleReason == "no-construction" && CivsRoadMaintenance.eligible(city)) {
             workPlan(city, worker)?.takeIf { it.upkeep != null }?.let { work ->
                 base = base.copy(workplace = work.standing, workMillis = work.durationMillis, idleReason = null,
@@ -1071,13 +1193,17 @@ class CivsCitizens(
                 else base.copy(token = base.token.copy(craftJobId = job.id))
         }
         val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
-        val planned = if (city.autonomy != null && admitted.type != BuildingType.FORESTER || admitted.courier != null ||
+        val planned = if (city.autonomy != null && admitted.type != BuildingType.FORESTER && !nativeAuto || admitted.courier != null ||
             admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
             val work = workPlan(city, worker)
-            if (work == null) base.copy(idleReason = workIdleReason(city, worker)) else base.copy(
-                workplace = work.standing, workMillis = work.durationMillis, completeAtWorkplace = true, worldWork = work)
+            if (work == null) {
+                val reason = workIdleReason(city, worker)
+                if (nativeAuto && reason == "waiting-growth") base else base.copy(idleReason = reason)
+            } else base.copy(workplace = work.standing, workMillis = work.durationMillis,
+                completeAtWorkplace = true, worldWork = work, autonomousWork = if (work.autonomousVisual) null else base.autonomousWork)
         }
-        return planned.copy(workMillis = CivsResidents.workDuration(worker, planned.workMillis),
+        return planned.copy(workMillis = if (nativeAuto && planned.worldWork == null && session != null)
+            session.remainingMillis else CivsResidents.workDuration(worker, planned.workMillis),
             suppliesNeeded = !workInputsReady(city, worker))
     }
 
@@ -1379,15 +1505,14 @@ class CivsCitizens(
             releaseCourierSource(actor, now)
             return
         }
-        val cycle = actor.cycle
         if (actor.collectedPending != null) { statuses[actor.workerId] = "loading-cargo"; return }
         if (supplyFood(actor, city, worker, world, now)) {
             actor.mineRouteEpisode.retain(null)
             releaseCourierSource(actor, now)
             return
         }
-        if (world.time in 12_000L..23_000L && cycle.phase !in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP)) {
-            if (actor.sheltering && actor.residentYield != null) { cycle.deferWork(now); return }
+        if (world.time in 12_000L..23_000L && actor.cycle.phase !in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP)) {
+            if (actor.sheltering && actor.residentYield != null) { actor.cycle.deferWork(now); return }
             if (collectItems(actor, city, worker, world, now, night = true)) return
             actor.mineRouteEpisode.retain(null)
             releaseCourierSource(actor, now)
@@ -1395,16 +1520,9 @@ class CivsCitizens(
             shelter(actor, city, worker, world, now)
             return
         }
-        if (actor.residentYield != null) { cycle.deferWork(now); return }
-        if (!holdCourierSource(actor, city, now)) return
-        if (actor.courierHeld) {
-            val waitingCourier = actors.values.any { it.courierPickupStartedAt != null && it.plan.courier?.let { plan ->
-                !plan.carrying && plan.cargo.sourceWorkerId == actor.workerId
-            } == true }
-            actor.cycle.deferWork(now)
-            if (waitingCourier) { statuses[actor.workerId] = "waiting-courier"; return }
-            actor.courierHeld = false
-        }
+        if (actor.residentYield != null) { actor.cycle.deferWork(now); return }
+        if (!trackCourierSource(actor, city, now)) return
+        val cycle = actor.cycle
         if (actor.sheltering) {
             cancelRoute(actor)
             actor.sheltering = false
@@ -1513,7 +1631,10 @@ class CivsCitizens(
                     pauseNavigation(actor, "route-unreachable", "left-workplace", resolvedTarget(actor, target).location(world), now)
                 else if (actor.plan.type == BuildingType.GUARD_TOWER) cycle.deferWork(now)
                 else if (actor.plan.idleReason != "placing") {
+                    val beforeWork = cycle.observedWorkMillis
                     cycle.work(now)
+                    actor.autonomousVisualSession?.takeIf { it.token == actor.plan.token }?.observe(
+                        cycle.observedWorkMillis - beforeWork)
                     if (cycle.phase == CitizenPhase.READY) submitReadyDelivery(actor, city, world, now)
                 }
             }
@@ -2108,7 +2229,7 @@ class CivsCitizens(
             other.npc.isValid && other.npc.world == world && !other.sleeping &&
             !other.sheltering && other.attacker == null && other.foodSource == null && other.supplyPickup == null &&
             other.collectedPending == null && other.collectionSeek == null && other.collectionHome == null &&
-            !other.courierHeld && !other.returningToWarehouse && other.workerId !in pendingHarm && other.route == null &&
+            !other.returningToWarehouse && other.workerId !in pendingHarm && other.route == null &&
             other.plan.idleReason in setOf("unassigned", "no-construction", "waiting-growth", "waiting-tool", "construction-paused") &&
             citizenCampEligible(other.plan, other.cycle.phase, world.time) &&
             city.workers.firstOrNull { it.id == other.workerId }?.let { !CivsResidents.isChild(it) && it.cargo == null } == true &&
@@ -2229,11 +2350,6 @@ class CivsCitizens(
         }
         val returning = !citizenWithinIdleArea(anchor, actor.npc.location.point())
         if (!returning && !actor.wander.ready(now) || wanderBudget == 0) return
-        // Acceptance can precede the courier's next pulse. Keep the offered feet fixed
-        // until its existing hold takes over, or the dispatcher releases the plan.
-        if (city.workers.any { courierPlan(city, it)?.let { plan ->
-                !plan.carrying && plan.cargo.sourceWorkerId == actor.workerId
-            } == true }) return
         wanderBudget--
         // Keep short invalid-target retries fair within the shared eight-check budget.
         citizenRotateAfterAdmission(actors, actor.workerId)
@@ -2719,7 +2835,7 @@ class CivsCitizens(
                 arrived(actor.npc.location, target.location(world))
         actor.plan.courier?.takeIf { !it.carrying && it.cargo.sourceWorkerId != null && target == actor.plan.workplace }?.let { plan ->
             val source = actors[plan.cargo.sourceWorkerId] ?: return false
-            return citizenNearEndpoint(source.npc.location.point(), plan.cargo.sourceEntrance) && courierMeetsSource(actor, source, plan.cargo)
+            return courierMeetsSource(actor, source)
         }
         val work = actor.plan.worldWork
         if (!actor.sheltering && target == actor.plan.workplace && work != null && citizenWorkFocus(work) != null)
@@ -2808,6 +2924,7 @@ class CivsCitizens(
         val token = actor.plan.token
         val actorId = actor.instanceId
         val workerId = actor.workerId
+        val visual = actor.plan.worldWork?.takeIf { it.autonomousVisual }
         val future = try {
             actor.plan.courier?.let { dropoffCargo(actor.cityId, actor.workerId, it.cargo, it.destinationBuildingId) }
                 ?: token.craftJobId?.let { craftDelivery(actor.cityId, actor.workerId, requireNotNull(token.assignmentId),
@@ -2819,7 +2936,7 @@ class CivsCitizens(
         }
         future.whenComplete { city, error ->
             // Only immutable domain data crosses this boundary; Bukkit and actor state stay on pulse().
-            val completion = Completion(workerId, actorId, ticket, token, city, error)
+            val completion = Completion(workerId, actorId, ticket, token, city, error, visualWork = visual)
             if (!closed.get()) {
                 completions.add(completion)
                 if (closed.get()) completions.remove(completion)
@@ -2868,6 +2985,18 @@ class CivsCitizens(
                         actor.plan = actor.plan.copy(courier = requireNotNull(actor.plan.courier).copy(cargo = cargo, carrying = true))
                         actor.cycle.pickedUp()
                         actor.reportedFailure = false
+                    }
+                } else if (completion.visualWork != null) {
+                    val work = completion.visualWork
+                    if (worker == null || actor.plan.worldWork != work || !work.autonomousVisual ||
+                        worker.assignment != completion.token.assignmentId || worker.completedCycles != completion.token.completedCycles ||
+                        worker.nextDeliveryAt != completion.token.nextDeliveryAt) actor.cycle.failDelivery(null, now)
+                    else {
+                        actor.cycle.close()
+                        actor.workHandoff = CitizenWorkHandoff(work.buildingId, worker.completedCycles,
+                            actor.npc.location.point(), navigationTick, work.status)
+                        actor.reportedFailure = false
+                        runCatching { fieldCareCompleted(actor) }.onFailure { logFailure(actor, "field-care-feedback", it) }
                     }
                 } else if (worker == null || worker.completedCycles != completion.token.completedCycles + 1 ||
                     actor.plan.courier != null && worker.cargo != null) {
@@ -3260,6 +3389,7 @@ class CivsCitizens(
         var turnSinceTick = 0L
         var turnAmount = 0f
         var workHandoff: CitizenWorkHandoff? = null
+        var autonomousVisualSession: CivAutonomousVisualSession? = null
         var reportedFailure = false
         var damageAfter = 0L
         var harmLogAfter = 0L
@@ -3295,7 +3425,8 @@ class CivsCitizens(
         var combatRouteAfter = 0L
         var combatAttackAfter = 0L
         var courierPickupStartedAt: Long? = null
-        var courierHeld = false
+        var courierSourceObserved: CitizenPoint? = null
+        var courierTargetAfter = 0L
         var courierRetry = CitizenRetry()
         var courierRetryAfter = 0L
     }
@@ -3336,7 +3467,7 @@ class CivsCitizens(
         fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
     }
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
-        val city: Settlement?, val error: Throwable?, val pickup: Boolean = false)
+        val city: Settlement?, val error: Throwable?, val pickup: Boolean = false, val visualWork: CivWorldWork? = null)
     private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?, val epoch: Long)
     private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean)
     private data class SupplyCompletion(val workerId: UUID, val actorId: UUID, val pickup: SupplyPickup,
@@ -3488,7 +3619,8 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
         if (phase == CitizenPhase.TO_WORK || phase == CitizenPhase.RETURNING && completeAtWorkplace) requireNotNull(workplace) else storage
     fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
         worldWork != null || type == BuildingType.GUARD_TOWER ||
-            type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded)
+            type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded,
+        visualSubaction = worldWork?.autonomousVisual == true)
 }
 
 /** Pickup publication changes carried quantity, never the identity of the journey already observed. */
@@ -3875,6 +4007,7 @@ internal fun citizenRecoveryTarget(city: Settlement, target: CivPosition, safe: 
 }
 
 private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
+    if (plan.worldWork?.autonomousVisual == true) return true
     if (city.autonomy != null) plan.industryWork?.let { return CivsIndustry.room(city, it) }
     if (city.autonomy != null && plan.type == BuildingType.FORESTER) {
         val work = plan.worldWork ?: return true
@@ -4031,7 +4164,8 @@ private const val CITIZEN_DELIVERY_RETRY_DELAY_MILLIS = 5_000L
 
 /** Only observed work counts. Producers return cargo to storage; builders finish the session at their worksite. */
 internal class CitizenCycle(val token: CitizenToken, private val workMillis: Long, private val completeAtWorkplace: Boolean = false,
-    private val pickupAtWorkplace: Boolean = false, carrying: Boolean = false, private val directToWork: Boolean = false) {
+    private val pickupAtWorkplace: Boolean = false, carrying: Boolean = false, private val directToWork: Boolean = false,
+    private val visualSubaction: Boolean = false) {
     var phase = CitizenPhase.IDLE
         private set
     var reason: String? = null
@@ -4044,6 +4178,12 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
     private val retries = CitizenRetry()
     private var hasCargo = carrying
     val failedAttempts: Int get() = retries.attempts
+    val observedWorkMillis: Long get() = workedMillis
+
+    fun returnWithObservedWork() {
+        check(phase == CitizenPhase.IDLE)
+        phase = CitizenPhase.RETURNING
+    }
 
     private fun travelStart(): CitizenPhase = when {
         pickupAtWorkplace && hasCargo -> CitizenPhase.RETURNING
@@ -4089,7 +4229,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         retryTransfer(reason, now, CitizenPhase.PICKUP_READY)
     }
     fun beginDelivery(now: Long): UUID? {
-        if (phase != CitizenPhase.READY || !pickupAtWorkplace && now < token.nextDeliveryAt) return null
+        if (phase != CitizenPhase.READY || !pickupAtWorkplace && !visualSubaction && now < token.nextDeliveryAt) return null
         phase = CitizenPhase.DELIVERING
         return UUID.randomUUID().also { ticket = it }
     }
@@ -4184,7 +4324,9 @@ internal fun citizenChunkReady(world: World, x: Int, z: Int): Boolean =
 internal fun citizenChunkLoadLevel(world: World, x: Int, z: Int): Chunk.LoadLevel? =
     if (world.isChunkLoaded(x, z)) world.getChunkAt(x, z, false).loadLevel else null
 
-private fun CitizenPlan.chunksReady(world: World): Boolean = workplace?.let {
+private fun CitizenPlan.chunksReady(world: World): Boolean = if (courier?.cargo?.sourceWorkerId != null)
+    citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
+else workplace?.let {
     CitizenChunks.between(storage.x, storage.z, it.x, it.z).ready(world)
 } ?: citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
 

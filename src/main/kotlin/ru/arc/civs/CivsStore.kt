@@ -471,6 +471,9 @@ class CivsStore(
         mineProgress = city.mineProgress?.toMap(),
         minePlans = city.minePlans?.toMap(),
         research = CivsResearch.detached(city.research),
+        roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, route) ->
+            route.copy(originalRoute = route.originalRoute.toList(), route = route.route.toList())
+        },
         autonomy = city.autonomy?.let { it.copy(products = it.products?.toMap()) },
     )
 

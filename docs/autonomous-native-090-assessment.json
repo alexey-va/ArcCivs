@@ -1,0 +1,144 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.90: native Auto scenery, observed economic sessions and moving interception",
+  "assumptions": [
+    "Selected scenario: one L1 FARM and one L1 QUARRY per active village, 0.25/1/4 active working hours per village-day and 1/4/6 participating villages. At most 60 complete observed sessions/hour before walking, sleep, hunger, persistence and capacity. These are upper-bound sensitivities, not live measurements.",
+    "FARM FOOD and QUARRY STONE payouts stay 3/6/9 at L1/L2/L3 per complete economic delivery, normal work60000ms or120000ms when hunger<=6. One profession XP per ordinary delivery remains unchanged. Native subactions give no stock/items/skill/economic token advance. Only bounded observed WORKING time counts, then real depot arrival and the original unique economic receipt. No offline/async-wait/travel credit.",
+    "L1 per-worker normal-hunger loose stock ceilings remain180 units/hour; L2/L3 remain360/540 before walking and sleep. Hunger halves these ceilings. Ore cycles replace stone cycles and are not additive; their existing recipes and probabilities are unchanged. The calculator shows L1 only, with levels mutually exclusive.",
+    "Actual native farm geometry has80/72/80 plots and1/4/1 irrigation cells for Nordic/MedievalOak/Caledonia, unchanged by level. Native visual growth and harvest are decoupled from abstract income, with no getDrops or item payout.",
+    "The already-paid worksite supplies its native scenery without a new stock levy. Complete existing mine v5 placement totals are1967/2566/3165 blocks at L1/L2/L3 (not additional payouts): L1=1334cobble+14ladders+160torches+152logs+243planks+64fences; L2=1734+18+210+200+324+80; L3=2134+22+260+248+405+96. Style changes timber only. Plan steps5104/6693/8282 include cuts. These native world blocks are distinct from transferable inventory.",
+    "Normal players cannot harvest/break/drop the exact new Auto farm/mine domain; administrator RW remains. Authored natural crop growth is allowed except exact receipt locks/unavailable state. Native cuts setBlockData(after,false) with no drop. Hence ordinary native extraction/resale from this new scenery is0; admin world edits are not an ordinary earning path. No new whole-settlement protection, infrastructure cap or building price is added.",
+    "Moving courier interception changes physical availability only: no source freeze, no transfer amount or quota increase, real nearby positions/LOS and current surplus rechecked. Sealed receipt is immutable; no double credit after retry.",
+    "Road turn correction adds an exact override through the first existing1STONE repair receipt: same X/Z and endpoints, only1or2local feet lowered1. Historical paid routes/amounts unchanged. Full wooden turn landing and existing public road resale remain the .89 assessed policy; no new rate or repeated reward. Spruce plank SELL0.56 is in25Oct21:12UTC disk capture; oak/dark-oak plank quotes remain unknown. Do not assert a new plank resale cap from that single quote. The earlier .89 all-flat DIRT1Vault sensitivity remains separate, not combined with the same retained road floor.",
+    "Direct Vault/tokens/player XP and ordinary transferable native scenery remain separately0. Current EconomyShopGUI SELL stays current; planned SELL-off/contracts stays future. No ordinary native scenery sale is assumed just because a disk shop quote exists.",
+    "Decision: retain prior prices/payouts/60s observed minimum and normal-player exact worksite protection. New scenery is a bounded paid-asset presentation, not extra inventory output. Actual active runtime work, route feel, admin extraction and indirect road resale remain unmeasured; delivery is deferred activation with no restart."
+  ],
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "currencies": {
+    "abstract_food": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "l1_farm_economic_sessions",
+          "kind": "mint",
+          "source": "CivsRules.deliveryAmount; observed session and depot receipt",
+          "basis": "Hypothetical selected L1 village; see assumptions. Not measured throughput.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "l1_quarry_economic_sessions",
+          "kind": "mint",
+          "source": "CivsRules.deliveryAmount; ore replaces these selected stone sessions",
+          "basis": "Hypothetical selected L1 village; see assumptions. Not measured throughput.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "resident_profession_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "two_independent_l1_workers",
+          "kind": "item",
+          "source": "Existing profession training only on ordinary economic delivery",
+          "basis": "Hypothetical selected L1 village; see assumptions. Not measured throughput.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              120,
+              480
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              30,
+              120,
+              480
+            ]
+          }
+        }
+      ]
+    },
+    "native_transferable_items": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "vault_direct": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  }
+}

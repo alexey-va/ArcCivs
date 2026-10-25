@@ -67,6 +67,31 @@ class CivsRoadMaintenanceTest : FunSpec({
         CivsRoadMaintenance.prepare(town, listOf(foreign)).targets shouldBe emptyList()
     }
 
+    test("ROAD upkeep retains its exact authored plank landing without inventing an ordered turn") {
+        val city = upkeepCity()
+        val floor = CivPosition(0, 63, 0)
+        val floors = listOf(CivPosition(-1, 62, 0), floor, CivPosition(0, 63, 1))
+        val road = city.buildings.last().copy(anchor = floor,
+            bounds = CivBox(CivPosition(-1, 62, 0), CivPosition(0, 65, 1)),
+            transit = floors.map { it.copy(y = it.y + 1) })
+        val town = city.copy(buildings = city.buildings.dropLast(1) + road)
+        val cells = floors.map { CivPlanBlock(it, "minecraft:stone",
+            if (it == floor) "minecraft:dark_oak_planks" else "minecraft:cobblestone") }
+        val plan = CivPlacementPlan(road.id, town.id, town.worldId, road, cells)
+        val network = CivsRoadMaintenance.prepare(town, listOf(plan))
+        val landing = network.targets.single { it.floor == floor }
+        landing.after shouldBe "minecraft:dark_oak_planks"
+        landing.route shouldBe null
+        landing.validated(town)
+        shouldThrow<IllegalArgumentException> { landing.copy(authoredAfter = null).validated(town) }
+        shouldThrow<IllegalArgumentException> { landing.copy(after = "minecraft:spruce_planks").validated(town) }
+        val ordinary = network.targets.single { it.floor == floors.first() }
+        shouldThrow<IllegalArgumentException> { ordinary.copy(after = "minecraft:dark_oak_planks").validated(town) }
+        val old = plan.copy(blocks = cells.map { it.copy(after = "minecraft:cobblestone") })
+        CivsRoadMaintenance.prepare(town, listOf(old)).targets.single { it.floor == floor }.after shouldBe
+            "minecraft:dark_oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+    }
+
     test("one pavement cell pays one stone preserves the next building reserve and grants no items or training") {
         val city = upkeepCity()
         val work = upkeepWork(city)
@@ -247,6 +272,9 @@ class CivsRoadMaintenanceTest : FunSpec({
         MockBukkitTestRuntime.open().use {
             roadUpkeepBoxes(Bukkit.createBlockData("minecraft:dirt_path")) shouldBe
                 listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0))
+            for (wood in listOf("oak", "spruce", "dark_oak"))
+                roadUpkeepBoxes(Bukkit.createBlockData("minecraft:${wood}_planks")) shouldBe
+                    listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
             for (wood in listOf("cobblestone", "oak", "spruce", "dark_oak"))
                 for ((facing, low) in listOf("north" to (.5 to .75), "south" to (.5 to .25),
                 "east" to (.25 to .5), "west" to (.75 to .5))) {
@@ -264,71 +292,92 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
     }
 
-    test("rising bend gains three-wide path profile without regrading another accepted route or entering reserves") {
-        val city = upkeepCity()
-        val source = city.buildings.last().copy(type = BuildingType.QUARRY, rotation = 180,
-            schematicId = CivsBlueprints.schematicId(city.style, BuildingType.QUARRY, 1),
-            anchor = CivPosition(2, 70, 1), bounds = CivBox(CivPosition(-7, 65, 2), CivPosition(11, 87, 20)),
-            entrance = CivPosition(2, 71, 1), transit = null)
-        val route = listOf(CivPosition(0, 67, -3), CivPosition(0, 67, -2), CivPosition(0, 68, -1),
-            CivPosition(0, 69, 0), CivPosition(0, 70, 1), CivPosition(1, 71, 1), source.entrance)
-        val town = city.copy(buildings = city.buildings.dropLast(1) + source)
-        val plan = upkeepApproach(town, source, route)
-        val network = CivsRoadMaintenance.prepare(town, listOf(plan))
+    test("a paid turn correction preserves historical routes and builds a flat intermediate block between straight flights") {
+        val (town, source, originalRoute) = upkeepBend()
+        val plan = upkeepApproach(town, source, originalRoute)
+        val saved = Gson().toJson(plan)
+        val repair = requireNotNull(CivsRoadMaintenance.turnOverride(town, source, originalRoute))
+        repair.changed() shouldBe listOf(4, 5)
+        repair.route[4] shouldBe CivPosition(0, 69, 1)
+        repair.route[5] shouldBe CivPosition(1, 70, 1)
+        val first = CivsRoadMaintenance.prepare(town, listOf(plan)).targets.single { it.routeOverride != null }
+        first.floor shouldBe CivPosition(0, 68, 1)
+        first.after shouldBe "minecraft:dark_oak_planks"
+        val worker = town.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, CivPosition(0, 69, 0),
+            listOf(CivPlanBlock(first.floor, "minecraft:dirt", first.after)),
+            status = "repairing-road", focus = first.floor, upkeep = first)
+        val after = CivsRoadMaintenance.complete(town, work, 3_000)
+        after.stock.stone shouldBe town.stock.stone - 1
+        after.roadRouteOverrides shouldBe mapOf(source.id.toString() to repair)
+        val receipt = CivRoadUpkeepReceipt(worker, town.stock, work, 3_000)
+        receipt.before(after) shouldBe town
+        receipt.validated(after)
+        shouldThrow<IllegalArgumentException> { CivsRoadMaintenance.complete(after, work, 3_000) }
+        val gson = Gson()
+        CivsRules.validate(gson.fromJson(gson.toJson(after), Settlement::class.java)) shouldBe after
+        gson.fromJson(gson.toJson(town), Settlement::class.java).roadRouteOverrides shouldBe null
+        gson.fromJson(gson.toJson(receipt), CivRoadUpkeepReceipt::class.java).validated(after)
+        shouldThrow<IllegalArgumentException> { CivsRules.validate(town.copy(roadRouteOverrides = emptyMap())) }
+        shouldThrow<IllegalArgumentException> { CivsRules.validate(after.copy(roadRouteOverrides =
+            mapOf(source.id.toString() to repair.copy(route = repair.route.dropLast(1))))) }
+        CivAutonomousAccess.from(after, listOf(plan)).routes.getValue(source.id) shouldBe repair.route
+        Gson().toJson(plan) shouldBe saved
+
+        val network = CivsRoadMaintenance.prepare(after, listOf(plan))
+        network.targets.none { it.routeOverride != null } shouldBe true
         val profile = network.targets.associateBy { civsTerrainKey(it.floor.x, it.floor.z) }
-        for (point in route) profile.getValue(civsTerrainKey(point.x, point.z)).floor shouldBe point.copy(y = point.y - 1)
+        for (point in repair.route) profile.getValue(civsTerrainKey(point.x, point.z)).floor shouldBe point.copy(y = point.y - 1)
         for (x in -1..1) profile.getValue(civsTerrainKey(x, -1)).floor.y shouldBe 67
-        // Inner shoulder takes the lower nearby grade; the +2 bank is not a traversable edge.
-        profile.getValue(civsTerrainKey(1, 0)).floor.y shouldBe 68
         val bend = profile.getValue(civsTerrainKey(0, 1))
-        bend.after shouldBe "minecraft:dark_oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        bend.after shouldBe "minecraft:dark_oak_planks"
         val upper = profile.getValue(civsTerrainKey(1, 1))
+        upper.floor.y shouldBe 69
         upper.after shouldBe "minecraft:dark_oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
-        upper.neighbours.none { it == CivPosition(1, 68, 0) } shouldBe true
-        val reserved = CivsAutonomousGeometry.futureBounds(town, source)
+        profile.getValue(civsTerrainKey(2, 1)).after shouldBe upper.after
+        val reserved = CivsAutonomousGeometry.futureBounds(after, source)
         network.targets.none { CivsAutonomousGeometry.horizontalContains(reserved, it.floor) } shouldBe true
-        val retained = city.buildings.last().copy(id = UUID(0, 91), anchor = CivPosition(-1, 69, 0),
+        val retained = upkeepCity().buildings.last().copy(id = UUID(0, 91), anchor = CivPosition(-1, 69, 0),
             bounds = CivBox(CivPosition(-1, 69, 0), CivPosition(-1, 71, 0)),
             entrance = CivPosition(-1, 70, 0), transit = listOf(CivPosition(-1, 70, 0)))
-        val withRoad = town.copy(buildings = town.buildings + retained)
+        val withRoad = after.copy(buildings = after.buildings + retained)
         val roadPlan = CivPlacementPlan(retained.id, withRoad.id, withRoad.worldId, retained,
             listOf(CivPlanBlock(retained.anchor, "minecraft:stone", "minecraft:cobblestone")))
         val retainedNetwork = CivsRoadMaintenance.prepare(withRoad, listOf(plan, roadPlan))
         retainedNetwork.targets.single { it.floor.x == -1 && it.floor.z == 0 }.floor.y shouldBe 69
         retainedNetwork.targets.none { it.floor == CivPosition(-1, 68, 0) } shouldBe true
-        // Historical straight-only receipts still load; a new arbitrary wood/facing does not.
-        bend.copy(after = CivsSettlementLayout.pavement(bend.floor,
-            (bend.neighbours + bend.floor).associate { civsTerrainKey(it.x, it.z) to it.y })).validated(town)
-        shouldThrow<IllegalArgumentException> { bend.copy(after = bend.after.replace("south", "north")).validated(town) }
-        shouldThrow<IllegalArgumentException> { bend.copy(after = bend.after.replace("dark_oak", "spruce")).validated(town) }
+        // Recovery of historical cobble/.89 wood receipts uses the original grade and original city snapshot.
+        val old = bend.copy(floor = CivPosition(0, 69, 1), route = originalRoute,
+            neighbours = listOf(CivPosition(0, 68, 0), CivPosition(-1, 69, 1), CivPosition(1, 70, 1)))
+        old.copy(after = CivsSettlementLayout.pavement(old.floor,
+            (old.neighbours + old.floor).associate { civsTerrainKey(it.x, it.z) to it.y })).validated(town)
+        old.copy(after = "minecraft:dark_oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]").validated(town)
+        shouldThrow<IllegalArgumentException> { upper.copy(after = upper.after.replace("east", "north")).validated(after) }
+        shouldThrow<IllegalArgumentException> { bend.copy(after = bend.after.replace("dark_oak", "spruce")).validated(after) }
 
         MockBukkitTestRuntime.open().use { paper ->
-            val world = CivsWorksiteWorldFixture("upkeep-bend").also(paper.server::addWorld)
+            val world = CivsWorksiteWorldFixture("upkeep-bend", collisionForData = { data ->
+                if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
+            }).also(paper.server::addWorld)
             for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
             val states = network.targets.associate { it.floor to Bukkit.createBlockData(it.after) }
-            fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
-                val at = CivPosition(x, y, z)
-                val local = states[at]?.let(::roadUpkeepBoxes)?.map { it.at(CivPosition(0, 0, 0)) }.orEmpty()
-                return CitizenCollisionSnapshot(false, false, local, local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
-            }
-            fun feet(p: CivPosition): CitizenPoint {
-                val boxes = roadUpkeepBoxes(states.getValue(p.copy(y = p.y - 1)))
-                val top = boxes.filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }.maxOf { it.maxY }
-                return CitizenPoint(p.x + .5, p.y - 1.0 + top, p.z + .5)
-            }
-            route.zipWithNext().forEach { (a, b) ->
-                citizenPacketStepClear(world, feet(a), feet(b), false, ::collision) shouldBe true
-                citizenPacketStepClear(world, feet(b), feet(a), false, ::collision) shouldBe true
-            }
+            states.forEach { (p, data) -> world.getBlockAt(p.x, p.y, p.z).setBlockData(data, false) }
+            val walk = requireNotNull(roadHalfStepWalk(world, repair.route))
+            (roadHalfStepWalk(world, repair.route.reversed()) != null) shouldBe true
+            walk.zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 9.0 / 16.0 } shouldBe true
+            // Merely putting a full landing at the old raised floor leaves a one-block jump.
+            val oldFloor = CivPosition(0, 69, 1)
+            world.getBlockAt(oldFloor.x, oldFloor.y, oldFloor.z).type = Material.DARK_OAK_PLANKS
+            roadHalfStepWalk(world, repair.route) shouldBe null
+            world.getBlockAt(oldFloor.x, oldFloor.y, oldFloor.z).type = Material.AIR
             System.getenv("CIVS_ROAD_PREVIEW_OUT")?.let { directory ->
                 val out = Path.of(directory)
                 Files.createDirectories(out)
                 Files.writeString(out.resolve("bend-profile.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
                     "kind" to "production-algorithm-offline-fixture-not-live-acceptance",
-                    "worldOffset" to CivPosition(-1846, 0, -2697), "route" to route,
-                    "targets" to network.targets.map { target -> mapOf("floor" to target.floor, "after" to target.after,
-                        "boxes" to roadUpkeepBoxes(states.getValue(target.floor))) },
-                    "reserved" to reserved)))
+                    "worldOffset" to CivPosition(-1846, 0, -2697), "originalRoute" to originalRoute, "route" to repair.route,
+                    "walk" to walk, "targets" to network.targets.map { target -> mapOf("floor" to target.floor, "after" to target.after,
+                        "boxes" to roadUpkeepBoxes(states.getValue(target.floor))) }, "reserved" to reserved)))
             }
         }
     }
@@ -441,3 +490,14 @@ private fun upkeepApproach(city: Settlement, building: CivBuilding, route: List<
         CivBox(CivPosition(route.minOf { it.x }, route.minOf { it.y } - 1, route.minOf { it.z }),
             CivPosition(route.maxOf { it.x }, route.maxOf { it.y } + 1, route.maxOf { it.z })),
         emptyList(), route, building.anchor.y, 0, 0))
+
+private fun upkeepBend(): Triple<Settlement, CivBuilding, List<CivPosition>> {
+    val city = upkeepCity()
+    val source = city.buildings.last().copy(type = BuildingType.QUARRY, rotation = 180,
+        schematicId = CivsBlueprints.schematicId(city.style, BuildingType.QUARRY, 1),
+        anchor = CivPosition(2, 70, 1), bounds = CivBox(CivPosition(-7, 65, 2), CivPosition(11, 87, 20)),
+        entrance = CivPosition(2, 71, 1), transit = null)
+    val route = listOf(CivPosition(0, 67, -3), CivPosition(0, 67, -2), CivPosition(0, 68, -1),
+        CivPosition(0, 69, 0), CivPosition(0, 70, 1), CivPosition(1, 71, 1), source.entrance)
+    return Triple(city.copy(buildings = city.buildings.dropLast(1) + source), source, route)
+}

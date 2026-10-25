@@ -493,6 +493,56 @@ class CivsStorageTest : FunSpec({
         receipt.after.workers.single().copy(completedCycles = 0, nextDeliveryAt = 1) shouldBe before.workers.single()
     }
 
+    test("Auto field receipt needs native authority on every replay and preserves naturally grown crops") {
+        val (fixture, work) = visualReceiptFixture("farmer")
+        val before = fixture.copy(worldId = world.uid)
+        val receipt = autonomousVisualTransaction(before, work)
+        val point = work.changes.single().position
+        world.loadChunk(point.x shr 4, point.z shr 4)
+        val crop = world.getBlockAt(point.x, point.y, point.z)
+        crop.type = Material.AIR
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "autonomous-work-authority-unavailable"
+        crop.type shouldBe Material.AIR
+        var checks = 0
+        storage.validateAutonomousVisualNative = { checks++; null }
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        crop.blockData.asString shouldBe "minecraft:wheat[age=0]"
+        crop.blockData = org.bukkit.Bukkit.createBlockData("minecraft:wheat[age=2]")
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        crop.blockData.asString shouldBe "minecraft:wheat[age=2]"
+        checks shouldBe 2
+        receipt.after.workers shouldBe before.workers
+        receipt.after.stock shouldBe before.stock
+        crop.type = Material.DIAMOND_BLOCK
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "world-cell-drift"
+        crop.type shouldBe Material.DIAMOND_BLOCK
+    }
+
+    test("Auto visual replay retries a temporarily unavailable native authority without writing") {
+        val (fixture, work) = visualReceiptFixture("miner")
+        val before = fixture.copy(worldId = world.uid)
+        val receipt = autonomousVisualTransaction(before, work)
+        val cell = work.changes.single()
+        world.loadChunk(cell.position.x shr 4, cell.position.z shr 4)
+        val block = world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+        block.blockData = org.bukkit.Bukkit.createBlockData(cell.before)
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        storage.validateAutonomousVisualNative = { CivInventoryApplyResult.Retry(mapOf("reason" to "worksite-unloaded")) }
+        (storage.reconcile(receipt) is CivInventoryApplyResult.Retry) shouldBe true
+        block.blockData.asString shouldBe cell.before
+        storage.validateAutonomousVisualNative = { null }
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        block.blockData.asString shouldBe cell.after
+        receipt.after.stock shouldBe before.stock
+        receipt.after.workers shouldBe before.workers
+    }
+
     test("upkeep recovery preserves neighbour derived stair shape but rejects a changed facing") {
         val after = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
         val (before, receipt) = upkeepStorageReceipt(city, after)

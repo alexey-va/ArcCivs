@@ -199,6 +199,8 @@ data class Settlement(
     val forestrySeeded: Set<String>? = null,
     /** Null preserves pre-research settlements and grants neither discoveries nor products. */
     val research: CivResearchState? = null,
+    /** Paid local road corrections; the original building placement journals stay immutable. */
+    val roadRouteOverrides: Map<String, CivRoadRouteOverride>? = null,
 ) {
     fun canManage(player: UUID): Boolean = player == owner || player in members
     fun building(id: UUID): CivBuilding? = buildings.firstOrNull { it.id == id }

@@ -37,7 +37,11 @@ internal data class CivAutonomousAccess(val routes: Map<UUID, List<CivPosition>>
                         route.zipWithNext().any { (a, b) ->
                             abs(a.x.toLong() - b.x) + abs(a.z.toLong() - b.z) != 1L || abs(a.y.toLong() - b.y) > 1L
                         }) return@forEach
-                    put(building.id, route.toList())
+                    val override = city.roadRouteOverrides?.get(building.id.toString())
+                    if (override != null && override.originalRoute == route) {
+                        override.validated(city, building)
+                        put(building.id, override.route.toList())
+                    } else put(building.id, route.toList())
                 }
             }, CivsSettlementLayout.accepted(city, plans))
         }

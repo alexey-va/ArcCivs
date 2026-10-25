@@ -97,6 +97,10 @@ class CivsProtection(
                     city.buildings.forEach { building ->
                         val locked = city.pendingDeletion != null
                         add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
+                        if (CivsAutonomousWorksites.supports(city, building) && building.phase == BuildingPhase.ACTIVE)
+                            CivsAutonomousWorksites.protectionBounds(building).forEach {
+                                add(Footprint(city.worldId, it, emptySet()))
+                            }
                         if (building.type == BuildingType.FARM && building.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null) {
                             CivsWorksiteLayouts.field(building).forEach { soil ->
                                 val crop = soil.copy(y = soil.y + 1)
@@ -258,7 +262,7 @@ class CivsProtection(
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun grow(event: BlockGrowEvent) {
         val block = event.block
-        if (physicsProtected(block)) { event.isCancelled = true; return }
+        if (transientPhysicsLock(block)) { event.isCancelled = true; return }
         if ((block.world.uid to CivPosition(block.x, block.y, block.z)) in snapshot.cropCells &&
             block.blockData is org.bukkit.block.data.Ageable) return
         if (protected(block)) event.isCancelled = true
@@ -287,8 +291,11 @@ class CivsProtection(
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun physics(event: BlockPhysicsEvent) { if (physicsProtected(event.block)) event.isCancelled = true }
 
+    private fun transientPhysicsLock(block: Block): Boolean =
+        (!available() && block.world.name in protectedWorlds) || worldLocked(block.world.uid, CivPosition(block.x, block.y, block.z))
+
     private fun physicsProtected(block: Block): Boolean =
-        (!available() && block.world.name in protectedWorlds) || worldLocked(block.world.uid, CivPosition(block.x, block.y, block.z)) ||
+        transientPhysicsLock(block) ||
             snapshot.worlds[block.world.uid]?.lockedPhysics(block.x, block.y, block.z) == true
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

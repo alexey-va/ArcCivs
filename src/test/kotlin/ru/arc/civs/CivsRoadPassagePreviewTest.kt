@@ -67,19 +67,23 @@ class CivsRoadPassagePreviewTest : FunSpec({
                 CivPlacementPlan(building.id, city.id, city.worldId, building, emptyList(), terrain = CivTerraformPlan(
                     building.bounds, emptyList(), points, building.anchor.y, 0, 0))
             }
-            val network = CivsRoadMaintenance.prepare(city, plans)
+            val originalPlans = gson.toJson(plans)
+            var network = CivsRoadMaintenance.prepare(city, plans)
             // Every admitted target has native evidence for support, lateral guards and the full capped cut.
-            val targets = network.targets.filter { p -> p.floor.let {
+            fun capturedTargets(prepared: CivRoadUpkeepNetwork) = prepared.targets.filter { p -> p.floor.let {
                 it.x in bounds.min.x + 1 until bounds.max.x && it.z in bounds.min.z + 1 until bounds.max.z &&
                     it.y in bounds.min.y + 1..bounds.max.y - CivsRoadMaintenance.MAX_CLEARANCE - 1 &&
                     p.neighbours.all { n -> bounds.contains(n.x, n.y, n.z) && bounds.contains(n.x, n.y + 3, n.z) }
             } }
+            var targets = capturedTargets(network)
             val protected = buildings.filter { it.type != BuildingType.ROAD }.map { CivsAutonomousGeometry.futureBounds(city, it) }
             val receipts = mutableListOf<CivWorldWork>()
             val plugin = paper.createSimplePlugin("RoadCaptureReplay")
             LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
                 CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
-                    for (pass in targets.indices) {
+                    for (pass in 0 until 64) {
+                        network = CivsRoadMaintenance.prepare(city, plans)
+                        targets = capturedTargets(network)
                         var progressed = false
                         for (target in targets) {
                             val work = native.captureRoadUpkeep(city, city.workers.single(), target) ?: continue
@@ -99,9 +103,12 @@ class CivsRoadPassagePreviewTest : FunSpec({
                             city = after
                             receipts += work
                             progressed = true
+                            if (work.upkeep?.routeOverride != null) break // Publish the new access view before another column.
                         }
                         if (!progressed) break
                     }
+                    network = CivsRoadMaintenance.prepare(city, plans)
+                    targets = capturedTargets(network)
                     fun cell(p: CivPosition, data: String) = mapOf("position" to p, "data" to data)
                     val after = original.map { (p, _) -> cell(p, world.getBlockAt(p.x, p.y, p.z).blockData.asString) }
                     val unresolved = targets.filter { target ->
@@ -147,6 +154,15 @@ class CivsRoadPassagePreviewTest : FunSpec({
                         "networkTargets" to network.targets.size, "capturedTargets" to targets.size,
                         "receipts" to receipts.size, "targets" to diagnostics)))
                     receipts.isNotEmpty() shouldBe true
+                    receipts.count { it.upkeep?.routeOverride != null } shouldBe 1
+                    gson.toJson(plans) shouldBe originalPlans
+                    val turnLandings = targets.filter { target -> target.route?.let { route ->
+                        target.floor in CivsSettlementLayout.turnFloors(route) && CivsRoadMaintenance.landing(target.after)
+                    } == true }
+                    turnLandings.isNotEmpty() shouldBe true
+                    turnLandings.forEach { target ->
+                        world.getBlockAt(target.floor.x, target.floor.y, target.floor.z).blockData.asString shouldBe target.after
+                    }
                     fun feet(p: CivPosition): CitizenPoint {
                         val block = world.getBlockAt(p.x, p.y - 1, p.z)
                         val top = requireNotNull(block.collisionShape.boundingBoxes
@@ -155,7 +171,8 @@ class CivsRoadPassagePreviewTest : FunSpec({
                     }
                     fun captured(p: CivPosition) = p.x in bounds.min.x + 1 until bounds.max.x &&
                         p.z in bounds.min.z + 1 until bounds.max.z && p.y - 1 >= bounds.min.y && p.y + 3 <= bounds.max.y
-                    val routeChecks = plans.flatMap { plan -> plan.terrain!!.route.zipWithNext().filter { (a, b) -> captured(a) && captured(b) }
+                    val currentAccess = CivAutonomousAccess.from(city, plans)
+                    val routeChecks = currentAccess.routes.values.flatMap { route -> route.zipWithNext().filter { (a, b) -> captured(a) && captured(b) }
                         .map { (a, b) ->
                             val from = feet(a); val to = feet(b)
                             val clear = citizenPacketBodyClear(world, from, false) && citizenPacketBodyClear(world, to, false) &&
@@ -165,6 +182,16 @@ class CivsRoadPassagePreviewTest : FunSpec({
                             mapOf("from" to from, "to" to to, "bodySupportedBidirectionalStep" to clear)
                         } }
                     routeChecks.isNotEmpty() shouldBe true
+                    val halfStepWalks = currentAccess.routes.values.mapNotNull { route ->
+                        val section = route.filter(::captured)
+                        if (section.size < 2) return@mapNotNull null
+                        val walk = requireNotNull(roadHalfStepWalk(world, section)) { "Captured route requires a jump: $section" }
+                        (roadHalfStepWalk(world, section.reversed()) != null) shouldBe true
+                        mapOf("route" to section, "walk" to walk,
+                            "maximumRise" to walk.zipWithNext().maxOf { (a, b) -> kotlin.math.abs(a.y - b.y) })
+                    }
+                    halfStepWalks.isNotEmpty() shouldBe true
+                    unresolved shouldBe emptyList()
                     Files.createDirectories(out)
                     Files.writeString(out.resolve("native-replay.json"), gson.toJson(mapOf(
                         "kind" to "fresh-native-blocks-offline-production-algorithm-replay-not-live-acceptance",
@@ -173,6 +200,8 @@ class CivsRoadPassagePreviewTest : FunSpec({
                         "sourceRevision" to layout["source_revision"].asLong, "bounds" to bounds,
                         "before" to original.map { (p, data) -> cell(p, data) }, "after" to after,
                         "targets" to targets, "receipts" to receipts, "unresolved" to unresolved, "routeChecks" to routeChecks,
+                        "turnLandings" to turnLandings.map { it.floor },
+                        "routeOverrides" to city.roadRouteOverrides, "halfStepWalks" to halfStepWalks,
                         "excludedByCaptureEnvelope" to network.targets.count { it !in targets && bounds.contains(it.floor.x, it.floor.y, it.floor.z) },
                         "limitations" to listOf("MockBukkit state uses captured native collision and exact new-road boxes.",
                             "Replay uses one funded fixture builder after construction priority, not the captured runtime schedule or stock.",

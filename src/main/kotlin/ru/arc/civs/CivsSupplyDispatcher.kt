@@ -461,7 +461,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         checkBudget()
         if (plan.carrying) { reserve(worker, plan, null, true); continue }
         // A rejected old reservation must first disappear at the owner. Do not silently reuse
-        // its stable shipment ID with a smaller amount or a new meeting point in this result.
+        // its stable shipment ID with a smaller amount in this result. Observed worker movement is harmless.
         rejectedRetained += worker
         val courier = couriers[worker] ?: continue
         val cargo = plan.cargo
@@ -471,7 +471,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
             remaining(plan) < cargo.amount || (courier.bagRoom[cargo.material] ?: 0) < cargo.amount ||
             roomFor(plan.destinationBuildingId, cargo.material) < cargo.amount ||
-            cargo.sourceWorkerId?.let { sources[it]?.meeting != cargo.sourceEntrance } == true ||
+            cargo.sourceWorkerId?.let { sources[it]?.buildingId != cargo.sourceBuildingId } == true ||
             cargo.sourceWorkerId in busySources || key != null && (demand[key] ?: 0) < cargo.amount ||
             cargo.sourceBuildingId == cargo.warehouseId && key == null) continue
         reserve(worker, plan, key)

@@ -383,6 +383,10 @@ internal object CivsSettlementLayout {
         }
         val pavedFloors = pieces.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
             .flatMap { it.transit }.associate { key(it) to it.y - 1 } + roads.mapValues { it.value.y }
+        val turns = pavingRoutes.flatMap { turnFloors(it) }.toSet()
+        val routeOwners = linkedMapOf<CivPosition, List<CivPosition>>().apply {
+            pavingRoutes.forEach { route -> route.forEach { feet -> putIfAbsent(feet.copy(y = feet.y - 1), route) } }
+        }
         // Fixed horizontal rectangles retain each column's own grade, including stepped roads.
         // Accepted rectangles were removed above, so later routes never repartition earlier orders.
         while (roads.isNotEmpty()) {
@@ -397,7 +401,8 @@ internal object CivsSettlementLayout {
             val transit = mutableListOf<CivPosition>()
             for (x in p.x until p.x + width) for (z in p.z until p.z + depth) {
                 val floor = requireNotNull(roads.remove(key(x, z)))
-                cells += CivSettlementBlock(floor, pathPavement(floor, pavedFloors, city.style))
+                cells += CivSettlementBlock(floor, pathPavement(floor, pavedFloors, city.style, atTurn = floor in turns,
+                    downhill = routeOwners[floor]?.let { routeDownhill(floor, it) }))
                 for (dy in 1..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:air")
                 transit += floor.copy(y = floor.y + 1)
             }
@@ -423,10 +428,30 @@ internal object CivsSettlementLayout {
 
     internal fun wood(style: String): String = when (style) { "nordic" -> "spruce"; "caledonia" -> "dark_oak"; else -> "oak" }
 
-    /** A rising bend has a downhill entry even when its continuing exit turns ninety degrees. */
-    internal fun pathPavement(floor: CivPosition, floors: Map<Long, Int>, style: String): String {
+    internal fun turnFloors(route: List<CivPosition>): Set<CivPosition> = route.windowed(3)
+        .filter { (before, _, after) -> before.x != after.x && before.z != after.z }
+        .mapTo(hashSetOf()) { (_, at, _) -> at.copy(y = at.y - 1) }
+
+    internal fun routeDownhill(floor: CivPosition, route: List<CivPosition>): CivPosition? {
+        val index = route.indexOf(floor.copy(y = floor.y + 1))
+        if (index < 0) return null
+        return listOfNotNull(route.getOrNull(index - 1), route.getOrNull(index + 1))
+            .singleOrNull { it.y == floor.y }?.let { it.copy(y = it.y - 1) }
+    }
+
+    /** A full intermediate block separates straight stair flights when the continuing exit turns. */
+    internal fun pathPavement(floor: CivPosition, floors: Map<Long, Int>, style: String,
+        atTurn: Boolean = false, downhill: CivPosition? = null, legacyStairAtTurn: Boolean = false): String {
         val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
-        val lower = directions.filter { (dx, dz) -> floors[key(floor.x + dx, floor.z + dz)] == floor.y - 1 }
+        if (!legacyStairAtTurn && atTurn && directions.any { (dx, dz) ->
+                floors[key(floor.x + dx, floor.z + dz)]?.let { it == floor.y - 1 || it == floor.y + 1 } == true })
+            return "minecraft:${wood(style)}_planks"
+        val ordered = downhill?.takeUnless { legacyStairAtTurn }?.let {
+            require(abs(it.x.toLong() - floor.x) + abs(it.z.toLong() - floor.z) == 1L && it.y == floor.y - 1)
+            require(floors[key(it)] == it.y)
+            (it.x - floor.x) to (it.z - floor.z)
+        }
+        val lower = ordered ?: directions.filter { (dx, dz) -> floors[key(floor.x + dx, floor.z + dz)] == floor.y - 1 }
             .singleOrNull() ?: return "minecraft:dirt_path"
         if (directions.none { (dx, dz) -> (dx to dz) != lower &&
                 floors[key(floor.x + dx, floor.z + dz)]?.let { it in floor.y..floor.y + 1 } == true })
