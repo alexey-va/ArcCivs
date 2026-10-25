@@ -76,7 +76,7 @@ internal fun civsWorkplaceItems(type: BuildingType): List<Material> = when (type
     BuildingType.TAVERN -> listOf(Material.BREAD, Material.APPLE, Material.PAPER)
     BuildingType.BAKERY -> listOf(Material.WHEAT, Material.BREAD, Material.SUGAR)
     BuildingType.GUARD_TOWER -> listOf(Material.IRON_SWORD, Material.PAPER, Material.FEATHER)
-    BuildingType.HOUSE, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD -> emptyList()
+    BuildingType.HOUSE, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD -> emptyList()
 }
 
 internal fun civsWorkplacePieces(type: BuildingType, rotation: Int): List<CivsWorkplacePiece> {

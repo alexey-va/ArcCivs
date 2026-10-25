@@ -7,15 +7,84 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import ru.arc.paper.api.*
+import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
+import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
+    test("builtin board uses its owned verified capture off thread and restores the ordinary control in all rotations") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use {
+                val root = Files.createTempDirectory("civs-board-blueprint")
+                val work = ArrayDeque<Runnable>()
+                fun finish() {
+                    var count = 0
+                    while (work.isNotEmpty()) {
+                        check(count++ < 100) { "Builtin blueprint fixture did not drain" }
+                        work.removeFirst().run()
+                    }
+                }
+                val bytes = CivsPlanBoardBlueprint.schematic(4444)
+                val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+                val origin = ArcSchematicPoint(3, 0, 3)
+                val cells = CivsPlanBoardBlueprint.blocks().mapKeys { (p, _) -> ArcSchematicPoint(p.x, p.y, p.z) }
+                val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 5, 2), origin, cells, hash, "minecraft:barrier")
+                val libraries = BlueprintLibraries(root, Executor { work.addLast(it) }, 4444)
+                every { libraries.captured.loadVerified("builtin/plan_board/v1", hash,
+                    ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(original)
+                every { libraries.captured.transform(original, any()) } answers {
+                    val turns = secondArg<ArcSchematicTransform>().quarterTurns
+                    fun rotated(p: ArcSchematicPoint) = CivsBlueprintGeometry.rotate(
+                        ArcSchematicPoint(p.x - origin.x, p.y - origin.y, p.z - origin.z), turns)
+                    val corners = listOf(0, 6).flatMap { x -> listOf(0, 2).map { z -> rotated(ArcSchematicPoint(x, 0, z)) } }
+                    CompletableFuture.completedFuture(BlueprintCellsSnapshot(
+                        ArcSchematicPoint(corners.minOf { it.x }, 0, corners.minOf { it.z }),
+                        ArcSchematicPoint(corners.maxOf { it.x }, 5, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
+                        cells.mapKeys { (p, _) -> rotated(p) }, hash, "minecraft:barrier"))
+                }
+                try {
+                    libraries.subject.use { subject ->
+                        val placement = CivPosition(40, 64, 20)
+                        val controls = listOf(CivPosition(43, 65, 19), CivPosition(41, 65, 23),
+                            CivPosition(37, 65, 21), CivPosition(39, 65, 17))
+                        for (turns in 0..3) {
+                            val pending = subject.prepare("nordic", BuildingType.PLAN_BOARD, 1, UUID.randomUUID(), UUID.randomUUID(),
+                                placement, 2, exactRotation = turns * 90)
+                            if (turns == 0) Files.exists(root.resolve("builtin")) shouldBe false
+                            pending.isDone shouldBe false
+                            finish()
+                            val blueprint = pending.join()
+                            blueprint.building.schematicId shouldBe CivsPlanBoardBlueprint.SCHEMATIC_ID
+                            blueprint.building.anchor shouldBe placement
+                            blueprint.building.entrance shouldBe CivPosition(40, 65, 20)
+                            blueprint.building.control shouldBe controls[turns]
+                            blueprint.sourceBytes.toList() shouldBe bytes.toList()
+                            blueprint.materials shouldBe mapOf("STRIPPED_SPRUCE_LOG" to 18L, "STONE_BRICKS" to 6L,
+                                "SMOOTH_SANDSTONE" to 15L, "DARK_OAK_STAIRS" to 14L, "DARK_OAK_SLAB" to 7L)
+                            val control = subject.controlPosition(blueprint.building.copy(phase = BuildingPhase.ACTIVE))
+                            finish()
+                            control.join() shouldBe controls[turns]
+                        }
+                        Files.readAllBytes(root.resolve("builtin/plan_board/v1.schem")).toList() shouldBe bytes.toList()
+                        verify(exactly = 8) { libraries.captured.loadVerified("builtin/plan_board/v1", hash,
+                            ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
+                        verify(exactly = 0) { libraries.source.load(any(), any()) }
+                        verify(exactly = 0) { libraries.source.captureSource(any(), any()) }
+                    }
+                } finally { root.toFile().deleteRecursively() }
+            }
+        }
+    }
+
     test("catalog selects all 126 authored levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
-            BuildingType.entries.filterNot { it.isInfrastructure }.flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
+            BuildingType.entries.filterNot { it.isInfrastructure || it == BuildingType.PLAN_BOARD }
+                .flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
         ids.size shouldBe 126
         ids.toSet().size shouldBe 126
@@ -34,6 +103,9 @@ class CivsBlueprintsTest : FunSpec({
         }
         shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("../nordic", BuildingType.HOUSE, 1) }
         shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("nordic", BuildingType.HOUSE, 4) }
+        CivsBlueprints.STYLES.map { CivsBlueprints.schematicId(it, BuildingType.PLAN_BOARD, 1) }.toSet() shouldBe
+            setOf(CivsPlanBoardBlueprint.SCHEMATIC_ID)
+        shouldThrow<IllegalArgumentException> { CivsBlueprints.schematicId("nordic", BuildingType.PLAN_BOARD, 2) }
     }
 
     test("warehouse maintenance derives private rotated rack differences and rejects unrelated changes") {
@@ -341,6 +413,8 @@ private class BlueprintCellsSnapshot(
     override val maximum: ArcSchematicPoint,
     override val origin: ArcSchematicPoint,
     private val data: Map<ArcSchematicPoint, String> = emptyMap(),
+    override val fileSha256: String = "a".repeat(64),
+    private val defaultData: String = "minecraft:air",
 ) : ArcSchematicSnapshot {
     override val sizeX = maximum.x - minimum.x + 1
     override val sizeY = maximum.y - minimum.y + 1
@@ -349,12 +423,11 @@ private class BlueprintCellsSnapshot(
     override val nonBarrierCount get() = blocks().count { !it.isBarrier }
     override val hasBiomes = false
     override val entityCount = 0
-    override val fileSha256 = "a".repeat(64)
     override val contentSha256 = "b".repeat(64)
     override fun blockAt(x: Int, y: Int, z: Int): ArcSchematicBlock {
         require(x in minimum.x..maximum.x && y in minimum.y..maximum.y && z in minimum.z..maximum.z)
         val point = ArcSchematicPoint(x, y, z)
-        val state = data[point] ?: "minecraft:air"
+        val state = data[point] ?: defaultData
         return ArcSchematicBlock(point, state, state == "minecraft:air", state == "minecraft:barrier")
     }
     override fun blocks(): List<ArcSchematicBlock> = buildList {
@@ -364,7 +437,11 @@ private class BlueprintCellsSnapshot(
         BlueprintCellsSnapshot(minimum, maximum, origin, data)
 }
 
-private class BlueprintLibraries {
+private class BlueprintLibraries(
+    capturedRoot: Path = Path.of("captured"),
+    executor: Executor = Executor { it.run() },
+    dataVersion: Int = 0,
+) {
     val source = mockk<ArcSchematicLibrary>(relaxed = true)
     val captured = mockk<ArcSchematicLibrary>(relaxed = true)
     private val service = mockk<ArcSchematicService>()
@@ -375,7 +452,7 @@ private class BlueprintLibraries {
         every { captured.crop(any(), any(), any()) } answers {
             CompletableFuture.completedFuture(firstArg<BlueprintCellsSnapshot>().cropped(secondArg(), thirdArg()))
         }
-        subject = CivsBlueprints(service, Path.of("source"), Path.of("captured"), Executor { it.run() }, 150_000)
+        subject = CivsBlueprints(service, Path.of("source"), capturedRoot, executor, 150_000, dataVersion)
     }
 }
 

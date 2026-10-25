@@ -742,6 +742,175 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("admin plan board placement keeps its explicit autonomous city through preview edits and queues one site without grants") {
+        serviceScenario { h ->
+            val board = ServiceAutoBoard(h)
+            h.start()
+            h.service.beginPlanBoardSelection(h.player, board.city.id).join()
+            verify(exactly = 1) { h.boundary.pulse(h.player, board.city, true, null, null,
+                board.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }) }
+            val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id, board.target)
+            h.await(selected)
+            h.service.preview(h.player)!!.autonomous shouldBe true
+            h.await(h.service.rotatePreview(h.player, 90))
+            h.await(h.service.nudgePreview(h.player, CivsPreviewMove.RIGHT))
+            h.await(h.service.movePreview(h.player, board.target))
+            h.service.city(h.player) shouldBe h.city
+            val confirmed = h.service.confirmPreview(h.player)
+            h.tick()
+            h.saves shouldBe emptyList()
+            board.capture.complete(board.plan())
+            h.tickUntil("autonomous plan board city commit") { h.saves.isNotEmpty() }
+            val proposed = h.saves.single().first
+            proposed.id shouldBe board.city.id
+            proposed.owner shouldBe board.city.owner
+            proposed.buildings.last().type shouldBe BuildingType.PLAN_BOARD
+            proposed.buildings.last().phase shouldBe BuildingPhase.SITE
+            proposed.constructionQueue shouldBe listOf(board.blueprint.building.id)
+            proposed.revision shouldBe board.city.revision + 1
+            proposed.stock shouldBe board.city.stock
+            proposed.inventory shouldBe null
+            proposed.workers shouldBe board.city.workers
+            proposed.immigration shouldBe board.city.immigration
+            proposed.forestrySeeded shouldBe board.city.forestrySeeded
+            proposed.settings shouldBe board.city.settings
+            h.commit() // Durable SITE precedes the existing one-time native control grant.
+            h.saves.size shouldBe 2
+            h.commit()
+            h.await(confirmed)
+            h.service.city(h.player) shouldBe h.city
+            h.service.settlements().size shouldBe 2
+            val placed = h.service.settlements().single { it.id == board.city.id }
+            placed.pendingControls shouldBe emptyList()
+            placed.constructionQueue shouldBe listOf(board.blueprint.building.id)
+            placed.stock shouldBe board.city.stock
+            placed.workers shouldBe board.city.workers
+            h.time += 10_000
+            h.paper.performTicks(40)
+            h.saves.size shouldBe 2 // Paused Auto defers the ordinary paid construction queue.
+            verify(exactly = 1) { h.worldAdapter.captureAutonomousSite(board.city.id, board.city.owner, h.world.uid,
+                board.blueprint.building, any(), any()) }
+            verify(exactly = 0) { h.worldAdapter.captureAutonomousSite(any(), h.owner, any(), any(), any(), any()) }
+            verify(exactly = 0) { h.store.save(match { it.id == h.city.id }) }
+        }
+    }
+
+    for (denial in listOf("admin", "use", "world", "foreign-personal", "missing-city"))
+        test("explicit autonomous board entry rejects $denial without falling back to a personal city") {
+            serviceScenario { h ->
+                val board = ServiceAutoBoard(h)
+                h.start()
+                var cityId = board.city.id
+                when (denial) {
+                    "admin" -> every { h.player.hasPermission("arccivs.admin") } returns false
+                    "use" -> every { h.player.hasPermission("arccivs.use") } returns false
+                    "world" -> every { h.player.world } returns h.paper.addSimpleWorld("other")
+                    "foreign-personal" -> {
+                        // The selected Auto must not become a generic administrative building bypass.
+                        cityId = UUID.randomUUID()
+                        val foreign = h.city.copy(id = cityId, owner = UUID.randomUUID(), workers = emptyList(),
+                            buildings = h.city.buildings.map { it.copy(id = UUID.randomUUID()) })
+                        every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city, board.city, foreign))
+                        h.await(h.service.reload(h.player))
+                    }
+                    "missing-city" -> cityId = UUID.randomUUID()
+                }
+                val denied = h.service.beginPlanBoardSelection(h.player, cityId)
+                denied.isCompletedExceptionally shouldBe true
+                h.service.selection(h.player) shouldBe null
+                h.service.city(h.player) shouldBe h.city
+                h.saves shouldBe emptyList()
+            }
+        }
+
+    for (changed in listOf("admin", "use", "world"))
+        test("autonomous board preparation rechecks $changed after the asynchronous blueprint load") {
+            serviceScenario { h ->
+                val board = ServiceAutoBoard(h)
+                val prepared = CompletableFuture<CivBlueprint>()
+                every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns prepared
+                h.start()
+                h.service.beginPlanBoardSelection(h.player, board.city.id).join()
+                val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id, board.target)
+                when (changed) {
+                    "admin" -> every { h.player.hasPermission("arccivs.admin") } returns false
+                    "use" -> every { h.player.hasPermission("arccivs.use") } returns false
+                    "world" -> every { h.player.world } returns h.paper.addSimpleWorld("other")
+                }
+                prepared.complete(board.blueprint)
+                h.tick()
+                selected.isCompletedExceptionally shouldBe true
+                h.service.preview(h.player) shouldBe null
+                h.saves shouldBe emptyList()
+                verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
+            }
+        }
+
+    for (stage in listOf("preview", "capture", "file-write"))
+        test("autonomous board confirmation rejects revoked admin authority at $stage before its city commit") {
+            serviceScenario { h ->
+                val board = ServiceAutoBoard(h)
+                h.start()
+                h.service.beginPlanBoardSelection(h.player, board.city.id).join()
+                h.await(h.service.selectGround(h.player, h.service.selection(h.player)!!.id, board.target))
+                val fileWrite = CompletableFuture<Unit>()
+                if (stage == "file-write") every { h.store.saveSchematic(any(), any()) } returns fileWrite
+                if (stage == "preview") every { h.player.hasPermission("arccivs.admin") } returns false
+                val confirmed = h.service.confirmPreview(h.player)
+                if (stage == "capture") {
+                    every { h.player.hasPermission("arccivs.admin") } returns false
+                    board.capture.complete(board.plan())
+                } else if (stage == "file-write") {
+                    board.capture.complete(board.plan())
+                    h.tick()
+                    verify(exactly = 1) { h.store.saveSchematic(board.blueprint.building.id, any()) }
+                    every { h.player.hasPermission("arccivs.admin") } returns false
+                    fileWrite.complete(Unit)
+                }
+                h.tick()
+                CivsDiagnostics.rejection(shouldThrow<CompletionException> { confirmed.join() })?.reason shouldBe "not-authorized"
+                h.saves shouldBe emptyList()
+                h.service.city(h.player) shouldBe h.city
+                h.service.settlements().single { it.id == board.city.id } shouldBe board.city
+                val control = board.blueprint.building.control!!
+                h.world.getBlockAt(control.x, control.y, control.z).type shouldBe Material.AIR
+                // The MockK actor is absent from onlinePlayers, so timer pulses cannot visit it.
+                h.paper.server.onlinePlayers.contains(h.player) shouldBe false
+                CivsService::class.java.getDeclaredMethod("refreshBoundary", Player::class.java)
+                    .also { it.isAccessible = true }.invoke(h.service, h.player)
+                verify(atLeast = 1) { h.boundary.pulse(h.player, null, false, null, null, emptyMap()) }
+                verify(exactly = 0) { h.boundary.pulse(h.player, match<Settlement> { it.id == h.city.id }, any(), any(), any(), any()) }
+            }
+        }
+
+    test("personal catalog plan board selection keeps ordinary site and player authority semantics") {
+        serviceScenario { h ->
+            val board = ServiceAutoBoard(h)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city))
+            val point = CivPosition(6, 63, 10)
+            h.world.getBlockAt(point.x, point.y, point.z).type = Material.GRASS_BLOCK
+            every { h.player.location } returns Location(h.world, 6.0, 65.0, 6.0)
+            every { h.player.eyeLocation } returns Location(h.world, 6.0, 66.62, 6.0)
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.start()
+            h.service.beginBuildingSelection(h.player, BuildingType.PLAN_BOARD).join()
+            h.await(h.service.selectGround(h.player, h.service.selection(h.player)!!.id, CivsGroundTarget(h.world.uid, point)))
+            h.service.preview(h.player)!!.autonomous shouldBe false
+            val confirmed = h.service.confirmPreview(h.player)
+            h.tickUntil("personal board site commit") { h.saves.isNotEmpty() }
+            h.saves.first().first.let {
+                it.id shouldBe h.city.id
+                it.constructionQueue shouldBe null
+                it.stock shouldBe h.city.stock
+                it.workers shouldBe h.city.workers
+            }
+            h.commit(); h.commit(); h.await(confirmed)
+            h.service.city(h.player)!!.buildings.last().type shouldBe BuildingType.PLAN_BOARD
+            verify(exactly = 0) { h.worldAdapter.captureAutonomousSite(any(), any(), any(), any(), any(), any()) }
+            verify(exactly = 1) { h.worldAdapter.captureSite(h.city.id, h.owner, h.world.uid, board.blueprint.building, any(), any(), any()) }
+        }
+    }
+
     test("autonomous pause is durable separately from the administrators personal town and rechecks permission") {
         serviceScenario { h ->
             val personal = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))
@@ -4831,6 +5000,58 @@ class CivsServiceTest : FunSpec({
         }
     }
 })
+
+/** A distinct paused Auto city makes the target, domain owner and grant-free admission observable. */
+private class ServiceAutoBoard(private val h: ServiceScenario) {
+    private val buildingId = UUID.randomUUID()
+    private val anchor = CivPosition(262, 63, 10)
+    val target = CivsGroundTarget(h.world.uid, anchor)
+    val city: Settlement
+    var blueprint: CivBlueprint
+        private set
+    val capture = CompletableFuture<CivPlacementPlan>()
+
+    init {
+        fun shifted(point: CivPosition) = point.copy(x = point.x + 256)
+        city = CivsRules.validate(h.city.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Auto Board Town",
+            center = shifted(h.city.center), inventory = null, workers = emptyList(), memberNames = null,
+            autonomy = CivAutonomy(paused = true), immigration = CivImmigration(0, h.time),
+            buildings = h.city.buildings.map { it.copy(id = UUID.randomUUID(), anchor = shifted(it.anchor), entrance = shifted(it.entrance),
+                bounds = CivBox(shifted(it.bounds.min), shifted(it.bounds.max)), control = it.control?.let(::shifted)) }))
+        blueprint = blueprint(anchor, 0)
+        h.world.loadChunk(anchor.x shr 4, anchor.z shr 4)
+        h.world.getBlockAt(anchor.x, anchor.y, anchor.z).type = Material.GRASS_BLOCK
+        every { h.player.location } returns Location(h.world, 262.0, 65.0, 6.0)
+        every { h.player.eyeLocation } returns Location(h.world, 262.0, 66.62, 6.0)
+        every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city, city))
+        every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            blueprint = blueprint(arg(5), arg<Int?>(7) ?: 0)
+            CompletableFuture.completedFuture(blueprint)
+        }
+        every { h.worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            val building = arg<CivBuilding>(3)
+            CompletableFuture.completedFuture(CivTerraformPlan(building.bounds, emptyList(), emptyList(), 63, 0, 0))
+        }
+        every { h.worldAdapter.captureAutonomousSite(any(), any(), any(), any(), any(), any()) } returns capture
+        every { h.worldAdapter.captureSite(any(), any(), any(), any(), any(), any(), any()) } answers {
+            CompletableFuture.completedFuture(plan(firstArg(), arg(2), arg(3)))
+        }
+        every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
+        every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+    }
+
+    private fun blueprint(at: CivPosition, rotation: Int): CivBlueprint {
+        val original = h.previewBlueprint(at, rotation)
+        every { original.snapshot.fileSha256 } returns "a".repeat(64)
+        return original.copy(building = original.building.copy(id = buildingId, type = BuildingType.PLAN_BOARD,
+            schematicId = CivsPlanBoardBlueprint.SCHEMATIC_ID))
+    }
+
+    fun plan(cityId: UUID = city.id, worldId: UUID = city.worldId, building: CivBuilding = blueprint.building): CivPlacementPlan =
+        CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building,
+            listOf(CivPlanBlock(building.bounds.min, "minecraft:air", "minecraft:stone")), "a".repeat(64),
+            CivTerraformPlan(building.bounds, emptyList(), emptyList(), 63, 0, 0))
+}
 
 /** Real Core custom-click dispatch; only native dialog presentation is replaced in MockBukkit. */
 private class RequestDialog(h: ServiceScenario, private val player: Player) : AutoCloseable {

@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.84 plan information board",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "New ordinary one-level PLAN_BOARD. Autonomous abstract construction cost12WOOD8STONE peracceptedboard; beforefeature unavailable, aftercostchargedonce through existing constructionreservation. Physicaltowns pay exact captured schematicmaterials, notabstractcost.",
+    "Low/base/high sensitivity assumes1/4/8 boards accepted perowner-day and1/10/16 owners. These are stress assumptions, not telemetry; existing16ordinary-building citycap, citycap and activeNPC limits remain unchanged. Players may remove/rebuild only underexistingpermission and paidconstruction lifecycle, no refunds are added.",
+    "Board is informational:0housing,0workers,0abstractstockcapacity (standardcontrolBARREL has27physicalslots),0production,0directboard-jobskill,0Vault,0tokens,0playerXP. Ordinary builders retain existing +1 BUILDER_HUT resident skill XP per accepted completed delivery/session, capped at40; native batch placement and final building completion add no separate training. Client-only map/display parts create no inventoryitem or transferableMapView. Actual wooden/stone support blocks remain normal physical materials likeother paidsettlementbuildings.",
+    "Auto's12WOOD requires4 netL1forester completions at3WOOD percompleted-and-replantedtree, or2L2 completions at7;8STONE requires3L1quarrydeliveries at3, or2L2at6. Travel/growth/hunger/storage reduce rates. No monetary savingtime or arbitrarycurrencyexchange is claimed.",
+    "Decoration uses one ordinary buildingslot; profile/goals do not autospamboards ordisplaceessential job assignments. Existinginfrastructurelimit96 is unchanged; board isnotROAD/GATE/WALL andcannotuseinfrastructurelimit asbypass.",
+    "Physical construction moves existing materials through receipts, no extra itemsissued. Autonomous worldblocks are an existing privileged abstractstock-to-world channel; authoredgeometry has6STONE_BRICKS+18STRIPPED_SPRUCE_LOG+15SMOOTH_SANDSTONE+14DARK_OAK_STAIRS+7DARK_OAK_SLAB=60solidblocks plus1standardBARRELcontrol. Deleting keeps physicalblocks and grantsnorefund underexistingsemantics; repeatedbuilds consume12/8 again.",
+    "No prices, SELL, contracts, rates, loot, storagecapacities or bonuses change. Current168hledger read2026-10-25T10:06:32.796Z and alternativeSELL/contracts limits recorded inforester-care-assessment.md. PlannedSELL-off notpresumedactive. Boardblocks can be salvaged likeotherworldblocks; no newserverbuybackquote is introduced.",
+    "Decision after reviewing exact61-block body: small paid woodeninformationdecoration, one level, no recurringreward. Preview/render testsdo not prove liveactivation or nativeclientappearance.",
+    "The61 normalworldblocks are an upper salvage quantity perAuto board (tools/protection still apply), not61paidlogs or61Vault. Auto administrative placement and existingcityremodel permissions areunchanged; no newunprivileged abstractstock-to-item route. Physicaltowns prepay exact nativeblocks. Arbitrary nativeSELLquotes were notmeasured for thismixedbody and are notinvented; no shoprulechanges.",
+    "Unchanged standardcontroltiming: acceptingSITE persists pendingControls, then grants/reuses1BARREL immediately. Its27physicalslots existbeforebodyconstruction; physicalexactbodymaterials are reservedlater. The boardadds no newcontrolgrant mechanism. Zeroitemgrant refers onlyto theinformationalpackets, notthisexistingSITEcontrol.",
+    "Schematic also journals55explicitAIRcells aboveground toclear the boardfront with existing protectedconstruction.10groundgaps remainuntouched. AIR is notanadditional paidmaterial oritemgrant; full126cell footprint has60solids+1control+55AIR+10untouched. Existing terrain/protection/nonempty-container checks remainauthoritative."
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_board_construction_wood",
+          "kind": "burn",
+          "source": "CivsRules.cost PLAN_BOARD acceptedconstruction",
+          "basis": "Newcost, peraccepted one-levelboard, no refund.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_board_construction_stone",
+          "kind": "burn",
+          "source": "CivsRules.cost PLAN_BOARD acceptedconstruction",
+          "basis": "SeparateSTONE unit, newcostperboard.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "auto_world_board_blocks": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "paid_autonomous_board_world_body",
+          "kind": "item",
+          "source": "CivsPlanBoardBlueprint.schematic plusstandardcontrolinstallation",
+          "basis": "61 actualworldblocks perpaidAuto board, notdirectbagitems; physicaltowninputtransfer excluded; administrativeplacement/protectionunchanged.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "61",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              4,
+              8
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

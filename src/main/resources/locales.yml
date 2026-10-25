@@ -139,6 +139,7 @@ ru:
     wall: 'Стена'
     gate: 'Ворота'
     road: 'Дорога'
+    plan_board: 'План поселения'
   building-purpose:
     town_hall: 'Ратуша задаёт предел жителей и размер города. После постройки здесь работают писари: 3 бумаги и 1 кожа превращаются в книгу.'
     warehouse: 'Кладовщики относят сырьё со склада на стройки и в мастерские, затем собирают готовую продукцию. Сундуки и бочки внутри склада подключаются автоматически.'
@@ -157,6 +158,18 @@ ru:
     wall: 'Ограда обозначает границу деревни.'
     gate: 'Проход через ограду деревни.'
     road: 'Дорога соединяет входы в постройки.'
+    plan_board: 'Большая карта показывает готовые здания, размеченные участки и сохранённые дорожки. Смотреть могут все; управление — через обычную бочку сбоку. Жители здесь не работают.'
+  plan-board:
+    place: 'Поставить доску плана'
+    title: 'ПЛАН ПОСЕЛЕНИЯ · <name>'
+    updating-title: 'ПЛАН ПОСЕЛЕНИЯ · <name> · обновление'
+    north-left: '← С'
+    north-up: '↑ С'
+    built: 'Построено'
+    planned: 'Запланировано'
+    roads: 'Дорожки'
+    roads-points: 'Дорожки · точки'
+    compact-key: "Названия\nв меню\nпостроек"
   building-phase:
     constructing: 'Строится'
     active: 'Готова'
@@ -1196,6 +1209,7 @@ en:
     wall: 'Wall'
     gate: 'Gate'
     road: 'Road'
+    plan_board: 'Settlement plan'
   building-purpose:
     town_hall: 'The town hall sets the population limit and town size. Once built, its scribes turn 3 paper and 1 leather into a book.'
     warehouse: 'Couriers carry supplies to building sites and workshops, then collect their products. Chests and barrels inside the warehouse connect automatically.'
@@ -1214,6 +1228,18 @@ en:
     wall: 'The wall marks the village boundary.'
     gate: 'A passage through the village wall.'
     road: 'A road connects building entrances.'
+    plan_board: 'A large map shows completed buildings, marked sites and recorded paths. Everyone can read it; use the standard barrel at the side to manage the board. It has no jobs.'
+  plan-board:
+    place: 'Place a plan board'
+    title: 'SETTLEMENT PLAN · <name>'
+    updating-title: 'SETTLEMENT PLAN · <name> · updating'
+    north-left: '← N'
+    north-up: '↑ N'
+    built: 'Built'
+    planned: 'Planned'
+    roads: 'Paths'
+    roads-points: 'Paths · dots'
+    compact-key: "Names in\nthe building\nmenu"
   building-phase:
     constructing: 'Under construction'
     active: 'Ready'

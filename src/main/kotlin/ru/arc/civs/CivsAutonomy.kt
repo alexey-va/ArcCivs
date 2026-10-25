@@ -22,7 +22,7 @@ object CivsAutonomy {
     val profile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
         BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE,
         BuildingType.TAVERN, BuildingType.GUARD_TOWER)
-    val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD)
+    val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD)
     private val upgrades = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
         BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.TAVERN, BuildingType.GUARD_TOWER)
 

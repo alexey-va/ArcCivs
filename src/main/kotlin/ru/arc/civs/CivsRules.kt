@@ -49,6 +49,7 @@ object CivsRules {
             BuildingType.WALL -> Stock(8, 16)
             BuildingType.GATE -> Stock(12, 16)
             BuildingType.ROAD -> Stock(0, 8)
+            BuildingType.PLAN_BOARD -> Stock(12, 8)
             BuildingType.TOWN_HALL -> error("handled above")
         }
         val multiplier = targetLevel.toLong() * targetLevel
@@ -918,7 +919,8 @@ object CivsRules {
         }
         if (building.type in setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH,
                 BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TAVERN, BuildingType.BAKERY,
-                BuildingType.GUARD_TOWER, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD) && order.payment == null) return false
+                BuildingType.GUARD_TOWER, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD,
+                BuildingType.PLAN_BOARD) && order.payment == null) return false
         val batches = order.batches
         if (batches == null) return order.payment == null && building.type in setOf(BuildingType.TOWN_HALL,
             BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM) &&

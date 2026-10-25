@@ -1637,6 +1637,13 @@ class CivsUi internal constructor(
         ), buildList {
             add(button(player, "buildings", "buildings.open", LAND) { showAutonomousBuildings(player, city.id) })
             add(button(player, "workers", "workers.open", PEOPLE) { showAutonomousWorkers(player, city.id) })
+            if (host.ready() && host.foundingAllowed() && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
+                add(button(player, "plan_board", "plan-board.place", PERSONAL, appearance = Action.FOUND) {
+                    if (!isAdmin(player)) autonomyDenied(player)
+                    else beginSelection(player, { host.beginPlanBoardSelection(player, city.id) }) {
+                        showAutonomousCity(player, city.id, it)
+                    }
+                })
             if (!paused && city.construction?.phase == ConstructionPhase.PAUSED)
                 add(button(player, "retry", "admin.retry", COMMIT, appearance = Action.START) {
                     if (!isAdmin(player)) autonomyDenied(player)
@@ -2037,6 +2044,7 @@ class CivsUi internal constructor(
         BuildingType.GUARD_TOWER -> 0x95B4CC
         BuildingType.WALL, BuildingType.GATE -> 0xB8BBC4
         BuildingType.ROAD -> 0xBDAE98
+        BuildingType.PLAN_BOARD -> 0xD9BE85
     })
 
     override fun close() {

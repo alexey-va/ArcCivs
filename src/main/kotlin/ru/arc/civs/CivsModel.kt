@@ -5,11 +5,11 @@ import java.util.UUID
 enum class Resource { WOOD, STONE, FOOD }
 enum class BuildingType {
     TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY,
-    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD;
+    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD, PLAN_BOARD;
 
     val isInfrastructure: Boolean get() = this == WALL || this == GATE || this == ROAD
     val isResidence: Boolean get() = this == HOUSE || this == TAVERN
-    val maxLevel: Int get() = if (isInfrastructure) 1 else 3
+    val maxLevel: Int get() = if (isInfrastructure || this == PLAN_BOARD) 1 else 3
 }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }

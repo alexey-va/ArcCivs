@@ -24,7 +24,6 @@ import ru.arc.paper.api.ArcSchematicException
 import ru.arc.paper.api.ArcSchematicFailure
 import ru.arc.paper.network.BackendTransfer
 import ru.arc.paper.network.BackendTransferResult
-import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -104,6 +103,7 @@ class CivsService(
     private var initialized = false
     private var closed = false
     private var citizenDrain = CompletableFuture.completedFuture<Void>(null)
+    private var planBoardDrain = CompletableFuture.completedFuture<Void>(null)
     private var loading = false
     private var loadFailure: String? = null
     private var geometryGeneration = 0L
@@ -134,6 +134,10 @@ class CivsService(
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
+    private val planBoardSnapshots = CivsPlanBoardSnapshots(tasks, executor, { id ->
+        if (ready()) cities[id]?.takeUnless { id in unhealthy || it.pendingDeletion != null } else null
+    }, ::loadPlanBoardPlans)
+    private val planBoards = CivsPlanBoardRenderer(plugin, tasks, nativeWork, executor, planBoardSnapshots::snapshot)
     private val protection = CivsProtection(cities = { cities.values.toList() }, available = { ready() }, protectedWorlds = settings.worlds,
         worldLocked = storage::isWorldLocked, forestryPath = { worldId, x, z ->
             forestryRoutes.values.any { it.first == worldId && (x to z) in it.second }
@@ -626,6 +630,12 @@ class CivsService(
         beginSelection(player, city.id, city.name, city.style, type)
     }
 
+    override fun beginPlanBoardSelection(player: Player, cityId: UUID): CompletableFuture<Unit> =
+        action("begin_plan_board_selection", player, "city" to cityId, "type" to BuildingType.PLAN_BOARD) {
+            val city = managedPlacement(player, cityId, BuildingType.PLAN_BOARD)
+            beginSelection(player, city.id, city.name, city.style, BuildingType.PLAN_BOARD, autonomous = city.autonomy != null)
+        }
+
     private fun beginSelection(player: Player, cityId: UUID?, name: String, style: String, type: BuildingType, autonomous: Boolean = false): CompletableFuture<Unit> {
         requirePlacementWorld(player)
         rejectIf(style !in styles(), "invalid-style")
@@ -653,8 +663,7 @@ class CivsService(
                 requireFounder(player, selection.autonomous)
                 checkSettlementSpace(player.world.uid, point)
             } else {
-                val city = managed(player)
-                rejectIf(city.id != selection.cityId, "not-authorized")
+                val city = managedPlacement(player, selection.cityId, selection.type)
                 rejectIf(!city.contains(point.x, point.z), "outside-city")
             }
             CivsDiagnostics.event("selection_selected", *CivsDiagnostics.actor(player), "selection" to selection.id,
@@ -760,7 +769,9 @@ class CivsService(
         rejectIf(style !in styles(), "invalid-style")
         requirePreviewSlot(player)
         val worldId = player.world.uid
-        if (cityId != null) rejectIf(cities[cityId]?.let { !it.canManage(player.uniqueId) || it.worldId != worldId } != false, "not-authorized")
+        if (cityId != null) managedPlacement(player, cityId, type).also {
+            rejectIf((it.autonomy != null) != autonomous, "stale-city")
+        }
         val request = UUID.randomUUID()
         requests[player.uniqueId] = request
         CivsDiagnostics.event("preview_load", *CivsDiagnostics.actor(player), "request" to request,
@@ -780,11 +791,11 @@ class CivsService(
                     log("prepare preview", failure)
                     result.completeExceptionally(failure)
                 } else runCatching {
-                    val city = cityId?.let { cities[it] ?: throw CivsRejection("no-city") }
                     val source = requireNotNull(blueprint)
+                    val city = cityId?.let { managedPlacement(player, it, source.building.type) }
+                    if (city != null) rejectIf((city.autonomy != null) != autonomous, "stale-city")
                     val prepared = source.copy(building = source.building.copy(production = city?.building(buildingId)?.production))
-                    if (city != null) rejectIf(!city.canManage(player.uniqueId) ||
-                        !city.contains(prepared.building.bounds.min.x, prepared.building.bounds.min.z) ||
+                    if (city != null) rejectIf(!city.contains(prepared.building.bounds.min.x, prepared.building.bounds.min.z) ||
                         !city.contains(prepared.building.bounds.max.x, prepared.building.bounds.max.z), "outside-city")
                     if (!upgrading) renderer.show(player, prepared.building, prepared.surface)
                     previews[player.uniqueId] = Preview(request, cityId, name, style, prepared, upgrading,
@@ -829,7 +840,7 @@ class CivsService(
         val cityCenter = blueprint.building.control ?: blueprint.building.entrance
         near(player, blueprint.worldId, blueprint.building.entrance)
         val cityId = preview.cityId ?: UUID.randomUUID()
-        val previousCity = preview.cityId?.let { managed(player).also { current -> rejectIf(current.id != it, "not-authorized") } }
+        val previousCity = preview.cityId?.let { managedPlacement(player, it, blueprint.building.type) }
         val queuedUpgrade = preview.upgrading && previousCity?.let {
             it.construction != null || it.constructionQueue.orEmpty().isNotEmpty()
         } == true
@@ -872,6 +883,9 @@ class CivsService(
             runCatching {
                 rejectIf(!player.isOnline || previews[player.uniqueId] !== preview, "preview-expired")
                 near(player, blueprint.worldId, blueprint.building.entrance)
+                val placementCity = previousCity?.let {
+                    managedPlacement(player, it.id, blueprint.building.type).also { current -> rejectIf(current != it, "stale-city") }
+                }
                 val capturedPlan = requireNotNull(captured).copy(capturedSha256 = blueprint.snapshot.fileSha256)
                 if (preview.upgrading && !queuedUpgrade) {
                     startOrder(player.uniqueId, cities.getValue(cityId), capturedPlan, blueprint.sourceBytes).whenCompleteSync(tasks) { _, failure ->
@@ -890,9 +904,24 @@ class CivsService(
                         requireFounderAfterCapture(player, preview.autonomous)
                         CivsMembership.remember((if (preview.autonomous) CivsAutonomy::found else CivsRules::found).invoke(cityId, player.uniqueId, preview.cityName, blueprint.worldId,
                             cityCenter, settings.radius, preview.style, blueprint.building, now()), mapOf(player.uniqueId to player.name))
-                    } else CivsRules.placeSite(cities.getValue(cityId), player.uniqueId, blueprint.building)
+                    } else if (placementCity?.autonomy != null) {
+                        // Only managedPlacement's explicit Auto board branch may use the domain owner.
+                        val site = CivsRules.placeSite(placementCity, placementCity.owner, blueprint.building)
+                        CivsRules.enqueue(site, placementCity.owner, blueprint.building.id).copy(revision = placementCity.revision + 1)
+                    } else CivsRules.placeSite(requireNotNull(placementCity), player.uniqueId, blueprint.building)
                     val next = if (control == null) placed else CivsRules.validate(placed.copy(pendingControls = placed.pendingControls.orEmpty() + control))
-                    saveCapturedCity(plan, blueprint.sourceBytes, next).whenCompleteSync(tasks) { saved, saveFailure ->
+                    // File writes may finish after permissions or the selected city changed. Recheck on Main
+                    // immediately before the city commit; other capture owners keep their existing save path.
+                    store.saveSchematic(plan.id, blueprint.sourceBytes).thenCompose { store.savePlan(plan) }.thenCompose {
+                        tasks.callSync {
+                            rejectIf(!player.isOnline || previews[player.uniqueId] !== preview, "preview-expired")
+                            requireReady(player)
+                            near(player, blueprint.worldId, blueprint.building.entrance)
+                            if (placementCity == null) requireFounderAfterCapture(player, preview.autonomous)
+                            else rejectIf(managedPlacement(player, cityId, blueprint.building.type) != placementCity, "stale-city")
+                            store.save(next)
+                        }.thenCompose { it }
+                    }.whenCompleteSync(tasks) { saved, saveFailure ->
                             if (saveFailure != null) {
                                 val rejected = CivsDiagnostics.rejection(saveFailure)
                                 if (rejected != null) {
@@ -1154,22 +1183,6 @@ class CivsService(
             if (waiting.isEmpty()) cityAvailability.remove(cityId)
             available.complete(Unit)
         }
-    }
-
-    private fun queuedUpgradeId(buildingId: UUID, targetLevel: Int): UUID =
-        UUID.nameUUIDFromBytes("arccivs-upgrade/$buildingId/$targetLevel".toByteArray(StandardCharsets.UTF_8))
-
-    private fun queuedDesignId(building: CivBuilding): UUID = if (building.phase == BuildingPhase.SITE) building.id
-        else queuedUpgradeId(building.id, building.level + 1)
-
-    private fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, building: CivBuilding) {
-        require(plan.id == queuedDesignId(building) && plan.cityId == city.id && plan.worldId == city.worldId)
-        require(if (building.phase == BuildingPhase.SITE)
-            plan.building.copy(phase = BuildingPhase.SITE, production = building.production) == building
-        else building.phase == BuildingPhase.ACTIVE && plan.building.id == building.id && plan.building.type == building.type &&
-            plan.building.phase == BuildingPhase.CONSTRUCTING && plan.building.level == building.level + 1 &&
-            plan.building.entrance == building.entrance && plan.building.rotation == building.rotation &&
-            civsContainsBox(plan.building.bounds, building.bounds)) { "Queued design no longer matches building ${building.id}" }
     }
 
     private fun cleanupCaptured(id: UUID): CompletableFuture<Unit> =
@@ -2974,6 +2987,8 @@ class CivsService(
         checkMain()
         rejectIf(loading || closed, "not-ready")
         loading = true
+        planBoardSnapshots.retain(emptySet())
+        planBoards.pulse(emptyList())
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
         autonomyProgress.clear()
@@ -3110,10 +3125,16 @@ class CivsService(
 
     private fun refreshBoundary(player: Player) {
         val preview = previews[player.uniqueId]?.takeUnless { it.upgrading }
-        val city = if (ready()) city(player) else null
+        val selection = selections[player.uniqueId]
+        val selectedCity = selection?.cityId ?: preview?.cityId
+        val type = if (selection?.cityId != null) selection.type else preview?.blueprint?.building?.type
+        val city = if (!ready()) null else if (selectedCity != null && type != null)
+            runCatching { managedPlacement(player, selectedCity, type) }.getOrNull() else city(player)
+        val authorized = selectedCity == null || city != null
+        val visiblePreview = preview?.takeIf { authorized }
         boundary.pulse(player, city,
-            player.uniqueId in selections || preview != null || previewLoads[player.uniqueId] == true,
-            preview?.blueprint?.building?.bounds, preview?.blueprint?.building?.id,
+            authorized && (player.uniqueId in selections || preview != null || previewLoads[player.uniqueId] == true),
+            visiblePreview?.blueprint?.building?.bounds, visiblePreview?.blueprint?.building?.id,
             city?.buildings?.associate { it.id to buildingStatus(it.id) }.orEmpty())
     }
 
@@ -3141,6 +3162,9 @@ class CivsService(
             pulseQueue()
         }
         pulseConstruction()
+        val visibleCities = if (ready()) cities.values.filter { it.id !in unhealthy && it.pendingDeletion == null } else emptyList()
+        planBoardSnapshots.retain(visibleCities.mapTo(hashSetOf(), Settlement::id))
+        planBoards.pulse(visibleCities)
         updateHealth()
     }
 
@@ -3497,6 +3521,17 @@ class CivsService(
 
     private fun loadAutonomousAccess(city: Settlement): CompletableFuture<CivAutonomousAccess> =
         loadAutonomousPlans(city).thenApplyAsync({ CivAutonomousAccess.from(city, it) }, executor)
+
+    /** Queued upgrade captures are exact future geometry, never retained built access roads. */
+    private fun loadPlanBoardPlans(city: Settlement): CompletableFuture<List<CivPlacementPlan>> {
+        require(city.constructionQueue.orEmpty().size <= CivsRules.MAX_SITES)
+        val upgrades = city.constructionQueue.orEmpty().mapNotNull(city::building)
+            .filter { it.phase == BuildingPhase.ACTIVE }.map { store.loadPlan(queuedDesignId(it)) }
+        val active = loadAutonomousPlans(city)
+        return active.thenCombineAsync(CompletableFuture.allOf(*upgrades.toTypedArray()), { retained, _ ->
+            retained + upgrades.mapNotNull { it.join() }
+        }, executor)
+    }
 
     private fun autonomousAccessReady(city: Settlement): Boolean = city.autonomy == null ||
         autonomousAccessChecked[city.id] == city.buildings
@@ -4070,8 +4105,23 @@ class CivsService(
     private fun currentPreview(player: Player): Preview {
         requireReady(player)
         rejectIf(player.uniqueId in previewLoads, "city-busy")
-        return previews[player.uniqueId]?.takeIf { it.expires > now() && it.blueprint.worldId == player.world.uid }
-            ?: throw CivsRejection("preview-expired")
+        return (previews[player.uniqueId]?.takeIf { it.expires > now() && it.blueprint.worldId == player.world.uid }
+            ?: throw CivsRejection("preview-expired")).also { preview ->
+            preview.cityId?.let { managedPlacement(player, it, preview.blueprint.building.type) }
+        }
+    }
+    /** Normal personal authority, with one explicit administrative placement for an existing Auto city. */
+    private fun managedPlacement(player: Player, cityId: UUID, type: BuildingType): Settlement {
+        requireReady(player)
+        val selected = cities[cityId] ?: throw CivsRejection("no-city")
+        val city = if (selected.autonomy != null) {
+            rejectIf(type != BuildingType.PLAN_BOARD || !player.hasPermission("arccivs.admin"), "not-authorized")
+            selected
+        } else managed(player).also { rejectIf(it.id != cityId, "not-authorized") }
+        rejectIf(city.worldId != player.world.uid, "outside-city")
+        rejectIf(city.id in unhealthy, "storage-unavailable")
+        rejectIf(city.pendingDeletion != null, "deletion-pending")
+        return city
     }
     private fun managed(player: Player, allowDeletion: Boolean = false): Settlement {
         requireReady(player)
@@ -4193,6 +4243,9 @@ class CivsService(
         closed = true
         initialized = false
         layoutDebug.close()
+        planBoardSnapshots.close()
+        planBoardDrain = runCatching { planBoards.closeAsync() }
+            .getOrElse { CompletableFuture.failedFuture(it) }
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
         supply.close()
@@ -4234,7 +4287,8 @@ class CivsService(
         updateHealth()
     }
 
-    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain, supply.drained(), layoutDebug.drained())
+    fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain,
+        supply.drained(), layoutDebug.drained(), planBoardDrain, planBoardSnapshots.drained())
 
     companion object {
         internal fun areasOverlap(a: CivPosition, ar: Int, b: CivPosition, br: Int): Boolean =

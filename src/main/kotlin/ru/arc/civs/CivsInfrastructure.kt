@@ -16,38 +16,46 @@ internal object CivsInfrastructure {
 
     /** Detached, bounded encoding. Core decodes and owns the resulting snapshot and native writes. */
     fun schematic(piece: CivSettlementPiece, dataVersion: Int): ByteArray {
-        require(piece.type.isInfrastructure && dataVersion > 0)
-        val box = piece.bounds
-        val width = box.max.x.toLong() - box.min.x + 1
-        val height = box.max.y.toLong() - box.min.y + 1
-        val length = box.max.z.toLong() - box.min.z + 1
-        require(width in 1..256 && height in 1..256 && length in 1..256 && width * height * length <= 65_536)
-        require(piece.blocks.isNotEmpty() && piece.blocks.all { box.contains(it.position.x, it.position.y, it.position.z) })
+        require(piece.type.isInfrastructure)
         val cells = piece.blocks.associate { it.position to it.after }
         require(cells.size == piece.blocks.size)
-        val palette = linkedMapOf("minecraft:barrier" to 0)
-        cells.values.sorted().forEach { palette.putIfAbsent(it, palette.size) }
-        require(palette.size <= 128 && palette.keys.all { it.length in 1..512 && it.startsWith("minecraft:") })
-        val data = ByteArrayOutputStream()
-        for (y in box.min.y..box.max.y) for (z in box.min.z..box.max.z) for (x in box.min.x..box.max.x)
-            data.write(palette.getValue(cells[CivPosition(x, y, z)] ?: "minecraft:barrier"))
-        val output = ByteArrayOutputStream()
-        DataOutputStream(GZIPOutputStream(output)).use { nbt ->
-            fun tag(type: Int, name: String) { nbt.writeByte(type); nbt.writeUTF(name) }
-            fun int(name: String, value: Int) { tag(3, name); nbt.writeInt(value) }
-            fun short(name: String, value: Long) { tag(2, name); nbt.writeShort(value.toInt()) }
-            tag(10, ""); tag(10, "Schematic")
-            int("Version", 3); int("DataVersion", dataVersion)
-            short("Width", width); short("Height", height); short("Length", length)
-            tag(11, "Offset"); nbt.writeInt(3); repeat(3) { nbt.writeInt(0) }
-            tag(10, "Blocks"); tag(10, "Palette")
-            palette.forEach { (state, index) -> int(state, index) }
-            nbt.writeByte(0)
-            tag(7, "Data"); nbt.writeInt(data.size()); nbt.write(data.toByteArray())
-            nbt.writeByte(0); nbt.writeByte(0); nbt.writeByte(0)
-        }
-        return output.toByteArray()
+        return civsGeneratedSchematic(piece.bounds, piece.bounds.min, cells, dataVersion)
     }
+}
+
+/** The board and infrastructure share this small, bounded Sponge encoder; Core still owns decoding and placement. */
+internal fun civsGeneratedSchematic(box: CivBox, origin: CivPosition, cells: Map<CivPosition, String>, dataVersion: Int): ByteArray {
+    require(dataVersion > 0)
+    val width = box.max.x.toLong() - box.min.x + 1
+    val height = box.max.y.toLong() - box.min.y + 1
+    val length = box.max.z.toLong() - box.min.z + 1
+    require(width in 1..256 && height in 1..256 && length in 1..256 && width * height * length <= 65_536)
+    require(cells.isNotEmpty() && cells.keys.all { box.contains(it.x, it.y, it.z) })
+    val palette = linkedMapOf("minecraft:barrier" to 0)
+    cells.values.sorted().forEach { palette.putIfAbsent(it, palette.size) }
+    require(palette.size <= 128 && palette.keys.all { it.length in 1..512 && it.startsWith("minecraft:") })
+    val data = ByteArrayOutputStream()
+    for (y in box.min.y..box.max.y) for (z in box.min.z..box.max.z) for (x in box.min.x..box.max.x)
+        data.write(palette.getValue(cells[CivPosition(x, y, z)] ?: "minecraft:barrier"))
+    val output = ByteArrayOutputStream()
+    DataOutputStream(GZIPOutputStream(output)).use { nbt ->
+        fun tag(type: Int, name: String) { nbt.writeByte(type); nbt.writeUTF(name) }
+        fun int(name: String, value: Int) { tag(3, name); nbt.writeInt(value) }
+        fun short(name: String, value: Long) { tag(2, name); nbt.writeShort(value.toInt()) }
+        tag(10, ""); tag(10, "Schematic")
+        int("Version", 3); int("DataVersion", dataVersion)
+        short("Width", width); short("Height", height); short("Length", length)
+        tag(11, "Offset"); nbt.writeInt(3)
+        nbt.writeInt(Math.subtractExact(box.min.x, origin.x))
+        nbt.writeInt(Math.subtractExact(box.min.y, origin.y))
+        nbt.writeInt(Math.subtractExact(box.min.z, origin.z))
+        tag(10, "Blocks"); tag(10, "Palette")
+        palette.forEach { (state, index) -> int(state, index) }
+        nbt.writeByte(0)
+        tag(7, "Data"); nbt.writeInt(data.size()); nbt.write(data.toByteArray())
+        nbt.writeByte(0); nbt.writeByte(0); nbt.writeByte(0)
+    }
+    return output.toByteArray()
 }
 
 /** Exact public columns remain walkable; native body/headroom capture still decides passage. */

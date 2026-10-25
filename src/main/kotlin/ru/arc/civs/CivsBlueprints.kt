@@ -1,7 +1,9 @@
 package ru.arc.civs
 
 import ru.arc.paper.api.*
+import ru.arc.persistence.AtomicFileStore
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -73,16 +75,47 @@ internal object CivsBlueprintGeometry {
 class CivsBlueprints(
     service: ArcSchematicService,
     sourceRoot: Path,
-    capturedRoot: Path,
+    private val capturedRoot: Path,
     private val executor: Executor,
     private val maximumVolume: Int,
+    private val dataVersion: Int = 0,
 ) : AutoCloseable {
     private val source = service.open("arccivs-library", sourceRoot)
     private val captured = service.open("arccivs-construction", capturedRoot)
+    private data class Builtin(val bytes: ByteArray, val sha256: String)
+    private var builtin: CompletableFuture<Builtin>? = null
+    private var closed = false
 
-    /** A marker lookup needs no captured bytes, material bill, transformed block palette or preview surface. */
+    /** Encoded generated source only; decoded snapshots stay with the expiring caller and Core cache. */
+    @Synchronized private fun planBoard(): CompletableFuture<Builtin> {
+        if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
+        builtin?.let { return it }
+        val prepared = CompletableFuture.supplyAsync({
+            val bytes = CivsPlanBoardBlueprint.schematic(dataVersion)
+            val file = AtomicFileStore(capturedRoot, Path.of("builtin", "plan_board", "v1.schem"),
+                CivsStore.MAX_SCHEMATIC_BYTES.toLong(), { value: ByteArray -> value }, { it })
+            file.write(bytes)
+            val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            Builtin(bytes, hash)
+        }, executor)
+        builtin = prepared
+        prepared.whenComplete { _, failure -> if (failure != null) synchronized(this) { if (builtin === prepared) builtin = null } }
+        return prepared
+    }
+
+    private fun sourceSnapshot(id: String): CompletableFuture<ArcSchematicSnapshot> =
+        if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) planBoard().thenCompose {
+            captured.loadVerified("builtin/plan_board/v1", it.sha256, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        }
+        else source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+
+    private fun sourceBytes(id: String, snapshot: ArcSchematicSnapshot): CompletableFuture<ByteArray> =
+        if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) planBoard().thenApply { it.bytes.copyOf() }
+        else source.captureSource(id, snapshot.fileSha256)
+
+    /** A marker lookup needs no material bill, transformed block palette or preview surface. */
     fun controlPosition(building: CivBuilding): CompletableFuture<CivPosition> =
-        source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenApplyAsync({ original ->
+        sourceSnapshot(building.schematicId).thenApplyAsync({ original ->
             requireVolume(original)
             val aligned = CivsBlueprintGeometry.alignment(original, building.anchor, building.rotation / 90,
                 building.rotation, building.entrance)
@@ -106,11 +139,12 @@ class CivsBlueprints(
         fixedEntrance: CivPosition? = null,
     ): CompletableFuture<CivBlueprint> {
         val id = schematicId(style, type, level)
-        return source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES).thenComposeAsync({ original ->
+        return sourceSnapshot(id).thenComposeAsync({ original ->
             requireVolume(original)
             val (anchor, turns, entrance, worldControl) = CivsBlueprintGeometry.alignment(original, placement, facing, exactRotation, fixedEntrance)
-            source.captureSource(id, original.fileSha256).thenComposeAsync({ bytes ->
-                source.transform(original, ArcSchematicTransform(turns, false)).thenApplyAsync({ transformed ->
+            sourceBytes(id, original).thenComposeAsync({ bytes ->
+                val library = if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) captured else source
+                library.transform(original, ArcSchematicTransform(turns, false)).thenApplyAsync({ transformed ->
                     val bounds = CivBox(
                         CivPosition(anchor.x + transformed.minimum.x, anchor.y + transformed.minimum.y, anchor.z + transformed.minimum.z),
                         CivPosition(anchor.x + transformed.maximum.x, anchor.y + transformed.maximum.y, anchor.z + transformed.maximum.z),
@@ -217,7 +251,10 @@ class CivsBlueprints(
 
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 
-    override fun close() { source.close(); captured.close() }
+    override fun close() {
+        synchronized(this) { closed = true; builtin = null }
+        source.close(); captured.close()
+    }
 
     private fun requireVolume(snapshot: ArcSchematicSnapshot) {
         if (snapshot.volume !in 1..maximumVolume.toLong()) throw CivsRejection("building-too-large")
@@ -242,6 +279,7 @@ class CivsBlueprints(
                 BuildingType.TAVERN -> "fundamentals/tavern"
                 BuildingType.BAKERY -> "craftsmanship/luxury/baker"
                 BuildingType.GUARD_TOWER -> "military/guardtower"
+                BuildingType.PLAN_BOARD -> return CivsPlanBoardBlueprint.SCHEMATIC_ID
                 BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD ->
                     return "civs/infrastructure/$style/${type.name.lowercase()}$level"
             }

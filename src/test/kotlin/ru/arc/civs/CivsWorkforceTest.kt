@@ -9,13 +9,15 @@ import java.util.UUID
 class CivsWorkforceTest : FunSpec({
     test("completed workplaces grow with level while an unfinished hut starts with one builder") {
         val city = workforceCity()
-        for (type in BuildingType.entries.filterNot { it.isResidence || it.isInfrastructure || it == BuildingType.GUARD_TOWER }) {
+        for (type in BuildingType.entries.filterNot { it.isResidence || it.isInfrastructure ||
+                it == BuildingType.GUARD_TOWER || it == BuildingType.PLAN_BOARD }) {
             for (level in 1..3) {
                 val building = workforceBuilding(1, type).copy(level = level)
                 CivsRules.slots(city, building) shouldBe level
             }
         }
-        for (type in listOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD))
+        for (type in listOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.WALL, BuildingType.GATE,
+            BuildingType.ROAD, BuildingType.PLAN_BOARD))
             CivsRules.slots(city, workforceBuilding(1, type)) shouldBe 0
         for (level in 1..3) CivsRules.slots(city, workforceBuilding(1, BuildingType.GUARD_TOWER).copy(level = level)) shouldBe 1
         CivsRules.slots(workforceBuilding(2, BuildingType.BUILDER_HUT).copy(phase = BuildingPhase.SITE)) shouldBe 1

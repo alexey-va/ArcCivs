@@ -101,7 +101,8 @@ open class ArcCivsPlugin : JavaPlugin() {
             network = CivsNetworkStore.open(dataRoot, serverId, settings.maximumCities, executor)
             val store = lifecycle.own(CivsStore(dataRoot.resolve("settlements"), executor, settings.maximumCities, network))
             val transfer = lifecycle.own(BungeeBackendTransfer(this) { failure -> logger.log(Level.WARNING, "ArcCivs backend transfer request failed", failure) })
-            val blueprints = lifecycle.own(CivsBlueprints(provider, settings.schematicRoot, store.schematicRoot(), executor, settings.maximumVolume))
+            val blueprints = lifecycle.own(CivsBlueprints(provider, settings.schematicRoot, store.schematicRoot(), executor,
+                settings.maximumVolume, dataVersion = server.unsafe.dataVersion))
             val preview = CivsPreviewRenderer(this, lifecycle.tasks, queue)
             lifecycle.own(AutoCloseable {
                 val failure = runCatching { preview.close() }.exceptionOrNull()

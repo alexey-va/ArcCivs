@@ -8,6 +8,63 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsRulesTest : FunSpec({
+    test("plan board is one ordinary paid plot with no resident job or economic output") {
+        val city = activeCity()
+        val board = building(70, BuildingType.PLAN_BOARD, x = 10, phase = BuildingPhase.ACTIVE)
+        BuildingType.PLAN_BOARD.isInfrastructure shouldBe false
+        BuildingType.PLAN_BOARD.maxLevel shouldBe 1
+        BuildingType.PLAN_BOARD.isResidence shouldBe false
+        CivsRules.cost(BuildingType.PLAN_BOARD, 1) shouldBe Stock(12, 8)
+        CivsAutonomy.cost(BuildingType.PLAN_BOARD, 1) shouldBe Stock(12, 8)
+        rejects("invalid-level") { CivsRules.cost(BuildingType.PLAN_BOARD, 2) }
+        CivsAutonomy.allowedTypes.contains(BuildingType.PLAN_BOARD) shouldBe true
+        CivsAutonomy.profile.contains(BuildingType.PLAN_BOARD) shouldBe false
+        CivsRules.slots(board) shouldBe 0
+        CivsRules.resource(board.type) shouldBe null
+        CivsRules.isDepot(board) shouldBe false
+        CivsRules.productionAvailable(city, board) shouldBe false
+        CivsProduction.options(board.type) shouldBe emptyList()
+        val built = CivsRules.validate(city.copy(buildings = city.buildings + board))
+        CivsRules.buildingCount(built) shouldBe CivsRules.buildingCount(city) + 1
+        CivsRules.capacity(built) shouldBe CivsRules.capacity(city)
+        CivsRules.beds(built) shouldBe CivsRules.beds(city)
+        CivsRules.validate(Gson().fromJson(Gson().toJson(built), Settlement::class.java)) shouldBe built
+        CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java)) shouldBe city
+        val full = city.copy(buildings = city.buildings + (1..15).map {
+            building(200 + it, BuildingType.PLAN_BOARD, x = (it % 5) * 6 + 10, z = (it / 5) * 6,
+                phase = BuildingPhase.ACTIVE)
+        })
+        CivsRules.buildingCount(CivsRules.validate(full)) shouldBe CivsRules.MAX_BUILDINGS
+        rejects("building-limit") { CivsRules.placeSite(full, owner, board.copy(id = uuid(999), anchor = board.anchor.copy(z = 30),
+            bounds = CivBox(CivPosition(9, 64, 29), CivPosition(11, 68, 31)), entrance = CivPosition(10, 64, 32))) }
+    }
+
+    test("physical plan board reserves its exact captured bill and cannot use a legacy prepaid order") {
+        val city = activeCity().copy(stock = Stock(), inventory = CivInventory.starting(Stock()))
+        val board = building(70, BuildingType.PLAN_BOARD, x = 10)
+        val site = CivsRules.placeSite(city, owner, board)
+        val materials = mapOf("STRIPPED_SPRUCE_LOG" to 18L, "STONE_BRICKS" to 6L, "SMOOTH_SANDSTONE" to 15L,
+            "DARK_OAK_STAIRS" to 14L, "DARK_OAK_SLAB" to 7L)
+        val order = CivConstruction(uuid(710), board.id, 1, 4, 0, ConstructionPhase.CONSTRUCTING, Stock(),
+            plannedBuilding = board, batches = CivConstructionBatches(4, 16, atomicPairs = true),
+            materials = materials, payment = CivConstructionPayment())
+        val reserved = CivsRules.reserveBuild(site, owner, board, order)
+        reserved.stock shouldBe Stock()
+        reserved.inventory shouldBe city.inventory
+        reserved.construction!!.materials shouldBe materials
+        reserved.construction!!.payment shouldBe CivConstructionPayment()
+        CivsRules.reserveBuild(reserved, owner, board, order) shouldBe reserved
+        rejects("invalid-construction") { CivsRules.reserveBuild(site, owner, board, order.copy(payment = null)) }
+        rejects("invalid-construction") { CivsRules.reserveBuild(site, owner, board, order.copy(cost = Stock(12, 8))) }
+        val auto = city.copy(stock = Stock(96, 96, 24), inventory = null, workers = emptyList(), autonomy = CivAutonomy())
+        val autoSite = CivsRules.placeSite(auto, owner, board)
+        val autoOrder = order.copy(cost = Stock(12, 8), payment = null)
+        val paid = CivsRules.reserveBuild(autoSite, owner, board, autoOrder)
+        paid.stock shouldBe Stock(84, 88, 24)
+        CivsRules.reserveBuild(paid, owner, board, autoOrder) shouldBe paid
+        paid.construction!!.materials shouldBe materials
+    }
+
     test("resurrection restores the exact surviving belongings and skills with no work assignment or cargo") {
         val base = activeCity()
         val original = base.workers.first().copy(skills = mapOf("QUARRY" to 20L), homeId = base.buildings.first().id,

@@ -53,6 +53,47 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("an administrator places a board in the selected Auto while keeping their personal town") {
+        withUi(realHistory = true) { h ->
+            val personal = settlement(h.player)
+            val village = autonomousSettlement(h.player, "Selected Auto")
+            h.city = personal
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            every { h.host.settlements() } returns listOf(personal, village)
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("ready")
+            every { h.host.beginPlanBoardSelection(h.player, village.id) } answers {
+                h.selection = CivsSelectionView(UUID(83, 100), h.player.world.uid, BuildingType.PLAN_BOARD,
+                    System.currentTimeMillis() + 60_000, true)
+                CompletableFuture.completedFuture(Unit)
+            }
+            h.ui.openAutonomous(h.player, village.id)
+            h.click("plan_board"); h.paper.performTicks(2)
+            verify(exactly = 1) { h.host.beginPlanBoardSelection(h.player, village.id) }
+            verify(exactly = 0) { h.host.beginBuildingSelection(any(), any()); h.host.beginPlanBoardSelection(h.player, personal.id) }
+            h.city shouldBe personal
+            h.selection?.type shouldBe BuildingType.PLAN_BOARD
+            h.ui.showingDialog(h.player) shouldBe false
+
+            h.selection = null
+            h.preview = preview().copy(type = BuildingType.PLAN_BOARD, autonomous = true, cityName = village.name,
+                materials = mapOf("OAK_LOG" to 18L))
+            h.open()
+            h.screen.id shouldBe "civs.preview"
+            h.body() shouldContain village.name
+            h.body().contains(personal.name) shouldBe false
+            h.screen.buttons.map { it.id.value } shouldBe listOf("placement", "villages")
+            h.click("villages")
+            h.screen.id shouldBe "civs.autonomous"
+            h.preview = null
+
+            h.ui.openAutonomous(h.player, village.id)
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            h.click("plan_board")
+            h.screen.id shouldBe "civs.autonomous-denied"
+            verify(exactly = 1) { h.host.beginPlanBoardSelection(any(), any()) }
+        }
+    }
+
     test("city history follows the inspected autonomous visit while the administrator has a personal city") {
         withUi(realHistory = true) { h ->
             val personal = settlement(h.player)
@@ -214,7 +255,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Припасы: 16"
             h.body() shouldContain "Древесина: 12"
             h.body().contains(personal.name) shouldBe false
-            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "pause", "refresh", "villages")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "pause", "refresh", "villages")
             export("resources")
             h.click("buildings")
             h.screen.id shouldBe "civs.autonomous-buildings"
@@ -326,7 +367,7 @@ class CivsUiTest : FunSpec({
             every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("blocked", BuildingType.BUILDER_HUT, 2, "autonomy-no-path")
             every { h.host.retryConstruction(h.player, village.id) } returns CompletableFuture.completedFuture(Unit)
             h.ui.openAutonomous(h.player, village.id)
-            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "retry", "pause", "refresh", "villages")
+            h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "retry", "pause", "refresh", "villages")
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "autonomy-construction-paused-ru", h.screen) }
             h.click("retry"); h.paper.performTicks(2)
             verify(exactly = 1) { h.host.retryConstruction(h.player, village.id) }
@@ -423,7 +464,7 @@ class CivsUiTest : FunSpec({
                         h.screen.id shouldBe "civs.autonomous-city"
                         h.body().contains("Personal") shouldBe false
                         h.body().contains("future-stage") shouldBe false
-                        h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "pause", "refresh", "villages")
+                        h.screen.buttons.map { it.id.value } shouldBe listOf("buildings", "workers", "plan_board", "pause", "refresh", "villages")
                         export(stage)
                     }
                     village = base.copy(workers = emptyList(), buildings = emptyList())
@@ -996,7 +1037,7 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "1 / 2"
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "buildings-infrastructure-$language", h.screen) }
             h.click("catalog")
-            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 13
+            h.screen.buttons.count { it.id.value.startsWith("offer_") } shouldBe 14
             val labels = h.screen.buttons.map { plainText(it.label) }
             for (type in infrastructure.map { it.type }.distinct()) {
                 val name = plainText(CivsText.fromYaml(civsLocaleSource()).building(h.player, type))
@@ -1030,13 +1071,13 @@ class CivsUiTest : FunSpec({
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.open(); h.click("buildings"); h.click("catalog")
             val offers = h.screen.buttons.filter { it.id.value.startsWith("offer_") }
-            offers.size shouldBe 13
+            offers.size shouldBe 14
             h.screen.columns shouldBe 2
-            offers.map { it.label.color() }.distinct().size shouldBe 13
+            offers.map { it.label.color() }.distinct().size shouldBe 14
             h.screen.buttons.map { it.id.value } shouldNotContain "next"
             export("workshops-catalog-first-ru")
-            offers.takeLast(3).map { plainText(it.label) } shouldBe
-                listOf("Таверна ›", "Пекарня ›", "Сторожевая башня ›")
+            offers.takeLast(4).map { plainText(it.label) } shouldBe
+                listOf("Таверна ›", "Пекарня ›", "Сторожевая башня ›", "План поселения ›")
             h.click("offer_7")
             h.body() shouldContain "1 → 2 → 3"
             h.body() shouldContain "желез"
@@ -2620,6 +2661,30 @@ class CivsUiTest : FunSpec({
             h.click("history")
             h.screen.id shouldBe "civs.overview"
             h.body().contains("Without nearby players") shouldBe false
+        }
+    }
+
+    test("the plan board is selectable and its ordinary detail offers no job production or upgrade") {
+        withUi(realHistory = true) { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru-RU"))
+            val base = settlement(h.player)
+            val board = base.buildings.last().copy(id = UUID(83, 17), type = BuildingType.PLAN_BOARD, level = 1,
+                control = CivPosition(6, 65, 2))
+            h.city = base.copy(buildings = base.buildings + board)
+            h.open(); h.click("buildings"); h.click("catalog")
+            repeat(3) {
+                if (h.screen.buttons.none { plainText(it.label).contains("План поселения") }) h.click("next")
+            }
+            val offer = h.screen.buttons.single { plainText(it.label).contains("План поселения") }
+            h.click(offer.id.value)
+            h.screen.id shouldBe "civs.offer"
+            h.body() shouldContain "Большая карта показывает"
+            h.screen.buttons.any { it.id.value == "prepare" } shouldBe true
+            h.ui.openBuilding(h.player, base.id, board.id)
+            h.screen.id shouldBe "civs.building"
+            for (action in listOf("workers", "production", "upgrade", "storage"))
+                h.screen.buttons.map { it.id.value } shouldNotContain action
+            h.screen.buttons.any { it.id.value == "delete_building" } shouldBe true
         }
     }
 

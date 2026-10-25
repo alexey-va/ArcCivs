@@ -108,6 +108,8 @@ interface CivsUiHost {
     fun selection(player: Player): CivsSelectionView?
     fun beginFoundingSelection(player: Player, name: String, style: String): CompletableFuture<Unit>
     fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit>
+    fun beginPlanBoardSelection(player: Player, cityId: UUID): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun selectGround(player: Player, selectionId: UUID, target: CivsGroundTarget): CompletableFuture<Unit>
     fun cancelSelection(player: Player, reason: String)
     fun upgradeBuilding(player: Player, buildingId: UUID): CompletableFuture<Unit>
