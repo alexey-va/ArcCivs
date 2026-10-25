@@ -109,6 +109,7 @@ class CivsService(
     private var loadFailure: String? = null
     private var geometryGeneration = 0L
     private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
+    private val roadMaintenance = CivsRoadMaintenance(world)
     private val layoutDebug = CivsLayoutDebug(plugin.dataFolder.toPath(), tasks, executor, { id ->
         store.loadPlan(id).whenComplete { _, failure ->
             if (failure != null) plugin.logger.log(Level.WARNING, "ArcCivs layout export could not read plan=$id", failure)
@@ -131,7 +132,10 @@ class CivsService(
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
-    private val storage = (storageAdapter ?: CivsStorage(plugin)).also { it.beginReceiptBootstrap() }
+    private val storage = (storageAdapter ?: CivsStorage(plugin)).also {
+        it.beginReceiptBootstrap()
+        it.validateUpkeepNative = ::validateUpkeepNative
+    }
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
@@ -196,7 +200,8 @@ class CivsService(
             if (cities[cityId]?.autonomy != null && player.hasPermission("arccivs.admin")) ui.openAutonomous(player, cityId)
             else if (city(player)?.id == cityId) ui.openWorker(player, cityId, workerId)
         }, settings.maximumNpcs, settings.viewerRange, hurt = ::hurtResident, footstep = footTraffic::record,
-        surfaceSpeed = footTraffic::speed, workPlan = worksites::plan, workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
+        surfaceSpeed = footTraffic::speed, workPlan = { city, worker -> roadMaintenance.plan(city, worker) ?: worksites.plan(city, worker) },
+        workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady,
         backgroundActive = chunkLoading::active,
@@ -204,7 +209,10 @@ class CivsService(
         courierFailed = { cityId, workerId, cargo ->
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
         },
-        workPositionFailed = worksites::rejectStanding,
+        workPositionFailed = { city, worker, work ->
+            if (work.upkeep != null) { roadMaintenance.invalidate(worker.id); true }
+            else worksites.rejectStanding(city, worker, work)
+        },
         residentSupplySource = ::residentSupplySource, prepareSupplies = { c, w, b -> prepareResidentSupplies(c, w, b) },
         craftPlan = ::craftPlan, craftDelivery = ::deliverCraft,
         craftSupplies = { c, w, b, job -> prepareResidentSupplies(c, w, b, job) },
@@ -218,6 +226,7 @@ class CivsService(
     private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
 
     init {
+        world.roadUpkeepResidentOccupied = citizens::growthBlocked
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
@@ -1708,9 +1717,19 @@ class CivsService(
             val city = cities[cityId] ?: throw CivsRejection("no-city")
             val building = city.building(assignment) ?: throw CivsRejection("building-not-found")
             if (CivsRules.isBuilder(city, building)) {
-                rejectIf(city.construction?.id != constructionId, "stale-delivery")
-                citizens.requireConstructionArrival(cityId, workerId, requireNotNull(constructionId))
-                mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
+                if (constructionId == null) {
+                    val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                    rejectIf(worker.assignment != assignment || worker.completedCycles != cycle || worker.nextDeliveryAt != nextAt,
+                        "stale-delivery")
+                    val work = roadMaintenance.plan(city, worker)?.takeIf { it.upkeep != null }
+                        ?: throw CivsRejection("stale-worksite")
+                    citizens.requireWorldWorkArrival(cityId, workerId, work)
+                    autonomousUpkeepMutation(city, work, at)
+                } else {
+                    rejectIf(city.construction?.id != constructionId, "stale-delivery")
+                    citizens.requireConstructionArrival(cityId, workerId, constructionId)
+                    mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }
+                }
             } else if (building.type == BuildingType.UNIVERSITY) {
                 rejectIf(constructionId != null, "stale-delivery")
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
@@ -1820,6 +1839,39 @@ class CivsService(
                 forestry = receipt).also { storage.seal(it, keepViewersOpen = true) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         return journalInventory(tx)
+    }
+
+    private fun autonomousUpkeepMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
+        rejectIf(!CivsRoadMaintenance.eligible(city), "stale-worksite")
+        rejectIf(city.stock.stone <= (CivsAutonomy.nextGoal(city)?.cost?.stone ?: 0L), "materials-missing")
+        val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
+        rejectIf(worker.completedCycles != work.cycle || worker.assignment != work.buildingId, "stale-delivery")
+        rejectIf(at < worker.nextDeliveryAt, "delivery-too-early")
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val tx = try {
+            citizens.requireWorldWorkArrival(city.id, work.workerId, work)
+            rejectIf(!world.roadUpkeepPending(city, work), "stale-worksite")
+            world.validateRoadUpkeep(city, work)
+            val after = CivsRoadMaintenance.complete(city, work, at)
+            CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), worldChanges = work.changes,
+                upkeep = CivRoadUpkeepReceipt(worker, city.stock, work, at)).also { storage.seal(it, keepViewersOpen = true) }
+        } catch (failure: Exception) { storage.unlock(id); throw failure }
+        return journalInventory(tx)
+    }
+
+    /** The same native authority fence covers fresh application and restart recovery. */
+    private fun validateUpkeepNative(tx: CivInventoryTransaction): CivInventoryApplyResult? {
+        val receipt = tx.upkeep ?: return null
+        val current = cities[tx.cityId] ?: return CivInventoryApplyResult.Conflict(mapOf("reason" to "city-unavailable"))
+        return try {
+            world.validateRoadUpkeep(current, receipt.work)
+            null
+        } catch (failure: CivsRejection) {
+            val details = failure.values + ("reason" to failure.reason)
+            if (failure.reason in setOf("world-unavailable", "world-unloaded", "chunk-unloaded", "chunks-unloaded", "road-occupied"))
+                CivInventoryApplyResult.Retry(details) else CivInventoryApplyResult.Conflict(details)
+        }
     }
 
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
@@ -2514,6 +2566,18 @@ class CivsService(
                 blockedRecovery -= tx.cityId
                 storage.unlock(tx.id)
                 if (tx.collected != null) collectedWorldBusy.remove(tx.after.worldId, tx.id)
+                tx.upkeep?.let { receipt ->
+                    val work = receipt.work
+                    val upkeep = requireNotNull(work.upkeep)
+                    footTraffic.registerSurface(tx.cityId, upkeep.floor)
+                    CivsDiagnostics.event("road_upkeep_committed", "city" to tx.cityId, "worker" to work.workerId,
+                        "cycle" to work.cycle, "transaction" to tx.id, "revision" to tx.after.revision,
+                        "source_building" to upkeep.source.id, "floor" to upkeep.floor,
+                        "before" to work.changes.first().before, "after" to upkeep.after,
+                        "cleared_cover" to work.changes.size - 1,
+                        "stone_spent" to receipt.stockBefore.stone - tx.after.stock.stone,
+                        "recovery_path" to (result == null))
+                }
                 // Recovery publication can still be hidden by unhealthy; retry after releasing that gate.
                 requestResurrectionAdmission(tx)
                 physics.enqueue(tx.after.worldId, tx.worldChanges.orEmpty())
@@ -3072,6 +3136,7 @@ class CivsService(
         autonomousAccessChecked.clear()
         autonomousAccessRetryAt.clear()
         forestryRoutes.clear()
+        roadMaintenance.clear()
         supply.clear()
         supplyObservations.clear()
         loadFailure = null
@@ -3621,13 +3686,17 @@ class CivsService(
         val result = tracked<List<CivPlacementPlan>>()
         CompletableFuture.allOf(*plans.toTypedArray()).thenApplyAsync({
             val saved = plans.mapNotNull { it.join() }
-            saved to CivAutonomousAccess.from(city, saved).routes.values.flatten().mapTo(hashSetOf()) { it.x to it.z }
+            Triple(saved, CivAutonomousAccess.from(city, saved).routes.values.flatten().mapTo(hashSetOf()) { it.x to it.z },
+                CivsRoadMaintenance.prepare(city, saved))
         }, executor).whenCompleteSync(tasks) { captured, failure ->
             if (closed) result.completeExceptionally(CivsRejection("not-ready"))
             else if (failure != null) result.completeExceptionally(failure)
             else {
-                val (saved, columns) = requireNotNull(captured)
-                if (cities[city.id]?.buildings == city.buildings) forestryRoutes[city.id] = city.worldId to columns
+                val (saved, columns, upkeep) = requireNotNull(captured)
+                if (cities[city.id]?.buildings == city.buildings) {
+                    forestryRoutes[city.id] = city.worldId to columns
+                    roadMaintenance.publish(city, upkeep)
+                }
                 result.complete(saved)
             }
         }
@@ -4363,6 +4432,7 @@ class CivsService(
             .getOrElse { CompletableFuture.failedFuture(it) }
         autonomyRequests.clear()
         autonomyLayoutChecked.clear()
+        roadMaintenance.clear()
         supply.close()
         HandlerList.unregisterAll(this)
         placementAccess.clear()

@@ -42,7 +42,8 @@ internal fun citizenTool(plan: CitizenPlan): Material? = when (plan.type) {
 }
 
 internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
-    plan.type != BuildingType.BUILDER_HUT && plan.type != BuildingType.GUARD_TOWER && plan.idleReason == null &&
+    (plan.type != BuildingType.BUILDER_HUT || plan.worldWork?.upkeep != null) &&
+        plan.type != BuildingType.GUARD_TOWER && plan.idleReason == null &&
         (phase == CitizenPhase.WORKING || plan.worldWork != null && phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING))
 
 /** Watering reuses the accepted crop/sapling care; fertilizer belongs only to a farmer's paid inputs. */

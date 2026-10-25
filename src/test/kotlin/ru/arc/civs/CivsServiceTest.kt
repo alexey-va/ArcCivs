@@ -1245,6 +1245,93 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("Auto road upkeep waits for the observed builder and its exact journal before spending one stone") {
+        serviceScenario { h ->
+            val upkeep = ServiceRoadUpkeep(h)
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            upkeep.publish()
+            every { h.citizens.requireWorldWorkArrival(upkeep.city.id, upkeep.worker.id, upkeep.work) } throws
+                CivsRejection("route-unreachable")
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { upkeep.deliver().join() })?.reason shouldBe "route-unreachable"
+            receipt shouldBe null
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            every { h.citizens.requireWorldWorkArrival(upkeep.city.id, upkeep.worker.id, upkeep.work) } returns Unit
+            val result = upkeep.deliver()
+            val tx = requireNotNull(receipt)
+            tx.upkeep!!.work shouldBe upkeep.work
+            tx.worldChanges shouldBe upkeep.work.changes
+            tx.changes shouldBe emptyList()
+            tx.after.stock shouldBe upkeep.city.stock.copy(stone = upkeep.city.stock.stone - 1)
+            tx.after.workers.single().copy(completedCycles = upkeep.worker.completedCycles,
+                nextDeliveryAt = upkeep.worker.nextDeliveryAt) shouldBe upkeep.worker
+            h.service.settlements().single().stock shouldBe upkeep.city.stock
+            h.saves shouldBe emptyList()
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            result.isDone shouldBe false
+            journal.complete(tx)
+            h.tickUntil("road patch after its journal") { h.saves.isNotEmpty() }
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.COBBLESTONE
+            h.service.settlements().single().stock shouldBe upkeep.city.stock
+            h.commit()
+            result.join().stock shouldBe tx.after.stock
+            upkeep.deliver().isCompletedExceptionally shouldBe true
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.citizens.requireConstructionArrival(any(), any(), any()) }
+        }
+    }
+
+    test("native road authority revoked after journal acknowledgement prevents the patch and city credit") {
+        serviceScenario { h ->
+            val upkeep = ServiceRoadUpkeep(h)
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); journal }
+            h.start()
+            upkeep.publish()
+            val result = upkeep.deliver()
+            val tx = requireNotNull(receipt)
+            every { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) } throws CivsRejection("lands-denied")
+            journal.complete(tx)
+            h.tickUntil("upkeep authority rejection") { result.isDone }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { result.join() })?.reason shouldBe "inventory-conflict"
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            h.service.settlements().single().stock shouldBe upkeep.city.stock
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("a committed upkeep receipt recovers its native patch without requiring spare stock or a new actor arrival") {
+        mockkConstructor(CivsFootTraffic::class)
+        try {
+            every { anyConstructed<CivsFootTraffic>().registerSurface(any(), any()) } returns Unit
+            serviceScenario { h ->
+                val upkeep = ServiceRoadUpkeep(h)
+                val reserve = CivsAutonomy.nextGoal(upkeep.city)?.cost?.stone ?: 0L
+                val before = upkeep.city.copy(stock = upkeep.city.stock.copy(stone = reserve + 1))
+                val after = CivsRoadMaintenance.complete(before, upkeep.work, h.time)
+                val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, emptyList(),
+                    worldChanges = upkeep.work.changes, upkeep = CivRoadUpkeepReceipt(upkeep.worker, before.stock, upkeep.work, h.time)).validated()
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(after))
+                every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+                every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+                h.start()
+                h.tickUntil("recovered committed road patch") { h.world.getBlockAt(20, 63, 0).type == Material.COBBLESTONE }
+                h.tick()
+                h.service.settlements().single().stock.stone shouldBe reserve
+                h.service.settlements().single().workers.single().completedCycles shouldBe 1L
+                h.saves shouldBe emptyList()
+                verify(exactly = 0) { h.citizens.requireWorldWorkArrival(any(), any(), any()) }
+                verify(exactly = 1) { h.worldAdapter.validateRoadUpkeep(after, upkeep.work) }
+                verify(exactly = 1) { anyConstructed<CivsFootTraffic>().registerSurface(after.id, upkeep.work.changes.single().position) }
+            }
+        } finally { unmockkConstructor(CivsFootTraffic::class) }
+    }
+
     test("useful crop care requires arrival at the plot and commits its cycle only through the journal") {
         serviceScenario { h ->
             val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)
@@ -5146,6 +5233,45 @@ class CivsServiceTest : FunSpec({
         }
     }
 })
+
+private class ServiceRoadUpkeep(private val h: ServiceScenario) {
+    private val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT)
+    private val floor = CivPosition(20, 63, 0)
+    private val road = CivBuilding(UUID.randomUUID(), BuildingType.ROAD, 1, floor, 0, "civs/infrastructure/test-road",
+        CivBox(floor, floor.copy(y = 65)), floor.copy(y = 64), BuildingPhase.ACTIVE,
+        transit = listOf(floor.copy(y = 64)))
+    val worker = h.city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1)
+    val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+        buildings = listOf(h.city.buildings.first(), hut, road), workers = listOf(worker)))
+    val work = CivWorldWork(worker.id, worker.completedCycles, hut.id, floor.copy(x = 19, y = 64),
+        listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone")), status = "repairing-road", focus = floor,
+        upkeep = CivRoadUpkeep(city.id, city.worldId, city.owner, road.id, road, floor, "minecraft:cobblestone", null, emptyList()))
+    private val plan = CivPlacementPlan(road.id, city.id, city.worldId, road,
+        listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone")), "a".repeat(64))
+
+    init {
+        h.world.loadChunk(1, 0)
+        h.world.getBlockAt(20, 63, 0).type = Material.DIRT
+        h.world.getBlockAt(20, 62, 0).type = Material.STONE
+        every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+        every { h.worldAdapter.captureRoadUpkeep(any(), worker, any()) } answers {
+            work.takeIf { h.world.getBlockAt(20, 63, 0).type == Material.DIRT }
+        }
+        every { h.worldAdapter.roadUpkeepPending(any(), work) } answers { h.world.getBlockAt(20, 63, 0).type == Material.DIRT }
+    }
+
+    fun publish() {
+        val runtime = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+            .get(h.service) as CivsRoadMaintenance
+        runtime.publish(city, CivsRoadMaintenance.prepare(city, listOf(plan)))
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun deliver(): CompletableFuture<Settlement> = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java,
+        UUID::class.java, UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+        .also { it.isAccessible = true }.invoke(h.service, city.id, worker.id, hut.id, worker.completedCycles,
+            worker.nextDeliveryAt, null, h.time) as CompletableFuture<Settlement>
+}
 
 /** A distinct paused Auto city makes the target, domain owner and grant-free admission observable. */
 private class ServiceAutoBoard(private val h: ServiceScenario) {

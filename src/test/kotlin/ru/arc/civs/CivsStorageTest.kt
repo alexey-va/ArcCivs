@@ -474,6 +474,41 @@ class CivsStorageTest : FunSpec({
         paper.playerDataSaveCount(player) shouldBe saves
     }
 
+    test("Auto upkeep is fail closed without native authority and rechecks the same authority on every replay") {
+        val (before, receipt) = upkeepStorageReceipt(city)
+        val floor = receipt.worldChanges!!.single().position
+        world.getBlockAt(floor.x, floor.y, floor.z).type = Material.DIRT
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "upkeep-authority-unavailable"
+        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.DIRT
+        var checks = 0
+        storage.validateUpkeepNative = { checks++; null }
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        checks shouldBe 2
+        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
+        receipt.after.stock shouldBe before.stock.copy(stone = before.stock.stone - 1)
+        receipt.after.workers.single().copy(completedCycles = 0, nextDeliveryAt = 1) shouldBe before.workers.single()
+    }
+
+    test("upkeep recovery preserves neighbour derived stair shape but rejects a changed facing") {
+        val after = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+        val (before, receipt) = upkeepStorageReceipt(city, after)
+        val floor = receipt.worldChanges!!.single().position
+        val corner = after.replace("shape=straight", "shape=inner_left")
+        world.getBlockAt(floor.x, floor.y, floor.z).blockData = org.bukkit.Bukkit.createBlockData(corner)
+        storage.replaceCities(listOf(before))
+        storage.reserve(before, receipt.id)
+        storage.seal(receipt)
+        storage.validateUpkeepNative = { null }
+        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        world.getBlockAt(floor.x, floor.y, floor.z).blockData.asString shouldBe corner
+        world.getBlockAt(floor.x, floor.y, floor.z).blockData = org.bukkit.Bukkit.createBlockData(after.replace("facing=east", "facing=west"))
+        (storage.reconcile(receipt) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "world-cell-drift"
+    }
+
     test("physical work exchanges inputs outputs and exact world cells through one replayable receipt") {
         city = city.copy(inventory = city.inventory!!.copy(mode = CivStorageMode.PHYSICAL))
         barrel.setItem(0, ItemStack(Material.OAK_LOG, 2))
@@ -2015,6 +2050,24 @@ class CivsStorageTest : FunSpec({
         barrel.isEmpty shouldBe true
     }
 })
+
+private fun upkeepStorageReceipt(base: Settlement, surface: String = "minecraft:cobblestone"): Pair<Settlement, CivInventoryTransaction> {
+    val hut = CivBuilding(UUID.randomUUID(), BuildingType.BUILDER_HUT, 1, CivPosition(10, 64, 0), 0, "builder1",
+        CivBox(CivPosition(9, 64, -1), CivPosition(11, 68, 1)), CivPosition(10, 64, -2), BuildingPhase.ACTIVE)
+    val floor = CivPosition(6, 63, 0)
+    val road = CivBuilding(UUID.randomUUID(), BuildingType.ROAD, 1, floor, 0, "civs/infrastructure/test-road",
+        CivBox(floor, floor.copy(y = 65)), floor.copy(y = 64), BuildingPhase.ACTIVE,
+        transit = listOf(floor.copy(y = 64)))
+    val worker = CivWorker(UUID.randomUUID(), "Builder", hut.id, nextDeliveryAt = 1)
+    val city = CivsRules.validate(base.copy(inventory = null, autonomy = CivAutonomy(), stock = Stock(96, 96, 24),
+        buildings = listOf(base.buildings.first().copy(phase = BuildingPhase.ACTIVE), hut, road), workers = listOf(worker)))
+    val work = CivWorldWork(worker.id, worker.completedCycles, hut.id, floor.copy(x = 5, y = 64),
+        listOf(CivPlanBlock(floor, "minecraft:dirt", surface)), status = "repairing-road", focus = floor,
+        upkeep = CivRoadUpkeep(city.id, city.worldId, city.owner, road.id, road, floor, surface, null, emptyList()))
+    val after = CivsRoadMaintenance.complete(city, work, 1_000)
+    return city to CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
+        worldChanges = work.changes, upkeep = CivRoadUpkeepReceipt(worker, city.stock, work, 1_000)).validated()
+}
 
 private fun transaction(id: UUID, city: Settlement, plan: CivStoragePlan) = CivInventoryTransaction(
     id, city.id, city.revision, city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes, plan.playerDebit,

@@ -1020,6 +1020,12 @@ class CivsCitizens(
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
         var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
         if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
+        if (base.type == BuildingType.BUILDER_HUT && base.idleReason == "no-construction" && CivsRoadMaintenance.eligible(city)) {
+            workPlan(city, worker)?.takeIf { it.upkeep != null }?.let { work ->
+                base = base.copy(workplace = work.standing, workMillis = work.durationMillis, idleReason = null,
+                    completeAtWorkplace = true, worldWork = work)
+            }
+        }
         if (city.autonomy != null && base.type == BuildingType.BUILDER_HUT) {
             base.token.constructionId?.let { orderId ->
                 constructionWorkplace(city.id, orderId)?.let { base = base.copy(workplace = it) }
@@ -1831,7 +1837,7 @@ class CivsCitizens(
     }
 
     private fun animateWork(actor: Actor, city: Settlement, world: World, now: Long) {
-        if (actor.plan.type == BuildingType.BUILDER_HUT) {
+        if (actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.worldWork?.upkeep == null) {
             val order = city.construction ?: return
             val target = constructionFocus(city.id, order.id) ?: return
             constructionBuilder(actor, city, order.id)?.let { lookAtBlock(it, target) }
@@ -2495,7 +2501,7 @@ class CivsCitizens(
                 (actor.route?.replanAttempts ?: 0) >= 2) pause(actor, status, now)
             return
         }
-        if (retryMineWorkPosition(actor, detail)) return
+        if (retryWorkPosition(actor, detail)) return
         if (actor.plan.courier?.let { !it.carrying && it.cargo.sourceWorkerId != null } == true) {
             pause(actor, status, now)
             return
@@ -2504,10 +2510,10 @@ class CivsCitizens(
     }
 
     /** A failed final approach rejects this stance, leaving the same physical action to its planner. */
-    private fun retryMineWorkPosition(actor: Actor, detail: String): Boolean {
+    private fun retryWorkPosition(actor: Actor, detail: String): Boolean {
         val route = actor.route ?: return false
         val work = actor.plan.worldWork ?: return false
-        if (actor.plan.type != BuildingType.QUARRY || work.miningStep == null ||
+        if (!(actor.plan.type == BuildingType.QUARRY && work.miningStep != null || work.upkeep != null) ||
             actor.cycle.phase != CitizenPhase.TO_WORK || actor.plan.courier != null ||
             actor.sheltering || actor.returningToWarehouse || actor.attacker != null || actor.foodSource != null ||
             route.intermediate || route.idleAnchor != null || route.authored != work.standing || route.motion.searching) return false
@@ -2689,6 +2695,7 @@ class CivsCitizens(
     /** A proven failed route may recover to a freshly validated loaded endpoint, never into a wall. */
     private fun recoverNavigation(actor: Actor, target: Location, now: Long, idleAnchor: CivPosition? = null): Boolean {
         val failed = actor.route ?: return false
+        if (actor.plan.worldWork?.upkeep != null) return false
         // Planning latency, denied passages and player obstruction never authorize a recovery teleport.
         if (failed.motion.searching || failed.motion.waitingForCollision || failed.nativeCollisionTicks > 0 ||
             now < actor.nextRecoveryAt || actor.attacker != null) return false

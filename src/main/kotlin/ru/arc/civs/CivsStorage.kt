@@ -129,13 +129,14 @@ data class CivInventoryTransaction(
     val resurrection: CivResurrectionDebit? = null,
     val collected: CivCollectedTransfer? = null,
     val forestry: CivForestryReceipt? = null,
+    val upkeep: CivRoadUpkeepReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
-        require(after.inventory != null || resurrection != null || collected != null || forestry != null || after.autonomy != null && residentTransfer != null)
-        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry).size <= 1)
+        require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null || after.autonomy != null && residentTransfer != null)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep).size <= 1)
         collected?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -144,8 +145,12 @@ data class CivInventoryTransaction(
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
-        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || worldChanges.orEmpty().isEmpty()))
+        if (after.inventory == null) require(changes.isEmpty() && (forestry != null || upkeep != null || worldChanges.orEmpty().isEmpty()))
         forestry?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
+            it.validated(after)
+        }
+        upkeep?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
             it.validated(after)
         }
@@ -233,6 +238,9 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedGround = mutableMapOf<UUID, UUID>()
     private val homeCursors = mutableMapOf<UUID, Int>()
     internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
+    internal var validateUpkeepNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "upkeep-authority-unavailable"))
+    }
     private val nativePersistenceDelegate = lazy { CivsNativePersistence(plugin) { collectedChunkLease(it) } }
     private val nativePersistence by nativePersistenceDelegate
     internal var persistCollectedNative: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { tx, before ->
@@ -424,6 +432,7 @@ class CivsStorage(private val plugin: Plugin,
                 revision = claim.city.revision) == claim.city)
         }
         transaction.forestry?.let { require(it.before(transaction.after) == claim.city) }
+        transaction.upkeep?.let { require(it.before(transaction.after) == claim.city) }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
         }
@@ -1217,6 +1226,11 @@ class CivsStorage(private val plugin: Plugin,
         if (playerState is CivInventoryApplyResult.Conflict || playerState is CivInventoryApplyResult.Retry) return playerState
         val containerState = classify(transaction, resolved)
         if (containerState is CivInventoryApplyResult.Conflict) return containerState
+        if (transaction.upkeep != null) when (val authority = validateUpkeepNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
         if (player == null && containerState == CivInventoryApplyResult.Applied && worldState == CivInventoryApplyResult.Applied &&
             collectedState == CivInventoryApplyResult.Applied) return containerState
         var playerPersisted = player == null
@@ -1244,7 +1258,7 @@ class CivsStorage(private val plugin: Plugin,
             }
             transaction.worldChanges.orEmpty().forEach { cell ->
                 val (block, after) = worldCells.getValue(cell.position)
-                if (block.blockData.asString != cell.after) block.setBlockData(after, false)
+                if (!worldAfterMatches(transaction, block.blockData, after)) block.setBlockData(after, false)
             }
             transaction.collected?.let { collected ->
                 val world = requireNotNull(plugin.server.getWorld(transaction.after.worldId))
@@ -1400,14 +1414,18 @@ class CivsStorage(private val plugin: Plugin,
     private fun classifyWorld(transaction: CivInventoryTransaction, cells: Map<CivPosition, Pair<Block, BlockData>>): CivInventoryApplyResult? {
         var pending = false
         transaction.worldChanges.orEmpty().forEach { cell ->
-            val current = cells.getValue(cell.position).first.blockData.asString
-            if (current != cell.after) {
-                if (current != cell.before) return CivInventoryApplyResult.Conflict(worldDetails(transaction, cell, "world-cell-drift") + ("actual" to current))
+            val (block, after) = cells.getValue(cell.position)
+            val current = block.blockData
+            if (!worldAfterMatches(transaction, current, after)) {
+                if (current.asString != cell.before) return CivInventoryApplyResult.Conflict(worldDetails(transaction, cell, "world-cell-drift") + ("actual" to current.asString))
                 pending = true
             }
         }
         return if (pending) null else CivInventoryApplyResult.Applied
     }
+
+    private fun worldAfterMatches(transaction: CivInventoryTransaction, actual: BlockData, expected: BlockData): Boolean =
+        actual.asString == expected.asString || transaction.upkeep != null && CivsWorld.sameConstructionState(actual, expected)
 
     private fun completedNativeState(transaction: CivInventoryTransaction, sources: Map<CivPosition, Source>, cells: Map<CivPosition, Pair<Block, BlockData>>): CivInventoryApplyResult {
         val containers = classify(transaction, sources)

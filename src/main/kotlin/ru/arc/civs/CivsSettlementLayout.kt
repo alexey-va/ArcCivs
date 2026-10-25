@@ -383,16 +383,6 @@ internal object CivsSettlementLayout {
         }
         val pavedFloors = pieces.filter { it.type == BuildingType.ROAD || it.type == BuildingType.GATE }
             .flatMap { it.transit }.associate { key(it) to it.y - 1 } + roads.mapValues { it.value.y }
-        fun pavement(floor: CivPosition): String {
-            val lower = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).filter { (dx, dz) ->
-                pavedFloors[key(floor.x + dx, floor.z + dz)] == floor.y - 1
-            }.singleOrNull() ?: return path
-            val (dx, dz) = lower
-            val next = pavedFloors[key(floor.x - dx, floor.z - dz)] ?: return path
-            if (next !in floor.y..floor.y + 1) return path
-            val facing = when { dx == 1 -> "west"; dx == -1 -> "east"; dz == 1 -> "north"; else -> "south" }
-            return "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
-        }
         // Fixed horizontal rectangles retain each column's own grade, including stepped roads.
         // Accepted rectangles were removed above, so later routes never repartition earlier orders.
         while (roads.isNotEmpty()) {
@@ -407,7 +397,7 @@ internal object CivsSettlementLayout {
             val transit = mutableListOf<CivPosition>()
             for (x in p.x until p.x + width) for (z in p.z until p.z + depth) {
                 val floor = requireNotNull(roads.remove(key(x, z)))
-                cells += CivSettlementBlock(floor, pavement(floor))
+                cells += CivSettlementBlock(floor, pavement(floor, pavedFloors))
                 for (dy in 1..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:air")
                 transit += floor.copy(y = floor.y + 1)
             }
@@ -429,6 +419,18 @@ internal object CivsSettlementLayout {
             }
         }) }
         return CivSettlementInfrastructure(repaired, rejected, closed, blockers.values.toList())
+    }
+
+    /** Construction and upkeep share the same unchanged grade and downhill-facing half step. */
+    internal fun pavement(floor: CivPosition, floors: Map<Long, Int>): String {
+        val lower = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).filter { (dx, dz) ->
+            floors[key(floor.x + dx, floor.z + dz)] == floor.y - 1
+        }.singleOrNull() ?: return "minecraft:cobblestone"
+        val (dx, dz) = lower
+        val next = floors[key(floor.x - dx, floor.z - dz)] ?: return "minecraft:cobblestone"
+        if (next !in floor.y..floor.y + 1) return "minecraft:cobblestone"
+        val facing = when { dx == 1 -> "west"; dx == -1 -> "east"; dz == 1 -> "north"; else -> "south" }
+        return "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
     }
 
     private fun insideCore(frame: CivSettlementFrame, p: CivPosition, inset: Int): Boolean =

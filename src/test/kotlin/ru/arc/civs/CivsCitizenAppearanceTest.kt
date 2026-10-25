@@ -3,6 +3,7 @@ package ru.arc.civs
 import com.google.gson.JsonParser
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.mockk
 import org.bukkit.Material
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.net.URI
@@ -124,6 +125,19 @@ class CivsCitizenAppearanceTest : FunSpec({
         val placing = appearancePlan(BuildingType.BUILDER_HUT, "placing")
         citizenWorking(placing, CitizenPhase.IDLE) shouldBe false
         citizenWorking(placing, CitizenPhase.CLOSED) shouldBe false
+    }
+
+    test("an admitted road upkeep uses the ordinary work gesture only at its work phases") {
+        val base = appearancePlan(BuildingType.BUILDER_HUT)
+        val point = requireNotNull(base.workplace)
+        val work = CivWorldWork(UUID(0, 9), 0, UUID(0, 10), point,
+            listOf(CivPlanBlock(point.copy(y = point.y - 1), "minecraft:dirt", "minecraft:cobblestone")),
+            status = "repairing-road", upkeep = mockk<CivRoadUpkeep>())
+        val plan = base.copy(worldWork = work)
+        for (phase in CitizenPhase.entries) citizenWorking(plan, phase) shouldBe
+            (phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING))
+        citizenWorking(plan.copy(idleReason = "no-construction"), CitizenPhase.WORKING) shouldBe false
+        citizenTool(plan) shouldBe null // No invented held item; the actual resident HAND remains authoritative.
     }
 
     test("only a matching stationary builder presents accepted materials and a timer never fabricates a placement") {

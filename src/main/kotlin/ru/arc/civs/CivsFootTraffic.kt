@@ -21,9 +21,9 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         if (city.worldId != from.world?.uid || city.worldId != to.world?.uid ||
             city.workers.none { it.id == workerId } || !city.contains(from.blockX, from.blockZ) ||
             !city.contains(to.blockX, to.blockZ)) return
-        // Building soil may wear too; Trails owns the terrain palette and permission checks.
-        // Cultivated plots remain crops rather than shortcuts through a field.
-        if (civsProtectedBuildings(city).any { CivsWorksiteLayouts.isField(it, from.blockX, from.blockZ) }) return
+        // NPC traffic must not paint present or reserved upgrade territory. Player Trails policy is independent.
+        if (civsFootTrafficBuildingTerritory(city, from.blockX, from.blockZ) ||
+            civsFootTrafficBuildingTerritory(city, to.blockX, to.blockZ)) return
         val authority = (sequenceOf(city.owner) + city.members.asSequence()).mapNotNull(plugin.server::getPlayer)
             .firstOrNull { it.isOnline && !it.hasMetadata("NPC") && it.world.uid == city.worldId } ?: return
         try {
@@ -70,6 +70,10 @@ internal class CivsFootTraffic(private val plugin: Plugin, private val cities: (
         plugin.logger.log(java.util.logging.Level.WARNING, "NPC footstep could not be processed by Trails", failure)
     }
 }
+
+internal fun civsFootTrafficBuildingTerritory(city: Settlement, x: Int, z: Int): Boolean =
+    civsProtectedBuildings(city).any { !it.type.isInfrastructure &&
+        CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(city, it), CivPosition(x, 0, z)) }
 
 private object CivsTrailsAdapter {
     fun registerSurface(plugin: Plugin, ground: org.bukkit.block.Block): CompletionStage<Boolean>? =

@@ -26,6 +26,7 @@ data class CivWorldWork(
     /** Already inspected passage prefix, distinct from the cursor this receipt will commit. */
     val miningAccessStep: Long? = null,
     val forestry: CivForestryProgress? = null,
+    val upkeep: CivRoadUpkeep? = null,
 ) {
     val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
 

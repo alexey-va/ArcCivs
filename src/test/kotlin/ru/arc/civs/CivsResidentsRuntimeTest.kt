@@ -2615,7 +2615,9 @@ class CivsResidentsRuntimeTest : FunSpec({
                 walked += distance
                 if (actor.location.distance(origin) >= 2.0) break
             }
-            withClue("position=${actor.location} ${h.navigationState()}") { (walked >= 2.0) shouldBe true }
+            withClue("origin=$origin position=${actor.location} walked=$walked displacement=${actor.location.distance(origin)} ${h.navigationState()}") {
+                (walked >= 2.0 - 1e-6) shouldBe true
+            }
             // PacketPlayerNpc.teleport also emits ordinary per-tick walking positions;
             // the bounded displacement above excludes a recovery jump.
             h.spawns shouldBe spawns
@@ -3342,6 +3344,85 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("an idle Auto builder walks to road upkeep and waits for its exact native work receipt") {
+        residentRuntime { h ->
+            val work = h.assignRoadUpkeep()
+            val floor = requireNotNull(work.upkeep).floor
+            val actor = h.owner.collisionActors().single()
+            val spawns = h.spawns
+            var walked = 0.0
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.TO_WORK
+            shouldThrow<CivsRejection> { h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work) }.reason shouldBe "route-unreachable"
+            for (tick in 1..300) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(2_000 + tick * 50L)
+                val distance = before.distance(actor.location)
+                withClue("upkeep movement tick=$tick from=$before to=${actor.location}") { (distance <= .172001) shouldBe true }
+                walked += distance
+                if (h.deliveries != 0) break
+            }
+            h.deliveries shouldBe 1
+            h.phase() shouldBe CitizenPhase.DELIVERING
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.owner.status(h.workerId) shouldBe "workers.status.repairing-road"
+            // Packet teleport also carries normal walking frames; the stride bound excludes recovery jumps.
+            (walked >= 1.0) shouldBe true
+            h.spawns shouldBe spawns
+            h.pendingDelivery.isDone shouldBe false
+            h.city.workers.single().completedCycles shouldBe 0L
+            h.world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.STONE
+        }
+    }
+
+    test("blocked road upkeep rejects its stance without teleport or credit then resumes a real walk") {
+        residentRuntime { h ->
+            val work = h.assignRoadUpkeep()
+            val actor = h.owner.collisionActors().single()
+            val spawns = h.spawns
+            val walls = (-2..2).flatMap { x -> (-2..2).flatMap { z ->
+                if (kotlin.math.abs(x) == 2 || kotlin.math.abs(z) == 2) (64..67).map { y -> CivPosition(x, y, z) }
+                else emptyList()
+            } }
+            walls.forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.STONE }
+            h.onWorkPositionFailed = { _, _, _ -> h.work = null; true }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            var ticks = 0
+            while (ticks < 240 && h.failedWorkPositions.isEmpty()) {
+                ticks++
+                val before = actor.location
+                h.navigate()
+                if (ticks % 20 == 0) h.owner.pulse(2_000 + ticks * 50L)
+                withClue("blocked upkeep movement tick=$ticks from=$before to=${actor.location}") {
+                    (before.distance(actor.location) <= .172001) shouldBe true
+                }
+            }
+            h.failedWorkPositions shouldBe listOf(work)
+            h.deliveries shouldBe 0
+            h.spawns shouldBe spawns
+            h.city.workers.single().completedCycles shouldBe 0L
+            walls.forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.AIR }
+            h.work = work
+            h.onWorkPositionFailed = { _, _, _ -> false }
+            for (step in 1..300) {
+                ticks++
+                val before = actor.location
+                h.navigate()
+                if (ticks % 20 == 0) h.owner.pulse(2_000 + ticks * 50L)
+                withClue("resumed upkeep movement tick=$ticks from=$before to=${actor.location}") {
+                    (before.distance(actor.location) <= .172001) shouldBe true
+                }
+                if (h.deliveries != 0) break
+            }
+            h.deliveries shouldBe 1
+            h.spawns shouldBe spawns
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+        }
+    }
+
     test("physical nudges preserve a pending receipt and stop at native walls") {
         residentRuntime { h ->
             val farm = h.assignFarm()
@@ -3738,6 +3819,19 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     }
     fun assignQuarry(): CivBuilding = assignFarm().copy(type = BuildingType.QUARRY, schematicId = "miner1", production = "COBBLESTONE").also { quarry ->
         city = CivsRules.validate(city.copy(buildings = city.buildings.map { if (it.id == quarry.id) quarry else it }))
+    }
+    fun assignRoadUpkeep(): CivWorldWork {
+        val hut = assignFarm().copy(type = BuildingType.BUILDER_HUT, production = null)
+        val floor = CivPosition(6, 63, 0)
+        val road = CivBuilding(UUID.randomUUID(), BuildingType.ROAD, 1, floor, 0, "civs/infrastructure/test-road",
+            CivBox(floor, floor.copy(y = 65)), floor.copy(y = 64), BuildingPhase.ACTIVE,
+            transit = listOf(floor.copy(y = 64)))
+        city = CivsRules.validate(city.copy(autonomy = CivAutonomy(), inventory = null, stock = Stock(96, 96, 24),
+            buildings = city.buildings.map { if (it.id == hut.id) hut else it } + road))
+        return CivWorldWork(workerId, 0, hut.id, floor.copy(x = 5, y = 64),
+            listOf(CivPlanBlock(floor, "minecraft:stone", "minecraft:cobblestone")), status = "repairing-road", focus = floor,
+            upkeep = CivRoadUpkeep(city.id, city.worldId, city.owner, road.id, road, floor,
+                "minecraft:cobblestone", null, emptyList())).also { work = it }
     }
     fun prepareMineWork(standing: CivPosition, focus: CivPosition = CivPosition(25, 64, 0),
                         anchor: CivPosition = CivPosition(19, 75, 12)): CivWorldWork {
