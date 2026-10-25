@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import com.destroystokyo.paper.entity.Pathfinder
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.assertions.withClue
@@ -951,6 +952,79 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("effective immortal residents finish observed work without mob aggro or an injury receipt") {
+        residentRuntime { h ->
+            h.testingAllowed = true
+            h.city = h.city.copy(settings = CivSettlementSettings(immortalResidents = true),
+                workers = h.city.workers.map { it.copy(health = 1.0) })
+            val work = h.beginCare("watering")
+            val actor = h.owner.collisionActors().single()
+            val at = actor.location
+            val monster = h.monsterAt(24.5, .5)
+            val monsterPathfinder = mockk<Pathfinder>(relaxed = true)
+            every { monster.pathfinder } returns monsterPathfinder
+            for (now in 3_000L..6_000L step 1_000L) {
+                h.owner.pulse(now)
+                h.navigate()
+                actor.location.toVector() shouldBe at.toVector()
+            }
+            h.deliveries shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            h.hits shouldBe 0
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            h.combatState()["attacker"] shouldBe null
+            verify(exactly = 0) { monsterPathfinder.moveTo(any<Location>(), any<Double>()) }
+            verify(exactly = 0) { monster.damage(any<Double>()) }
+        }
+    }
+
+    for (revocation in listOf("setting", "permission"))
+    test("enabling effective immortality clears stale combat in place and $revocation revocation restores it") {
+        residentRuntime { h ->
+            h.city = h.city.copy(settings = CivSettlementSettings(immortalResidents = true),
+                workers = h.city.workers.map { it.copy(health = 1.0) })
+            h.beginCare("watering")
+            h.phase() shouldBe CitizenPhase.WORKING
+            val actor = h.owner.collisionActors().single()
+            val monster = h.monsterAt(24.5, .5)
+            val monsterPathfinder = mockk<Pathfinder>(relaxed = true)
+            every { monster.pathfinder } returns monsterPathfinder
+            h.navigationNow = 2_000
+            h.owner.pulse(3_000)
+            h.navigate()
+            h.owner.pulse(4_000)
+            // The persisted flag alone cannot suppress ordinary threats without the existing permission.
+            h.owner.status(h.workerId) shouldBe "workers.status.retreating"
+            h.combatState()["attacker"] shouldBe monster.uniqueId
+            val combatRoute = requireNotNull(h.routeIdentity())
+            val at = actor.location
+
+            h.testingAllowed = true
+            h.owner.pulse(5_000)
+            h.combatState()["attacker"] shouldBe null
+            h.combatState()["target"] shouldBe null
+            h.combatState()["status"] shouldBe null
+            (h.routeIdentity() !== combatRoute) shouldBe true
+            h.phase() shouldBe CitizenPhase.WORKING
+            h.owner.status(h.workerId) shouldBe "workers.status.watering"
+            actor.location.toVector() shouldBe at.toVector()
+            repeat(20) { h.navigate() }
+            actor.location.toVector() shouldBe at.toVector()
+            h.hits shouldBe 0
+            verify(exactly = 1) { monsterPathfinder.stopPathfinding() }
+
+            if (revocation == "setting") h.city = h.city.copy(settings = CivSettlementSettings())
+            else h.testingAllowed = false
+            h.owner.pulse(6_000)
+            h.navigate()
+            h.owner.pulse(7_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.retreating"
+            h.combatState()["attacker"] shouldBe monster.uniqueId
+            h.deliveries shouldBe 0
+            h.hits shouldBe 0
+        }
+    }
+
     test("wounded adults and children walk away from a pursuing monster without attacking or earning work credit") {
         for (child in listOf(false, true)) residentRuntime { h ->
             h.city = h.city.copy(workers = h.city.workers.map { if (child)
@@ -1164,7 +1238,9 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = freed) })
             // The fixture retains this work plan; worksite cache invalidation on bag edits is a separate contract.
             h.owner.pulse(requireNotNull(h.navigationNow))
-            h.phase() shouldBe CitizenPhase.RETURNING
+            withClue("at=${actor.location} focus=$focus navigation=${h.navigationState()}") {
+                h.phase() shouldBe CitizenPhase.RETURNING
+            }
             h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
             (h.routeIdentity() === leisureRoute) shouldBe false
             h.deliveries shouldBe 0
@@ -3003,6 +3079,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val pendingGroundCollection = CompletableFuture<Settlement>()
     val pendingHomeDeposit = CompletableFuture<Settlement>()
     var workReady = true
+    var testingAllowed = false
     var foodSource: UUID? = null
     var workPlans = 0
     val failedWorkPositions = mutableListOf<CivWorldWork>()
@@ -3128,7 +3205,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             }, constructionWorkplace = { _, _ -> constructionWorkplace },
             collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
-            depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit })
+            depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit },
+            immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
@@ -3165,6 +3243,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         answers = false, recordedCalls = true, childMocks = false)
     fun socialState(worker: UUID): Map<*, *> =
         (((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["social"] as Map<*, *>)
+    fun combatState(worker: UUID = workerId): Map<*, *> =
+        (((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["combat"] as Map<*, *>)
     fun startSocialPair(): List<PacketPlayerNpc> {
         for (x in -2..1) for (z in -2..1) world.loadChunk(x, z)
         city = city.copy(workers = city.workers + CivWorker(UUID(0, 29), "Neighbour", null))

@@ -17,6 +17,7 @@ import org.bukkit.entity.Arrow
 import org.bukkit.entity.Creeper
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
+import org.bukkit.entity.Mob
 import org.bukkit.entity.Monster
 import org.bukkit.entity.Player
 import org.bukkit.entity.Projectile
@@ -49,15 +50,19 @@ internal data class CivsThreatTarget(val cityId: UUID, val workerId: UUID, val n
  * movement, projectiles and explosions; this owner supplies target positions and authoritative hits.
  */
 internal class CivsResidentThreats(private val plugin: Plugin,
-    private val attacked: (UUID, Monster) -> Unit = { _, _ -> }, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
-    private data class Pursuit(val monster: Monster, val worker: UUID, var attackAfter: Long = 0, var routeAfter: Long = 0)
+    private val attacked: (UUID, Monster) -> Unit = { _, _ -> },
+    private val mobProtected: (UUID) -> Boolean = { false }, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
+    private data class Pursuit(val monster: Monster, val worker: UUID, val cityId: UUID, var attackAfter: Long = 0,
+        var routeAfter: Long = 0, var ignited: Boolean = false)
     private data class Flight(val projectile: Projectile, var previous: Location)
     private data class Falling(val top: Double, var speed: Double = 0.0)
+    private data class Burning(val until: Long, val fromMob: Boolean = false,
+        val nonMobUntil: Long = if (fromMob) 0 else until)
     private var targets = emptyMap<UUID, CivsThreatTarget>()
     private val pursuits = linkedMapOf<UUID, Pursuit>()
     private val projectiles = linkedMapOf<UUID, Flight>()
     private val equipment = mutableMapOf<UUID, List<ItemStack?>>()
-    private val burningUntil = mutableMapOf<UUID, Long>()
+    private val burning = mutableMapOf<UUID, Burning>()
     private val submergedSince = mutableMapOf<UUID, Long>()
     private val falling = mutableMapOf<UUID, Falling>()
     private val explosions = mutableMapOf<UUID, Float>()
@@ -73,10 +78,11 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         if (closed) return
         targets = current.associateBy { it.workerId }
         equipment.keys.retainAll(targets.keys)
-        burningUntil.keys.retainAll(targets.keys)
+        burning.keys.retainAll(targets.keys)
         submergedSince.keys.retainAll(targets.keys)
         falling.keys.retainAll(targets.keys)
-        val available = targets.values.toList()
+        releaseProtectedPursuits()
+        val available = targets.values.filterNot { mobProtected(it.cityId) }
         if (available.isNotEmpty()) repeat(min(2, available.size)) {
             val target = available[Math.floorMod(cursor++, available.size)]
             val npc = target.npc
@@ -86,11 +92,11 @@ internal class CivsResidentThreats(private val plugin: Plugin,
                 if (pursuits.size >= 32) break
                 if (monster.isValid && !monster.isDead && monster.hasAI() && monster.type !in NEUTRAL && monster.target == null &&
                     monster.world.difficulty != Difficulty.PEACEFUL && visible(monster.eyeLocation, eye(target))) {
-                    pursuits.putIfAbsent(monster.uniqueId, Pursuit(monster, target.workerId))
+                    pursuits.putIfAbsent(monster.uniqueId, Pursuit(monster, target.workerId, target.cityId))
                 }
             }
         }
-        for (target in available) environment(target, now)
+        for (target in targets.values) environment(target, now)
     }
 
 
@@ -114,7 +120,10 @@ internal class CivsResidentThreats(private val plugin: Plugin,
             pursuit.routeAfter = now + 1_000
         }
         if (monster is Creeper) {
-            if (distance < 3.0 * 3.0 && !monster.isIgnited) monster.ignite()
+            if (distance < 3.0 * 3.0 && !monster.isIgnited) {
+                monster.ignite()
+                pursuit.ignited = monster.isIgnited
+            }
             return true
         }
         if (now < pursuit.attackAfter) return true
@@ -156,7 +165,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         if (sharpness > 0) amount += (.5 * sharpness + .5) * strength
         if (hit(target, player, DamageCause.ENTITY_ATTACK, amount)) {
             val fire = weapon.getEnchantmentLevel(Enchantment.FIRE_ASPECT)
-            if (fire > 0) burningUntil[workerId] = System.currentTimeMillis() + 4_000L * fire
+            if (fire > 0) burning[workerId] = Burning(System.currentTimeMillis() + 4_000L * fire)
             if (player.gameMode != GameMode.CREATIVE && !weapon.type.isAir) player.inventory.setItemInMainHand(weapon.damage(1, player))
         }
         player.resetCooldown()
@@ -165,6 +174,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
     /** Bounded projectile sweep. A stale or blocked segment cannot hit through terrain. */
     fun tick() {
         if (closed) return
+        releaseProtectedPursuits()
         for (id in pursuits.keys.take(2)) {
             val pursuit = pursuits.remove(id) ?: continue
             try {
@@ -242,14 +252,15 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         val distance = delta.length()
         if (distance < .0001 || distance > 128) return false
         val direction = delta.normalize()
-        val nearest = targets.values.asSequence().filter { it.npc.world == at.world }.mapNotNull { target ->
+        val source = projectile.shooter as? Entity
+        val nearest = targets.values.asSequence().filter { it.npc.world == at.world &&
+            (source !is Mob || !mobProtected(it.cityId)) }.mapNotNull { target ->
             val hit = box(target).expand(.15).rayTrace(flight.previous.toVector(), direction, distance) ?: return@mapNotNull null
             target to hit.hitPosition.distance(flight.previous.toVector())
         }.minByOrNull { it.second } ?: return false
         val obstacle = at.world!!.rayTraceBlocks(flight.previous, direction, nearest.second, FluidCollisionMode.NEVER, true)
         if (obstacle != null) return false
         val target = nearest.first
-        val source = projectile.shooter as? Entity
         if (source is Player && !playerAllowed(source, target.npc.location)) return false
         val amount = when (projectile) {
             is Trident -> 8.0
@@ -258,8 +269,12 @@ internal class CivsResidentThreats(private val plugin: Plugin,
             else -> return false
         }
         if (!hit(target, source ?: projectile, DamageCause.PROJECTILE, amount)) return false
-        if (projectile.fireTicks > 0 || projectile is SmallFireball)
-            burningUntil[target.workerId] = System.currentTimeMillis() + 5_000
+        if (projectile.fireTicks > 0 || projectile is SmallFireball) {
+            val until = System.currentTimeMillis() + 5_000
+            burning[target.workerId] = if (source is Mob)
+                Burning(until, fromMob = true, nonMobUntil = burning[target.workerId]?.nonMobUntil ?: 0)
+            else Burning(until)
+        }
         if (projectile is Trident) {
             // Keep the original thrown item and native Loyalty/pickup lifecycle. A virtual
             // contact consumes this flight once, just as a native entity hit does.
@@ -305,6 +320,11 @@ internal class CivsResidentThreats(private val plugin: Plugin,
     }
 
     private fun environment(target: CivsThreatTarget, now: Long) {
+        val burn = burning[target.workerId]
+        if (burn != null && burn.fromMob && mobProtected(target.cityId)) {
+            if (burn.nonMobUntil > now) burning[target.workerId] = Burning(burn.nonMobUntil)
+            else burning.remove(target.workerId)
+        }
         val at = target.npc.location
         if (!citizenChunkReady(target.npc.world, at.blockX shr 4, at.blockZ shr 4)) return
         if (at.blockY !in target.npc.world.minHeight + 1 until target.npc.world.maxHeight - 2) return
@@ -312,13 +332,13 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         val beneath = at.clone().subtract(0.0, .1, 0.0).block
         val floor = beneath.type
         val head = eye(target).block.type
-        if (feet == Material.LAVA) { burningUntil[target.workerId] = now + 15_000; hit(target, null, DamageCause.LAVA, 4.0) }
+        if (feet == Material.LAVA) { burning[target.workerId] = Burning(now + 15_000); hit(target, null, DamageCause.LAVA, 4.0) }
         else if (feet in FIRE && (at.block.blockData as? Lightable)?.isLit != false ||
             floor in FIRE && (beneath.blockData as? Lightable)?.isLit != false) {
-            burningUntil[target.workerId] = now + 8_000
+            burning[target.workerId] = Burning(now + 8_000)
             hit(target, null, DamageCause.FIRE, 1.0)
-        } else if (feet == Material.WATER) burningUntil.remove(target.workerId)
-        else if ((burningUntil[target.workerId] ?: 0) > now) hit(target, null, DamageCause.FIRE_TICK, 1.0)
+        } else if (feet == Material.WATER) burning.remove(target.workerId)
+        else if ((burning[target.workerId]?.until ?: 0) > now) hit(target, null, DamageCause.FIRE_TICK, 1.0)
         if (head == Material.WATER) {
             val since = submergedSince.getOrPut(target.workerId) { now }
             if (now - since >= 15_000) hit(target, null, DamageCause.DROWNING, 2.0)
@@ -331,13 +351,14 @@ internal class CivsResidentThreats(private val plugin: Plugin,
 
     private fun hit(target: CivsThreatTarget, source: Entity?, cause: DamageCause, amount: Double): Boolean {
         if (!amount.isFinite() || amount <= 0 || !target.npc.isValid) return false
+        val mob = source as? Mob ?: ((source as? Projectile)?.shooter as? Mob)
+        if (mob != null && mobProtected(target.cityId)) return false
         if (source is Player && !playerAllowed(source, target.npc.location)) return false
         val damage = citizenArmoredDamage(amount, equipment[target.workerId].orEmpty(), cause)
         val event = CivsResidentDamageEvent(target.cityId, target.workerId, target.npc.location, source, cause, damage)
         Bukkit.getPluginManager().callEvent(event)
         if (event.isCancelled || !event.damage.isFinite() || event.damage <= 0) return false
-        val monster = source as? Monster ?: ((source as? Projectile)?.shooter as? Monster)
-        if (monster != null) attacked(target.workerId, monster)
+        if (mob is Monster) attacked(target.workerId, mob)
         injury(target.workerId, event.damage)
         return true
     }
@@ -364,15 +385,30 @@ internal class CivsResidentThreats(private val plugin: Plugin,
 
     fun remove(worker: UUID) {
         targets = targets - worker
-        equipment.remove(worker); burningUntil.remove(worker); submergedSince.remove(worker); falling.remove(worker)
+        equipment.remove(worker); burning.remove(worker); submergedSince.remove(worker); falling.remove(worker)
         val removed = pursuits.values.filter { it.worker == worker }
         removed.forEach { pursuits.remove(it.monster.uniqueId) }
-        removed.forEach(::stop)
+        removed.forEach { stop(it) }
     }
 
-    private fun stop(pursuit: Pursuit) {
+    private fun releaseProtectedPursuits() {
+        val iterator = pursuits.values.iterator()
+        while (iterator.hasNext()) {
+            val pursuit = iterator.next()
+            if (!mobProtected(pursuit.cityId)) continue
+            iterator.remove()
+            stop(pursuit, disarm = true)
+        }
+    }
+
+    private fun stop(pursuit: Pursuit, disarm: Boolean = false) {
         runCatching {
-            if (pursuit.monster.isValid && pursuit.monster.target == null) pursuit.monster.pathfinder.stopPathfinding()
+            val monster = pursuit.monster
+            if (monster.isValid && monster.target == null) {
+                monster.pathfinder.stopPathfinding()
+                if (disarm && pursuit.ignited && monster is Creeper && monster.igniter == null)
+                    monster.isIgnited = false
+            }
         }.onFailure { plugin.logger.log(java.util.logging.Level.WARNING,
             "ArcCivs failed to release resident pursuit worker=${pursuit.worker}", it) }
     }
@@ -383,10 +419,10 @@ internal class CivsResidentThreats(private val plugin: Plugin,
         val retiring = pursuits.values.toList()
         targets = emptyMap()
         pursuits.clear()
-        equipment.clear(); burningUntil.clear(); submergedSince.clear(); falling.clear()
+        equipment.clear(); burning.clear(); submergedSince.clear(); falling.clear()
         projectiles.clear(); explosions.clear()
         HandlerList.unregisterAll(this)
-        retiring.forEach(::stop)
+        retiring.forEach { stop(it) }
     }
 
     companion object {

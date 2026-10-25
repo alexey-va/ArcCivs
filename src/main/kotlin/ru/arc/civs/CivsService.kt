@@ -206,7 +206,8 @@ class CivsService(
         constructionFocus = { cityId, orderId -> constructionFocus[cityId]?.takeIf { it.orderId == orderId }?.position },
         constructionWorkplace = { cityId, orderId -> cities[cityId]?.construction?.takeIf { it.id == orderId }?.preparationWorkplace },
         collectionAvailable = ::collectionAvailable, collectionHome = ::collectedHome,
-        pickupGround = ::pickupGround, depositCollected = ::depositCollected)).also(onCitizensCreated)
+        pickupGround = ::pickupGround, depositCollected = ::depositCollected,
+        immortalResidents = { id -> cities[id]?.let { it.settings?.immortalResidents == true && testingAllowed(it) } == true })).also(onCitizensCreated)
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork, ::captureSupply, ::validateSupply, supplyExecutor, clock)
     private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()

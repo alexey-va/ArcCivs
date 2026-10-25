@@ -100,6 +100,7 @@ class CivsCitizens(
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
     private val depositCollected: (UUID, UUID, CivPosition?) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
+    private val immortalResidents: (UUID) -> Boolean = { false },
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
@@ -250,7 +251,7 @@ class CivsCitizens(
         checkMainThread()
         skins = loadCitizenSkins()
         packets = packetOwner ?: PaperPacketNpcs(plugin, "civs-residents")
-        threats = CivsResidentThreats(plugin, attacked = ::defend, injury = ::damage)
+        threats = CivsResidentThreats(plugin, attacked = ::defend, mobProtected = immortalResidents, injury = ::damage)
         packets.onInteract = { player, npc, action ->
             val actor = actors.values.firstOrNull { it.npc === npc }
             if (!closed.get() && actor != null) {
@@ -1158,10 +1159,9 @@ class CivsCitizens(
     }
 
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
-        val cycle = actor.cycle
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         if (actor.terrainObstructedAt != null) {
-            cycle.deferWork(now)
+            actor.cycle.deferWork(now)
             statuses[actor.workerId] = "route-unreachable"
             return
         }
@@ -1178,6 +1178,7 @@ class CivsCitizens(
             releaseCourierSource(actor, now)
             return
         }
+        val cycle = actor.cycle
         if (actor.collectedPending != null) { statuses[actor.workerId] = "loading-cargo"; return }
         if (supplyFood(actor, city, worker, world, now)) {
             actor.mineRouteEpisode.retain(null)
@@ -1333,6 +1334,7 @@ class CivsCitizens(
 
     private fun defend(workerId: UUID, monster: Monster) {
         val victim = actors[workerId] ?: return
+        if (immortalResidents(victim.cityId)) return
         val now = System.currentTimeMillis()
         for (actor in actors.values) {
             if (actor.cityId != victim.cityId || !actor.npc.isValid || actor.npc.world != monster.world ||
@@ -1355,12 +1357,15 @@ class CivsCitizens(
 
     private fun combat(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
         val monster = actor.attacker ?: return false
-        if (!monster.isValid || monster.isDead || monster.world != world || now > actor.combatUntil ||
+        if (immortalResidents(city.id) || !monster.isValid || monster.isDead || monster.world != world || now > actor.combatUntil ||
             monster.location.distanceSquared(actor.npc.location) > 24.0 * 24.0) {
             cancelRoute(actor)
             actor.attacker = null
+            actor.combatUntil = 0
             actor.combatDestination = null
             actor.combatStatus = null
+            actor.combatRouteAfter = 0
+            actor.combatAttackAfter = 0
             actor.cycle = actor.plan.cycle()
             return false
         }
