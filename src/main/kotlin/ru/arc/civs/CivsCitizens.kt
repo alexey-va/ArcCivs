@@ -139,6 +139,17 @@ class CivsCitizens(
         return actors.values.map { it.npc }
     }
 
+    /** Natural tree growth happens later than tending; protect the bodies present at that instant. */
+    internal fun growthBlocked(worldId: UUID, point: CivPosition): Boolean {
+        checkMainThread()
+        val block = BoundingBox(point.x.toDouble(), point.y.toDouble(), point.z.toDouble(),
+            point.x + 1.0, point.y + 1.0, point.z + 1.0)
+        // The resident runtime already caps this collection at 48; no native entity/world scan.
+        return actors.values.any { actor -> actor.worldId == worldId && actor.npc.isValid &&
+            (actor.sleepPose?.takeIf { actor.sleeping }?.bounds
+                ?: citizenStandingBounds(actor.npc.location, actor.npc.scale)).overlaps(block) }
+    }
+
     /** Logical grounded feet stay stable while the sleeping mesh has a pose-only lift. */
     internal fun residentFeet(workerId: UUID): Location? {
         checkMainThread()
@@ -197,7 +208,7 @@ class CivsCitizens(
                 val half = .3 * actor.npc.scale - .001
                 if (!citizenSleepClear(actor.npc.world, BoundingBox(from.x - half, from.y + .001, from.z - half,
                         from.x + half, from.y + actor.npc.height - .001, from.z + half))) return true
-                plugin.logger.info(CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
+                CivsDiagnostics.record(plugin.logger, Level.INFO, actor.cityId, CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
                     "worker" to actor.workerId, "outcome" to "cleared", "actual" to from.point().coordinates(),
                     "elapsed_ms" to (now - started).coerceAtLeast(0)))
                 actor.terrainObstructedAt = null
@@ -206,7 +217,7 @@ class CivsCitizens(
         }
         if (actor.terrainObstructedAt == null) {
             actor.terrainObstructedAt = now
-            plugin.logger.warning(CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
+            CivsDiagnostics.record(plugin.logger, Level.WARNING, actor.cityId, CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
                 "worker" to actor.workerId, "outcome" to "blocked", "reason" to "native-body-overlap",
                 "actual" to from.point().coordinates(), "block" to escape.material, "obstruction" to escape.obstruction,
                 "exit_available" to (escape.step != null), "injury_pending" to (actor.workerId in pendingHarm)))
@@ -258,7 +269,7 @@ class CivsCitizens(
                 if (action == PacketNpcInteraction.ATTACK) threats.playerAttack(player, actor.workerId, npc)
                 else {
                     val resident = cityProvider().firstOrNull { it.id == actor.cityId }?.workers?.firstOrNull { it.id == actor.workerId }
-                    voices.greet(actor.workerId, npc, player, resident?.let(CivsResidents::sex))
+                    voices.greet(actor.cityId, actor.workerId, npc, player, resident?.let(CivsResidents::sex))
                     interact(player, actor.cityId, actor.workerId)
                 }
             }
@@ -391,7 +402,7 @@ class CivsCitizens(
                     spawnRetries[workerId] = plan to retry
                     statuses[workerId] = "route-unreachable"
                     recordAdmission(city, worker, plan, world, "no-safe-spawn", nowMillis, retry, search)
-                    if (retry.attempts == 1 || retry.attempts == 3) plugin.logger.warning(CivsDiagnostics.line(
+                    if (retry.attempts == 1 || retry.attempts == 3) CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id, CivsDiagnostics.line(
                         "citizen_spawn_blocked", "city" to city.id, "worker" to workerId, "origin" to origin,
                         "attempt" to retry.attempts, "retry_at" to retry.nextAttemptAt,
                         "candidates" to search.inspected, "rejections" to search.rejections))
@@ -414,13 +425,13 @@ class CivsCitizens(
                     "skin" to skin.name, "tool" to (CivsEquipment.slots(worker)[4]?.material ?: citizenTool(plan)?.name))
             } catch (error: Exception) {
                 actors.remove(workerId)?.cycle?.close()
-                runCatching { npc?.remove() }.onFailure { plugin.logger.log(Level.WARNING,
+                runCatching { npc?.remove() }.onFailure { CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
                     "ArcCivs failed to remove rejected NPC city=${city.id} worker=$workerId", it) }
                 retry.fail(nowMillis)
                 spawnRetries[workerId] = requireNotNull(plan) to retry
                 statuses[workerId] = "unavailable"
                 recordAdmission(city, worker, plan, world, "spawn-failed", nowMillis, retry)
-                if (retry.attempts == 1 || retry.exhausted) plugin.logger.log(Level.WARNING,
+                if (retry.attempts == 1 || retry.exhausted) CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
                     "ArcCivs NPC spawn failed city=${city.id} worker=$workerId attempt=${retry.attempts}", error)
             }
         }
@@ -1790,7 +1801,7 @@ class CivsCitizens(
             !actor.npc.isValid || (actor.route?.motion?.navigating == true)) return
         val player = actor.npc
         val resident = cityProvider().firstOrNull { it.id == actor.cityId }?.workers?.firstOrNull { it.id == actor.workerId }
-        runCatching { voices.say(actor.workerId, player, event, Bukkit.getCurrentTick(), plugin.server.onlinePlayers,
+        runCatching { voices.say(actor.cityId, actor.workerId, player, event, Bukkit.getCurrentTick(), plugin.server.onlinePlayers,
             resident?.let(CivsResidents::sex)) }
             .onFailure { logFailure(actor, "voice", it) }
     }
@@ -2366,7 +2377,7 @@ class CivsCitizens(
         val work = mineRouteWork(actor, route) ?: return
         route.mineFailureReported = true
         val report = actor.mineRouteEpisode.failed(requireNotNull(CivsMineRouteEpisode.key(work)), now) ?: return
-        plugin.logger.warning(MINE_ROUTE_DIAGNOSTIC.line(
+        CivsDiagnostics.record(plugin.logger, Level.WARNING, actor.cityId, MINE_ROUTE_DIAGNOSTIC.line(
             "city" to actor.cityId, "worker" to actor.workerId, "building" to report.key.buildingId,
             "plan_version" to report.key.planVersion, "cycle" to report.key.cycle, "mining_step" to report.key.miningStep,
             "state" to if (report.failures >= CivsMineRouteEpisode.STALL_FAILURES) "stalled" else "blocked",
@@ -2382,7 +2393,7 @@ class CivsCitizens(
     }
 
     private fun mineRouteRecovered(actor: Actor, report: CivsMineRouteEpisode.Snapshot, reason: String, now: Long) {
-        plugin.logger.info(MINE_ROUTE_RECOVERED.line(
+        CivsDiagnostics.record(plugin.logger, Level.INFO, actor.cityId, MINE_ROUTE_RECOVERED.line(
             "city" to actor.cityId, "worker" to actor.workerId, "building" to report.key.buildingId,
             "plan_version" to report.key.planVersion, "cycle" to report.key.cycle, "mining_step" to report.key.miningStep,
             "reason" to reason, "episode_failures" to report.failures, "episode_elapsed_ms" to report.elapsedMillis,
@@ -2401,7 +2412,7 @@ class CivsCitizens(
         }
         if (navigationTick < actor.navigationReportAfter) { actor.navigationSuppressed++; return false }
         actor.navigationReportAfter = navigationTick + 200
-        plugin.logger.warning(NAVIGATION_DIAGNOSTIC.line(
+        CivsDiagnostics.record(plugin.logger, Level.WARNING, actor.cityId, NAVIGATION_DIAGNOSTIC.line(
             "city" to actor.cityId, "worker" to actor.workerId, "cycle" to actor.plan.token.completedCycles,
             "attempt" to actor.cycle.failedAttempts + 1, "phase" to actor.cycle.phase, "reason" to detail,
             "from" to route?.from?.coordinates(), "target" to target.point().coordinates(), "actual" to actual.coordinates(),
@@ -2737,7 +2748,7 @@ class CivsCitizens(
     private fun logFailure(actor: Actor, phase: String, error: Throwable) {
         if (actor.reportedFailure) return
         actor.reportedFailure = true
-        plugin.logger.log(Level.WARNING,
+        CivsDiagnostics.record(plugin.logger, Level.WARNING, actor.cityId,
             "ArcCivs NPC failure city=${actor.cityId} worker=${actor.workerId} phase=$phase cycle=${actor.plan.token.completedCycles}", error)
     }
 

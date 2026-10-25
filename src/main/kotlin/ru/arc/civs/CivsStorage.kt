@@ -1260,7 +1260,7 @@ class CivsStorage(private val plugin: Plugin,
                 }
             }
         } catch (failure: Exception) {
-            plugin.logger.log(Level.WARNING, "ArcCivs could not apply storage transaction ${transaction.id} for ${transaction.cityId}", failure)
+            CivsDiagnostics.record(plugin.logger, Level.WARNING, transaction.cityId, "ArcCivs could not apply storage transaction ${transaction.id} for ${transaction.cityId}", failure)
             if (!playerPersisted) return CivInventoryApplyResult.Retry(mapOf("reason" to "player-save-incomplete"))
             return completedNativeState(transaction, resolved, worldCells)
         }

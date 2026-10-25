@@ -97,7 +97,7 @@ class CivsBoundaryRenderer internal constructor(
             scene.pending = false
             if (failure != null && !closed && scenes[player.uniqueId] === scene) {
                 clear(player.uniqueId)
-                if (failure !is CancellationException) plugin.logger.log(Level.WARNING,
+                if (failure !is CancellationException) CivsDiagnostics.record(plugin.logger, Level.WARNING, scene.cityId,
                     "ArcCivs boundary rendering failed city=${scene.cityId} player=${player.uniqueId}", failure)
             }
         }
@@ -186,7 +186,7 @@ class CivsBoundaryRenderer internal constructor(
             if (retired.hasNext()) retired.next().remove()
             !retired.hasNext()
         }.whenComplete { _, failure ->
-            if (failure != null && !closed && failure !is CancellationException) plugin.logger.log(Level.WARNING,
+            if (failure != null && !closed && failure !is CancellationException) CivsDiagnostics.record(plugin.logger, Level.WARNING, scene.cityId,
                 "ArcCivs boundary cleanup remains owned by its display runtime player=$playerId", failure)
         }
     }

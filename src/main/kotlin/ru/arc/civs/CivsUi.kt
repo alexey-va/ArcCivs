@@ -39,7 +39,7 @@ class CivsUi internal constructor(
     constructor(plugin: Plugin, host: CivsUiHost, tasks: LifecycleTaskScope, text: CivsText) :
         this(plugin, host, tasks, PaperDialogRuntime(plugin), text)
 
-    private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token) {
+    private class Visit(val screenId: String, val epoch: LifecycleTaskScope.Token, val cityId: UUID?) {
         val id: UUID = UUID.randomUUID()
         var consumed = false
         var cancelPending: (() -> Unit)? = null
@@ -240,7 +240,7 @@ class CivsUi internal constructor(
         ), listOf(
             button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) },
             button(player, "refresh", "autonomy.refresh", NAVIGATION) { showBuildingInspection(player, cityId, buildingId) },
-        ), reopen = { showBuildingInspection(player, cityId, buildingId) })
+        ), reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
     }
 
     private fun openInspectionInventory(player: Player, cityId: UUID, buildingId: UUID) {
@@ -301,7 +301,7 @@ class CivsUi internal constructor(
                     success = { showRemote(player, tr(player, "network.transfer-requested", "server" to remote.server.value)) },
                     failure = { showRemote(player, it) }, workingKey = "network.connecting")
             },
-        ), reopen = { showRemote(player) })
+        ), reopen = { showRemote(player) }, cityId = city.id)
     }
 
     private fun showStyles(player: Player, page: Int = 0, autonomous: Boolean = false) {
@@ -418,18 +418,18 @@ class CivsUi internal constructor(
                 add(button(player, "hall_inventory", "city.hall-inventory", STOCK) { openIntake(player, hall.id) }
                     .copy(tooltip = tr(player, "city.hall-inventory-help")))
             add(button(player, "guide", "guide.open", NAVIGATION) { showGuide(player) })
-        }, reopen = { showOverview(player) })
+        }, reopen = { showOverview(player) }, cityId = city.id)
     }
 
     private fun showGuide(player: Player) {
-        city(player) ?: return
+        val city = city(player) ?: return
         present(player, "civs.guide", "guide.title", listOfNotNull(
             presentation.paragraph(tr(player, "city.boundary-help")),
             presentation.paragraph(tr(player, "city.sleep-rule")), presentation.divider(),
             presentation.callout(tr(player, "buildings.site-help")),
             presentation.paragraph(tr(player, "guide.population-help")),
             presentation.paragraph(tr(player, "guide.storage-help")),
-        ), emptyList(), reopen = { showGuide(player) })
+        ), emptyList(), reopen = { showGuide(player) }, cityId = city.id)
     }
 
     private fun showManagement(player: Player) {
@@ -449,7 +449,7 @@ class CivsUi internal constructor(
                 add(button(player, "testing_settings", "testing-settings.open", PERSONAL, appearance = Action.SETTINGS) { showTestingSettings(player) })
             if (city.owner == player.uniqueId) add(button(player, "delete_city", "delete.open", DANGER) { showDeleteCity(player, city.id) })
             if (isAdmin(player)) add(button(player, "admin", "admin.open") { showAdmin(player) })
-        }, reopen = { showManagement(player) })
+        }, reopen = { showManagement(player) }, cityId = city.id)
     }
 
     private fun showTestingSettings(player: Player, error: Component? = null) {
@@ -479,7 +479,7 @@ class CivsUi internal constructor(
                     { host.setSettlementSetting(player, setting, !enabled) },
                     success = { showTestingSettings(player) }, failure = { showTestingSettings(player, it) }, workingKey = null)
             }
-        }, reopen = { showTestingSettings(player) })
+        }, reopen = { showTestingSettings(player) }, cityId = city.id)
     }
 
     private fun showDeleteCity(player: Player, expectedCityId: UUID, initial: String = "", error: Component? = null) {
@@ -519,7 +519,7 @@ class CivsUi internal constructor(
             })
         }, inputs = listOf(
             PaperDialogTextInput(DELETE_NAME, tr(player, "delete.name-label"), initial = initial.take(32), width = 320, maxLength = 32),
-        ), reopen = { showDeleteCity(player, expectedCityId, draft) })
+        ), reopen = { showDeleteCity(player, expectedCityId, draft) }, cityId = city.id)
     }
 
     private fun showStock(player: Player, page: Int = 0, error: Component? = null) {
@@ -556,7 +556,7 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, buildings.size) { showStock(player, it) }
-        }, reopen = { showStock(player, current) })
+        }, reopen = { showStock(player, current) }, cityId = city.id)
     }
 
     private fun showAvailableMaterials(player: Player, page: Int = 0) {
@@ -573,11 +573,12 @@ class CivsUi internal constructor(
             result.exceptionOrNull()?.let { body(text.failure(player, it)) }, busyBody(player),
         ), buildList {
             pages(player, current, materials.size) { showAvailableMaterials(player, it) }
-        }, reopen = { showAvailableMaterials(player, current) })
+        }, reopen = { showAvailableMaterials(player, current) }, cityId = city.id)
     }
 
     private fun showStorageMode(player: Player, error: Component? = null) {
-        val inventory = city(player)?.inventory ?: return showStock(player)
+        val city = city(player) ?: return
+        val inventory = city.inventory ?: return showStock(player)
         val busy = host.cityBusy(player)
         present(player, "civs.storage-mode", "stock.mode-title", listOfNotNull(
             body(player, "stock.mode-help"), body(player, "stock.mode-keeps-items"), busyBody(player), error?.let(::body),
@@ -591,11 +592,12 @@ class CivsUi internal constructor(
                         success = { showStorageMode(player) }, failure = { showStorageMode(player, it) })
                 })
             }
-        }, reopen = { showStorageMode(player) })
+        }, reopen = { showStorageMode(player) }, cityId = city.id)
     }
 
     private fun showContainers(player: Player, page: Int = 0, error: Component? = null) {
-        val inventory = city(player)?.inventory ?: return showStock(player)
+        val city = city(player) ?: return
+        val inventory = city.inventory ?: return showStock(player)
         val current = page.coerceIn(0, lastPage(inventory.containers.size))
         val busy = host.cityBusy(player)
         present(player, "civs.containers", "stock.containers-title", listOfNotNull(
@@ -613,7 +615,7 @@ class CivsUi internal constructor(
                     success = { showContainers(player, current) }, failure = { showContainers(player, current, it) })
             })
             pages(player, current, inventory.containers.size) { showContainers(player, it) }
-        }, reopen = { showContainers(player, current) })
+        }, reopen = { showContainers(player, current) }, cityId = city.id)
     }
 
     private fun showContainer(player: Player, position: CivPosition, error: Component? = null) {
@@ -627,7 +629,7 @@ class CivsUi internal constructor(
                 perform(player, "civs.container", "stock.container-title", { host.unregisterContainer(player, position) },
                     success = { showContainers(player) }, failure = { showContainer(player, position, it) })
             })
-        }, reopen = { showContainer(player, position) })
+        }, reopen = { showContainer(player, position) }, cityId = city.id)
     }
 
     private fun openWarehouse(player: Player, buildingId: UUID) {
@@ -669,7 +671,7 @@ class CivsUi internal constructor(
                 if (materials.isNotEmpty()) add(button(player, "withdraw", "warehouse.withdraw", STOCK) { showWithdraw(player, buildingId) })
             }
             pages(player, current, materials.size) { showWarehouse(player, buildingId, it) }
-        }, reopen = { showWarehouse(player, buildingId, current) })
+        }, reopen = { showWarehouse(player, buildingId, current) }, cityId = city.id)
     }
 
     private fun showWithdraw(player: Player, buildingId: UUID, page: Int = 0, error: Component? = null) {
@@ -697,7 +699,7 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, materials.size) { showWithdraw(player, buildingId, it) }
-        }, reopen = { showWithdraw(player, buildingId, current) })
+        }, reopen = { showWithdraw(player, buildingId, current) }, cityId = city.id)
     }
 
     private fun openIntake(player: Player, buildingId: UUID) {
@@ -744,7 +746,7 @@ class CivsUi internal constructor(
             }
             if (CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS) add(button(player, "catalog", "buildings.catalog", PERSONAL) { showCatalog(player) })
             pages(player, current, ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE) { showBuildings(player, it) }
-        }, reopen = { showBuildings(player, current) })
+        }, reopen = { showBuildings(player, current) }, cityId = city.id)
     }
 
     private fun infrastructureSummary(player: Player, city: Settlement): PaperDialogBody? {
@@ -781,11 +783,11 @@ class CivsUi internal constructor(
                 }
             }
             pages(player, current, queued.size) { showQueue(player, it) }
-        }, reopen = { showQueue(player, current) })
+        }, reopen = { showQueue(player, current) }, cityId = city.id)
     }
 
     private fun showCatalog(player: Player, page: Int = 0) {
-        city(player) ?: return
+        val city = city(player) ?: return
         val types = BuildingType.entries.filter { it != BuildingType.TOWN_HALL && !it.isInfrastructure }
         val current = page.coerceIn(0, lastPage(types.size, BUILDINGS_PAGE_SIZE))
         present(player, "civs.catalog", "buildings.catalog-title", listOf(body(player, "buildings.catalog-help")),
@@ -794,7 +796,7 @@ class CivsUi internal constructor(
                     add(valueButton(player, "offer_$index", "common.destination", text.building(player, type), buildingColor(type)) { showOffer(player, type) })
                 }
                 pages(player, current, types.size, BUILDINGS_PAGE_SIZE) { showCatalog(player, it) }
-            }, reopen = { if (city(player) != null) showCatalog(player, current) })
+            }, reopen = { if (city(player) != null) showCatalog(player, current) }, cityId = city.id)
     }
 
     private fun showOffer(player: Player, type: BuildingType, error: Component? = null) {
@@ -811,7 +813,7 @@ class CivsUi internal constructor(
             if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT, appearance = Action.FOUND) {
                 beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
             })
-        }, reopen = { showOffer(player, type) })
+        }, reopen = { showOffer(player, type) }, cityId = city.id)
     }
 
     private fun showBuilding(player: Player, buildingId: UUID, error: Component? = null) {
@@ -823,7 +825,7 @@ class CivsUi internal constructor(
                 body(player, "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
                 facts(player, listOf(tr(player, "label.state") to buildingSummaryStatus(player, city, building),
                     tr(player, "label.position") to coordinates(player, building.entrance))),
-            ), emptyList(), reopen = { showBuilding(player, buildingId) })
+            ), emptyList(), reopen = { showBuilding(player, buildingId) }, cityId = city.id)
             return
         }
         val assigned = city.workers.count { it.assignment == buildingId }
@@ -900,7 +902,7 @@ class CivsUi internal constructor(
             if (building.type != BuildingType.TOWN_HALL && !host.cityBusy(player)) {
                 add(button(player, "delete_building", "delete-building.open", DANGER) { showDeleteBuilding(player, city.id, buildingId) })
             }
-        }, reopen = { showBuilding(player, buildingId) })
+        }, reopen = { showBuilding(player, buildingId) }, cityId = city.id)
     }
 
     private fun showDeleteBuilding(player: Player, expectedCityId: UUID, buildingId: UUID, error: Component? = null) {
@@ -927,14 +929,14 @@ class CivsUi internal constructor(
                         player.sendMessage(text.success(player, "delete-building.success", "building" to text.building(player, building.type)))
                     }, failure = { showDeleteBuilding(player, expectedCityId, buildingId, it) })
             })
-        }, reopen = { showDeleteBuilding(player, expectedCityId, buildingId) })
+        }, reopen = { showDeleteBuilding(player, expectedCityId, buildingId) }, cityId = city.id)
     }
 
     private fun loadControlRelocation(player: Player, buildingId: UUID, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         if (building.phase != BuildingPhase.ACTIVE) return showBuilding(player, buildingId, text.reason(player, "control-relocation-site"))
-        val visit = present(player, "civs.control-relocation", "control.title", listOf(body(player, "control.loading")), emptyList()) ?: return
+        val visit = present(player, "civs.control-relocation", "control.title", listOf(body(player, "control.loading")), emptyList(), cityId = city.id) ?: return
         val future = try { host.buildingControl(player, buildingId) } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
         future.whenCompleteSync(tasks, visit.epoch) { target, failure ->
             if (!current(player, visit)) return@whenCompleteSync
@@ -963,7 +965,7 @@ class CivsUi internal constructor(
                     success = { showBuilding(player, buildingId, tr(player, "control.success").color(COMMIT)) },
                     failure = { loadControlRelocation(player, buildingId, it) })
             })
-        }, reopen = { loadControlRelocation(player, buildingId) })
+        }, reopen = { loadControlRelocation(player, buildingId) }, cityId = city.id)
     }
 
     private fun loadBuildingMaterials(player: Player, buildingId: UUID) {
@@ -971,7 +973,7 @@ class CivsUi internal constructor(
         city.construction?.takeIf { it.buildingId == buildingId }?.let {
             return showBuildingMaterials(player, buildingId, it.materials.orEmpty())
         }
-        val visit = present(player, "civs.building-materials", "materials.title", listOf(body(player, "materials.loading")), emptyList()) ?: return
+        val visit = present(player, "civs.building-materials", "materials.title", listOf(body(player, "materials.loading")), emptyList(), cityId = city.id) ?: return
         val future = try { host.buildingMaterials(player, buildingId) } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { materials, error ->
             if (!current(player, visit)) return@whenCompleteSync
@@ -1038,7 +1040,7 @@ class CivsUi internal constructor(
                     workingKey = "materials.preparing")
             }.copy(tooltip = tr(player, if (CivsRules.legacyHallBuilder(city)) "materials.legacy-start-help" else "materials.start-help")))
             pages(player, current, entries.size, MATERIALS_PAGE_SIZE) { showBuildingMaterials(player, buildingId, estimate, it) }
-        }, reopen = { showBuildingMaterials(player, buildingId, estimate, current) })
+        }, reopen = { showBuildingMaterials(player, buildingId, estimate, current) }, cityId = city.id)
     }
 
     private fun loadBuilderMaterials(player: Player, hutId: UUID, workerId: UUID? = null, page: Int = 0, feedback: Component? = null) {
@@ -1047,7 +1049,7 @@ class CivsUi internal constructor(
             else showWorker(player, workerId, feedback)
         val visit = visits[player.uniqueId]?.takeIf { it.screenId == "civs.builder-materials" && current(player, it) }
             ?: present(player, "civs.builder-materials", "materials.title",
-                listOf(body(player, "materials.loading")), emptyList()) ?: return
+                listOf(body(player, "materials.loading")), emptyList(), cityId = city.id) ?: return
         val future = try { host.buildingMaterials(player, order.buildingId) }
             catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { materials, error ->
@@ -1136,7 +1138,7 @@ class CivsUi internal constructor(
             else if (!host.cityBusy(player)) add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, hutId) })
             if (city.constructionQueue.orEmpty().isNotEmpty()) add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
             pages(player, current, entries.size, PAGE_SIZE) { loadBuilderMaterials(player, hutId, workerId, it) }
-        }, reopen = { loadBuilderMaterials(player, hutId, workerId, current) })
+        }, reopen = { loadBuilderMaterials(player, hutId, workerId, current) }, cityId = city.id)
     }
 
     private fun showBuildingWorkers(player: Player, buildingId: UUID, page: Int = 0, error: Component? = null) {
@@ -1165,7 +1167,7 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, workers.size) { showBuildingWorkers(player, buildingId, it) }
-        }, reopen = { showBuildingWorkers(player, buildingId, current) })
+        }, reopen = { showBuildingWorkers(player, buildingId, current) }, cityId = city.id)
     }
 
     private fun showProduction(player: Player, buildingId: UUID, error: Component? = null) {
@@ -1209,7 +1211,7 @@ class CivsUi internal constructor(
                         success = { showProduction(player, buildingId) }, failure = { showProduction(player, buildingId, it) })
                 })
             }
-        }, reopen = { showProduction(player, buildingId) })
+        }, reopen = { showProduction(player, buildingId) }, cityId = city.id)
     }
 
     private fun showCarpentry(player: Player, buildingId: UUID, page: Int = 0) {
@@ -1248,7 +1250,7 @@ class CivsUi internal constructor(
             })
             add(button(player, "refresh", "carpentry.refresh") { showCarpentry(player, buildingId, current) })
             pages(player, current, orders.size, CARPENTRY_PAGE_SIZE) { showCarpentry(player, buildingId, it) }
-        }, reopen = { showCarpentry(player, buildingId, current) })
+        }, reopen = { showCarpentry(player, buildingId, current) }, cityId = city.id)
     }
 
     private fun showCarpentryRecipes(player: Player, buildingId: UUID, tier: Int, page: Int = 0) {
@@ -1280,7 +1282,7 @@ class CivsUi internal constructor(
                     showCarpentryRecipes(player, buildingId, level)
                 })
             pages(player, current, recipes.size, CARPENTRY_PAGE_SIZE) { showCarpentryRecipes(player, buildingId, tier, it) }
-        }, reopen = { showCarpentryRecipes(player, buildingId, tier, current) })
+        }, reopen = { showCarpentryRecipes(player, buildingId, tier, current) }, cityId = city.id)
     }
 
     private fun materialAmounts(player: Player, materials: Map<String, Long>): Component =
@@ -1359,7 +1361,7 @@ class CivsUi internal constructor(
             if (current < sourcePages.lastIndex) add(button(player, "next", "logistics.sources-next", NAVIGATION) {
                 showSupplyRequests(player, warehouseId, current + 1, materialPages)
             })
-        }, reopen = { showSupplyRequests(player, warehouseId, current, materialPages) })
+        }, reopen = { showSupplyRequests(player, warehouseId, current, materialPages) }, cityId = city.id)
     }
 
     private fun showUpgrades(player: Player, page: Int = 0) {
@@ -1374,7 +1376,7 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, buildings.size) { showUpgrades(player, it) }
-        }, reopen = { showUpgrades(player, current) })
+        }, reopen = { showUpgrades(player, current) }, cityId = city.id)
     }
 
     private fun showUpgrade(player: Player, buildingId: UUID, error: Component? = null) {
@@ -1401,7 +1403,7 @@ class CivsUi internal constructor(
                     success = { showBuilding(player, buildingId) }, failure = { showUpgrade(player, buildingId, it) },
                     workingKey = "upgrades.starting")
             })
-        }, reopen = { showUpgrade(player, buildingId) })
+        }, reopen = { showUpgrade(player, buildingId) }, cityId = city.id)
     }
 
     private fun showWorkers(player: Player, page: Int = 0, error: Component? = null) {
@@ -1420,7 +1422,7 @@ class CivsUi internal constructor(
                     workerStatus(player, worker)) { showWorker(player, worker.id) })
             }
             pages(player, current, city.workers.size) { showWorkers(player, it) }
-        }, reopen = { showWorkers(player, current) })
+        }, reopen = { showWorkers(player, current) }, cityId = city.id)
     }
 
     private fun showWorker(player: Player, workerId: UUID, error: Component? = null) {
@@ -1469,7 +1471,7 @@ class CivsUi internal constructor(
                 perform(player, "civs.worker", "workers.detail-title", { host.assign(player, workerId, null) },
                     success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
             })
-        }, reopen = { showWorker(player, workerId) })
+        }, reopen = { showWorker(player, workerId) }, cityId = city.id)
     }
 
     private fun showWorkerSkills(player: Player, workerId: UUID, page: Int = 0) {
@@ -1487,7 +1489,7 @@ class CivsUi internal constructor(
             }, frame = DialogTables.Frame.EPIC),
             body(tr(player, "workers.endurance-help", "health" to residentNumber(CivsResidents.maxHealth(worker)))),
         ), buildList { pages(player, current, professions.size, SKILLS_PAGE_SIZE) { showWorkerSkills(player, workerId, it) } },
-            reopen = { showWorkerSkills(player, workerId, current) })
+            reopen = { showWorkerSkills(player, workerId, current) }, cityId = city.id)
     }
 
     private fun showWorkerInventory(player: Player, workerId: UUID) {
@@ -1527,7 +1529,7 @@ class CivsUi internal constructor(
                 })
             }
             pages(player, current, places.size) { showAssignments(player, workerId, it) }
-        }, reopen = { showAssignments(player, workerId, current) })
+        }, reopen = { showAssignments(player, workerId, current) }, cityId = city.id)
     }
 
     private fun showMembers(player: Player, page: Int = 0, error: Component? = null) {
@@ -1544,7 +1546,7 @@ class CivsUi internal constructor(
             }
             if (city.owner == player.uniqueId) add(button(player, "add", "members.add", PERSONAL) { showAddMember(player) })
             pages(player, current, members.size) { showMembers(player, it) }
-        }, reopen = { showMembers(player, current) })
+        }, reopen = { showMembers(player, current) }, cityId = city.id)
     }
 
     private fun showAddMember(player: Player, initial: String = "", error: Component? = null) {
@@ -1555,7 +1557,7 @@ class CivsUi internal constructor(
                 val name = context.text(MEMBER)?.trim().orEmpty()
                 perform(player, "civs.member-add", "members.add-title", { host.addMember(player, name) },
                     success = { showMembers(player) }, failure = { showAddMember(player, name, it) })
-            }), inputs = listOf(PaperDialogTextInput(MEMBER, tr(player, "members.name-label"), initial = initial.take(16), width = 320, maxLength = 16)))
+            }), inputs = listOf(PaperDialogTextInput(MEMBER, tr(player, "members.name-label"), initial = initial.take(16), width = 320, maxLength = 16)), cityId = city.id)
     }
 
     private fun showMember(player: Player, member: UUID, error: Component? = null) {
@@ -1567,7 +1569,7 @@ class CivsUi internal constructor(
         ), if (city.owner == player.uniqueId && member != city.owner) listOf(button(player, "remove", "members.remove", DANGER, appearance = Action.DELETE) {
             perform(player, "civs.member", "members.detail-title", { host.removeMember(player, member) },
                 success = { showMembers(player) }, failure = { showMember(player, member, it) })
-        }) else emptyList(), reopen = { showMember(player, member) })
+        }) else emptyList(), reopen = { showMember(player, member) }, cityId = city.id)
     }
 
     private fun autonomyDenied(player: Player) {
@@ -1665,7 +1667,7 @@ class CivsUi internal constructor(
             })
             add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showAutonomousCity(player, city.id) })
             add(button(player, "villages", "autonomy.open", PERSONAL) { showAutonomous(player) })
-        }, reopen = { showAutonomousCity(player, city.id) })
+        }, reopen = { showAutonomousCity(player, city.id) }, cityId = city.id)
     }
 
     private fun showAutonomousBuildings(player: Player, cityId: UUID, page: Int = 0) {
@@ -1682,7 +1684,7 @@ class CivsUi internal constructor(
                 DialogTables.Frame.RARE, 400, listOf(5, 1, 5, 3)),
         ), buildList {
             pages(player, current, ordinary.size, BUILDING_OVERVIEW_PAGE_SIZE) { showAutonomousBuildings(player, city.id, it) }
-        }, reopen = { showAutonomousBuildings(player, city.id, current) })
+        }, reopen = { showAutonomousBuildings(player, city.id, current) }, cityId = city.id)
     }
 
     private fun showAutonomousWorkers(player: Player, cityId: UUID, page: Int = 0) {
@@ -1697,7 +1699,7 @@ class CivsUi internal constructor(
                 })),
         ), buildList {
             pages(player, current, city.workers.size) { showAutonomousWorkers(player, city.id, it) }
-        }, reopen = { showAutonomousWorkers(player, city.id, current) })
+        }, reopen = { showAutonomousWorkers(player, city.id, current) }, cityId = city.id)
     }
 
     private fun showAdmin(player: Player, page: Int = 0, error: Component? = null) {
@@ -1734,7 +1736,7 @@ class CivsUi internal constructor(
                 perform(player, "civs.admin-city", "admin.city-title", { host.retryConstruction(player, cityId) },
                     success = { showAdminCity(player, cityId) }, failure = { showAdminCity(player, cityId, it) })
             })
-        }, reopen = { showAdminCity(player, cityId) })
+        }, reopen = { showAdminCity(player, cityId) }, cityId = city.id)
     }
 
     private fun showReload(player: Player, error: Component? = null) {
@@ -1864,13 +1866,14 @@ class CivsUi internal constructor(
         workingKey: String? = "common.working") {
         // Transfers retain the consumed visit and its table until fresh state can replace it once.
         val visit = if (workingKey == null) visits[player.uniqueId]?.takeIf { it.screenId == id && current(player, it) }
-            else present(player, id, title, listOf(body(player, workingKey)), emptyList())
+            else present(player, id, title, listOf(body(player, workingKey)), emptyList(),
+                cityId = visits[player.uniqueId]?.takeIf { it.screenId == id }?.cityId)
         if (visit == null) return
         visit.cancelPending = cancelPending
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenCompleteSync(tasks, visit.epoch) { result, error ->
             if (!current(player, visit)) {
-                CivsDiagnostics.event("ui_completion_ignored", "player" to player.uniqueId, "screen" to id, "visit" to visit.id)
+                CivsDiagnostics.event("ui_completion_ignored", "player" to player.uniqueId, "screen" to id, "visit" to visit.id, "city" to visit.cityId)
                 return@whenCompleteSync
             }
             visit.cancelPending = null
@@ -1883,11 +1886,11 @@ class CivsUi internal constructor(
         present(player, id, title, listOf(body(content)), listOf(button(player, "return", destinationKey) { destination() }))
 
     private fun present(player: Player, id: String, title: String, bodies: List<PaperDialogBody>, buttons: List<PaperDialogButton>,
-        inputs: List<PaperDialogTextInput> = emptyList(), reopen: (() -> Unit)? = null): Visit? {
+        inputs: List<PaperDialogTextInput> = emptyList(), reopen: (() -> Unit)? = null, cityId: UUID? = null): Visit? {
         if (closed || !player.isOnline) return null
-        val visit = Visit(id, tasks.token())
+        val visit = Visit(id, tasks.token(), cityId)
         visits[player.uniqueId] = visit
-        CivsDiagnostics.event("ui_screen", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
+        CivsDiagnostics.event("ui_screen", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id, "city" to visit.cityId,
             "actions" to buttons.joinToString { it.id.toString() }, "inputs" to inputs.size)
         val hasParent = roots[player.uniqueId] != id
         val closeOnEscape = !hasParent && player.getMetadata("arc-menu-escape").any { it.asString() == "close" }
@@ -1899,7 +1902,7 @@ class CivsUi internal constructor(
             }
             control.copy(closeDialogBeforeAction = false, onClick = { context ->
                 val accepted = current(player, visit) && !visit.consumed
-                CivsDiagnostics.event("ui_click", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
+                CivsDiagnostics.event("ui_click", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id, "city" to visit.cityId,
                     "action" to button.id.toString(), "outcome" to if (accepted) "accepted" else "ignored",
                     "reason" to if (accepted) null else if (visit.consumed) "already-consumed" else "stale-visit",
                     "city_name" to context.text(NAME), "member_name" to context.text(MEMBER))
@@ -1922,7 +1925,7 @@ class CivsUi internal constructor(
             guarded.firstOrNull { it.id.value == "previous" },
             guarded.firstOrNull { it.id.value == "next" },
         ), reopen, {
-            CivsDiagnostics.event("ui_dismiss", "player" to player.uniqueId, "screen" to id, "visit" to visit.id,
+            CivsDiagnostics.event("ui_dismiss", "player" to player.uniqueId, "screen" to id, "visit" to visit.id, "city" to visit.cityId,
                 "current" to (visits[player.uniqueId] === visit), "pending" to (visit.cancelPending != null))
             if (visits[player.uniqueId] === visit) {
                 visits.remove(player.uniqueId)

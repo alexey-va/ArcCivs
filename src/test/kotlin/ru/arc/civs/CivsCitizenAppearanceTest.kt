@@ -177,6 +177,26 @@ class CivsCitizenAppearanceTest : FunSpec({
         citizenWorkFocus(watering.copy(changes = listOf(CivPlanBlock(focus.copy(x = 13),
             "minecraft:stone", "minecraft:air")))) shouldBe null
     }
+
+    test("a forester presents the shared watering prop only for active sapling care") {
+        val plan = appearancePlan(BuildingType.FORESTER)
+        val focus = CivPosition(12, 64, 0)
+        val watering = CivWorldWork(UUID(0, 3), 0, requireNotNull(plan.token.assignmentId),
+            requireNotNull(plan.workplace),
+            listOf(CivPlanBlock(focus, "minecraft:oak_sapling[stage=0]", "minecraft:oak_sapling[stage=1]")),
+            durationMillis = 4_000, status = "watering", focus = focus)
+
+        citizenFieldCareItem(plan.copy(worldWork = watering)) shouldBe Material.WATER_BUCKET
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(status = "felling-tree"))) shouldBe null
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(status = "fertilizing",
+            inputs = mapOf("BONE_MEAL" to 1L)))) shouldBe null
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(focus = null, changes = emptyList()))) shouldBe null
+        citizenFieldCareItem(plan.copy(worldWork = watering.copy(changes = listOf(
+            watering.changes.single().copy(position = focus.copy(x = 14)))))) shouldBe null
+        citizenFieldCareItem(plan.copy(idleReason = "waiting-growth", worldWork = watering)) shouldBe null
+        citizenFieldCareItem(plan.copy(type = BuildingType.QUARRY, worldWork = watering)) shouldBe null
+        citizenFieldCareItem(plan) shouldBe null
+    }
 })
 
 private fun appearancePlan(type: BuildingType?, idleReason: String? = null) = CitizenPlan(

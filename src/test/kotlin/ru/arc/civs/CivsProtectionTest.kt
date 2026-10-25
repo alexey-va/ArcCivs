@@ -9,6 +9,7 @@ import io.mockk.verify
 import org.bukkit.Location
 import org.bukkit.ExplosionResult
 import org.bukkit.Material
+import org.bukkit.TreeType
 import org.bukkit.World
 import org.bukkit.block.BlockFace
 import org.bukkit.block.Container
@@ -40,6 +41,7 @@ import org.bukkit.event.inventory.InventoryType
 import org.bukkit.event.inventory.InventoryOpenEvent
 import org.bukkit.event.inventory.InventoryPickupItemEvent
 import org.bukkit.event.player.PlayerInteractEvent
+import org.bukkit.event.world.StructureGrowEvent
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.InventoryView
@@ -49,6 +51,31 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("natural tree growth rejects its actual changed blocks at a current resident body") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = paper.addSimpleWorld("resident-tree-growth")
+            val changed = CivPosition(2, 65, 2)
+            var occupied = changed
+            val protection = CivsProtection({ emptyList() }, citizenCollision = { worldId, point ->
+                worldId == world.uid && point == occupied
+            })
+            fun growth(): StructureGrowEvent {
+                val proposed = world.getBlockAt(changed.x, changed.y, changed.z).state.apply { type = Material.OAK_LOG }
+                return StructureGrowEvent(Location(world, .5, 64.0, .5), TreeType.TREE, false, null, mutableListOf(proposed))
+            }
+            val blocked = growth()
+            protection.tree(blocked)
+            blocked.isCancelled shouldBe true
+            blocked.blocks.size shouldBe 1
+            world.getBlockAt(changed.x, changed.y, changed.z).type shouldBe Material.AIR
+            // The callback observes the body now, after the earlier care action completed.
+            occupied = CivPosition(0, 64, 0)
+            val clear = growth()
+            protection.tree(clear)
+            clear.isCancelled shouldBe false
+        }
+    }
+
     test("autonomous control contents are public read-only while administrator writes retain every existing lock") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("auto-control")

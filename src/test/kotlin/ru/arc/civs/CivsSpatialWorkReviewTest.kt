@@ -565,13 +565,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                    runtime.pulse(listOf(city))
+                    // Search the whole bounded zone for free care before requesting planting supplies.
+                    repeat(2_000) { if (runtime.requirement(city, worker) == null) runtime.pulse(listOf(city)) }
                     runtime.plan(city, worker) shouldBe null
                     runtime.requirement(city, worker) shouldBe ("DARK_OAK_SAPLING" to 64L)
                     runtime.idleReason(city, worker) shouldBe "waiting-saplings"
                     val changed = city.copy(buildings = city.buildings.map { if (it.id == forest.id) it.copy(production = "OAK_LOG") else it })
                     runtime.requirement(changed, worker) shouldBe null
-                    runtime.pulse(listOf(changed))
+                    repeat(2_000) { if (runtime.requirement(changed, worker) == null) runtime.pulse(listOf(changed)) }
                     runtime.requirement(changed, worker) shouldBe ("OAK_SAPLING" to 64L)
                 }
                 tasks.close()

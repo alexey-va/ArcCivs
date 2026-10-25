@@ -45,10 +45,12 @@ internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
     plan.type != BuildingType.BUILDER_HUT && plan.type != BuildingType.GUARD_TOWER && plan.idleReason == null &&
         (phase == CitizenPhase.WORKING || plan.worldWork != null && phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING))
 
-/** A watering prop represents the farm's irrigation; fertilizer must belong to the accepted work inputs. */
+/** Watering reuses the accepted crop/sapling care; fertilizer belongs only to a farmer's paid inputs. */
 internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
     val work = plan.worldWork ?: return null
-    if (plan.type != BuildingType.FARM || plan.idleReason != null || work.focus == null || citizenWorkFocus(work) == null) return null
+    if (plan.idleReason != null || work.focus == null || citizenWorkFocus(work) == null) return null
+    if (plan.type == BuildingType.FORESTER) return Material.WATER_BUCKET.takeIf { CivsForestry.care(work) }
+    if (plan.type != BuildingType.FARM) return null
     return when (work.status) {
         "watering" -> Material.WATER_BUCKET
         "fertilizing" -> Material.BONE_MEAL.takeIf { (work.inputs["BONE_MEAL"] ?: 0) > 0 }

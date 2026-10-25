@@ -129,9 +129,9 @@ internal class CivsAutonomousPlacement(
                         access.routes.values.toList(), access.infrastructure, pavingRoutes)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
-                    if (blockers.isNotEmpty()) ru.arc.logging.ArcLogging.warn(ru.arc.logging.ArcLogging.escapeMM(
+                    if (blockers.isNotEmpty()) CivsDiagnostics.record(java.util.logging.Level.WARNING, city.id,
                         CivsDiagnostics.line("autonomous_layout_obstructed", "city" to city.id,
-                            "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size)))
+                            "perimeter_closed" to plan.perimeterClosed, "blockers" to blockers.take(4), "count" to blockers.size))
                     val missing = plan.pieces.filter { city.building(it.id) == null }
                         .sortedWith(compareBy<CivSettlementPiece> { when (it.type) {
                             BuildingType.GATE -> 0; BuildingType.WALL -> 1; else -> 2

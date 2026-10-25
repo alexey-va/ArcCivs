@@ -89,7 +89,7 @@ internal class CivsNativePersistence(
             operation.leases.asReversed().forEach { lease -> runCatching { lease.close() }.onFailure {
                 if (problem == null) problem = it else problem!!.addSuppressed(it)
             } }
-            CivsDiagnostics.event("resident_item_persist", "receipt" to transaction.id,
+            CivsDiagnostics.event("resident_item_persist", "city" to transaction.cityId, "receipt" to transaction.id,
                 "phase" to if (before) "before-journal" else "after-native", "chunks" to chunks.size,
                 "elapsed_ms" to (System.nanoTime() - started) / 1_000_000,
                 "result" to if (problem == null) "acknowledged" else "unknown")
@@ -111,7 +111,7 @@ internal class CivsNativePersistence(
                         check(world.isChunkLoaded(key.x, key.z)) { "Persistence source chunk is unloaded" }
                         val serialStarted = System.nanoTime()
                         native.save(world.getChunkAt(key.x, key.z)) // At most one loaded holder per owner-thread tick.
-                        if (System.nanoTime() - serialStarted >= 10_000_000) plugin.logger.warning(
+                        if (System.nanoTime() - serialStarted >= 10_000_000) CivsDiagnostics.record(plugin.logger, java.util.logging.Level.WARNING, transaction.cityId,
                             "ArcCivs resident item chunk serialization exceeded 10ms at ${key.x},${key.z}")
                     } else if (io == null && targets.none { native.hasTask(controllers.getValue(it), it.x, it.z) }) {
                         // The pinned scheduleSave registers each chunk task before holder.save returns, including

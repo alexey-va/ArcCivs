@@ -57,6 +57,21 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("tree growth probes the current scaled resident body without moving it") {
+        residentRuntime { h ->
+            val npc = h.owner.collisionActors().single()
+            npc.teleport(Location(h.world, 4.1, 64.0, 4.5))
+            h.owner.growthBlocked(h.world.uid, CivPosition(3, 65, 4)) shouldBe true
+            h.owner.growthBlocked(h.world.uid, CivPosition(4, 64, 4)) shouldBe true
+            h.owner.growthBlocked(h.world.uid, CivPosition(4, 66, 4)) shouldBe false
+            h.owner.growthBlocked(UUID.randomUUID(), CivPosition(4, 64, 4)) shouldBe false
+            val before = npc.location
+            h.owner.growthBlocked(h.world.uid, CivPosition(3, 65, 4))
+            npc.location shouldBe before
+            h.deliveries shouldBe 0
+        }
+    }
+
     for (obstruction in listOf(Material.OAK_LEAVES, Material.STONE))
     test("a new $obstruction overlap escapes without work or a recovery jump while injury persistence is pending") {
         residentRuntime { h ->
@@ -1201,7 +1216,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     test("full physical bags keep their items while wandering and return to the captured work before delivery") {
-        residentRuntime { h ->
+        residentRuntime(workerId = UUID(0, 19)) { h ->
             val farm = h.assignFarm()
             val actor = h.owner.collisionActors().single()
             actor.teleport(Location(h.world, 22.5, 64.0, .5))
@@ -1221,24 +1236,35 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.pulse(3_500)
             h.phase() shouldBe CitizenPhase.PAUSED
             h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            fun outsideWorkReach(): Boolean {
+                val at = actor.location
+                val dx = at.x - (focus.x + .5)
+                val dz = at.z - (focus.z + .5)
+                val margin = CITIZEN_BLOCK_REACH + 1.0
+                return dx * dx + dz * dz > margin * margin
+            }
             for (tick in 1..1_200) {
                 val before = actor.location
                 h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                 (before.distance(actor.location) <= .118251) shouldBe true
-                if (!citizenCanReachBlock(actor, focus) && h.routeIdentity() != null) break
+                // A floor ray can fail before the body has left reach; require observed distance too.
+                if (outsideWorkReach() && !citizenCanReachBlock(actor, focus) && h.routeIdentity() != null) break
             }
+            withClue("at=${actor.location} focus=$focus ${h.navigationState()}") { outsideWorkReach() shouldBe true }
             citizenCanReachBlock(actor, focus) shouldBe false
             h.phase() shouldBe CitizenPhase.PAUSED
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
             h.city.workers.single().items shouldBe fullBag
             h.deliveries shouldBe 0
             h.steps shouldBe emptyList()
             val leisureRoute = requireNotNull(h.routeIdentity())
+            val paused = h.navigationState()
             val freed = fullBag.toMutableList().also { it[CivsEquipment.BAG] = null }
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = freed) })
             // The fixture retains this work plan; worksite cache invalidation on bag edits is a separate contract.
             h.owner.pulse(requireNotNull(h.navigationNow))
-            withClue("at=${actor.location} focus=$focus navigation=${h.navigationState()}") {
+            withClue("at=${actor.location} focus=$focus paused=$paused navigation=${h.navigationState()}") {
                 h.phase() shouldBe CitizenPhase.RETURNING
             }
             h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
@@ -1750,6 +1776,8 @@ class CivsResidentsRuntimeTest : FunSpec({
                 citizenPacketBodyClear(h.world, CitizenPoint(feet.x, feet.y, feet.z), false) shouldBe true
                 val body = runtimeSleepingBody(npc)
                 citizenSleepClear(h.world, body) shouldBe true
+                h.owner.growthBlocked(h.world.uid, CivPosition(kotlin.math.floor(body.centerX).toInt(),
+                    kotlin.math.floor(body.centerY).toInt(), kotlin.math.floor(body.centerZ).toInt())) shouldBe true
                 home.bounds.contains(feet.blockX, feet.blockY, feet.blockZ) shouldBe true
                 body
             }
@@ -3288,6 +3316,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     /** Read-only failure context; runtime behavior never depends on private test access. */
     fun navigationState(worker: UUID = workerId): String = runCatching {
         val actor = (field(owner, "actors") as Map<*, *>)[worker] ?: return@runCatching "no actor"
+        val cycle = field(actor, "cycle") as CitizenCycle
         val route = field(actor, "route")
         val motion = route?.let { field(it, "motion") as CitizenPacketRoute }
         val queue = field(requireNotNull(field(owner, "navigation")), "jobs") as Map<*, *>
@@ -3295,7 +3324,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         val feet = owner.residentFeet(worker)
         val chunksReady = if (shelter == null || feet == null) null else
             CitizenChunks.between(feet.blockX, feet.blockZ, shelter.x, shelter.z).ready(world)
-        "cycle=${field(actor, "cycle")} shelter=$shelter shelterChunksReady=$chunksReady sleepPose=${field(actor, "shelterPose")} " +
+        "cycle=${cycle.phase}/${cycle.reason} resume=${field(cycle, "resumePhase")} workedMillis=${field(cycle, "workedMillis")} " +
+            "shelter=$shelter shelterChunksReady=$chunksReady sleepPose=${field(actor, "shelterPose")} " +
             "shelterCursor=${field(actor, "shelterSearchIndex")} queue=${queue.size} nodes=${motion?.nodeCount} " +
             "searching=${motion?.searching} failure=${motion?.failure} remaining=${motion?.remainingNodes}"
     }.getOrElse { "unavailable: ${it.javaClass.simpleName}" }

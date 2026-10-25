@@ -181,7 +181,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
                 if (pursue(pursuit, System.currentTimeMillis())) pursuits[id] = pursuit
             } catch (error: Exception) {
                 stop(pursuit)
-                plugin.logger.log(java.util.logging.Level.WARNING,
+                CivsDiagnostics.record(plugin.logger, java.util.logging.Level.WARNING, pursuit.cityId,
                     "ArcCivs resident pursuit failed worker=${pursuit.worker}", error)
             }
         }
@@ -409,7 +409,7 @@ internal class CivsResidentThreats(private val plugin: Plugin,
                 if (disarm && pursuit.ignited && monster is Creeper && monster.igniter == null)
                     monster.isIgnited = false
             }
-        }.onFailure { plugin.logger.log(java.util.logging.Level.WARNING,
+        }.onFailure { CivsDiagnostics.record(plugin.logger, java.util.logging.Level.WARNING, pursuit.cityId,
             "ArcCivs failed to release resident pursuit worker=${pursuit.worker}", it) }
     }
 

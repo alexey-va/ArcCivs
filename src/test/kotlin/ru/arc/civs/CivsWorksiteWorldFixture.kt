@@ -111,6 +111,8 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
                 type == Material.STONE -> listOf(ItemStack(Material.COBBLESTONE))
                 // Deterministic native drop sample; production still owns gravel/flint RNG.
                 type == Material.GRAVEL -> listOf(ItemStack(Material.GRAVEL))
+                // A valid zero-drop native sample; physical forestry still samples every admitted leaf.
+                type.name.endsWith("_LEAVES") -> emptyList()
                 type in setOf(
                     Material.COBBLESTONE, Material.LADDER, Material.TORCH,
                     Material.OAK_PLANKS, Material.SPRUCE_PLANKS, Material.DARK_OAK_PLANKS,

@@ -27,8 +27,9 @@ open class ArcCivsPlugin : JavaPlugin() {
     private var nativeWork: ru.arc.core.BudgetedTaskQueue? = null
     // Core may finish retiring captured native handles on its next tick; IO closes inline.
     private var nativeClose = CompletableFuture.completedFuture(Unit)
+    private var historyClose = CompletableFuture.completedFuture(Unit)
     private var installedScheduler: TaskScheduler? = null
-    internal fun drained(): CompletableFuture<Unit> = nativeClose.copy()
+    internal fun drained(): CompletableFuture<Unit> = CompletableFuture.allOf(nativeClose, historyClose).thenApply { Unit }
 
     override fun onEnable() {
         val unavailable = pluginMeta.pluginDependencies.filterNot(server.pluginManager::isPluginEnabled)
@@ -42,11 +43,17 @@ open class ArcCivsPlugin : JavaPlugin() {
             it.start("version" to pluginMeta.version)
         }
         try {
-            check(nativeClose.isDone) { "Previous native cleanup is still pending; retry enable after it finishes" }
+            check(nativeClose.isDone && historyClose.isDone) { "Previous cleanup is still pending; retry enable after it finishes" }
             nativeClose.join() // Complete already: propagate cleanup failure without blocking Main.
             PaperArcRuntime.installScheduling(this)
             installedScheduler = Tasks.scheduler
             ArcLogging.install(PaperLoggingPlatform("ArcCivs", "ArcCivs"), LoggingConfigSource { EmptyConfig })
+            val history = CivsCityHistory(dataPath.resolve("logs"), logger::warning)
+            CivsDiagnostics.install(history, logger)
+            lifecycle.own(AutoCloseable {
+                historyClose = history.closeAfter(nativeClose).whenComplete { _, _ -> CivsDiagnostics.detach(history) }
+            })
+            lifecycle.tasks.runTimer(1_200L, 1_200L, history::maintenance)
             val queue = ru.arc.core.BudgetedTaskQueue(lifecycle.tasks, 512, 4_000_000L, System::nanoTime, 4096).also { nativeWork = it }
             prepare(lifecycle, queue, server.servicesManager.load(ArcSchematicService::class.java), dataPath)
         } catch (failure: Throwable) {
@@ -107,7 +114,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 nativeDrains += boundary.drained()
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
-            val service = lifecycle.own(CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
+            val service = CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
                 offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
                     val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors, citizens::nudgeResident))
@@ -122,7 +129,12 @@ open class ArcCivsPlugin : JavaPlugin() {
                         nativeDrains += runCatching { citizens.closeAsync() }
                             .getOrElse { CompletableFuture.failedFuture<Void>(it) }
                     })
-                }))
+                })
+            lifecycle.own(AutoCloseable {
+                val failure = runCatching { service.close() }.exceptionOrNull()
+                nativeDrains += service.drained()
+                if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
+            })
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks, text))
             service.ui = ui
             val corpses = CivsCorpseRenderer(this, lifecycle.tasks, text, service::corpseSettlements, ui::openCorpse,

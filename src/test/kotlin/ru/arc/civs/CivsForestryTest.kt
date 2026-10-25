@@ -18,6 +18,232 @@ import java.util.UUID
 import java.util.concurrent.Executor
 
 class CivsForestryTest : FunSpec({
+    test("free sapling care preserves Auto stock its unused construction kit and worker state across receipt replay") {
+        val directory = Files.createTempDirectory("civs-forestry-care-")
+        try {
+            val before = forestryCity().copy(stock = Stock())
+            val work = forestryCareWork(before)
+            CivsForestry.validateWork(before, work)
+            CivsForestry.autoStock(before, work) shouldBe before.stock
+            val receipt = forestryReceipt(before, work, 1_000)
+            receipt.validated() shouldBe receipt
+            receipt.worldChanges shouldBe work.changes
+            receipt.after.stock shouldBe before.stock
+            receipt.after.forestrySeeded shouldBe before.forestrySeeded
+            receipt.after.forestryJobs shouldBe before.forestryJobs
+            receipt.after.workers.single().let { after ->
+                after.copy(completedCycles = 0, nextDeliveryAt = before.workers.single().nextDeliveryAt)
+            } shouldBe before.workers.single()
+            CivsStore(directory, Executor(Runnable::run)).use { store ->
+                store.save(before).join()
+                store.saveInventoryTransaction(receipt).join() shouldBe receipt
+            }
+            CivsStore(directory, Executor(Runnable::run)).use { store ->
+                store.loadInventoryTransactions().join().single().validated() shouldBe receipt
+            }
+            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(receipt.after, work, 2_000) }.reason shouldBe "stale-delivery"
+            val seeded = before.copy(forestrySeeded = setOf(work.buildingId.toString()))
+            CivsRules.finishWorldWork(seeded, work, 1_000).forestrySeeded shouldBe seeded.forestrySeeded
+            // Watering cannot consume or unlock the one paid planting kit.
+            CivsRules.finishWorldWork(receipt.after, forestryPlantWork(receipt.after), 2_000).stock shouldBe Stock()
+            val physical = forestryCity(autonomous = false)
+            val physicalWork = forestryCareWork(physical)
+            val physicalAfter = CivsRules.finishWorldWork(physical, physicalWork, 1_000)
+            physicalAfter.workers.single().skills shouldBe physical.workers.single().skills
+            physicalAfter.workers.single().items shouldBe physical.workers.single().items
+            CivInventoryTransaction(UUID.randomUUID(), physical.id, physical.revision, physicalAfter, emptyList(),
+                worldChanges = physicalWork.changes).validated().after shouldBe physicalAfter
+        } finally { directory.toFile().deleteRecursively() }
+    }
+
+    test("care accepts only one exact configured stage zero to one transition without goods equipment or reward authority") {
+        val city = forestryCity().copy(stock = Stock())
+        val work = forestryCareWork(city)
+        val cell = work.changes.single()
+        for (invalid in listOf(
+            work.copy(inputs = mapOf("SPRUCE_SAPLING" to 1L)),
+            work.copy(inputs = mapOf("BONE_MEAL" to 1L)),
+            work.copy(outputs = mapOf("SPRUCE_LOG" to 1L)),
+            work.copy(equipmentAfter = emptyList()),
+            work.copy(durationMillis = 3_000),
+            work.copy(focus = cell.position.copy(x = 2)),
+            work.copy(changes = emptyList()),
+            work.copy(changes = listOf(cell, cell.copy(position = cell.position.copy(x = 1)))),
+            work.copy(changes = listOf(cell.copy(before = cell.after))),
+            work.copy(changes = listOf(cell.copy(after = "minecraft:spruce_log[axis=y]"))),
+            work.copy(changes = listOf(cell.copy(before = "minecraft:oak_sapling[stage=0]", after = "minecraft:oak_sapling[stage=1]"))),
+            work.copy(miningStep = 1),
+        )) shouldThrow<IllegalArgumentException> { CivsForestry.validateWork(city, invalid) }
+        val paid = city.copy(forestryJobs = mapOf(work.buildingId.toString() to forestryTestJob()))
+        shouldThrow<IllegalArgumentException> { CivsForestry.validateWork(paid, work) }
+    }
+
+    test("Auto and physical care replay their existing native journal once without creating a tree or any reward") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = paper.addSimpleWorld("forestry-care-replay")
+            val plugin = paper.createSimplePlugin("ForestryCareReplay")
+            world.loadChunk(0, 0)
+            for (autonomous in listOf(true, false)) {
+                val city = forestryCity(autonomous).copy(worldId = world.uid, stock = Stock())
+                val work = forestryCareWork(city)
+                val cell = work.changes.single()
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = paper.server.createBlockData(cell.before)
+                val receipt = if (autonomous) forestryReceipt(city, work, 1_000) else CivInventoryTransaction(UUID.randomUUID(),
+                    city.id, city.revision, CivsRules.finishWorldWork(city, work, 1_000), emptyList(), worldChanges = work.changes)
+                CivsStorage(plugin).use { storage ->
+                    storage.replaceCities(listOf(city))
+                    storage.reserve(city, receipt.id)
+                    storage.seal(receipt)
+                    storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                    storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                    world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
+                    receipt.after.stock shouldBe city.stock
+                    receipt.after.forestrySeeded shouldBe city.forestrySeeded
+                    receipt.after.forestryJobs shouldBe city.forestryJobs
+                    storage.unlock(receipt.id)
+                }
+            }
+        }
+    }
+
+    test("a mature tree beyond the first sixteen columns outranks earlier care and empty planting ground") {
+        forestryWorksite("forestry-care-priority") { world, runtime, city ->
+            val worker = city.workers.single()
+            val young = CivPosition(-15, 64, -26)
+            val mature = CivPosition(10, 64, -26)
+            world.getBlockAt(young.x, young.y, young.z).blockData = Material.OAK_SAPLING.createBlockData()
+            forestrySmallOak(world, mature)
+            runtime.pulse(listOf(city))
+            runtime.plan(city, worker) shouldBe null
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe mature
+            runtime.validate(city, work)
+            world.getBlockAt(young.x, young.y, young.z).blockData.asString shouldBe "minecraft:oak_sapling[stage=0]"
+        }
+    }
+
+    for (arrival in listOf("carried", "building-stock")) test("$arrival saplings arriving mid-scan restore priority to an earlier mature tree") {
+        var supplies = emptyMap<String, Long>()
+        forestryWorksite("forestry-care-refill-$arrival", autonomous = false, supplies = { supplies }) { world, runtime, before ->
+            var city = before
+            var worker = city.workers.single()
+            val mature = CivPosition(-15, 64, -26)
+            val young = CivPosition(10, 64, -26)
+            forestrySmallOak(world, mature)
+            world.getBlockAt(young.x, young.y, young.z).blockData = Material.OAK_SAPLING.createBlockData()
+            // At most 1,024 of 1,596 columns: the first unfunded root has passed, but care is not admitted yet.
+            repeat(64) { runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker) shouldBe null
+            if (arrival == "carried") {
+                worker = CivsEquipment.collectSupplies(worker, mapOf("OAK_SAPLING" to 1L))
+                city = city.copy(workers = listOf(worker))
+            } else supplies = mapOf("OAK_SAPLING" to 1L)
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe mature
+            work.inputs shouldBe mapOf("OAK_SAPLING" to 1L)
+            runtime.validate(city, work)
+            world.getBlockAt(young.x, young.y, young.z).blockData.asString shouldBe "minecraft:oak_sapling[stage=0]"
+        }
+    }
+
+    test("an unaccepted cached care is replaced when a native mature tree appears in a later scan") {
+        forestryWorksite("forestry-care-preempt") { world, runtime, city ->
+            val worker = city.workers.single()
+            val young = CivPosition(-15, 64, -26)
+            val mature = CivPosition(10, 64, -26)
+            world.getBlockAt(young.x, young.y, young.z).blockData = Material.OAK_SAPLING.createBlockData()
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val care = requireNotNull(runtime.plan(city, worker))
+            care.status shouldBe "watering"
+            care.focus shouldBe young
+            forestrySmallOak(world, mature)
+            repeat(2_000) { if (runtime.plan(city, worker) == care) runtime.pulse(listOf(city)) }
+            val harvest = requireNotNull(runtime.plan(city, worker))
+            harvest.status shouldBe "felling-tree"
+            harvest.focus shouldBe mature
+            runtime.validate(city, harvest)
+        }
+    }
+
+    test("supported mixed-stage giant plots receive only one free real stage and stale native growth invalidates care") {
+        forestryWorksite("forestry-care-giant", "SPRUCE") { world, runtime, initial ->
+            var city = initial.copy(forestrySeeded = setOf(initial.buildings.first().id.toString()))
+            var worker = city.workers.single()
+            val roots = listOf(CivPosition(-15, 64, -26), CivPosition(-15, 64, -25),
+                CivPosition(-14, 64, -26), CivPosition(-14, 64, -25))
+            roots.forEachIndexed { index, root -> world.getBlockAt(root.x, root.y, root.z).blockData =
+                org.bukkit.Bukkit.createBlockData(CivsForestry.saplingState("SPRUCE_SAPLING", if (index == 0) 0 else 1)) }
+            runtime.pulse(listOf(city))
+            runtime.plan(city, worker) shouldBe null
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val care = requireNotNull(runtime.plan(city, worker))
+            care.status shouldBe "watering"
+            care.durationMillis shouldBe 4_000L
+            care.changes.single().position shouldBe roots.first()
+            care.inputs shouldBe emptyMap()
+            care.outputs shouldBe emptyMap()
+            care.equipmentAfter shouldBe null
+            runtime.plan(city.copy(stock = Stock()), worker) shouldBe care
+            runtime.validate(city, care)
+            for (changed in listOf(roots.last(), roots.last().copy(y = 63))) {
+                val block = world.getBlockAt(changed.x, changed.y, changed.z)
+                val previous = block.blockData
+                block.type = Material.AIR
+                shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+                block.blockData = previous
+            }
+            val neighbour = world.getBlockAt(roots.last().x, roots.last().y, roots.last().z)
+            neighbour.type = Material.OAK_SAPLING
+            shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+            neighbour.blockData = org.bukkit.Bukkit.createBlockData("minecraft:spruce_sapling[stage=1]")
+            val target = world.getBlockAt(roots.first().x, roots.first().y, roots.first().z)
+            target.blockData = org.bukkit.Bukkit.createBlockData("minecraft:spruce_sapling[stage=1]")
+            shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+            target.blockData = org.bukkit.Bukkit.createBlockData("minecraft:spruce_sapling[stage=0]")
+            runtime.validate(city, care)
+            city = CivsRules.finishWorldWork(city, care, 1_000)
+            target.blockData = org.bukkit.Bukkit.createBlockData(care.changes.single().after)
+            worker = city.workers.single()
+            runtime.invalidate(worker.id)
+            repeat(2_000) { runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker) shouldBe null
+            city.stock shouldBe Stock()
+            city.forestryJobs shouldBe null
+            city.forestrySeeded shouldBe initial.forestrySeeded.orEmpty() + initial.buildings.first().id.toString()
+        }
+    }
+
+    test("physical care needs no spare supplies and rejects unloaded locked or newly obstructed native work") {
+        val locked = hashSetOf<CivPosition>()
+        forestryWorksite("forestry-care-guards", autonomous = false, locked = locked) { world, runtime, city ->
+            val worker = city.workers.single()
+            val point = CivPosition(-15, 64, -26)
+            world.getBlockAt(point.x, point.y, point.z).blockData = Material.OAK_SAPLING.createBlockData()
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val care = requireNotNull(runtime.plan(city, worker))
+            care.status shouldBe "watering"
+            care.inputs shouldBe emptyMap()
+            care.equipmentAfter shouldBe null
+            runtime.validate(city, care)
+            locked += point
+            shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+            locked.clear()
+            world.unloadChunk(point.x shr 4, point.z shr 4)
+            shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+            world.isChunkLoaded(point.x shr 4, point.z shr 4) shouldBe false
+            world.loadChunk(point.x shr 4, point.z shr 4)
+            val stance = world.getBlockAt(care.standing.x, care.standing.y, care.standing.z)
+            stance.type = Material.STONE
+            shouldThrow<CivsRejection> { runtime.validate(city, care) }.reason shouldBe "stale-worksite"
+            stance.type = Material.AIR
+            runtime.validate(city, care)
+        }
+    }
+
     test("detached capture crosses the old height and 128-log ceilings follows downward branches and yields by its read allowance") {
         val (scan, cells, roots) = forestryCapture()
         var pulses = 0
@@ -510,7 +736,7 @@ class CivsForestryTest : FunSpec({
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> mapOf("${timber}_SAPLING" to 4L) }, { _, _ -> false })
-                    repeat(100) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val plan = requireNotNull(runtime.plan(city, worker))
                     plan.changes.size shouldBe 4
                     plan.inputs shouldBe mapOf("${timber}_SAPLING" to 4L)
@@ -537,7 +763,7 @@ class CivsForestryTest : FunSpec({
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                    repeat(100) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val plan = requireNotNull(runtime.plan(city, worker))
                     plan.status shouldBe "planting-tree"
                     plan.equipmentAfter shouldBe null
@@ -562,7 +788,7 @@ class CivsForestryTest : FunSpec({
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                    repeat(100) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val first = requireNotNull(runtime.plan(city, worker))
                     first.status shouldBe "planting-tree"
                     runtime.validate(city, first)
@@ -572,6 +798,9 @@ class CivsForestryTest : FunSpec({
                     val planted = first.changes.single().position
                     world.getHighestBlockYAt(planted.x, planted.z) shouldBe planted.y - 1
                     world.getHighestBlockYAt(planted.x, planted.z, HeightMap.WORLD_SURFACE) shouldBe planted.y
+                    // Native care has already advanced this sapling; the spacing check concerns the next planting.
+                    world.getBlockAt(planted.x, planted.y, planted.z).blockData =
+                        paper.server.createBlockData("minecraft:oak_sapling[stage=1]")
                     worker = city.workers.single()
                     runtime.invalidate(worker.id)
                     repeat(1_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
@@ -659,4 +888,43 @@ private fun forestryPlantWork(city: Settlement): CivWorldWork {
     return CivWorldWork(worker.id, worker.completedCycles, building.id, roots.first().copy(x = -1),
         roots.map { CivPlanBlock(it, "minecraft:air", CivsForestry.saplingState(sapling)) },
         inputs = mapOf(sapling to roots.size.toLong()), status = "planting-tree", focus = roots.first())
+}
+
+private fun forestryCareWork(city: Settlement): CivWorldWork {
+    val building = city.buildings.last { it.type == BuildingType.FORESTER }
+    val worker = city.workers.single { it.assignment == building.id }
+    val sapling = requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING"
+    val point = CivPosition(0, 64, 0)
+    return CivWorldWork(worker.id, worker.completedCycles, building.id, point.copy(x = -1),
+        listOf(CivPlanBlock(point, CivsForestry.saplingState(sapling), CivsForestry.saplingState(sapling, 1))),
+        durationMillis = 4_000, status = "watering", focus = point)
+}
+
+private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: Boolean = true,
+    locked: Set<CivPosition> = emptySet(), supplies: () -> Map<String, Long> = { emptyMap() },
+    scenario: (CivsWorksiteWorldFixture, CivsWorksites, Settlement) -> Unit) {
+    MockBukkitTestRuntime.open().use { paper ->
+        val world = CivsWorksiteWorldFixture(name, Material.DIRT).also(paper.server::addWorld)
+        val plugin = paper.createSimplePlugin("ForestryCare")
+        val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+        try {
+            val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(0, 63, 0)).copy(production = "${timber}_LOG")
+            val worker = spatialWorker(mill, "IRON_AXE").let { if (autonomous) it.copy(items = null, inventory = null) else it }
+            val city = spatialCity(world.uid, listOf(mill), worker).let {
+                if (autonomous) it.copy(inventory = null, autonomy = CivAutonomy(), stock = Stock()) else it
+            }
+            for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+            CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                val runtime = CivsWorksites(plugin, access, { _, _ -> supplies() }, { _, point -> point in locked })
+                scenario(world, runtime, city)
+            }
+        } finally { tasks.close() }
+    }
+}
+
+/** Detached native-block fixture only; it does not run Minecraft's tree generator. */
+private fun forestrySmallOak(world: CivsWorksiteWorldFixture, root: CivPosition) {
+    for (y in root.y..root.y + 2) world.getBlockAt(root.x, y, root.z).type = Material.OAK_LOG
+    world.getBlockAt(root.x, root.y + 3, root.z).blockData = org.bukkit.Bukkit.createBlockData(
+        "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
 }

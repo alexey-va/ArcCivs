@@ -1,0 +1,140 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.82 forester sapling care",
+  "assumptions": [
+    "One forester per participating owner; low/base/high scenarios use1/2/4active hours daily,6/12/18completed trees per hour BEFORE and12/24/36 AFTER. Participants1/10/16. These are sensitivity assumptions, not telemetry or guaranteed rates.",
+    "Care is one real sapling stage0->1, takes4seconds after ordinary walking, with no cost, item, abstract WOOD or training reward. A stage1 sapling is not eligible again. Native growth still depends on loaded chunks/light/soil/crown and may fail. No free mature tree/bone meal is generated.",
+    "Forester yield remains4/8/12 abstract WOOD by mill L1/2/3, planting1WOOD per complete plot, so3/7/11net per harvested and replanted tree. Calculator usesL2gross8 and1 replant debit, with initial planting treated separately as a one-time1WOOD debit per fresh grove. A prepaid recoverykit is excluded from recurring totals.",
+    "After assumes twice as many successful real trees only to stress a growth-limited case: skipping one of two natural growth stages can roughly halve growth waiting when walk/care/harvest time is negligible. This is not a measured multiplier or hard deterministic ceiling. With dominant harvesting/travel/capacity, change may be much smaller orzero.",
+    "Ordinary physical towns receive only actual native drops, variable by observed tree and tool. Separate illustrative logs assume4/8/16 logs per tree in low/base/high; leaf/apple/stick/sapling drops are not fixed or valued as extra currency. Abstract Auto WOOD cannot be directly withdrawn as logs.",
+    "Direct Vault/tokens/playerXP delta0. Care does not simulate player BlockBreak or grant EcoJobs. Existing player harvesting/loot/SELL/contract redemptions are separate; no simultaneous SELL andcontract for same item.",
+    "Live read2026-10-25T10:06:32.796Z from classic,168h network-shared ledger:24players,33278operations. Vault mint1226592.6355820035 burn855418.4400000003;tokens mint94 burn12. Unknown Vault absolute983329.17 and operation coverage99.0006percent; totals not a normal hourly income baseline. Shop log unit values are allocated/mixed observations, not a reliable currentquote.",
+    "Current guild_oak_log andguild_spruce_log open with sampled marginal123minor=1.23Vault/log, base100minor, each10000Vault envelope. Selling remains current; planned SELL-off not activated by this task. Contract is an alternative redemption only. Native log growth throughput and real trade outcomes must be measured after activation.",
+    "Unchanged planting3s upperadversarial20four-saplingplots/min gives80saplings/min until stock exhausted, nominal prior disk SELL2Vault/sapling (not confirmed loadedquote). Care spends4additional seconds and creates nosapling ornewpayment, cannot increase this planting-only ceiling. PaidL1mill20WOOD+12STONE includes one recorded kit.",
+    "Capacity, native128cell batches, supplies, hunger, protections, field ownership and durable receipts unchanged. No new currencyprices/caps/boosts. Storagefull stops production; multiple workers do not receive duplicate rewards. Exact beforeimages/replay prevent repeating care or completion payouts.",
+    "Decision: accept free one-stage care like farmer care; promote realwork over idle, preserve genuine harvest output owner and no reward for tending. Growtheconomy changes frequency, not yield. Newtown growthandphysicalmarket effect unmeasured; verify stage0->1 receipts and later completed trees separately."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "completed_tree_L2",
+          "kind": "mint",
+          "source": "CivsForestry.autoStock/CivsRules.deliveryAmount",
+          "basis": "Actual finished tree only; stress scenario, unchanged8WOOD/tree.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              12,
+              48,
+              144
+            ]
+          }
+        },
+        {
+          "id": "paid_replant_L2",
+          "kind": "burn",
+          "source": "CivsForestry.autoStock",
+          "basis": "OneWOOD per full harvested-tree replant plot; recurring rate excludes the one-time initial plot and prepaid recoverykit.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              12,
+              48,
+              144
+            ]
+          }
+        }
+      ]
+    },
+    "physical_logs": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "native_observed_log_drops",
+          "kind": "item",
+          "source": "native tree Block.getDrops through existing inventoryreceipt",
+          "basis": "Illustrative variable-size tree assumption4/8/16logs; cannot withdrawAutoabstractstock thisway.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              24,
+              192,
+              1152
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              48,
+              384,
+              2304
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "care_skill_points": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  }
+}

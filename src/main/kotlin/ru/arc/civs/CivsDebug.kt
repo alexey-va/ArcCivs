@@ -23,9 +23,11 @@ internal object CivsDebug {
         if (args.size > 2 && worker == null) return error("invalid-worker-id")
         if (system == "terrain" && (city == null || worker == null)) return error("terrain-requires-city-and-worker")
         return (if (system == "all") systems else listOf(system)).map { section ->
-            "ARCCIVS_DEBUG " + gson.toJson(linkedMapOf(
+            ("ARCCIVS_DEBUG " + gson.toJson(linkedMapOf(
                 "schema" to 1, "system" to section, "generated_at_ms" to System.currentTimeMillis(),
-                "city" to city, "worker" to worker, "state" to state(section, city, worker)))
+                "city" to city, "worker" to worker, "state" to state(section, city, worker)))).also { line ->
+                CivsDiagnostics.record(java.util.logging.Level.INFO, city, line)
+            }
         }
     }
 }

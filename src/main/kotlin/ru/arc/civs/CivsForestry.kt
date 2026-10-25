@@ -134,7 +134,9 @@ internal object CivsForestry {
             }
         }
     }
-    fun saplingState(sapling: String): String = "minecraft:${sapling.lowercase()}[stage=0]"
+    fun saplingState(sapling: String, stage: Int = 0): String = "minecraft:${sapling.lowercase()}[stage=$stage]"
+    fun care(work: CivWorldWork): Boolean = work.status == "watering" && work.forestry == null
+
     fun large(timber: String): Boolean = timber in setOf("SPRUCE_LOG", "JUNGLE_LOG", "DARK_OAK_LOG")
 
     /** Conservative horizontal reserve; StructureGrowEvent also checks the actual generated crown. */
@@ -252,6 +254,10 @@ internal object CivsForestry {
         val progress = work.forestry
         if (progress == null) {
             require(city.forestryJobs?.get(building.id.toString()) == null)
+            if (care(work)) {
+                validateCare(building, work)
+                return
+            }
             require(work.changes.size in setOf(1, 4) && work.outputs.isEmpty())
             val sapling = requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING"
             require(work.inputs == mapOf(sapling to work.changes.size.toLong()))
@@ -287,6 +293,16 @@ internal object CivsForestry {
         if (city.autonomy != null) require(progress.drops.isEmpty())
         // The last receipt must plant every reserved root; no progress-only final grant.
         if (progress.next == job.cells.size) require(work.changes.filter { it.position in job.roots }.size == job.roots.size)
+    }
+
+    private fun validateCare(building: CivBuilding, work: CivWorldWork) {
+        val timber = requireNotNull(CivsProduction.material(building))
+        val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
+        require(work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null && work.durationMillis == 4_000L)
+        require(work.miningStep == null && work.miningPlanVersion == null && !work.miningGenerator && work.miningAccessStep == null)
+        val focus = requireNotNull(work.focus)
+        val changed = requireNotNull(work.changes.singleOrNull())
+        require(changed.position == focus && changed.before == saplingState(sapling) && changed.after == saplingState(sapling, 1))
     }
 
     /** Detached captured strings only. Native reads are supplied one at a time under the shared pulse budget. */

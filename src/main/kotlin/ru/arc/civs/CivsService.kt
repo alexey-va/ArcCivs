@@ -137,7 +137,7 @@ class CivsService(
     private val protection = CivsProtection(cities = { cities.values.toList() }, available = { ready() }, protectedWorlds = settings.worlds,
         worldLocked = storage::isWorldLocked, forestryPath = { worldId, x, z ->
             forestryRoutes.values.any { it.first == worldId && (x to z) in it.second }
-        })
+        }, citizenCollision = { worldId, point -> citizens.growthBlocked(worldId, point) })
     private val sharedProtection = object : ArcBlockProtectionService {
         override fun isProtected(worldId: UUID, x: Int, y: Int, z: Int): Boolean =
             protection.isProtected(worldId, x, y, z)
@@ -167,10 +167,10 @@ class CivsService(
                 val current = block.blockData
                 if (!CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.before)) &&
                     !CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.after))) {
-                    plugin.logger.warning(CivsDiagnostics.line("construction_write_denied", "city" to city.id,
+                    CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line("construction_write_denied", "city" to city.id,
                         "order" to access.plan.id, "batch" to city.construction?.workDone, "reason" to "autonomy-terrain",
                         "world" to worldId, "x" to x, "y" to y, "z" to z,
-                        "before" to expected.before, "after" to expected.after, "actual" to current.asString))
+                        "before" to expected.before, "after" to expected.after, "actual" to current.asString), plugin.logger)
                     return false
                 }
             }
@@ -333,7 +333,7 @@ class CivsService(
             .whenComplete { _, failure ->
                 if (failure != null && CivsDiagnostics.rejection(failure) == null &&
                     CivsDiagnostics.cause(failure) !is java.util.concurrent.CancellationException)
-                    plugin.logger.log(Level.WARNING, "ArcCivs layout export failed city=$cityId terrain=$terrain", failure)
+                    CivsDiagnostics.record(Level.WARNING, cityId, "ArcCivs layout export failed city=$cityId terrain=$terrain", plugin.logger, failure)
             }
     }
 
@@ -903,7 +903,7 @@ class CivsService(
                                 else {
                                     // Unknown commit outcomes keep the site capture for canonical recovery.
                                     unhealthy += cityId; initialized = false
-                                    log("commit building design $cityId", saveFailure)
+                                    log("commit building design $cityId", saveFailure, cityId)
                                     finishReservation(cityId, player.uniqueId, result, CivsRejection("storage-unavailable"))
                                 }
                             } else publish(requireNotNull(saved)).whenCompleteSync(tasks) { _, publishFailure ->
@@ -1697,7 +1697,7 @@ class CivsService(
                             "storage_inputs" to if (city.autonomy == null) work.storageInputs(worker) else emptyMap<String, Long>(),
                             "autonomous_wood_delta" to if (city.autonomy != null) saved.stock.wood - city.stock.wood else null,
                             "seed_deferred" to work.forestry?.job?.seedDeferred,
-                            "initial_seed_kit" to (city.autonomy != null && work.forestry == null && city.stock.wood == 0L),
+                            "initial_seed_kit" to (city.autonomy != null && work.forestry == null && !CivsForestry.care(work) && city.stock.wood == 0L),
                             "outputs" to work.outputs,
                             "mining_step" to work.miningStep)
                     }
@@ -2263,7 +2263,7 @@ class CivsService(
                 unhealthy += cityId
                 blockedRecovery += cityId
                 busy -= cityId
-                log("journal inventory ${tx.id}", failure)
+                log("journal inventory ${tx.id}", failure, tx.cityId)
                 result.completeExceptionally(CivsRejection("inventory-recovery"))
             } else {
                 inventoryRecovery[cityId] = tx
@@ -2279,7 +2279,7 @@ class CivsService(
         fun fail(error: Throwable, retry: Boolean = false) {
             busy -= tx.cityId
             unhealthy += tx.cityId
-            if (!retry) { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error) }
+            if (!retry) { blockedRecovery += tx.cityId; log("reconcile inventory ${tx.id}", error, tx.cityId) }
             result?.completeExceptionally(error)
             updateHealth()
         }
@@ -2390,7 +2390,7 @@ class CivsService(
             } else {
                 unhealthy += tx.cityId
                 blockedRecovery += tx.cityId
-                log("cancel untouched inventory journal ${tx.id}", failure)
+                log("cancel untouched inventory journal ${tx.id}", failure, tx.cityId)
                 result?.completeExceptionally(CivsRejection("inventory-recovery"))
             }
             updateHealth()
@@ -2412,7 +2412,7 @@ class CivsService(
             if (failure != null) {
                 unhealthy += tx.cityId
                 blockedRecovery += tx.cityId
-                log("retire inventory journal ${tx.id}", failure)
+                log("retire inventory journal ${tx.id}", failure, tx.cityId)
                 result?.completeExceptionally(CivsRejection("inventory-recovery"))
             } else {
                 inventoryRecovery.remove(tx.cityId)
@@ -2460,7 +2460,7 @@ class CivsService(
                     migration.whenCompleteSync(tasks) { saved, error ->
                         if (error != null) {
                             unhealthy += current.id
-                            log("materialize recovered cargo ${current.id}", error)
+                            log("materialize recovered cargo ${current.id}", error, current.id)
                             result?.completeExceptionally(error)
                         } else {
                             unhealthy -= current.id
@@ -2500,7 +2500,7 @@ class CivsService(
                         busy -= city.id; unhealthy += city.id
                         if (!retryCollectedPersistence(tx, problem)) {
                             blockedRecovery += city.id
-                            log("recover inventory ${tx.id}", problem)
+                            log("recover inventory ${tx.id}", problem, tx.cityId)
                         }
                         updateHealth()
                     } else {
@@ -2512,7 +2512,7 @@ class CivsService(
             else throw CivsRejection("inventory-conflict")
         }.onFailure {
             busy -= city.id; blockedRecovery += city.id; unhealthy += city.id
-            log("recover inventory ${tx.id}", it)
+            log("recover inventory ${tx.id}", it, tx.cityId)
         }
     }
 
@@ -2883,11 +2883,11 @@ class CivsService(
             if (failure == null) deletionFailures.remove(city.id)
             else {
                 val reason = CivsDiagnostics.rejection(failure)?.reason ?: "storage-unavailable"
-                if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure)
+                if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure, city.id)
             }
         } }.onFailure { failure ->
             val reason = CivsDiagnostics.rejection(failure)?.reason ?: "storage-unavailable"
-            if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure)
+            if (deletionFailures.put(city.id, reason) != reason) log("recover deletion ${city.id}", failure, city.id)
         }
     }
 
@@ -2900,7 +2900,7 @@ class CivsService(
                 if (rejection != null) result.completeExceptionally(rejection)
                 else {
                     unhealthy += city.id
-                    log("delete settlement ${city.id}", failure)
+                    log("delete settlement ${city.id}", failure, city.id)
                     result.completeExceptionally(CivsRejection("storage-unavailable"))
                 }
                 updateHealth()
@@ -2908,7 +2908,7 @@ class CivsService(
                 busy -= city.id
                 if (publishFailure != null) {
                     unhealthy += city.id
-                    log("publish settlement deletion ${city.id}", publishFailure)
+                    log("publish settlement deletion ${city.id}", publishFailure, city.id)
                     result.completeExceptionally(CivsRejection("storage-unavailable"))
                 } else {
                     // Invalidate old drafts and membership callbacks before a new city can be founded.
@@ -2961,7 +2961,7 @@ class CivsService(
                 if (rejected != null) result.completeExceptionally(rejected)
                 else {
                     unhealthy += cityId
-                    log("save settlement $cityId", failure)
+                    log("save settlement $cityId", failure, cityId)
                     result.completeExceptionally(CivsRejection("storage-unavailable"))
                 }
             }
@@ -3179,8 +3179,8 @@ class CivsService(
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(testingSupplyCursor++, candidates.size)]
         runCatching { prepareTestingConstructionSupplies(city.id) }.onSuccess { future ->
-            future.whenComplete { _, failure -> if (failure != null) log("issue testing construction supplies ${city.id}", failure) }
-        }.onFailure { log("issue testing construction supplies ${city.id}", it) }
+            future.whenComplete { _, failure -> if (failure != null) log("issue testing construction supplies ${city.id}", failure, city.id) }
+        }.onFailure { log("issue testing construction supplies ${city.id}", it, city.id) }
     }
 
     private fun pulseCorpses() {
@@ -3189,7 +3189,7 @@ class CivsService(
             it.corpses.orEmpty().any { corpse -> corpse.expiresAt <= now() } } ?: return
         mutate(city.id) { current -> current.copy(corpses = current.corpses.orEmpty().filter { it.expiresAt > now() },
             revision = current.revision + 1) }.whenComplete { _, error ->
-            if (error != null) log("expire resident corpses ${city.id}", error)
+            if (error != null) log("expire resident corpses ${city.id}", error, city.id)
         }
     }
 
@@ -3210,9 +3210,9 @@ class CivsService(
         runCatching { materialize(city.id, background = true) }
             .onSuccess { future -> future.whenComplete { _, failure ->
                 if (failure != null)
-                    log("materialize stored items ${city.id}", failure)
+                    log("materialize stored items ${city.id}", failure, city.id)
             } }
-            .onFailure { log("materialize stored items ${city.id}", it) }
+            .onFailure { log("materialize stored items ${city.id}", it, city.id) }
     }
 
     /** Missing controls after their one-time grant require repair, never a repeating free grant. */
@@ -3332,7 +3332,7 @@ class CivsService(
                 }
                 CivsRules.validate(city.copy(stock = Stock(), inventory = CivInventory.starting(city.stock),
                     buildings = buildings, pendingControls = city.pendingControls.orEmpty() + controls, revision = city.revision + 1))
-            } }.onFailure { log("migrate city materials ${old.id}", it) }
+            } }.onFailure { log("migrate city materials ${old.id}", it, old.id) }
         }
         val controls = nearby.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city -> city.pendingControls.orEmpty().map { city to it } }
         if (controls.isEmpty()) return
@@ -3341,10 +3341,10 @@ class CivsService(
             if (city.id in busy) return@repeat
             runCatching { installControl(city.id, pending.buildingId) }.onSuccess { future ->
                 future.whenComplete { _, failure ->
-                    if (failure != null && controlFailures.add(pending.buildingId)) log("install control ${pending.buildingId}", failure)
+                    if (failure != null && controlFailures.add(pending.buildingId)) log("install control ${pending.buildingId}", failure, city.id)
                 }
             }.onFailure {
-                if (controlFailures.add(pending.buildingId)) log("install control ${pending.buildingId}", it)
+                if (controlFailures.add(pending.buildingId)) log("install control ${pending.buildingId}", it, city.id)
             }
         }
     }
@@ -3362,7 +3362,7 @@ class CivsService(
                 .onSuccess { future -> future.whenComplete { saved, failure ->
                     if (failure == null) CivsDiagnostics.event("resident_arrived", "city" to city.id, "population" to saved.workers.size,
                         "remaining" to saved.immigration?.remaining)
-                } }.onFailure { log("admit resident ${city.id}", it) }
+                } }.onFailure { log("admit resident ${city.id}", it, city.id) }
         }
     }
 
@@ -3397,8 +3397,8 @@ class CivsService(
             }
         } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
             populationPending -= city.id
-            if (failure != null) log("advance resident life ${city.id}", failure)
-        } }.onFailure { populationPending -= city.id; log("advance resident life ${city.id}", it) }
+            if (failure != null) log("advance resident life ${city.id}", failure, city.id)
+        } }.onFailure { populationPending -= city.id; log("advance resident life ${city.id}", it, city.id) }
     }
 
     private fun rememberedMemberNames(city: Settlement): Settlement = CivsMembership.remember(city,
@@ -3420,8 +3420,8 @@ class CivsService(
             }.thenApply { Unit }
         } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
             memberNamesPending -= city.id
-            if (failure != null) log("remember city member names ${city.id}", failure)
-        } }.onFailure { memberNamesPending -= city.id; log("remember city member names ${city.id}", it) }
+            if (failure != null) log("remember city member names ${city.id}", failure, city.id)
+        } }.onFailure { memberNamesPending -= city.id; log("remember city member names ${city.id}", it, city.id) }
     }
 
     private fun pulseAutoAssignments() {
@@ -3434,11 +3434,11 @@ class CivsService(
             CivsRules.autoAssign(current, current.owner, now()) { citizens.canReassign(current.id, it) }
         } }.onSuccess { future ->
             future.whenCompleteSync(tasks) { saved, failure ->
-                if (failure != null) log("auto assign residents ${city.id}", failure)
+                if (failure != null) log("auto assign residents ${city.id}", failure, city.id)
                 else CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,
                     "assigned" to requireNotNull(saved).workers.count { worker -> city.workers.firstOrNull { it.id == worker.id }?.assignment != worker.assignment })
             }
-        }.onFailure { log("auto assign residents ${city.id}", it) }
+        }.onFailure { log("auto assign residents ${city.id}", it, city.id) }
     }
 
     @EventHandler(priority = org.bukkit.event.EventPriority.HIGHEST, ignoreCancelled = false)
@@ -3518,19 +3518,19 @@ class CivsService(
                 if (error == null && (counts?.get("denied") ?: 0) == 0 && cities[city.id]?.buildings == city.buildings) {
                     autonomousAccessChecked[city.id] = city.buildings.toList()
                     autonomousAccessRetryAt.remove(city.id)
-                    if ((counts?.get("changed") ?: 0) > 0 || (counts?.get("conflicts") ?: 0) > 0) plugin.logger.warning(CivsDiagnostics.line(
+                    if ((counts?.get("changed") ?: 0) > 0 || (counts?.get("conflicts") ?: 0) > 0) CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line(
                         "autonomous_access_repaired", "city" to city.id, "candidates" to repairs.orEmpty().size,
-                        "result" to counts, "source" to "retained-terrain-inverse", "work_credit" to false))
+                        "result" to counts, "source" to "retained-terrain-inverse", "work_credit" to false), plugin.logger)
                     pulseConstruction()
                 } else {
                     autonomousAccessRetryAt[city.id] = now() + 30_000L
-                    plugin.logger.warning(CivsDiagnostics.line("autonomous_access_repair_blocked", "city" to city.id,
+                    CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line("autonomous_access_repair_blocked", "city" to city.id,
                         "reason" to (CivsDiagnostics.rejection(error)?.reason ?: when {
                             (counts?.get("denied") ?: 0) > 0 -> "autonomy-access-denied"
                             error == null -> "stale-building"
                             else -> "storage-unavailable"
-                        }), "result" to counts))
-                    if (error != null && CivsDiagnostics.rejection(error) == null) log("repair autonomous access ${city.id}", error)
+                        }), "result" to counts), plugin.logger)
+                    if (error != null && CivsDiagnostics.rejection(error) == null) log("repair autonomous access ${city.id}", error, city.id)
                 }
             }
             if (failure != null) { completed(null, failure); return@whenCompleteSync }
@@ -3635,13 +3635,13 @@ class CivsService(
             val warnAt = autonomyWarnAt.getOrPut(cityId) { now() + 60_000 }
             if (now() >= warnAt) {
                 autonomyWarnAt[cityId] = now() + 60_000
-                plugin.logger.warning(CivsDiagnostics.line("autonomous_development_stalled", "city" to cityId,
+                CivsDiagnostics.record(Level.WARNING, cityId, CivsDiagnostics.line("autonomous_development_stalled", "city" to cityId,
                     "type" to goal.type, "level" to goal.targetLevel, "reason" to reason,
                     "details" to rejection?.values,
-                    "placement" to autonomousPlacement.debug(cityId)))
+                    "placement" to autonomousPlacement.debug(cityId)), plugin.logger)
             }
         }
-        if (CivsDiagnostics.rejection(failure) == null) log("develop autonomous settlement $cityId", failure)
+        if (CivsDiagnostics.rejection(failure) == null) log("develop autonomous settlement $cityId", failure, cityId)
     }
 
     private fun commitAutonomousDesign(city: Settlement, design: CivAutonomousDesign): CompletableFuture<Unit> {
@@ -3715,7 +3715,7 @@ class CivsService(
             val reason = CivsDiagnostics.rejection(failure)?.reason ?: "placement-failed"
             if (queueFailures.put(city.id, building.id to reason) != (building.id to reason)) {
                 CivsDiagnostics.event("construction_queue_waiting", "city" to city.id, "building" to building.id, "reason" to reason)
-                if (CivsDiagnostics.rejection(failure) == null) log("start queued building ${building.id}", failure)
+                if (CivsDiagnostics.rejection(failure) == null) log("start queued building ${building.id}", failure, city.id)
             }
         }
         runCatching { activateBuilding(city, building) }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
@@ -3762,7 +3762,7 @@ class CivsService(
                 // Older releases flattened temporary chunk unload into this generic failure. Try its current row once.
                 legacyPlacementRetries -= order.id
                 mutate(city.id) { CivsRules.retryConstruction(it, it.owner, order.id) }
-                    .whenComplete { _, failure -> if (failure != null) log("resume legacy construction ${order.id}", failure) }
+                    .whenComplete { _, failure -> if (failure != null) log("resume legacy construction ${order.id}", failure, city.id) }
                 continue
             }
             if (order.phase !in setOf(ConstructionPhase.READY_TO_PLACE, ConstructionPhase.PLACING)) continue
@@ -3834,7 +3834,7 @@ class CivsService(
                                         mutate(city.id) { CivsRules.awaitMaterials(it, it.owner, order.id, order.workDone, required) }
                                     }
                                         .whenComplete { _, waitFailure ->
-                                            if (waitFailure != null) log("wait for construction materials ${order.id}", waitFailure)
+                                            if (waitFailure != null) log("wait for construction materials ${order.id}", waitFailure, city.id)
                                             else CivsDiagnostics.event("construction_waiting_materials", "city" to city.id,
                                                 "order" to order.id, "batch" to order.workDone, "materials" to required)
                                         }
@@ -4001,7 +4001,7 @@ class CivsService(
         runCatching(action).onFailure { failure ->
             if (!access.feedbackFailed) {
                 access.feedbackFailed = true
-                log("present construction block $orderId at $point", failure)
+                log("present construction block $orderId at $point", failure, access.plan.cityId)
             }
         }
     }
@@ -4017,7 +4017,7 @@ class CivsService(
             } }, executor)
                 .whenCompleteSync(tasks) { cells, failure ->
                     if (placementAccess[cityId] !== access) return@whenCompleteSync
-                    if (failure != null) { releasePlacement(cityId); log("prepare shape repair $cityId", failure); return@whenCompleteSync }
+                    if (failure != null) { releasePlacement(cityId); log("prepare shape repair $cityId", failure, cityId); return@whenCompleteSync }
                     if (!ready()) { releasePlacement(cityId); return@whenCompleteSync }
                     runCatching {
                         val repair = blueprints.repair(plan.worldId, requireNotNull(cells))
@@ -4026,14 +4026,14 @@ class CivsService(
                             if (placementAccess[cityId] !== access) return@whenCompleteSync
                             releasePlacement(cityId)
                             physics.enqueue(plan.worldId, access.physicsCells)
-                            if (repairFailure != null) log("repair shapes $cityId", repairFailure)
+                            if (repairFailure != null) log("repair shapes $cityId", repairFailure, cityId)
                             else store.deletePlan(plan.id).thenCompose { store.deleteSchematic(plan.id) }
-                                .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure) }
+                                .whenComplete { _, cleanupFailure -> if (cleanupFailure != null) log("clean captured plan ${plan.id}", cleanupFailure, cityId) }
                             updateHealth()
                         }
-                    }.onFailure { releasePlacement(cityId); log("repair shapes $cityId", it) }
+                    }.onFailure { releasePlacement(cityId); log("repair shapes $cityId", it, cityId) }
                 }
-        }.onFailure { releasePlacement(cityId); log("prepare shape repair $cityId", it) }
+        }.onFailure { releasePlacement(cityId); log("prepare shape repair $cityId", it, cityId) }
     }
 
     private fun releasePlacement(cityId: UUID) {
@@ -4055,16 +4055,16 @@ class CivsService(
                 "batch" to cities[cityId]?.construction?.workDone, "reason" to "chunk-unloaded")
             return
         }
-        log("place construction $orderId", failure)
+        log("place construction $orderId", failure, cityId)
         val reason = causes.filterIsInstance<CivsRejection>().firstOrNull()?.reason
             ?: if (causes.filterIsInstance<ArcSchematicException>().any { it.reason == ArcSchematicFailure.PROTECTED_AREA }) "protected-area" else "placement-failed"
-        plugin.logger.warning(CivsDiagnostics.line("construction_paused", "city" to cityId, "order" to orderId,
+        CivsDiagnostics.record(Level.WARNING, cityId, CivsDiagnostics.line("construction_paused", "city" to cityId, "order" to orderId,
             "batch" to cities[cityId]?.construction?.workDone, "reason" to reason,
-            *causes.filterIsInstance<CivsRejection>().firstOrNull()?.values.orEmpty().map { it.key to it.value }.toTypedArray()))
+            *causes.filterIsInstance<CivsRejection>().firstOrNull()?.values.orEmpty().map { it.key to it.value }.toTypedArray()), plugin.logger)
         runCatching {
             afterCityAvailable(cityId) { mutate(cityId) { CivsRules.pauseConstruction(it, it.owner, orderId, reason) } }
         }
-            .onFailure { log("pause construction $orderId", it) }
+            .onFailure { log("pause construction $orderId", it, cityId) }
     }
 
     private fun currentPreview(player: Player): Preview {
@@ -4148,8 +4148,9 @@ class CivsService(
         val result = try { block() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         return result.whenComplete { _, failure ->
             val rejection = CivsDiagnostics.rejection(failure)
-            if (failure != null && rejection == null) plugin.logger.log(Level.WARNING,
-                "ArcCivs operation $name failed (request=$id)", failure)
+            if (failure != null && rejection == null) CivsDiagnostics.record(Level.WARNING,
+                fields.firstOrNull { it.first == "city" }?.second as? UUID,
+                "ArcCivs operation $name failed (request=$id)", plugin.logger, failure)
             CivsDiagnostics.event("operation_end", "operation" to name, "request" to id, *actor, *fields,
                 "outcome" to if (failure == null) "success" else if (rejection != null) "rejected" else "failed",
                 "reason" to rejection?.reason, "detail" to rejection?.values,
@@ -4160,8 +4161,10 @@ class CivsService(
 
     /** Queue intent, then re-read authority, position and stock in the action's normal entrypoint. */
     private fun <T> cityAction(name: String, player: Player, vararg fields: Pair<String, Any?>,
-        allowDeletion: Boolean = false, block: (Settlement) -> CompletableFuture<T>): CompletableFuture<T> =
-        action(name, player, *fields) {
+        allowDeletion: Boolean = false, block: (Settlement) -> CompletableFuture<T>): CompletableFuture<T> {
+        val inspected = runCatching { managed(player, allowDeletion).id }.getOrNull()
+        val context = if (fields.none { it.first == "city" } && inspected != null) arrayOf("city" to inspected, *fields) else fields
+        return action(name, player, *context) {
             val cityId = managed(player, allowDeletion).id
             afterCityAvailable(cityId) {
                 rejectIf(!player.isOnline, "player-offline")
@@ -4170,9 +4173,11 @@ class CivsService(
                 block(current)
             }
         }
+    }
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }
     private fun now() = clock()
-    private fun log(context: String, error: Throwable) = plugin.logger.log(Level.WARNING, "ArcCivs could not $context", error)
+    private fun log(context: String, error: Throwable, cityId: UUID? = null) =
+        CivsDiagnostics.record(Level.WARNING, cityId, "ArcCivs could not $context", plugin.logger, error)
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "ArcCivs authority must run on Paper's main thread" }
 
     @EventHandler fun quit(event: PlayerQuitEvent) {

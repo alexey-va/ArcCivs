@@ -45,6 +45,7 @@ class CivsProtection(
     private val protectedWorlds: Set<String> = emptySet(),
     private val worldLocked: (UUID, CivPosition) -> Boolean = { _, _ -> false },
     private val forestryPath: (UUID, Int, Int) -> Boolean = { _, _, _ -> false },
+    private val citizenCollision: (UUID, CivPosition) -> Boolean = { _, _ -> false },
 ) : Listener {
     internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>,
         val barrelRestorers: Set<UUID> = emptySet())
@@ -309,7 +310,11 @@ class CivsProtection(
                 snapshot.growthWorlds[world.uid]?.contains(location.blockX, location.blockY, location.blockZ, null) == true ||
                 forestryPath(world.uid, location.blockX, location.blockZ)
         } ?: false
-        if (blocked(event.location) || event.blocks.any { blocked(it.location) }) event.isCancelled = true
+        if (blocked(event.location) || event.blocks.any { block ->
+                blocked(block.location) || block.world.let { world ->
+                    citizenCollision(world.uid, CivPosition(block.x, block.y, block.z))
+                }
+            }) event.isCancelled = true
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)

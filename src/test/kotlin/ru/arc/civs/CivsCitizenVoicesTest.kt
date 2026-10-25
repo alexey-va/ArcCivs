@@ -60,23 +60,23 @@ class CivsCitizenVoicesTest : FunSpec({
                     emitted += secondArg<Array<Pair<String, Any?>>>().toMap()
                     Unit
                 }
-                voices.say(UUID(0, 0), actor, CitizenVoiceEvent.GREET, 0, listOf(viewer, distant))
+                voices.say(UUID(0, 1), UUID(0, 0), actor, CitizenVoiceEvent.GREET, 0, listOf(viewer, distant))
                 verify(exactly = 1) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.greet", SoundCategory.NEUTRAL, 0.65f, 1f) }
                 verify(exactly = 0) { distant.playSound(any<Location>(), any<String>(), any<SoundCategory>(), any<Float>(), any<Float>()) }
                 sleeping = true
-                voices.say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 2_000, listOf(viewer))
+                voices.say(UUID(0, 1), UUID(0, 0), actor, CitizenVoiceEvent.WORK, 2_000, listOf(viewer))
                 sleeping = false
-                CivsCitizenVoices(YamlConfiguration()).say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 4_000, listOf(viewer))
+                CivsCitizenVoices(YamlConfiguration()).say(UUID(0, 1), UUID(0, 0), actor, CitizenVoiceEvent.WORK, 4_000, listOf(viewer))
                 verify(exactly = 0) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.work", SoundCategory.NEUTRAL, any<Float>(), 1f) }
                 // A click is explicit, so even consecutive clicks and a sleeping resident answer.
                 sleeping = true
-                repeat(3) { voices.greet(UUID(0, 0), actor, viewer) }
+                repeat(3) { voices.greet(UUID(0, 1), UUID(0, 0), actor, viewer) }
                 verify(exactly = 3) { viewer.playSound(any<Location>(), "arccivs:citizen.male1.greet", SoundCategory.NEUTRAL, 0.85f, 1f) }
                 sleeping = false
                 // Replies neither spend nor reset the existing ambient cooldown.
-                voices.say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 299, listOf(viewer), CivSex.FEMALE)
+                voices.say(UUID(0, 1), UUID(0, 0), actor, CitizenVoiceEvent.WORK, 299, listOf(viewer), CivSex.FEMALE)
                 emitted.size shouldBe 4
-                voices.say(UUID(0, 0), actor, CitizenVoiceEvent.WORK, 300, listOf(viewer), CivSex.FEMALE)
+                voices.say(UUID(0, 1), UUID(0, 0), actor, CitizenVoiceEvent.WORK, 300, listOf(viewer), CivSex.FEMALE)
                 verify(exactly = 1) { viewer.playSound(any<Location>(), "arccivs:citizen.female1.work", SoundCategory.NEUTRAL, 0.65f, 1f) }
                 emitted.map { it["trigger"] } shouldBe listOf("ambient", "interaction", "interaction", "interaction", "ambient")
                 emitted.map { it["voice_event"] } shouldBe listOf("greet", "greet", "greet", "greet", "work")

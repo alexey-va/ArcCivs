@@ -688,7 +688,8 @@ object CivsRules {
             }.takeIf { it.isNotEmpty() }
         } else city.forestryJobs
         val stock = if (autonomousForestry) CivsForestry.autoStock(city, work) else city.stock
-        val forestrySeeded = if (autonomousForestry && (work.forestry == null || forestFinished || !work.forestry.job.seedDeferred))
+        val forestrySeeded = if (autonomousForestry && !CivsForestry.care(work) &&
+            (work.forestry == null || forestFinished || !work.forestry.job.seedDeferred))
             city.forestrySeeded.orEmpty() + building.id.toString() else city.forestrySeeded
         check(work.miningPlanVersion == null || work.miningPlanVersion in 2..CivsMinePlan.VERSION && work.miningStep != null,
             "stale-worksite")

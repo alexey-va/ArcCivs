@@ -53,6 +53,37 @@ import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
 class CivsUiTest : FunSpec({
+    test("city history follows the inspected autonomous visit while the administrator has a personal city") {
+        withUi(realHistory = true) { h ->
+            val personal = settlement(h.player)
+            val village = autonomousSettlement(h.player, "History village")
+            h.city = personal
+            every { h.player.hasPermission("arccivs.admin") } returns true
+            every { h.host.settlements() } returns listOf(personal, village)
+            every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("ready")
+            val folder = Files.createTempDirectory("civs-ui-history")
+            val history = CivsCityHistory(folder.resolve("logs"), h.plugin.logger::warning)
+            try {
+                CivsDiagnostics.install(history, h.plugin.logger)
+                h.ui.openAutonomous(h.player, village.id)
+                h.click("workers")
+                h.ui.close()
+                history.closeAsync().get(5, java.util.concurrent.TimeUnit.SECONDS)
+                val text = Files.readString(folder.resolve("logs/settlements/${village.id}/latest.log"))
+                text shouldContain "event=ui_screen"
+                text shouldContain "event=ui_click"
+                text shouldContain "screen=civs.autonomous-city"
+                text shouldContain "screen=civs.autonomous-workers"
+                Files.exists(folder.resolve("logs/settlements/${personal.id}")) shouldBe false
+            } finally {
+                h.ui.close()
+                history.closeAsync().get(5, java.util.concurrent.TimeUnit.SECONDS)
+                CivsDiagnostics.detach(history)
+                folder.toFile().deleteRecursively()
+            }
+        }
+    }
+
     test("worker card keeps native vitals and actions while naming each fact") {
         for (locale in listOf("ru", "en")) for (font in listOf("", "arc:dialog_ui")) withUi(decorationFont = font) { h ->
             h.player.setLocale(Locale.forLanguageTag(locale))
@@ -2648,7 +2679,9 @@ class CivsUiTest : FunSpec({
             h.paper.performTicks(2)
             verify(exactly = 1) { h.host.deleteCity(h.player, city.id, city.name) }
             h.screen.id shouldBe "civs.welcome"
-            h.click("history")
+            val close = h.screen.exitButton!!
+            (close.label as net.kyori.adventure.text.TranslatableComponent).key() shouldBe "mco.selectServer.close"
+            h.click(close.id.value)
             h.ui.showingDialog(h.player) shouldBe false
             h.screen.id shouldBe "civs.welcome"
         }
@@ -2940,7 +2973,11 @@ class CivsUiTest : FunSpec({
             verify(exactly = 1) { h.host.deleteBuilding(h.player, base.id, building.id) }
             h.screen.id shouldBe "civs.buildings"
             h.screen.buttons.none { plainText(it.label).contains("Лесорубка") } shouldBe true
-            plainText(h.screen.exitButton!!.label) shouldBe "Закрыть"
+            val close = h.screen.exitButton!!
+            (close.label as net.kyori.adventure.text.TranslatableComponent).key() shouldBe "mco.selectServer.close"
+            h.click(close.id.value)
+            h.ui.showingDialog(h.player) shouldBe false
+            h.screen.id shouldBe "civs.buildings"
         }
     }
 
