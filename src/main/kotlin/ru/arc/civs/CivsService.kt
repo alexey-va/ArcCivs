@@ -3425,10 +3425,13 @@ class CivsService(
 
     private fun pulseAutoAssignments() {
         val city = cities.values.firstOrNull { city ->
-            city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null && CivsRules.needsAutoAssignment(city) &&
+            city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
+                CivsRules.needsAutoAssignment(city) { citizens.canReassign(city.id, it) } &&
                 settlementActive(city)
         } ?: return
-        runCatching { mutate(city.id) { CivsRules.autoAssign(it, it.owner, now()) } }.onSuccess { future ->
+        runCatching { mutate(city.id) { current ->
+            CivsRules.autoAssign(current, current.owner, now()) { citizens.canReassign(current.id, it) }
+        } }.onSuccess { future ->
             future.whenCompleteSync(tasks) { saved, failure ->
                 if (failure != null) log("auto assign residents ${city.id}", failure)
                 else CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,

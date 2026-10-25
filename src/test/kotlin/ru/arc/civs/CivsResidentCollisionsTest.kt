@@ -307,6 +307,60 @@ class CivsResidentCollisionsTest : FunSpec({
             citizenResidentNudgeClear(f.npc, from, from.clone().add(.1, 0.0, 0.0)) shouldBe false
         }
     }
+
+    test("new native overlap exits in supported short steps while ordinary nudges remain blocked") {
+        collisionScenario { f ->
+            f.npcAt = Location(f.world, .4, 64.0, .5)
+            f.walls += Triple(0, 65, 0)
+            citizenResidentNudgeClear(f.npc, f.npcAt, f.npcAt.clone().add(-.05, 0.0, 0.0)) shouldBe false
+            var steps = 0
+            repeat(20) {
+                val result = citizenResidentEscapeStep(f.npc) { true } ?: return@repeat
+                result.obstruction shouldBe CivPosition(0, 65, 0)
+                val next = requireNotNull(result.step)
+                (f.npcAt.distance(next) <= .050001) shouldBe true
+                (next.x < f.npcAt.x) shouldBe true
+                next.y shouldBe f.npcAt.y
+                f.npcAt = next
+                steps++
+            }
+            (steps in 1..20) shouldBe true
+            citizenPacketBodyClear(f.world, CitizenPoint(f.npcAt.x, f.npcAt.y, f.npcAt.z), false) shouldBe true
+            f.walls shouldBe setOf(Triple(0, 65, 0))
+        }
+    }
+
+    test("native overlap cannot deepen enter a new solid or bypass denied unsupported and unloaded exits") {
+        collisionScenario { f ->
+            f.npcAt = Location(f.world, .4, 64.0, .5)
+            f.walls += Triple(0, 65, 0)
+            // Only the deeper direction is authorized; it cannot become an exit.
+            requireNotNull(citizenResidentEscapeStep(f.npc) { it.x > f.npcAt.x }).step shouldBe null
+            requireNotNull(citizenResidentEscapeStep(f.npc) { false }).step shouldBe null
+            f.npcAt.x = .315
+            f.walls += Triple(-1, 65, 0)
+            requireNotNull(citizenResidentEscapeStep(f.npc) { it.x < f.npcAt.x }).step shouldBe null
+            f.walls -= Triple(-1, 65, 0)
+            f.supported = false
+            requireNotNull(citizenResidentEscapeStep(f.npc) { true }).step shouldBe null
+            f.supported = true
+            f.loaded = false
+            f.blockReads = 0
+            citizenResidentEscapeStep(f.npc) { true } shouldBe null
+            f.blockReads shouldBe 0
+            f.npcAt shouldBe Location(f.world, .315, 64.0, .5)
+        }
+    }
+
+    test("native overlap recovery uses the actual scaled body and leaves clear children in place") {
+        collisionScenario { f ->
+            f.npcAt = Location(f.world, .5, 64.0, .5)
+            f.walls += Triple(0, 65, 0)
+            f.npcScale = .5
+            f.npcHeight = .9
+            citizenResidentEscapeStep(f.npc) { true } shouldBe null
+        }
+    }
 })
 
 private fun collisionScenario(block: (ResidentCollisionFixture) -> Unit) {

@@ -56,6 +56,52 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    for (obstruction in listOf(Material.OAK_LEAVES, Material.STONE))
+    test("a new $obstruction overlap escapes without work or a recovery jump while injury persistence is pending") {
+        residentRuntime { h ->
+            val messages = mutableListOf<LogRecord>()
+            val handler = object : Handler() {
+                override fun publish(record: LogRecord) { messages += record }
+                override fun flush() = Unit
+                override fun close() = Unit
+            }
+            h.logger.addHandler(handler)
+            try {
+                h.navigationNow = 2_000
+                val npc = h.owner.collisionActors().single()
+                npc.teleport(Location(h.world, 4.5, 64.0, 4.5))
+                val before = h.city
+                h.world.getBlockAt(4, 65, 4).type = obstruction
+                h.owner.pulse(2_000) // The production environmental check accepts the real suffocation injury.
+                h.hits shouldBe 1
+                h.pending.isDone shouldBe false
+                h.phase() shouldBe CitizenPhase.CLOSED
+                h.owner.canReassign(h.city.id, h.workerId) shouldBe false
+                val start = npc.location
+                h.owner.residentStepAllowed = { _, _, _ -> false }
+                repeat(10) { h.navigate() }
+                npc.location shouldBe start
+                h.owner.residentStepAllowed = { _, _, _ -> true }
+                repeat(32) {
+                    val from = npc.location
+                    h.navigate()
+                    (from.distance(npc.location) <= .050001) shouldBe true
+                }
+                citizenPacketBodyClear(h.world, CitizenPoint(npc.location.x, npc.location.y, npc.location.z), false) shouldBe true
+                h.pending.isDone shouldBe false
+                h.city shouldBe before
+                h.deliveries shouldBe 0
+                h.world.getBlockAt(4, 65, 4).type shouldBe obstruction
+                messages.count { it.level == java.util.logging.Level.WARNING &&
+                    "event=citizen_terrain_escape" in it.message && "outcome=blocked" in it.message } shouldBe 1
+                messages.count { "event=citizen_terrain_escape" in it.message && "outcome=cleared" in it.message } shouldBe 1
+                h.commitHit()
+                h.owner.pulse(4_000)
+                h.hits shouldBe 1 // Committed health remains authoritative; the environment is now clear.
+            } finally { h.logger.removeHandler(handler) }
+        }
+    }
+
     test("idle collection walks into actual reach before one bounded pickup request") {
         residentRuntime { h ->
             h.collectionEnabled = true
@@ -82,11 +128,15 @@ class CivsResidentsRuntimeTest : FunSpec({
 
     test("near-feet collection batches at most eight and pending persistence prevents repeat pickup") {
         residentRuntime { h ->
+            h.owner.canReassign(h.city.id, h.workerId) shouldBe true
+            h.owner.canReassign(h.city.id, UUID.randomUUID()) shouldBe true
+            h.owner.canReassign(UUID.randomUUID(), h.workerId) shouldBe false
             h.collectionEnabled = true
             val feet = h.owner.residentFeet(h.workerId)!!
             repeat(9) { h.groundAt(feet.clone().add(1.0, 0.0, 0.0)) }
             h.owner.pulse(2_000)
             h.groundRequests.single().size shouldBe 8
+            h.owner.canReassign(h.city.id, h.workerId) shouldBe false
             h.owner.pulse(3_000)
             h.owner.pulse(8_000)
             h.groundRequests.size shouldBe 1

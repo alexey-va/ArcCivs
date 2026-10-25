@@ -163,21 +163,61 @@ class CivsCitizens(
         val to = from.clone().add(impulse)
         if (npc.world.uid != city.worldId || !citizenResidentStepClear(npc, from, to, shelterOccupied(actor)) ||
             !citizenResidentNudgeClear(npc, from, to)) return false
-        val target = actor.plan.workplace ?: actor.plan.storage
-        val allowed = actor.route?.allowedBuildings ?: citizenRouteBuildings(city, actor.plan, target,
-            CivPosition(from.blockX, from.blockY, from.blockZ))
-        val halfWidth = .3 * npc.scale
-        for (x in kotlin.math.floor(to.x - halfWidth).toInt()..kotlin.math.floor(to.x + halfWidth).toInt())
-            for (z in kotlin.math.floor(to.z - halfWidth).toInt()..kotlin.math.floor(to.z + halfWidth).toInt())
-                if (!citizenRoutePointAllowed(city, allowed, CivPosition(x, kotlin.math.floor(to.y).toInt(), z), routeMine(actor, city))) return false
-        if (!citizenControlStepClear(city, from.point(), to.point())) return false
+        if (!residentRouteStepAllowed(actor, city, from, to)) return false
         npc.teleport(to)
         actor.footsteps.reset()
         return true
     }
 
+    private fun residentRouteStepAllowed(actor: Actor, city: Settlement, from: Location, to: Location): Boolean {
+        val target = actor.plan.workplace ?: actor.plan.storage
+        val allowed = actor.route?.allowedBuildings ?: citizenRouteBuildings(city, actor.plan, target,
+            CivPosition(from.blockX, from.blockY, from.blockZ))
+        val halfWidth = .3 * actor.npc.scale
+        for (x in kotlin.math.floor(to.x - halfWidth).toInt()..kotlin.math.floor(to.x + halfWidth).toInt())
+            for (z in kotlin.math.floor(to.z - halfWidth).toInt()..kotlin.math.floor(to.z + halfWidth).toInt())
+                if (!citizenRoutePointAllowed(city, allowed, CivPosition(x, kotlin.math.floor(to.y).toInt(), z), routeMine(actor, city))) return false
+        return citizenControlStepClear(city, from.point(), to.point())
+    }
+
     private fun residentMoveAllowed(actor: Actor, from: Location, to: Location): Boolean =
         citizenResidentStepClear(actor.npc, from, to, shelterOccupied(actor)) && residentStepAllowed(actor.npc, from, to)
+
+    /** Injury persistence still freezes work, but cannot repeatedly cancel a physical exit from a new solid. */
+    private fun escapeTerrain(actor: Actor, now: Long): Boolean {
+        val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
+        if (actor.npc.world.uid != city.worldId) return false
+        val from = actor.npc.location
+        val escape = citizenResidentEscapeStep(actor.npc) { to ->
+            residentRouteStepAllowed(actor, city, from, to) && residentMoveAllowed(actor, from, to)
+        }
+        if (escape == null) {
+            actor.terrainObstructedAt?.let { started ->
+                val half = .3 * actor.npc.scale - .001
+                if (!citizenSleepClear(actor.npc.world, BoundingBox(from.x - half, from.y + .001, from.z - half,
+                        from.x + half, from.y + actor.npc.height - .001, from.z + half))) return true
+                plugin.logger.info(CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
+                    "worker" to actor.workerId, "outcome" to "cleared", "actual" to from.point().coordinates(),
+                    "elapsed_ms" to (now - started).coerceAtLeast(0)))
+                actor.terrainObstructedAt = null
+            }
+            return false
+        }
+        if (actor.terrainObstructedAt == null) {
+            actor.terrainObstructedAt = now
+            plugin.logger.warning(CivsDiagnostics.line("citizen_terrain_escape", "city" to actor.cityId,
+                "worker" to actor.workerId, "outcome" to "blocked", "reason" to "native-body-overlap",
+                "actual" to from.point().coordinates(), "block" to escape.material, "obstruction" to escape.obstruction,
+                "exit_available" to (escape.step != null), "injury_pending" to (actor.workerId in pendingHarm)))
+            stopCamp(actor, "native-body-overlap")
+            cancelRoute(actor)
+        }
+        actor.cycle.deferWork(now)
+        statuses[actor.workerId] = "route-unreachable"
+        escape.step?.let { actor.npc.teleport(it) }
+        actor.footsteps.reset()
+        return true
+    }
 
     /** Existing overlaps separate by ordinary bounded steps, without teleport recovery or work credit. */
     private fun separateResident(actor: Actor): Boolean? {
@@ -541,6 +581,7 @@ class CivsCitizens(
                         "mining_step" to it.key.miningStep, "failures" to it.failures, "elapsed_ms" to it.elapsedMillis,
                         "walked_distance" to it.walkedDistance, "suppressed" to it.suppressed) },
                     "injury_pending" to (actor.workerId in pendingHarm),
+                    "terrain_obstructed_at" to actor.terrainObstructedAt,
                     "actual" to position?.point(), "body_yaw" to if (valid) actor.npc.bodyYaw else null,
                     "head_yaw" to if (valid) actor.npc.headYaw else null,
                     "plan" to mapOf("assignment" to actor.plan.token.assignmentId, "cycle" to actor.plan.token.completedCycles,
@@ -581,6 +622,20 @@ class CivsCitizens(
                 actor.plan.idleReason in listOf(null, "placing") &&
                 actor.cycle.phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED)
         }.mapTo(hashSetOf()) { it.workerId }
+    }
+
+    /** Reassignment may retire leisure, never an accepted work, transfer or injury episode. */
+    internal fun canReassign(cityId: UUID, workerId: UUID): Boolean {
+        checkMainThread()
+        if (closed.get() || workerId in pendingHarm) return false
+        val actor = actors[workerId] ?: return true
+        return actor.cityId == cityId && actor.cycle.phase == CitizenPhase.IDLE &&
+            actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
+            actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
+            actor.supplyPickup == null && actor.foodSource == null &&
+            !actor.courierHeld && actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
+            actor.collectedPending == null && actor.collectionSeek == null && actor.collectionHome == null &&
+            actor.collectionCycle == null && actor.terrainObstructedAt == null
     }
 
     private fun admissionOrigin(city: Settlement, workerId: UUID, plan: CitizenPlan): CivPosition =
@@ -891,21 +946,23 @@ class CivsCitizens(
         navigation.pulse()
         threats.tick()
         val viewers = viewers()
-        var separationBudget = 4 // At most twelve supported nudge probes across the hard 48-actor cap.
+        var separationBudget = 4 // Shared by native-overlap exits and at most twelve resident separation probes.
         for (actor in actors.values.toList()) {
-            val route = actor.route
             val npc = actor.npc
             if (separationBudget > 0 && npc.isValid && !actor.sleeping && actor.supplyPickup == null &&
-                actor.collectedPending == null && actor.workerId !in pendingHarm &&
+                actor.collectedPending == null &&
                 actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
                 activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers)) {
-                val separated = separateResident(actor)
-                if (separated != null) separationBudget--
+                separationBudget--
+                citizenRotateAfterAdmission(actors, actor.workerId)
+                if (escapeTerrain(actor, now)) continue
+                val separated = if (actor.workerId !in pendingHarm) separateResident(actor) else null
                 if (separated == true) {
-                    route?.progressTick = navigationTick
+                    actor.route?.progressTick = navigationTick
                     continue
                 }
             }
+            val route = actor.route
             if (npc.isValid) {
                 val previous = actor.observedYaw
                 if (!actor.sleeping && !actor.observedSleeping && previous != null &&
@@ -1103,6 +1160,11 @@ class CivsCitizens(
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
         val cycle = actor.cycle
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (actor.terrainObstructedAt != null) {
+            cycle.deferWork(now)
+            statuses[actor.workerId] = "route-unreachable"
+            return
+        }
         if (actor.sleeping && !sleepStillSafe(actor)) {
             // Changed support/headroom must be handled before work, hunger or another route.
             // A clear but unsupported origin wakes in place and falls on the normal gravity tick.
@@ -2963,6 +3025,7 @@ class CivsCitizens(
         var damageAfter = 0L
         var harmLogAfter = 0L
         var reportHarmCompletion = false
+        var terrainObstructedAt: Long? = null
         var equipmentItems: List<CivResidentItem?>? = null
         var equipmentType: BuildingType? = null
         var careItem: Material? = null

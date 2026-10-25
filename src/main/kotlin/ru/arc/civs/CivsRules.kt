@@ -376,19 +376,24 @@ object CivsRules {
         return changed(city, city.copy(workers = city.workers.map { if (it.id == workerId) updated else it }))
     }
 
-    fun needsAutoAssignment(city: Settlement): Boolean = city.workers.any { it.assignment == null && !CivsResidents.isChild(it) } &&
-        city.buildings.any { automaticVacancies(city, it) > 0 }
+    fun needsAutoAssignment(city: Settlement, canReassign: (UUID) -> Boolean = { true }): Boolean =
+        CivsAutonomy.criticalAssignment(city, canReassign) != null ||
+            city.workers.any { it.assignment == null && !CivsResidents.isChild(it) } &&
+            city.buildings.any { automaticVacancies(city, it) > 0 }
 
     private fun automaticVacancies(city: Settlement, building: CivBuilding): Int {
         val capacity = if (building.type == BuildingType.WAREHOUSE) minOf(1, slots(city, building)) else slots(city, building)
         return (capacity - city.workers.count { it.assignment == building.id }).coerceAtLeast(0)
     }
 
-    /** Fill vacancies without moving a resident who already has a job. Builder sites bootstrap themselves. */
-    fun autoAssign(city: Settlement, actor: UUID, now: Long): Settlement {
+    /** Personal jobs remain assigned; autonomous towns may recover one idle critical worker. */
+    fun autoAssign(city: Settlement, actor: UUID, now: Long, canReassign: (UUID) -> Boolean = { true }): Settlement {
         authorized(city, actor)
         check(now >= 0, "invalid-time")
-        if (!needsAutoAssignment(city)) return city
+        CivsAutonomy.criticalAssignment(city, canReassign)?.let { (worker, building) ->
+            return assign(city, actor, worker, building, now)
+        }
+        if (!needsAutoAssignment(city, canReassign)) return city
         val vacancies = if (city.autonomy != null) {
             val workplaces = city.buildings.sortedBy { when (it.type) {
                 BuildingType.BUILDER_HUT -> 0

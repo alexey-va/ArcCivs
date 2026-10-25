@@ -87,6 +87,29 @@ object CivsAutonomy {
                 city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
             }
 
+    /** Recover a missing critical profession after deaths, without interrupting accepted work. */
+    internal fun criticalAssignment(city: Settlement, canReassign: (UUID) -> Boolean): Pair<UUID, UUID>? {
+        if (city.autonomy?.paused != false || city.pendingDeletion != null) return null
+        fun unstaffed(building: CivBuilding) = CivsRules.slots(city, building) > 0 &&
+            city.workers.none { it.assignment == building.id }
+        val builder = city.construction?.takeIf { CivsRules.constructionWorkers(city, it.buildingId).isEmpty() }?.let {
+            city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) }
+        }
+        val target = builder ?: if (city.stock.food < CivsRules.RECRUIT_FOOD) city.buildings.firstOrNull {
+            it.type == BuildingType.FARM && CivsRules.productionAvailable(city, it) && unstaffed(it)
+        } else null
+        target ?: return null
+        val worker = city.workers.sortedBy { it.assignment != null }.firstOrNull { worker ->
+            !CivsResidents.isChild(worker) && worker.cargo == null && worker.hasCollectedItems != true &&
+                worker.assignment?.toString() !in city.forestryJobs.orEmpty() &&
+                !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
+                // Keep the only food source until ordinary paid recruitment can supply another builder.
+                !(city.stock.food < CivsRules.RECRUIT_FOOD &&
+                    worker.assignment?.let(city::building)?.type == BuildingType.FARM) && canReassign(worker.id)
+        } ?: return null
+        return worker.id to target.id
+    }
+
     fun setPaused(city: Settlement, paused: Boolean): Settlement {
         CivsRules.validate(city)
         val autonomy = city.autonomy ?: throw CivsRejection("invalid-state")

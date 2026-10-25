@@ -136,6 +136,57 @@ internal fun citizenResidentNudgeClear(npc: PacketPlayerNpc, from: Location, to:
         citizenPacketCampfireClear(world, CitizenPoint(to.x, to.y, to.z), CitizenPoint(from.x, from.y, from.z), half, npc.height)
 }
 
+internal data class CitizenTerrainEscape(val obstruction: CivPosition, val material: String, val step: Location?)
+
+/** A grown crown or newly placed block permits only a short step toward an existing overlap's exit. */
+internal fun citizenResidentEscapeStep(npc: PacketPlayerNpc, allowed: (Location) -> Boolean): CitizenTerrainEscape? {
+    val from = npc.location
+    if (!npc.isValid || npc.pose == PacketNpcPose.SLEEPING ||
+        !from.x.isFinite() || !from.y.isFinite() || !from.z.isFinite()) return null
+    val world = npc.world
+    val half = .3 * npc.scale - .001
+    val body = bodyAt(from.toVector().add(Vector(0.0, .001, 0.0)), half, npc.height - .002, half)
+    val envelope = body.clone().expand(.05, 0.0, .05)
+    val obstacles = mutableListOf<BoundingBox>()
+    val liquids = mutableListOf<BoundingBox>()
+    var obstruction: Pair<CivPosition, String>? = null
+    for (x in floor(envelope.minX).toInt()..floor(envelope.maxX).toInt())
+        for (z in floor(envelope.minZ).toInt()..floor(envelope.maxZ).toInt()) {
+            if (!citizenChunkReady(world, x shr 4, z shr 4)) return null
+            for (y in (floor(envelope.minY).toInt() - 1)..floor(envelope.maxY).toInt()) {
+                if (y !in world.minHeight until world.maxHeight) return null
+                val block = world.getBlockAt(x, y, z)
+                if (block.isLiquid) liquids += BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + 1.0, z + 1.0)
+                for (local in block.collisionShape.boundingBoxes) {
+                    val box = local.clone().shift(x.toDouble(), y.toDouble(), z.toDouble())
+                    if (!envelope.overlaps(box)) continue
+                    obstacles += box
+                    if (obstruction == null && body.overlaps(box)) obstruction = CivPosition(x, y, z) to block.type.name
+                }
+            }
+        }
+    val hit = obstruction ?: return null
+    fun depth(body: BoundingBox, obstacle: BoundingBox): Double = if (!body.overlaps(obstacle)) 0.0 else
+        minOf(body.maxX - obstacle.minX, obstacle.maxX - body.minX, body.maxZ - obstacle.minZ, obstacle.maxZ - body.minZ)
+    val before = obstacles.map { depth(body, it) }
+    val candidates = listOf(-.05 to 0.0, .05 to 0.0, 0.0 to -.05, 0.0 to .05).mapNotNull { (dx, dz) ->
+        val next = body.clone().shift(dx, 0.0, dz)
+        val swept = body.clone().union(next)
+        val after = obstacles.map { depth(next, it) }
+        if (liquids.any(swept::overlaps) || obstacles.indices.any {
+                before[it] == 0.0 && swept.overlaps(obstacles[it]) || after[it] > before[it] + CONTACT_EPSILON
+            }) return@mapNotNull null
+        val progress = before.sum() - after.sum()
+        if (progress <= CONTACT_EPSILON) null else from.clone().add(dx, 0.0, dz) to progress
+    }.sortedByDescending { it.second }
+    val next = candidates.firstOrNull { (at, _) ->
+        citizenPacketSupported(world, CitizenPoint(at.x, at.y, at.z)) &&
+            citizenPacketCampfireClear(world, CitizenPoint(at.x, at.y, at.z), CitizenPoint(from.x, from.y, from.z), half, npc.height) &&
+            allowed(at)
+    }?.first
+    return CitizenTerrainEscape(hit.first, hit.second, next)
+}
+
 internal data class CitizenCollisionMove(val position: Vector, val contact: Vector)
 
 /** Owned packet residents use the same full-body sweep as native-player contact. */

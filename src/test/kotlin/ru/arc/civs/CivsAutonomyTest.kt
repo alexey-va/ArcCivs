@@ -138,6 +138,102 @@ class CivsAutonomyTest : FunSpec({
         CivsRules.autoAssign(assigned, city.owner, 400_000) shouldBe assigned
     }
 
+    test("the last idle forester resumes paid farm construction without resetting its receipt or granting stock") {
+        val city = autonomyLostBuilder()
+        val worker = city.workers.single()
+        val hut = city.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        city.stock shouldBe Stock(68, 48, 3)
+        CivsAutonomy.activeMinute(city).workers shouldBe city.workers // Twelve food is still required.
+        CivsRules.needsAutoAssignment(city) shouldBe true
+        val assigned = CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, worker.nextDeliveryAt)
+        assigned.workers.single() shouldBe worker.copy(assignment = hut.id,
+            nextDeliveryAt = worker.nextDeliveryAt + CivsRules.BUILDER_SESSION_INTERVAL)
+        assigned.stock shouldBe city.stock
+        assigned.construction shouldBe city.construction
+        assigned.immigration shouldBe city.immigration
+        assigned.autonomy shouldBe city.autonomy
+        CivsRules.autoAssign(assigned, city.owner, 400_000) shouldBe assigned
+        autonomyReject("stale-delivery") { autonomyTrip(assigned, worker, worker.nextDeliveryAt) }
+    }
+
+    test("the last builder staffs the completed farm and replacements still cost twelve earned food") {
+        val unfinished = autonomyLostBuilder()
+        val farm = unfinished.buildings.first { it.type == BuildingType.FARM }
+        val hut = unfinished.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        val before = CivsRules.validate(unfinished.copy(construction = null,
+            buildings = unfinished.buildings.map { if (it.id == farm.id) it.copy(phase = BuildingPhase.ACTIVE) else it },
+            workers = listOf(unfinished.workers.single().copy(assignment = hut.id))))
+        var city = CivsRules.autoAssign(before, before.owner, 300_000)
+        city.workers.single().assignment shouldBe farm.id
+        city.stock shouldBe before.stock
+        city.workers.single().health shouldBe before.workers.single().health
+        CivsRules.autoAssign(city, city.owner, 300_001) shouldBe city
+
+        val warehouse = autonomyBuilding(BuildingType.WAREHOUSE, phase = BuildingPhase.CONSTRUCTING)
+        val queued = CivsRules.reserveBuild(city, city.owner, warehouse, autonomyOrder(warehouse, 65))
+        CivsRules.autoAssign(queued, queued.owner, 300_002) shouldBe queued // Do not pull the only farmer back before recruitment.
+        repeat(3) {
+            val worker = city.workers.single()
+            city = autonomyTrip(city, worker, worker.nextDeliveryAt)
+        }
+        city.stock.food shouldBe CivsRules.RECRUIT_FOOD
+        val recruited = CivsAutonomy.activeMinute(autonomyRoundtrip(city), nextId = { UUID(20, 1) })
+        recruited.workers.size shouldBe 2
+        recruited.workers.first().id shouldBe before.workers.single().id
+        recruited.stock shouldBe city.stock.copy(food = 0)
+        val staffed = CivsRules.autoAssign(recruited, recruited.owner, 600_000)
+        staffed.workers.map { it.assignment } shouldBe listOf(farm.id, hut.id)
+    }
+
+    test("a staffed pending order leaves an idle forester available for the empty low food farm") {
+        val unfinished = autonomyLostBuilder()
+        val farm = unfinished.buildings.first { it.type == BuildingType.FARM }
+        val hut = unfinished.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        val forester = unfinished.workers.single()
+        val builder = forester.copy(id = UUID(21, 1), name = "Builder", assignment = hut.id, health = 20.0)
+        val completedFarm = CivsRules.validate(unfinished.copy(construction = null, workers = listOf(builder, forester),
+            buildings = unfinished.buildings.map { if (it.id == farm.id) it.copy(phase = BuildingPhase.ACTIVE) else it }))
+        val warehouse = autonomyBuilding(BuildingType.WAREHOUSE, phase = BuildingPhase.CONSTRUCTING)
+        val pending = CivsRules.reserveBuild(completedFarm, completedFarm.owner, warehouse, autonomyOrder(warehouse, 65))
+        for (city in listOf(pending, CivsRules.pauseConstruction(pending, pending.owner, pending.construction!!.id, "world-changed"))) {
+            CivsRules.needsAutoAssignment(city) shouldBe true
+            val staffed = CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, 400_000)
+            staffed.workers.first() shouldBe builder
+            staffed.workers.last().assignment shouldBe farm.id
+            staffed.stock shouldBe city.stock
+            staffed.construction shouldBe city.construction
+            CivsRules.autoAssign(staffed, city.owner, 400_001) shouldBe staffed
+        }
+    }
+
+    test("critical reassignment preserves personal jobs and waits for durable or runtime work to finish") {
+        val city = autonomyLostBuilder()
+        val worker = city.workers.single()
+        val root = city.center.copy(y = city.center.y + 1)
+        val centre = (15 shl 5) or 15
+        val tree = CivForestryJob(UUID(30, 1), root, "OAK_SAPLING", listOf(root),
+            listOf("minecraft:oak_log[axis=y]", "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"),
+            listOf((1 shl 16) or (1 shl 10) or centre, centre), next = 1)
+        // Personal captured batches carry native materials rather than the Auto fixed stock price.
+        val personal = city.copy(autonomy = null, construction = city.construction!!.copy(cost = Stock()))
+        for (blocked in listOf(personal,
+            city.copy(autonomy = city.autonomy!!.copy(paused = true)),
+            city.copy(pendingDeletion = CivDeletion(null)),
+            city.copy(forestryJobs = mapOf(worker.assignment.toString() to tree)))) {
+            CivsRules.needsAutoAssignment(blocked) shouldBe false
+            if (blocked.pendingDeletion == null) CivsRules.autoAssign(autonomyRoundtrip(blocked), blocked.owner, 300_000) shouldBe blocked
+        }
+        CivsRules.needsAutoAssignment(city) { false } shouldBe false
+        CivsRules.autoAssign(city, city.owner, 300_000) { false } shouldBe city
+        CivsRules.needsAutoAssignment(city) { it == worker.id } shouldBe true
+        val child = worker.copy(assignment = null, nextDeliveryAt = 0, childMinutes = 0,
+            parentIds = setOf(UUID(40, 1), UUID(40, 2)))
+        CivsRules.needsAutoAssignment(city.copy(workers = listOf(child))) shouldBe false
+        val carrying = worker.copy(cargo = CivCargo(UUID(40, 3), UUID(40, 4), UUID(40, 4), UUID(40, 5),
+            root, "BREAD", 1))
+        CivsAutonomy.criticalAssignment(city.copy(workers = listOf(carrying))) { true } shouldBe null
+    }
+
     test("accepted production and forestry receipts sustain eleven buildings including three houses through level two without outside inputs") {
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
@@ -206,6 +302,20 @@ private fun autonomyImmigrants(before: Settlement): Settlement {
     repeat(5) { index -> city = CivsRules.immigrate(city, city.owner, UUID(2, index.toLong()),
         "Resident $index", 31_000L + index * 60_000) }
     return city
+}
+
+private fun autonomyLostBuilder(): Settlement {
+    val hut = autonomyBuilding(BuildingType.BUILDER_HUT, phase = BuildingPhase.ACTIVE)
+    val forest = autonomyBuilding(BuildingType.FORESTER, phase = BuildingPhase.ACTIVE)
+    val quarry = autonomyBuilding(BuildingType.QUARRY, phase = BuildingPhase.ACTIVE)
+    val farm = autonomyBuilding(BuildingType.FARM, phase = BuildingPhase.CONSTRUCTING)
+    val base = autonomyImmigrants(autonomyCity())
+    val city = CivsRules.validate(base.copy(buildings = base.buildings + listOf(hut, forest, quarry),
+        workers = listOf(base.workers.single { it.id == UUID(2, 0) }.copy(assignment = forest.id,
+            nextDeliveryAt = 300_000, health = 1.0)), stock = Stock(92, 56, 3),
+        autonomy = CivAutonomy(recruitmentMinutes = CivsAutonomy.RECRUITMENT_MINUTES)))
+    val reserved = CivsRules.reserveBuild(city, city.owner, farm, autonomyOrder(farm, 287))
+    return CivsRules.validate(reserved.copy(construction = reserved.construction!!.copy(workDone = 26, blocksPlaced = 26)))
 }
 
 private fun autonomyOrder(building: CivBuilding, rows: Int) = CivConstruction(UUID.randomUUID(), building.id, building.level,
