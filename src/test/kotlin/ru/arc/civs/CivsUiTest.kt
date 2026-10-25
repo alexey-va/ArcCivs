@@ -1075,7 +1075,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("warehouse request board preserves remaining in transit and one current stock snapshot") {
+    test("warehouse request board preserves remaining deficits without querying shared stock") {
         withUi(realHistory = true) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -1101,21 +1101,21 @@ class CivsUiTest : FunSpec({
             val beforeRequests = stockSnapshots
             h.click("logistics")
             h.screen.id shouldBe "civs.logistics"
-            materialTableCells(h.screen).first() shouldBe listOf("Материал", "Нужно", "В пути", "Запас", "Состояние")
-            materialTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "1", "2", "47", "Частично")
-            materialTableCells(h.screen).first { it.first() == "Кожа" }.take(4) shouldBe listOf("Кожа", "1", "0", "12")
-            materialTableCells(h.screen).first { it.first() == "Камень" }.take(4) shouldBe listOf("Камень", "8", "0", "128")
-            stockSnapshots shouldBe beforeRequests + 1
+            logisticsTableCells(h.screen).first() shouldBe listOf("Материал", "Не хватает")
+            logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "1")
+            logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "1")
+            logisticsTableCells(h.screen).first { it.first() == "Камень" } shouldBe listOf("Камень", "8")
+            stockSnapshots shouldBe beforeRequests
             h.screen.body.size shouldBe 1 // One card for all four requests from this hall.
             h.screen.buttons shouldBe emptyList()
-            materialTableCells(h.screen).first { it.first() == "Дубовое бревно" }.take(4) shouldBe listOf("Дубовое бревно", "4", "0", "4")
+            logisticsTableCells(h.screen).first { it.first() == "Дубовое бревно" } shouldBe listOf("Дубовое бревно", "4")
             export("logistics-requests-ru")
             physical = physical + ("OAK_LOG" to 6L)
             h.click("history")
             val beforeRefresh = stockSnapshots
             h.click("logistics")
-            materialTableCells(h.screen).first { it.first() == "Дубовое бревно" }.take(4) shouldBe listOf("Дубовое бревно", "4", "0", "6")
-            stockSnapshots shouldBe beforeRefresh + 1
+            logisticsTableCells(h.screen).first { it.first() == "Дубовое бревно" } shouldBe listOf("Дубовое бревно", "4")
+            stockSnapshots shouldBe beforeRefresh
             h.screen.buttons shouldBe emptyList()
             export("logistics-requests-refreshed-ru")
             h.click("history")
@@ -1166,15 +1166,17 @@ class CivsUiTest : FunSpec({
                 exportUiScreen(it, "$name-$locale", h.screen, listOf(640, 360))
             }
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
+            h.screen.body.single().width shouldBe 320
+            h.body().codePoints().anyMatch { it in 0x100000..0x101FFF } shouldBe true
             val observed = mutableListOf<List<String>>()
             repeat(4) { materialPage ->
                 h.screen.body.size shouldBe 1 // A long source stays one card; its six visible rows are explicit.
                 h.body() shouldContain "12, 64, 8"
                 h.body() shouldContain "${materialPage + 1}/4"
                 h.body().contains("22, 64, 8") shouldBe false
-                materialTableCells(h.screen).first() shouldBe if (locale == "ru")
-                    listOf("Материал", "Нужно", "В пути", "Запас", "Состояние")
-                    else listOf("Material", "Need", "Transit", "Stock", "State")
+                logisticsTableCells(h.screen).first() shouldBe if (locale == "ru")
+                    listOf("Материал", "Не хватает")
+                    else listOf("Material", "Missing")
                 val rows = logisticsMaterialRows(h.screen)
                 rows.size shouldBe 6
                 observed += rows
@@ -1192,10 +1194,7 @@ class CivsUiTest : FunSpec({
             }
             observed shouldBe materials.mapIndexed { index, material ->
                 val transit = if (index % 3 == 0) 4 else 0
-                val stock = when (material) { "OAK_LOG" -> 64; "GLASS" -> 37; else -> 0 }
-                val state = if (transit > 0) "part-in-transit" else if (stock > 0) "waiting-courier" else "waiting-stock"
-                listOf(plainText(labels.material(h.player, material)), (12 + index - transit).toString(), transit.toString(),
-                    stock.toString(), plainText(labels.render(h.player, "logistics.state.$state")))
+                listOf(plainText(labels.material(h.player, material)), (12 + index - transit).toString())
             }
             h.click("materials_previous")
             h.body() shouldContain "3/4"
@@ -1225,7 +1224,7 @@ class CivsUiTest : FunSpec({
         }
     }
 
-    test("warehouse request board keeps stock unknown when its snapshot is unavailable") {
+    test("warehouse request board renders deficits without a shared stock snapshot") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
@@ -1236,18 +1235,17 @@ class CivsUiTest : FunSpec({
             every { h.host.availableMaterials(h.player) } throws CivsRejection("storage-unavailable")
             h.ui.openBuilding(h.player, base.id, warehouse.id)
             h.click("logistics")
-            materialTableCells(h.screen).first { it.first() == "Бумага" }.take(3) shouldBe listOf("Бумага", "3", "0")
-            materialTableCells(h.screen).dropWhile { it.first() != "Бумага" }.map { it[3] }
-                .filter(String::isNotBlank).joinToString(" ") shouldBe "Нет данных"
-            materialTableCells(h.screen).first { it.first() == "Бумага" }.last() shouldBe "Неизвестно"
+            logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "3")
+            h.body().contains("Нет данных") shouldBe false
+            h.body().contains("Неизвестно") shouldBe false
             h.body().contains("3 / 0") shouldBe false
             h.screen.buttons shouldBe emptyList()
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-stock-unavailable-ru", h.screen, listOf(588, 380)) }
         }
     }
 
-    test("courier board clamps covered requests and distinguishes empty stock") {
-        withUi { h ->
+    test("courier board clamps covered requests with and without pack fonts") {
+        for (font in listOf("", "arc:dialog_ui")) withUi(decorationFont = font) { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
             val base = settlement(h.player)
             val warehouse = base.buildings.last().copy(type = BuildingType.WAREHOUSE)
@@ -1257,9 +1255,11 @@ class CivsUiTest : FunSpec({
                 CivSupplyRequest(base.buildings.first().id, "LEATHER", 2, 0))
             every { h.host.availableMaterials(h.player) } returns emptyMap()
             h.ui.openBuilding(h.player, base.id, warehouse.id); h.click("logistics")
-            materialTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "0", "5", "0", "В пути")
-            materialTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "2", "0", "0", "Нет запаса")
-            materialTableCells(h.screen).drop(2).none { it.getOrNull(1)?.startsWith("-") == true } shouldBe true
+            logisticsTableCells(h.screen).first { it.first() == "Бумага" } shouldBe listOf("Бумага", "0")
+            logisticsTableCells(h.screen).first { it.first() == "Кожа" } shouldBe listOf("Кожа", "2")
+            logisticsTableCells(h.screen).drop(1).none { it.getOrNull(1)?.startsWith("-") == true } shouldBe true
+            h.body().codePoints().anyMatch { it in 0x100000..0x101FFF } shouldBe font.isNotEmpty()
+            if (font.isEmpty()) h.body().codePoints().anyMatch { Character.getType(it) == Character.PRIVATE_USE.toInt() } shouldBe false
             System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "logistics-covered-and-short-ru", h.screen, listOf(588, 380)) }
         }
     }
@@ -3416,10 +3416,26 @@ private fun materialTableCells(screen: PaperDialogScreen): List<List<String>> {
         } } }.toList()
 }
 
-/** Reassemble wrapped cell lines so a dense-board assertion checks every full name, count and state. */
+/** Read the two visible columns from either the authored panel or the native fallback. */
+private fun logisticsTableCells(screen: PaperDialogScreen): List<List<String>> {
+    fun panel(component: Component): Component? {
+        if (component.children().firstOrNull()?.font()?.asString() == "arc:dialog_panel_navy") return component
+        return component.children().firstNotNullOfOrNull(::panel)
+    }
+    val framed = screen.body.firstNotNullOfOrNull { panel(it.text) }
+    if (framed != null) return framed.children().drop(1).filter { it.children().size == 5 }.map { line ->
+        listOf(line.children()[1], line.children()[3]).map {
+            plainText(it).replace(Regex("\\p{Co}"), "").trim()
+        }
+    }
+    return screen.body.flatMap { plainText(it.text).lineSequence().map { it.split(" · ") }
+        .filter { it.size == 2 }.toList() }
+}
+
+/** Reassemble wrapped cell lines so a dense-board assertion checks every full name and deficit. */
 private fun logisticsMaterialRows(screen: PaperDialogScreen): List<List<String>> {
     val rows = mutableListOf<MutableList<String>>()
-    for (line in materialTableCells(screen).dropWhile { it[1].toLongOrNull() == null }) {
+    for (line in logisticsTableCells(screen).dropWhile { it[1].toLongOrNull() == null }) {
         if (line[1].isNotBlank()) rows += line.toMutableList()
         else line.forEachIndexed { column, value ->
             if (value.isNotBlank()) rows.last()[column] = listOf(rows.last()[column], value).filter(String::isNotBlank).joinToString(" ")

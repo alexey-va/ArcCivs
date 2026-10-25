@@ -1297,8 +1297,6 @@ class CivsUi internal constructor(
         if (warehouse.type != BuildingType.WAREHOUSE) return showBuilding(player, warehouseId)
         val result = runCatching { host.supplyRequests(player) }
         val requests = result.getOrDefault(emptyList())
-        val available = if (requests.isNotEmpty()) runCatching { host.availableMaterials(player) }
-            else Result.success(emptyMap<String, Long>())
         data class SupplyCard(val id: UUID, val page: Int, val lastPage: Int, val body: PaperDialogBody, val lines: Int)
         val cards = requests.groupBy(CivSupplyRequest::buildingId).map { (buildingId, orders) ->
             val last = lastPage(orders.size, LOGISTICS_MATERIAL_PAGE_SIZE)
@@ -1309,24 +1307,12 @@ class CivsUi internal constructor(
                 ?: tr(player, "buildings.generic")
             if (last > 0) source = source.append(text.literal(" · ")).append(tr(player, "logistics.material-page",
                 "page" to materialPage + 1, "pages" to last + 1).color(CivsText.BODY))
-            val table = DialogTables.body(orders.drop(materialPage * LOGISTICS_MATERIAL_PAGE_SIZE)
+            val table = presentation.supplyTable(orders.drop(materialPage * LOGISTICS_MATERIAL_PAGE_SIZE)
                 .take(LOGISTICS_MATERIAL_PAGE_SIZE).map { request ->
                 val remaining = (request.needed - request.inTransit).coerceAtLeast(0)
-                val stock = available.getOrNull()?.get(request.material) ?: 0
-                val state = when {
-                    remaining == 0L && request.inTransit > 0 -> "in-transit"
-                    request.inTransit > 0 -> "part-in-transit"
-                    available.isFailure -> "stock-unknown"
-                    stock == 0L -> "waiting-stock"
-                    else -> "waiting-courier"
-                }
                 listOf(materialName(player, request.material).color(STOCK),
-                    text.literal(remaining).color(CivsText.BODY), text.literal(request.inTransit).color(CivsText.BODY),
-                    (if (available.isSuccess) text.literal(stock) else tr(player, "workers.stock-unknown")).color(CivsText.BODY),
-                    tr(player, "logistics.state.$state").color(if (state == "waiting-stock") STOCK else NAVIGATION))
-            }, listOf(tr(player, "materials.item")) + listOf("remaining", "transit", "stock", "state")
-                .map { tr(player, "logistics.column-$it").hoverEvent(HoverEvent.showText(tr(player, "logistics.board-help"))) },
-                DialogTables.Frame.COMMON, 520, listOf(16, 4, 4, 4, 8))
+                    text.literal(remaining).color(CivsText.BODY))
+            }, listOf(tr(player, "materials.item"), tr(player, "materials.missing")))
             val body = PaperDialogBody(source.append(Component.newline()).append(table.text), table.width)
             SupplyCard(buildingId, materialPage, last, body,
                 PlainTextComponentSerializer.plainText().serialize(body.text).count { it == '\n' } + 1)
@@ -1343,7 +1329,6 @@ class CivsUi internal constructor(
         val visible = sourcePages.getOrNull(current).orEmpty()
         present(player, "civs.logistics", "logistics.title", buildList {
             result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
-            available.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
             if (result.isSuccess && requests.isEmpty()) add(body(player, "logistics.empty"))
             addAll(visible.map(SupplyCard::body))
         }, buildList {
