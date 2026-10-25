@@ -1,15 +1,15 @@
 import importlib.util
-import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 from zipfile import ZipFile
 
 
 SPEC = importlib.util.spec_from_file_location("settlement_preview", Path(__file__).with_name("render-settlement-ui.py"))
 preview = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(preview)
-RENDERER = Path(__file__).resolve().parents[2] / "ruscrafting-ops/.agents/skills/design-ruscrafting-surfaces/scripts/render_plugin_surface_dump.py"
 
 
 class ExportedFontTest(unittest.TestCase):
@@ -34,29 +34,35 @@ class ExportedFontTest(unittest.TestCase):
                                      {"font": "arc:second", "text": self.panel}])
         with self.assertRaisesRegex(ValueError, "Unregistered private-use glyph"):
             preview.fixture_glyphs({"content": {"body-0": self.panel}}, self.registry)
+        for font in (None, "", 42):
+            with self.subTest(font=font), self.assertRaisesRegex(ValueError, "Invalid component font"):
+                preview.component_fonts({"font": font, "text": self.panel})
 
-    def test_exact_pack_provider_resolves_references_spaces_and_client_fallback(self):
-        core = preview.load_renderer(RENDERER).CORE
+    def test_wrapper_checks_resolved_glyphs_and_propagates_unknown_font_failure(self):
+        # Reference resolution belongs to the canonical renderer's own suite.
+        # Exercise our validator against that dependency's resolved-provider contract.
+        core = SimpleNamespace(resolve_providers=Mock(return_value=[
+            {"type": "bitmap", "chars": [self.panel]},
+            {"type": "space", "advances": {self.spacer: -1}},
+        ]))
         with tempfile.TemporaryDirectory() as directory:
             pack, client = Path(directory) / "pack.zip", Path(directory) / "client.jar"
-            with ZipFile(pack, "w") as archive:
-                archive.writestr("assets/arc/font/dialog_ui_preview.json", json.dumps({"providers": [
-                    {"type": "reference", "id": "arc:panel"},
-                    {"type": "space", "advances": {self.spacer: -1}},
-                ]}))
-                archive.writestr("assets/arc/font/panel.json", json.dumps({"providers": [
-                    {"type": "bitmap", "file": "arc:panel.png", "chars": [self.panel]},
-                ]}))
-            with ZipFile(client, "w") as archive:
-                archive.writestr("assets/minecraft/font/default.json", json.dumps({"providers": [
-                    {"type": "bitmap", "file": "minecraft:font.png", "chars": [self.icon]},
-                ]}))
-            preview.validate_glyphs({self.panel: "arc:dialog_ui_preview", self.spacer: "arc:dialog_ui_preview",
-                                     self.icon: "minecraft:default"}, pack, client, core)
+            for path in (pack, client):
+                with ZipFile(path, "w"):
+                    pass
+            preview.validate_glyphs({self.panel: "arc:dialog_ui_preview", self.spacer: "arc:dialog_ui_preview"}, pack, client, core)
+            core.resolve_providers.assert_called_once()
+            call = core.resolve_providers.call_args
+            self.assertEqual(call.args[1], "arc:dialog_ui_preview")
+            self.assertEqual(Path(call.args[0].filename), pack)
+            self.assertEqual([Path(archive.filename) for archive in call.kwargs["fallback_archives"]], [client])
             with self.assertRaisesRegex(ValueError, "does not define"):
-                preview.validate_glyphs({self.panel: "minecraft:default"}, pack, client, core)
-            with self.assertRaises(core.SurfaceRenderError):
+                preview.validate_glyphs({self.icon: "arc:dialog_ui_preview"}, pack, client, core)
+            failure = ValueError("Unknown font: arc:missing")
+            core.resolve_providers.side_effect = failure
+            with self.assertRaises(ValueError) as raised:
                 preview.validate_glyphs({self.panel: "arc:missing"}, pack, client, core)
+            self.assertIs(raised.exception, failure)
 
 
 if __name__ == "__main__":

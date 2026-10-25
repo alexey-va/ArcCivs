@@ -10,6 +10,8 @@ The low/base/high sensitivities use 1/4/6 active city owners, 0.25/1/4 active ho
 
 The canonical assessment keeps Vault, tokens, player XP, resident job XP, Auto city stock, and native items separate. It does not translate any item into money. Project funding and construction costs are one-time resource sinks; they are not daily production events and are not multiplied by seven. Calculator `disposable_per_player_day` is zero because net stock after committed downstream consumption is not established; no native withdrawal API is assumed. This does not mean gross item flows are zero.
 
+The release's resident-yield correction restores ordinary walking when residents mutually block a depot approach. It changes neither nominal work intervals nor recipe quantities, fees, stock caps, or rewards. Yield steps never grant arrival or completed work; the normal observed-arrival and commit checks still apply.
+
 ## One-time funding and construction costs
 
 ### Auto city-stock costs

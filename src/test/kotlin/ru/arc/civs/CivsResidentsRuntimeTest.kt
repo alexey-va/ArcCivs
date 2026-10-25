@@ -25,6 +25,7 @@ import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Monster
+import org.bukkit.entity.Player
 import org.bukkit.event.EventHandler
 import org.bukkit.event.Listener
 import org.bukkit.inventory.EquipmentSlot
@@ -2175,6 +2176,264 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (headOn in listOf(false, true))
+    test("autonomous depot traffic yields and completes both real resource trips headOn=$headOn") {
+        residentRuntime(workerId = UUID.fromString("06254fa5-4795-4a8e-a7c7-783f9fc90cfd")) { h ->
+            val (farm, quarry, forester) = h.autonomousTrafficTown(headOn)
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            // The returning farmer first earns a complete session at the real workplace.
+            for (tick in 1..3_000) {
+                h.navigate()
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if (h.phase() == CitizenPhase.RETURNING) break
+            }
+            withClue(h.navigationState()) { h.phase() shouldBe CitizenPhase.RETURNING }
+            h.deliveries shouldBe 0
+            val minerId = UUID.fromString("679ad6aa-2a43-4c17-89ba-16589232fed3")
+            val foresterId = UUID.fromString("da33dc2d-c343-48c7-9b8d-10cda594970e")
+            val idleId = UUID.fromString("e79fb27a-c939-4cb2-9cd6-ec9542a3465d")
+            h.city = h.city.copy(workers = h.city.workers + listOf(
+                CivWorker(minerId, "Miner", quarry.id, completedCycles = 88, nextDeliveryAt = 1),
+                CivWorker(foresterId, "Forester", forester.id, nextDeliveryAt = 1), CivWorker(idleId, "Idle", null)))
+            h.idleReason = "searching-work"
+            val farmer = h.owner.collisionActors().single()
+            farmer.teleport(if (headOn) Location(h.world, -1866.8092239145421, 64.0, -2758.5)
+                else Location(h.world, -1866.8092239145421, 64.0, -2757.809223914542))
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow)) }
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            actors.size shouldBe 4
+            // One fixture placement reproduces the 2026-10-25 16:02:06 UTC Auto2 snapshot.
+            // All subsequent displacement, including the idle neighbours, belongs to the runtime.
+            actors.getValue(minerId).teleport(Location(h.world, -1867.5, 64.0,
+                if (headOn) -2758.5 else -2758.303946199169))
+            actors.getValue(foresterId).teleport(Location(h.world, -1868.5, 64.0, -2758.5))
+            actors.getValue(idleId).teleport(Location(h.world, -1867.5, 64.0,
+                if (headOn) -2759.2 else -2758.9962500000006))
+            repeat(2) { h.owner.pulse(requireNotNull(h.navigationNow)) }
+            val before = CivsRules.validate(h.city)
+            val received = mutableSetOf<UUID>()
+            h.workerDelivery = { worker, token ->
+                h.owner.requireAutonomousDelivery(h.city.id, worker, token)
+                h.city = CivsRules.deliver(h.city, h.city.owner, worker, requireNotNull(token.assignmentId),
+                    token.completedCycles, token.nextDeliveryAt, requireNotNull(h.navigationNow))
+                received += worker
+                CompletableFuture.completedFuture(h.city)
+            }
+            var yielded = false
+            val afterYield = actors.keys.associateWith { 2.0 }.toMutableMap()
+            for (tick in 1..4_000) {
+                val previous = actors.mapValues { it.value.location }
+                val progress = actors.keys.associateWith { h.routeMotion(it) to h.routeProgress(it) }
+                val yielding = actors.keys.filter(h::yielding).associateWith { h.routeProgress(it) }
+                h.navigate()
+                yielded = yielded || actors.keys.any(h::yielding)
+                for ((id, npc) in actors) {
+                    (previous.getValue(id).distance(npc.location) <= .215001) shouldBe true
+                    if (id !in yielding && h.yielding(id)) {
+                        withClue("Repeated yield without two real forward blocks: worker=$id progress=$afterYield") {
+                            (afterYield.getValue(id) >= 2.0) shouldBe true
+                        }
+                        afterYield[id] = 0.0
+                    } else {
+                        val prior = if (progress.getValue(id).first === h.routeMotion(id)) progress.getValue(id).second ?: 0.0 else 0.0
+                        val walked = ((h.routeProgress(id) ?: 0.0) - prior).coerceAtLeast(0.0)
+                        afterYield[id] = afterYield.getValue(id) + walked
+                    }
+                    if (id in yielding) {
+                        (previous.getValue(id).distance(npc.location) <= .050001) shouldBe true
+                        h.routeProgress(id) shouldBe yielding.getValue(id)
+                    }
+                }
+                val bodies = actors.values.map { npc -> npc.location.let { at ->
+                    BoundingBox(at.x - .3, at.y, at.z - .3, at.x + .3, at.y + 1.8, at.z + .3)
+                } }
+                withClue("tick=$tick positions=${actors.mapValues { it.value.location }}") {
+                    bodies.indices.all { a -> (a + 1 until bodies.size).all { b -> !bodies[a].overlaps(bodies[b]) } } shouldBe true
+                }
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if (received.containsAll(listOf(h.workerId, minerId))) break
+            }
+            withClue("received=$received ${h.owner.debug(h.city.id, null)}") {
+                yielded shouldBe true
+                received.containsAll(listOf(h.workerId, minerId)) shouldBe true
+            }
+            (h.city.workers.first { it.id == h.workerId }.completedCycles >= 114) shouldBe true
+            (h.city.workers.first { it.id == minerId }.completedCycles >= 89) shouldBe true
+            (h.city.stock.food >= before.stock.food + CivsRules.deliveryAmount(farm)) shouldBe true
+            (h.city.stock.stone >= before.stock.stone + CivsRules.deliveryAmount(quarry)) shouldBe true
+            h.city.inventory shouldBe null
+            h.city.workers.all { it.items == null } shouldBe true
+        }
+    }
+
+    for (supportHole in listOf(false, true))
+    test("resident yielding checks the whole corridor and sealed routes pause without relocation supportHole=$supportHole") {
+        residentRuntime { h ->
+            val quarry = h.assignQuarry().copy(control = null, production = null,
+                bounds = CivBox(CivPosition(18, 64, -4), CivPosition(26, 68, -1)))
+            h.world.getBlockAt(20, 64, 0).type = Material.AIR
+            val hall = h.city.buildings.first().copy(bounds = CivBox(CivPosition(-2, 64, -4), CivPosition(2, 68, -2)))
+            val forester = quarry.copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+                anchor = CivPosition(10, 64, 10), entrance = CivPosition(10, 64, 10),
+                bounds = CivBox(CivPosition(8, 64, 7), CivPosition(12, 68, 9)))
+            val blocker = UUID(0, 99)
+            h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                buildings = listOf(hall, quarry, forester),
+                workers = h.city.workers + CivWorker(blocker, "Waiting forester", forester.id, nextDeliveryAt = 1)))
+            h.idleReason = "searching-work"
+            h.owner.collisionActors().single().teleport(Location(h.world, .5, 64.0, if (supportHole) .8 else .5))
+            h.navigationNow = 2_000
+            h.owner.residentStepAllowed = { _, _, _ -> false }
+            repeat(2) { h.owner.pulse(2_000) }
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            actors.getValue(blocker).teleport(Location(h.world, 10.5, 64.0, 10.5))
+            for (tick in 1..200) {
+                h.navigate(0)
+                if (h.routeMotion(h.workerId)?.let { !it.searching && it.waitingForCollision } == true) break
+            }
+            withClue(h.navigationState()) { h.routeMotion(h.workerId)?.waitingForCollision shouldBe true }
+            // The geometry token is already accepted; only a new physical obstruction changes.
+            actors.getValue(blocker).teleport(Location(h.world, 1.25, 64.0, if (supportHole) .8 else .5))
+            if (supportHole) h.world.getBlockAt(1, 63, 1).type = Material.AIR // z=.8 and z=2.05 supported; z=1 is not.
+            else {
+                for (x in -2..3) for (z in listOf(-1, 1)) for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
+                for (x in listOf(-1, 2)) for (z in -1..1) for (y in 64..66)
+                    h.world.getBlockAt(x, y, z).type = Material.STONE
+            }
+            h.owner.residentStepAllowed = { _, _, _ -> true }
+            var paused = false
+            var yielded = false
+            for (tick in 1..400) {
+                val previous = actors.mapValues { it.value.location }
+                h.navigate()
+                yielded = yielded || h.yielding(blocker)
+                if (supportHole) (actors.getValue(blocker).location.z <= .800001) shouldBe true
+                actors.forEach { (id, npc) -> (previous.getValue(id).distance(npc.location) <= .172001) shouldBe true }
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if (supportHole && yielded && actors.getValue(blocker).location.z < .3) break
+                if (!supportHole && h.phase() == CitizenPhase.PAUSED) { paused = true; break }
+            }
+            withClue(h.owner.debug(h.city.id, null)) {
+                if (supportHole) {
+                    yielded shouldBe true
+                    (actors.getValue(blocker).location.z < .3) shouldBe true
+                } else paused shouldBe true
+            }
+            h.deliveries shouldBe 0
+            h.city.stock shouldBe Stock()
+            h.city.workers.first { it.id == h.workerId }.completedCycles shouldBe 0L
+        }
+    }
+
+    test("an arrived work route cannot yield away before its coarse arrival pulse") {
+        residentRuntime { h ->
+            h.prepareMineWork(CivPosition(22, 64, 0))
+            val requester = UUID(0, 98)
+            h.city = h.city.copy(workers = h.city.workers + CivWorker(requester, "Returning neighbour", null))
+            h.navigationNow = 2_000
+            repeat(2) { h.owner.pulse(2_000) }
+            for (tick in 1..500) {
+                h.navigate()
+                if (h.routeFinished(h.workerId)) break
+            }
+            withClue(h.navigationState()) {
+                h.routeFinished(h.workerId) shouldBe true
+                h.phase() shouldBe CitizenPhase.TO_WORK
+            }
+            val actor = h.owner.collisionActors().single { it.uniqueId == h.workerId }
+            val arrived = actor.location
+            // Seed only the other actor's scheduling state: this probes the exact main-thread
+            // handoff between navigation arrival and the work pulse, without granting a receipt.
+            h.requestYieldAsReturning(requester, h.workerId, arrived.clone().add(.8, 0.0, 0.0))
+            h.yielding(h.workerId) shouldBe false
+            repeat(30) {
+                h.navigate()
+                actor.location.toVector() shouldBe arrived.toVector()
+            }
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            actor.location.toVector() shouldBe arrived.toVector()
+            h.phase() shouldBe CitizenPhase.WORKING
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("a real native player retains collision priority and departure resumes the original mine job") {
+        residentRuntime { h ->
+            // This canonical landing cut lies over five blocks from the blocked feet;
+            // the neighbouring x=25 cut can legitimately be worked from the approach.
+            val work = h.prepareMineWork(CivPosition(23, 64, 0), focus = CivPosition(26, 64, 0))
+            // Seal the only passage before route admission, including the rear cap.
+            // A player in an open room may legitimately be walked around.
+            for (x in 19..26) for (z in -1..1) for (y in 64..66)
+                if (x == 19 || x == 26 || z != 0 || y == 66)
+                    h.world.getBlockAt(x, y, z).type = Material.STONE
+            (20..25).all { x ->
+                citizenPacketBodyClear(h.world, CitizenPoint(x + .5, 64.0, .5), false)
+            } shouldBe true
+            val actor = h.owner.collisionActors().single()
+            val focus = requireNotNull(work.focus)
+            citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe false
+            val player = h.playerAt(Location(h.world, 21.2, 64.0, .5))
+            h.nativeCollisions().use { collisions ->
+                var nativeDenials = 0
+                h.owner.residentStepAllowed = { npc, from, to ->
+                    collisions.canResidentMove(npc, from, to).also { if (!it) nativeDenials++ }
+                }
+                h.navigationNow = 2_000
+                h.owner.pulse(2_000)
+                var blockedFrames = 0
+                var heldSearchAt: Int? = null
+                var heldSearchFrames = 0
+                repeat(360) { tick ->
+                    if (nativeDenials > 0 && heldSearchAt == null) h.holdNavigation = true
+                    val before = actor.location
+                    h.navigate()
+                    if (h.pendingNavigationWorkers > 0) {
+                        val heldAt = heldSearchAt ?: tick.also { heldSearchAt = it }
+                        if (tick - heldAt >= 80) h.releaseNavigation() else heldSearchFrames++
+                    }
+                    if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                    withClue("blocked tick=$tick from=$before feet=${actor.location} focus=$focus ${h.owner.debug(h.city.id, h.workerId)}") {
+                        (before.distance(actor.location) <= .222001) shouldBe true
+                        val at = actor.location
+                        val half = .3 * actor.scale
+                        BoundingBox(at.x - half, at.y, at.z - half,
+                            at.x + half, at.y + actor.height, at.z + half)
+                            .overlaps(player.boundingBox) shouldBe false
+                        citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe false
+                    }
+                    h.yielding(h.workerId) shouldBe false
+                    val row = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
+                    val route = row["route"] as? Map<*, *>
+                    if (route?.get("collision_wait") == true) {
+                        blockedFrames++
+                        route["blocking_resident"] shouldBe null
+                    }
+                }
+                withClue(h.owner.debug(h.city.id, h.workerId)) {
+                    (blockedFrames >= 100) shouldBe true
+                    (nativeDenials >= 100) shouldBe true
+                    (heldSearchFrames >= 80) shouldBe true
+                }
+                h.deliveries shouldBe 0
+                h.failedWorkPositions shouldBe emptyList()
+                player.location.x shouldBe 21.2
+                player.teleport(Location(h.world, 24.5, 68.0, 4.5))
+                for (tick in 1..1_000) {
+                    val before = actor.location
+                    h.navigate()
+                    (before.distance(actor.location) <= .172001) shouldBe true
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    if (h.deliveries == 1) break
+                }
+                h.deliveries shouldBe 1
+                h.work shouldBe work
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
+            }
+        }
+    }
+
     test("five residents walk and pause independently and separate an exact overlap without work or teleport credit") {
         residentRuntime(workerId = UUID.fromString("9d0a2c2a-2abb-4d5b-9150-7659bfb1df84")) { h ->
             for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
@@ -3157,6 +3416,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var hits = 0
     var deliveries = 0
     var onDelivery: ((CitizenToken) -> Unit)? = null
+    var workerDelivery: ((UUID, CitizenToken) -> CompletableFuture<Settlement>)? = null
     var unloads = 0
     var supplyRequests = 0
     var collectionEnabled = false
@@ -3250,11 +3510,18 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
         owner = CivsCitizens(plugin, { if (viewing) listOf(city) + otherCities else emptyList() },
-            { _, _, assignment, cycle, nextAt, order, _ ->
-                if (onDelivery != null) onDelivery!!.invoke(CitizenToken(assignment, cycle, nextAt, order))
-                else check(work != null) { "idle resident cannot deliver" }
-                deliveries++
-                pendingDelivery
+            { _, deliveredWorker, assignment, cycle, nextAt, order, _ ->
+                val token = CitizenToken(assignment, cycle, nextAt, order)
+                val commit = workerDelivery
+                if (commit != null) {
+                    deliveries++
+                    commit(deliveredWorker, token)
+                } else {
+                    if (onDelivery != null) onDelivery!!.invoke(token)
+                    else check(work != null) { "idle resident cannot deliver" }
+                    deliveries++
+                    pendingDelivery
+                }
             },
             { _, _, _ -> }, hurt = { _, _, hit -> hits++; damage = hit; pending },
             doorBlocked = { _, _ -> passageLocked },
@@ -3297,6 +3564,46 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
     }
+
+    fun autonomousTrafficTown(headOn: Boolean): Triple<CivBuilding, CivBuilding, CivBuilding> {
+        background = true
+        for (x in -120..-112) for (z in -176..-167) world.loadChunk(x, z)
+        fun building(type: BuildingType, x: Int, z: Int) = CivBuilding(UUID.randomUUID(), type, 1,
+            CivPosition(x, 64, z), 0, "traffic-${type.name.lowercase()}",
+            CivBox(CivPosition(x - 2, 64, z - 4), CivPosition(x + 2, 68, z - 1)),
+            CivPosition(x, 64, z), BuildingPhase.ACTIVE)
+        val hall = building(BuildingType.TOWN_HALL, -1868, -2759)
+        val farm = building(BuildingType.FARM, -1813, -2735)
+        // The regression isolates the depot contact on level ground; remote mine geometry has its own tests.
+        val quarry = building(BuildingType.QUARRY, -1844, if (headOn) -2759 else -2696)
+        val forester = building(BuildingType.FORESTER, -1868, -2696)
+        city = CivsRules.validate(city.copy(center = hall.entrance, autonomy = CivAutonomy(), inventory = null,
+            buildings = listOf(hall, farm, quarry, forester),
+            workers = listOf(CivWorker(workerId, "Farmer", farm.id, completedCycles = 113, nextDeliveryAt = 1))))
+        owner.collisionActors().single().teleport(Location(world, -1867.5, 64.0, -2758.5))
+        return Triple(farm, quarry, forester)
+    }
+    fun yielding(worker: UUID): Boolean = (field(owner, "actors") as Map<*, *>)[worker]?.let { field(it, "residentYield") } != null
+    fun routeMotion(worker: UUID): CitizenPacketRoute? = routeIdentity(worker)?.let { field(it, "motion") as CitizenPacketRoute }
+    fun routeProgress(worker: UUID): Double? = routeMotion(worker)?.forwardProgress
+    fun routeFinished(worker: UUID): Boolean = routeIdentity(worker)?.let { (field(it, "motion") as CitizenPacketRoute).finished } == true
+    fun requestYieldAsReturning(requester: UUID, blocker: UUID, at: Location) {
+        val actor = requireNotNull((field(owner, "actors") as Map<*, *>)[requester])
+        fun set(name: String, value: Any?) = actor.javaClass.getDeclaredField(name).run { isAccessible = true; set(actor, value) }
+        (field(actor, "npc") as PacketPlayerNpc).teleport(at)
+        val plan = (field(actor, "plan") as CitizenPlan).copy(idleReason = null)
+        set("plan", plan)
+        field(actor, "route")?.let { (field(it, "motion") as CitizenPacketRoute).cancel() }
+        set("route", null)
+        set("cycle", CitizenCycle(plan.token, 0, pickupAtWorkplace = true, carrying = true).also { it.start() })
+        set("collisionResident", blocker)
+        owner.javaClass.declaredMethods.single { it.name == "beginResidentYield" }.run {
+            isAccessible = true
+            invoke(owner, actor)
+        }
+    }
+    fun playerAt(at: Location): Player = paper.addPlayer("TrafficBlocker").also { it.teleport(at); world.threatEntities += it }
+    fun nativeCollisions() = CivsResidentCollisions(plugin, owner::collisionActors, owner::nudgeResident)
 
     fun monsterAt(x: Double, z: Double): Monster {
         world.difficulty = Difficulty.NORMAL
@@ -3474,8 +3781,13 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
     override fun getNearbyEntities(location: Location, x: Double, y: Double, z: Double,
         filter: Predicate<in Entity>?): Collection<Entity> = threatEntities.filter { entity ->
         val at = entity.location
-        kotlin.math.abs(at.x - location.x) <= x && kotlin.math.abs(at.y - location.y) <= y &&
-            kotlin.math.abs(at.z - location.z) <= z && filter?.test(entity) != false
+        // Paper queries native bounding boxes, not only feet; an approaching player can overlap
+        // a resident's swept body while their feet are still outside the query box.
+        val nearby = if (entity is Player) entity.boundingBox.overlaps(BoundingBox(
+            location.x - x, location.y - y, location.z - z, location.x + x, location.y + y, location.z + z))
+        else kotlin.math.abs(at.x - location.x) <= x && kotlin.math.abs(at.y - location.y) <= y &&
+            kotlin.math.abs(at.z - location.z) <= z
+        nearby && filter?.test(entity) != false
     }
 
     override fun spawnParticle(particle: Particle, location: Location, count: Int,
