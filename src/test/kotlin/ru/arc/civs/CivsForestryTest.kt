@@ -5,6 +5,7 @@ import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Location
+import org.bukkit.HeightMap
 import org.bukkit.Material
 import org.bukkit.TreeType
 import org.bukkit.event.world.StructureGrowEvent
@@ -543,6 +544,45 @@ class CivsForestryTest : FunSpec({
                     runtime.validate(city, plan)
                     val depleted = city.copy(forestrySeeded = setOf(mill.id.toString()))
                     runtime.plan(depleted, worker) shouldBe null
+                }
+            } finally { tasks.close() }
+        }
+    }
+
+    test("consecutive oak planting sees non-motion-blocking saplings and keeps the next young crown separate") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("forestry-young-crowns", Material.DIRT).also(paper.server::addWorld)
+            val plugin = paper.createSimplePlugin("ForestryYoungCrowns")
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+            try {
+                val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(0, 63, 0)).copy(production = "OAK_LOG")
+                var worker = spatialWorker(mill, "IRON_AXE").copy(items = null, inventory = null)
+                var city = spatialCity(world.uid, listOf(mill), worker)
+                    .copy(inventory = null, autonomy = CivAutonomy(), stock = Stock(20))
+                for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    repeat(100) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    val first = requireNotNull(runtime.plan(city, worker))
+                    first.status shouldBe "planting-tree"
+                    runtime.validate(city, first)
+                    city = CivsRules.finishWorldWork(city, first, 1_000)
+                    first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                        .blockData = paper.server.createBlockData(cell.after) }
+                    val planted = first.changes.single().position
+                    world.getHighestBlockYAt(planted.x, planted.z) shouldBe planted.y - 1
+                    world.getHighestBlockYAt(planted.x, planted.z, HeightMap.WORLD_SURFACE) shouldBe planted.y
+                    worker = city.workers.single()
+                    runtime.invalidate(worker.id)
+                    repeat(1_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                    val second = requireNotNull(runtime.plan(city, worker))
+                    second.status shouldBe "planting-tree"
+                    val crown = CivsForestry.crownBounds(second.changes.map { it.position }, "OAK_LOG")
+                    val reserved = crown.copy(min = crown.min.copy(x = crown.min.x - 7, z = crown.min.z - 7),
+                        max = crown.max.copy(x = crown.max.x + 7, z = crown.max.z + 7))
+                    (planted.x in reserved.min.x..reserved.max.x && planted.z in reserved.min.z..reserved.max.z) shouldBe false
+                    runtime.validate(city, second)
+                    world.getBlockAt(planted.x, planted.y, planted.z).type shouldBe Material.OAK_SAPLING
                 }
             } finally { tasks.close() }
         }

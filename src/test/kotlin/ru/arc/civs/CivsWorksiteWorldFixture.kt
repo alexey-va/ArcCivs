@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Location
+import org.bukkit.HeightMap
 import org.bukkit.FluidCollisionMode
 import org.bukkit.Material
 import org.bukkit.block.BlockFace
@@ -33,9 +34,21 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
         private set
     init { setName(name) }
 
-    override fun getHighestBlockYAt(x: Int, z: Int): Int =
+    // Pinned CraftRegionAccessor defaults to MOTION_BLOCKING; WORLD_SURFACE also sees saplings and other plants.
+    override fun getHighestBlockYAt(x: Int, z: Int): Int = getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)
+
+    override fun getHighestBlockYAt(x: Int, z: Int, heightMap: HeightMap): Int =
         (maxOf(63, cells.keys.filter { it.x == x && it.z == z }.maxOfOrNull { it.y } ?: 63) downTo minHeight)
-            .first { !getBlockAt(x, it, z).type.isAir }
+            .first {
+                val block = getBlockAt(x, it, z)
+                when (heightMap) {
+                    HeightMap.WORLD_SURFACE -> !block.type.isAir
+                    HeightMap.MOTION_BLOCKING -> block.type.isSolid || block.isLiquid
+                    HeightMap.MOTION_BLOCKING_NO_LEAVES ->
+                        (block.type.isSolid || block.isLiquid) && !block.type.name.endsWith("_LEAVES")
+                    else -> error("Unspecified fixture height map $heightMap")
+                }
+            }
 
     override fun getBlockAt(x: Int, y: Int, z: Int): BlockMock = getBlockAt(Coordinate(x, y, z))
 

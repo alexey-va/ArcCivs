@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Bukkit
+import org.bukkit.HeightMap
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
@@ -804,7 +805,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (inCrown) { forestPlants.remove(worker.id); return null }
                 pending.next++; continue
             }
-            val top = world.getHighestBlockYAt(point.x, point.z)
+            // CraftWorld's default MOTION_BLOCKING omits saplings; young crowns need every non-air surface block.
+            val top = world.getHighestBlockYAt(point.x, point.z, HeightMap.WORLD_SURFACE)
             val block = read(city, building, world, point.copy(y = top), allowOwn = false)
             // A neighbouring sapling reserves its future crown too; two young plots must not grow into one inseparable tree.
             if (block?.type?.name?.endsWith("_SAPLING") == true || inCrown && (block == null ||
