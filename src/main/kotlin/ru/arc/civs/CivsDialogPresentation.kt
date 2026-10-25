@@ -45,6 +45,7 @@ internal class CivsDialogPresentation(font: String) {
     }
 
     fun button(button: PaperDialogButton, action: Action?): PaperDialogButton {
+        if (decoration == null && action == Action.BACK) return button.copy(label = Component.text("‹ ").append(button.label))
         if (decoration == null || action == null) return button
         val frame = DialogDecoration.ButtonFrame(DialogDecoration.Glyph(action.base, 16),
             DialogDecoration.Glyph(action.base + 1, 17), DialogDecoration.Glyph(action.base + 3, 15))

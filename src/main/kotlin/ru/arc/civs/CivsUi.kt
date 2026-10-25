@@ -20,6 +20,7 @@ import ru.arc.paper.menu.PaperDialogActionId
 import ru.arc.paper.menu.PaperDialogBody
 import ru.arc.paper.menu.PaperDialogButton
 import ru.arc.paper.menu.PaperDialogInputId
+import ru.arc.paper.menu.PaperDialogNavigation
 import ru.arc.paper.menu.PaperDialogRuntime
 import ru.arc.paper.menu.PaperDialogScreen
 import ru.arc.paper.menu.PaperDialogTextInput
@@ -525,7 +526,7 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val inventory = city.inventory
         if (inventory == null) {
-            notice(player, "civs.stock", "stock.title", text.reason(player, "materials-migration-pending")) { showOverview(player) }
+            notice(player, "civs.stock", "stock.title", text.reason(player, "materials-migration-pending"), "common.settlement") { showOverview(player) }
             return
         }
         val buildings = city.buildings.filterNot { it.type.isInfrastructure }
@@ -1345,19 +1346,17 @@ class CivsUi internal constructor(
             addAll(visible.map(SupplyCard::body))
         }, buildList {
             visible.singleOrNull()?.takeIf { it.lastPage > 0 }?.let { card ->
-                if (card.page > 0) add(button(player, "materials_previous", "logistics.materials-previous", NAVIGATION,
-                    appearance = Action.PREVIOUS) {
+                if (card.page > 0) add(button(player, "materials_previous", "logistics.materials-previous", NAVIGATION) {
                     showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page - 1))
                 })
-                if (card.page < card.lastPage) add(button(player, "materials_next", "logistics.materials-next", NAVIGATION,
-                    appearance = Action.NEXT) {
+                if (card.page < card.lastPage) add(button(player, "materials_next", "logistics.materials-next", NAVIGATION) {
                     showSupplyRequests(player, warehouseId, current, materialPages + (card.id to card.page + 1))
                 })
             }
-            if (current > 0) add(button(player, "previous", "logistics.sources-previous", NAVIGATION, appearance = Action.PREVIOUS) {
+            if (current > 0) add(button(player, "previous", "logistics.sources-previous", NAVIGATION) {
                 showSupplyRequests(player, warehouseId, current - 1, materialPages)
             })
-            if (current < sourcePages.lastIndex) add(button(player, "next", "logistics.sources-next", NAVIGATION, appearance = Action.NEXT) {
+            if (current < sourcePages.lastIndex) add(button(player, "next", "logistics.sources-next", NAVIGATION) {
                 showSupplyRequests(player, warehouseId, current + 1, materialPages)
             })
         }, reopen = { showSupplyRequests(player, warehouseId, current, materialPages) })
@@ -1595,7 +1594,7 @@ class CivsUi internal constructor(
             return null
         }
         val city = host.settlements().firstOrNull { it.id == cityId && it.autonomy != null }
-        if (city == null) notice(player, "civs.autonomous-city", "autonomy.detail-title", tr(player, "autonomy.not-found")) {
+        if (city == null) notice(player, "civs.autonomous-city", "autonomy.detail-title", tr(player, "autonomy.not-found"), "common.autonomous") {
             showAutonomous(player)
         }
         return city
@@ -1879,8 +1878,9 @@ class CivsUi internal constructor(
         }
     }
 
-    private fun notice(player: Player, id: String, title: String, content: Component, back: () -> Unit) =
-        present(player, id, title, listOf(body(content)), listOf(button(player, "return", "common.return") { back() }))
+    private fun notice(player: Player, id: String, title: String, content: Component,
+        destinationKey: String = "common.settlements", destination: () -> Unit) =
+        present(player, id, title, listOf(body(content)), listOf(button(player, "return", destinationKey) { destination() }))
 
     private fun present(player: Player, id: String, title: String, bodies: List<PaperDialogBody>, buttons: List<PaperDialogButton>,
         inputs: List<PaperDialogTextInput> = emptyList(), reopen: (() -> Unit)? = null): Visit? {
@@ -1889,25 +1889,38 @@ class CivsUi internal constructor(
         visits[player.uniqueId] = visit
         CivsDiagnostics.event("ui_screen", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
             "actions" to buttons.joinToString { it.id.toString() }, "inputs" to inputs.size)
-        val closeOnEscape = player.getMetadata("arc-menu-escape").any { it.asString() == "close" }
-        val footerKey = if (closeOnEscape || roots[player.uniqueId] == id) "common.close" else "common.back"
-        val guarded = buttons.map { button -> button.copy(closeDialogBeforeAction = false, onClick = { context ->
-            val accepted = current(player, visit) && !visit.consumed
-            CivsDiagnostics.event("ui_click", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
-                "action" to button.id.toString(), "outcome" to if (accepted) "accepted" else "ignored",
-                "reason" to if (accepted) null else if (visit.consumed) "already-consumed" else "stale-visit",
-                "city_name" to context.text(NAME), "member_name" to context.text(MEMBER))
-            if (accepted) {
-                visit.consumed = true
-                if (button.closeDialogBeforeAction) runtime.close(player)
-                button.onClick.handle(context)
+        val hasParent = roots[player.uniqueId] != id
+        val closeOnEscape = !hasParent && player.getMetadata("arc-menu-escape").any { it.asString() == "close" }
+        val guarded = buttons.map { button ->
+            val control = when (button.id.value) {
+                "previous", "materials_previous" -> PaperDialogNavigation.previous(button, button.label)
+                "next", "materials_next" -> PaperDialogNavigation.next(button, button.label)
+                else -> button
             }
-        }) }
-        runtime.open(player, PaperDialogScreen(id = id, title = tint(tr(player, title), screenColor(id)), body = bodies,
+            control.copy(closeDialogBeforeAction = false, onClick = { context ->
+                val accepted = current(player, visit) && !visit.consumed
+                CivsDiagnostics.event("ui_click", *CivsDiagnostics.actor(player), "screen" to id, "visit" to visit.id,
+                    "action" to button.id.toString(), "outcome" to if (accepted) "accepted" else "ignored",
+                    "reason" to if (accepted) null else if (visit.consumed) "already-consumed" else "stale-visit",
+                    "city_name" to context.text(NAME), "member_name" to context.text(MEMBER))
+                if (accepted) {
+                    visit.consumed = true
+                    if (button.closeDialogBeforeAction) runtime.close(player)
+                    button.onClick.handle(context)
+                }
+            })
+        }
+        val screen = PaperDialogScreen(id = id, title = tint(tr(player, title), screenColor(id)), body = bodies,
             inputs = inputs, buttons = guarded,
             columns = if (guarded.size == 1) 1 else 2,
-            exitButton = presentation.button(button(player, "history", footerKey).copy(width = 200),
-                if (footerKey == "common.close") Action.CLOSE else Action.BACK),
+            exitButton = if (hasParent) presentation.button(
+                button(player, "history", "common.back").copy(width = 200), Action.BACK,
+            ) else null,
+        )
+        runtime.open(player, PaperDialogNavigation.bottom(
+            screen,
+            guarded.firstOrNull { it.id.value == "previous" },
+            guarded.firstOrNull { it.id.value == "next" },
         ), reopen, {
             CivsDiagnostics.event("ui_dismiss", "player" to player.uniqueId, "screen" to id, "visit" to visit.id,
                 "current" to (visits[player.uniqueId] === visit), "pending" to (visit.cancelPending != null))
@@ -1966,8 +1979,8 @@ class CivsUi internal constructor(
         value.color(color).children(value.children().map { tint(it, color) })
 
     private fun MutableList<PaperDialogButton>.pages(player: Player, page: Int, count: Int, pageSize: Int = PAGE_SIZE, show: (Int) -> Unit) {
-        if (page > 0) add(button(player, "previous", "common.previous", NAVIGATION, appearance = Action.PREVIOUS) { show(page - 1) })
-        if (page < lastPage(count, pageSize)) add(button(player, "next", "common.next", NAVIGATION, appearance = Action.NEXT) { show(page + 1) })
+        if (page > 0) add(button(player, "previous", "common.previous", NAVIGATION) { show(page - 1) })
+        if (page < lastPage(count, pageSize)) add(button(player, "next", "common.next", NAVIGATION) { show(page + 1) })
     }
 
     private fun lastPage(count: Int, pageSize: Int = PAGE_SIZE): Int = ((count - 1).coerceAtLeast(0)) / pageSize
