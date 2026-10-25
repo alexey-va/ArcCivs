@@ -332,10 +332,12 @@ retain their existing factors. Routes avoid horizontal footprints
 of foreign buildings and farm fields; idle wandering does not generate Trails wear.
 Unassigned adults share a bounded five-tick handoff (four actors, existing eight-target
 budget per coarse pulse) instead of waiting for the coarse city timer. Successful
-leisure legs have no artificial rest; unreachable optional routes retain a 2.5–4s
+unassigned leisure legs have no artificial rest; unreachable optional routes retain a 2.5–4s
 backoff. Pure target geometry favours useful forward legs before one native admission.
 The walking label requires a ready unblocked route; other unassigned actors use a
 neutral label. Leisure still grants no work cycle or resource.
+Assigned producers retain their 2–6.5s successful rest so asynchronous courier
+allocation can validate the same stationary meeting, including the fast farm lane.
 Productive journeys continue reporting real footsteps to Trails. Turning reduces
 accumulated yaw before choosing the shortest bounded turn, including route corners.
 The bounded search between world-work cycles holds the current position instead

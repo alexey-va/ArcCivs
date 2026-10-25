@@ -2863,6 +2863,7 @@ class CivsResidentsRuntimeTest : FunSpec({
             for (tick in 1..1_200) {
                 h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
                 if (producer.location.distanceSquared(origin) > 4.0 && h.routeIdentity() != null) break
             }
             withClue("origin=$origin actual=${producer.location} ${h.navigationState()} ${h.owner.status(h.workerId)}") {
@@ -2874,13 +2875,23 @@ class CivsResidentsRuntimeTest : FunSpec({
             for (tick in 1..1_200) {
                 h.navigate()
                 if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
                 if (h.routeIdentity() == null) break
             }
             h.routeIdentity() shouldBe null
-            h.owner.courierSupplySources(h.city.id).keys shouldBe setOf(h.workerId)
-            accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
+            val offered = h.owner.courierSupplySources(h.city.id)
+            offered.keys shouldBe setOf(h.workerId)
             val meeting = producer.location
+            // Capture -> delayed async allocation -> owner acceptance, while the fast farm lane keeps ticking.
+            repeat(15) { tick ->
+                h.navigate()
+                if ((tick + 1) % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+                h.routeIdentity() shouldBe null
+                producer.location shouldBe meeting
+                h.owner.courierSupplySources(h.city.id) shouldBe offered
+            }
+            accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
+                offered) { _, _ -> 64L })
             // Only the producer gets its fast field pulse: the accepted courier has not acquired its hold yet.
             h.navigationNow = requireNotNull(h.navigationNow) + 60_000
             h.owner.pulseFieldWork(requireNotNull(h.navigationNow))

@@ -2214,11 +2214,12 @@ class CivsCitizens(
             if (outcome != CitizenNavigationOutcome.ARRIVED &&
                 !citizenSafeIdlePosition(world, anchor, actor.npc.location.point(), city.buildings) &&
                 recoverNavigation(actor, route.target, now, idleAnchor = anchor)) {
-                actor.wander.finish(now, true)
+                actor.wander.finish(now, true, resumeImmediately = worker.assignment == null)
                 return
             }
             cancelRoute(actor)
-            actor.wander.finish(now, outcome == CitizenNavigationOutcome.ARRIVED)
+            actor.wander.finish(now, outcome == CitizenNavigationOutcome.ARRIVED,
+                resumeImmediately = worker.assignment == null)
             CivsDiagnostics.event("citizen_wander", "city" to city.id, "worker" to actor.workerId,
                 "outcome" to outcome.name.lowercase(), "target" to route.target.point().coordinates(),
                 "reason" to route.motion.failure, "actual" to actor.npc.location.point().coordinates(),
@@ -3909,11 +3910,13 @@ internal class CitizenWander(workerId: UUID) {
         step = if (step == Int.MAX_VALUE) 0 else step + 1
         schedule(now, 100L + random.nextInt(251))
     }
-    fun finish(now: Long, arrived: Boolean) {
+    fun finish(now: Long, arrived: Boolean, resumeImmediately: Boolean = false) {
         val next = (step.toLong() / CITIZEN_WANDER_HEIGHTS.size + 1) * CITIZEN_WANDER_HEIGHTS.size
         step = if (next > Int.MAX_VALUE) 0 else next.toInt()
-        // The existing five-tick handoff supplies a natural pause after a successful walk.
-        schedule(now, if (arrived) 0L else 2_500L + random.nextInt(1_501))
+        // Unassigned residents can continue at the next handoff. Assigned producers retain
+        // their offer window while asynchronous supply allocation validates a stationary meeting.
+        schedule(now, if (!arrived) 2_500L + random.nextInt(1_501) else if (resumeImmediately) 0L
+            else 2_000L + random.nextInt(4_501))
     }
     private fun schedule(now: Long, delay: Long) {
         nextAt = if (now > Long.MAX_VALUE - delay) Long.MAX_VALUE else now + delay

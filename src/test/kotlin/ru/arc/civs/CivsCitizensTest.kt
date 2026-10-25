@@ -1159,7 +1159,7 @@ class CivsCitizensTest : FunSpec({
         wander.ready(4_099) shouldBe false
         wander.ready(4_350) shouldBe true
         wander.step shouldBe 1
-        wander.finish(6_000, true)
+        wander.finish(6_000, true, resumeImmediately = true)
         wander.step shouldBe 5
         wander.ready(6_000) shouldBe true
         wander.finish(13_000, false)
@@ -1199,7 +1199,7 @@ class CivsCitizensTest : FunSpec({
         }
         timing(ids[0]) shouldBe timing(ids[0])
         (timing(ids[0]) != timing(ids[1])) shouldBe true
-        timing(ids[0]).zipWithNext().all { (a, b) -> b == a } shouldBe true
+        timing(ids[0]).zipWithNext().all { (a, b) -> b - a in 2_000L..6_550L } shouldBe true
     }
 
     test("idle walks keep their workplace or home anchor and reject climbs without limiting a working route") {
