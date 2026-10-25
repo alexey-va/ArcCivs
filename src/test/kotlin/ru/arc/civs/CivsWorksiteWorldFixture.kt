@@ -28,7 +28,8 @@ private val MINE_TIMBER_FENCE_STATE = Regex(
 /** Only the native collision/drop operations absent from the pinned MockBukkit are supplied here.
  * BlockData, mutations, loaded chunks and the world remain ordinary MockBukkit state.
  * This is a stone-plane fixture, not evidence of native growth or resident navigation. */
-internal class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE) : WorldMock(ground, 63) {
+internal class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE,
+    private val collisionForData: ((BlockData) -> List<BoundingBox>?)? = null) : WorldMock(ground, 63) {
     private val cells = hashMapOf<Coordinate, BlockMock>()
     var rayTraces = 0
         private set
@@ -60,7 +61,7 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
             override fun isPassable(): Boolean = collisionShape.boundingBoxes.isEmpty()
 
             override fun getCollisionShape(): VoxelShape {
-                val boxes = if (type.name.endsWith("_FENCE")) {
+                val boxes = collisionForData?.invoke(blockData) ?: if (type.name.endsWith("_FENCE")) {
                     fenceCollisionBoxes(blockData.asString)
                 } else if (blockData is Gate) {
                     // Purpur 1.21.11 native FenceGateBlock probe: closed height 1.5, open empty.

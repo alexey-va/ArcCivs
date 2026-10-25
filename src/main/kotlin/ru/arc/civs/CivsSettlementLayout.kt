@@ -253,7 +253,7 @@ internal object CivsSettlementLayout {
         }
         val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
             .mapValues { (_, cells) -> cells.minOf { it.position.y } }
-        val wood = when (city.style) { "nordic" -> "spruce"; "caledonia" -> "dark_oak"; else -> "oak" }
+        val wood = wood(city.style)
         val stone = if (city.style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
         val path = "minecraft:cobblestone"
         fun ground(x: Int, z: Int): Int? {
@@ -397,7 +397,7 @@ internal object CivsSettlementLayout {
             val transit = mutableListOf<CivPosition>()
             for (x in p.x until p.x + width) for (z in p.z until p.z + depth) {
                 val floor = requireNotNull(roads.remove(key(x, z)))
-                cells += CivSettlementBlock(floor, pavement(floor, pavedFloors))
+                cells += CivSettlementBlock(floor, pathPavement(floor, pavedFloors, city.style))
                 for (dy in 1..2) cells += CivSettlementBlock(floor.copy(y = floor.y + dy), "minecraft:air")
                 transit += floor.copy(y = floor.y + 1)
             }
@@ -421,7 +421,22 @@ internal object CivsSettlementLayout {
         return CivSettlementInfrastructure(repaired, rejected, closed, blockers.values.toList())
     }
 
-    /** Construction and upkeep share the same unchanged grade and downhill-facing half step. */
+    internal fun wood(style: String): String = when (style) { "nordic" -> "spruce"; "caledonia" -> "dark_oak"; else -> "oak" }
+
+    /** A rising bend has a downhill entry even when its continuing exit turns ninety degrees. */
+    internal fun pathPavement(floor: CivPosition, floors: Map<Long, Int>, style: String): String {
+        val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
+        val lower = directions.filter { (dx, dz) -> floors[key(floor.x + dx, floor.z + dz)] == floor.y - 1 }
+            .singleOrNull() ?: return "minecraft:dirt_path"
+        if (directions.none { (dx, dz) -> (dx to dz) != lower &&
+                floors[key(floor.x + dx, floor.z + dz)]?.let { it in floor.y..floor.y + 1 } == true })
+            return "minecraft:dirt_path"
+        val (dx, dz) = lower
+        val facing = when { dx == 1 -> "west"; dx == -1 -> "east"; dz == 1 -> "north"; else -> "south" }
+        return "minecraft:${wood(style)}_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
+    }
+
+    /** Legacy authored road finish, retained for construction receipts accepted before path upkeep. */
     internal fun pavement(floor: CivPosition, floors: Map<Long, Int>): String {
         val lower = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).filter { (dx, dz) ->
             floors[key(floor.x + dx, floor.z + dz)] == floor.y - 1

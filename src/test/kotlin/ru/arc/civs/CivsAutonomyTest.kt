@@ -21,6 +21,47 @@ class CivsAutonomyTest : FunSpec({
         CivsAutonomy.nextGoal(capped) shouldBe upgrade
     }
 
+    test("the plan board follows the first house and existing boards are never duplicated") {
+        val beforeBoard = CivsAutonomy.baseProfile.takeWhile { it != BuildingType.PLAN_BOARD }
+            .map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }
+        val city = autonomyCity().copy(buildings = beforeBoard, stock = Stock(4, 20))
+        CivsAutonomy.nextGoal(city) shouldBe CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(8))
+        val board = autonomyBuilding(BuildingType.PLAN_BOARD)
+        val queued = city.copy(buildings = city.buildings + board, constructionQueue = listOf(board.id))
+        CivsAutonomy.nextGoal(queued)?.buildingId shouldBe board.id
+        val complete = city.copy(buildings = city.buildings + board.copy(phase = BuildingPhase.ACTIVE))
+        CivsAutonomy.nextGoal(complete)?.type shouldBe BuildingType.TAVERN
+    }
+
+    test("a full established village without a board still advances upgrades and infrastructure") {
+        val types = CivsAutonomy.baseProfile.filterNot { it == BuildingType.PLAN_BOARD } +
+            listOf(BuildingType.HOUSE, BuildingType.HOUSE, BuildingType.UNIVERSITY, BuildingType.SMELTERY,
+                BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.BAKERY)
+        types.size shouldBe CivsRules.MAX_BUILDINGS
+        val city = autonomyCity().copy(buildings = types.mapIndexed { index, type ->
+            autonomyBuilding(type, phase = BuildingPhase.ACTIVE, occurrence = index)
+        })
+        val goal = requireNotNull(CivsAutonomy.nextGoal(city))
+        goal.type shouldBe BuildingType.TOWN_HALL
+        goal.targetLevel shouldBe 2
+        CivsAutonomy.infrastructureDue(city, goal) shouldBe true
+    }
+
+    test("the next-plan view projects only the accepted current construction without spending or mutating") {
+        val beforeHouse = CivsAutonomy.baseProfile.takeWhile { it != BuildingType.HOUSE }
+            .map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }
+        val house = autonomyBuilding(BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING)
+        val city = autonomyCity().copy(buildings = beforeHouse + house, stock = Stock(4, 20),
+            construction = autonomyOrder(house, 65), autonomy = CivAutonomy(paused = true))
+        val unchanged = autonomyRoundtrip(city)
+        CivsAutonomy.nextGoal(city) shouldBe null
+        CivsAutonomy.nextGoalAfterCurrent(city) shouldBe
+            CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(8))
+        city shouldBe unchanged
+        CivsAutonomy.nextGoalAfterCurrent(city.copy(autonomy = null)) shouldBe null
+        CivsAutonomy.nextGoalAfterCurrent(city.copy(pendingDeletion = CivDeletion(null))) shouldBe null
+    }
+
     test("legacy cities remain personal and autonomous snapshots reject physical inventory and membership") {
         val city = autonomyCity()
         val personal = CivsRules.found(city.id, city.owner, city.name, city.worldId, city.center,
@@ -121,7 +162,7 @@ class CivsAutonomyTest : FunSpec({
     }
 
     test("essential jobs precede the guard and second producer slots") {
-        val buildings = CivsAutonomy.baseProfile.map { autonomyBuilding(it, 2, BuildingPhase.ACTIVE) }
+        val buildings = CivsAutonomy.baseProfile.map { autonomyBuilding(it, minOf(2, it.maxLevel), BuildingPhase.ACTIVE) }
         val hall = buildings.first { it.type == BuildingType.TOWN_HALL }
         val house = buildings.first { it.type == BuildingType.HOUSE }
         val workers = (0..7).map { index -> CivWorker(UUID(50, index.toLong()), "Resident $index", null,
@@ -234,12 +275,12 @@ class CivsAutonomyTest : FunSpec({
         CivsAutonomy.criticalAssignment(city.copy(workers = listOf(carrying))) { true } shouldBe null
     }
 
-    test("accepted production and forestry receipts sustain eleven buildings including three houses through level two without outside inputs") {
+    test("accepted production and forestry receipts sustain twelve buildings including the board and three houses without outside inputs") {
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
         val completed = mutableListOf<Pair<BuildingType, Int>>()
         var minutes = 0
-        while (completed.size < 22 && CivsAutonomy.nextGoal(city) != null && minutes++ < 1_000) {
+        while (completed.size < 23 && CivsAutonomy.nextGoal(city) != null && minutes++ < 1_000) {
             val goal = requireNotNull(CivsAutonomy.nextGoal(city))
             if (goal.ready) {
                 val building = goal.buildingId?.let(city::building)?.copy(level = goal.targetLevel,
@@ -274,12 +315,12 @@ class CivsAutonomyTest : FunSpec({
             city = CivsAutonomy.activeMinute(city)
         }
         (minutes < 1_000) shouldBe true
-        completed.take(9).map { it.first } shouldBe CivsAutonomy.baseProfile
-        completed.size shouldBe 22
+        completed.take(CivsAutonomy.baseProfile.size).map { it.first } shouldBe CivsAutonomy.baseProfile
+        completed.size shouldBe 23
         CivsAutonomy.nextGoal(city)!!.type shouldBe BuildingType.UNIVERSITY
         CivsAutonomy.nextGoal(city)!!.targetLevel shouldBe 1
-        city.buildings.size shouldBe 11
-        city.buildings.all { it.level == 2 && it.phase == BuildingPhase.ACTIVE } shouldBe true
+        city.buildings.size shouldBe 12
+        city.buildings.all { it.level == minOf(2, it.type.maxLevel) && it.phase == BuildingPhase.ACTIVE } shouldBe true
         city.workers.size shouldBe minOf(CivsRules.populationLimit(city), CivsRules.beds(city))
         city.inventory shouldBe null
         city.workers.all { it.items == null && it.inventory == null && it.cargo == null } shouldBe true
@@ -292,7 +333,7 @@ private fun autonomyCity(): Settlement = CivsAutonomy.found(UUID.randomUUID(), U
 
 private fun autonomyBuilding(type: BuildingType, level: Int = 1, phase: BuildingPhase = BuildingPhase.SITE,
     occurrence: Int = 0): CivBuilding {
-    val x = type.ordinal * 8; val z = occurrence * 12
+    val x = if (type == BuildingType.PLAN_BOARD) -16 else type.ordinal * 8; val z = occurrence * 12
     return CivBuilding(UUID(1 + occurrence.toLong(), type.ordinal.toLong()), type, level, CivPosition(x, 64, z), 0,
         "autonomy/${type.name.lowercase()}/$level", CivBox(CivPosition(x - 2, 62, z - 2), CivPosition(x + 2, 68, z + 2)),
         CivPosition(x, 64, z - 3), phase, CivPosition(x, 64, z))

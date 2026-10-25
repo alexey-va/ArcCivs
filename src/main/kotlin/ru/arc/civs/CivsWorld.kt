@@ -22,6 +22,7 @@ import org.bukkit.block.data.type.Gate
 import org.bukkit.block.data.type.Fence
 import org.bukkit.block.data.type.Leaves
 import org.bukkit.block.data.type.Stairs
+import org.bukkit.block.data.type.Chest as ChestData
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
@@ -118,7 +119,10 @@ class CivsWorld(
     }
 
     internal fun repairStorageRacks(city: Settlement, building: CivBuilding, cells: List<CivPlanBlock>): CompletableFuture<Map<String, Int>> = admit {
-        requireCivs(cells.size in 1..512 && cells.map { it.position }.distinct().size == cells.size, "invalid-plan")
+        requireCivs(cells.size in 1..512 && cells.groupBy { it.position }.values.all { alternatives ->
+            alternatives.size in 1..2 && alternatives.map { it.before }.distinct().size == alternatives.size &&
+                alternatives.map { it.after }.distinct().size == 1
+        }, "invalid-plan")
         StorageRackRepair(city.id, city.owner, city.worldId, building, cells.toList())
     }
 
@@ -149,7 +153,7 @@ class CivsWorld(
         }
     }
 
-    /** Exact pre-receipt probe. An already repaired floor never consumes another stone. */
+    /** Exact pre-receipt probe. A healthy column never consumes another stone. */
     internal fun roadUpkeepPending(city: Settlement, work: CivWorldWork): Boolean {
         check(Bukkit.isPrimaryThread())
         val upkeep = work.upkeep ?: return false
@@ -159,6 +163,9 @@ class CivsWorld(
         val world = plugin.server.getWorld(city.worldId) ?: return false
         if (!world.isChunkLoaded(cell.position.x shr 4, cell.position.z shr 4) ||
             cell.position.y !in world.minHeight until world.maxHeight) return false
+        if (work.changes.none { it.position == upkeep.floor } &&
+            !sameConstructionState(world.getBlockAt(upkeep.floor.x, upkeep.floor.y, upkeep.floor.z).blockData,
+                Bukkit.createBlockData(upkeep.after))) return false
         return work.changes.all { change -> change.position.y in world.minHeight until world.maxHeight &&
             world.getBlockAt(change.position.x, change.position.y, change.position.z).blockData.asString == change.before }
     }
@@ -168,15 +175,21 @@ class CivsWorld(
         check(Bukkit.isPrimaryThread())
         val world = plugin.server.getWorld(city.worldId) ?: return null
         val p = upkeep.floor
-        if (!world.isChunkLoaded(p.x shr 4, p.z shr 4) || p.y !in world.minHeight + 1 until world.maxHeight - 2) return null
+        if (!world.isChunkLoaded(p.x shr 4, p.z shr 4) ||
+            p.y !in world.minHeight + 1 until world.maxHeight - CivsRoadMaintenance.MAX_CLEARANCE) return null
         val block = world.getBlockAt(p.x, p.y, p.z)
         val after = Bukkit.createBlockData(upkeep.after)
-        if (sameConstructionState(block.blockData, after) || !roadUpkeepReplaceable(block)) return null
-        val change = CivPlanBlock(p, block.blockData.asString, after.asString)
-        val cover = CivsRoadMaintenance.covers(p, world.getBlockAt(p.x, p.y + 1, p.z).blockData.asString,
-            world.getBlockAt(p.x, p.y + 2, p.z).blockData.asString) ?: return null
+        val change = if (sameConstructionState(block.blockData, after)) null else {
+            if (!roadUpkeepReplaceable(block)) return null
+            CivPlanBlock(p, block.blockData.asString, after.asString)
+        }
+        val cover = CivsRoadMaintenance.covers(p, (1..CivsRoadMaintenance.MAX_CLEARANCE).map { dy ->
+            world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
+        }) ?: return null
+        val changes = listOfNotNull(change) + cover
+        if (changes.isEmpty()) return null
         val assignment = worker.assignment ?: return null
-        for (dy in listOf(1, 0, 2)) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
+        for (dy in listOf(1, 0, 2, 3)) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
             if (!city.contains(standing.x, standing.z) || !citizenControlClear(city, standing) ||
                 !citizenStandable(world, standing) || !citizenPacketBodyClear(world,
@@ -185,9 +198,9 @@ class CivsWorld(
                     (CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(city, it), standing) ||
                         CivsWorksiteLayouts.isField(it, standing.x, standing.z)) }) continue
             val eye = Location(world, standing.x + .5, standing.y + 1.62, standing.z + .5)
-            if (!citizenCanReachBlock(world, eye, p)) continue
-            val work = CivWorldWork(worker.id, worker.completedCycles, assignment, standing, listOf(change) + cover,
-                status = "repairing-road", focus = p, upkeep = upkeep)
+            val focus = changes.asReversed().firstOrNull { citizenCanReachBlock(world, eye, it.position) }?.position ?: continue
+            val work = CivWorldWork(worker.id, worker.completedCycles, assignment, standing, changes,
+                status = "repairing-road", focus = focus, upkeep = upkeep)
             try { validateRoadUpkeep(city, work); return work }
             catch (_: CivsRejection) { return null }
         }
@@ -203,24 +216,25 @@ class CivsWorld(
         requireCivs(city.autonomy != null && city.pendingDeletion == null, "not-authorized")
         try { CivsRoadMaintenance.validateChanges(upkeep, work.changes) }
         catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
-        val cell = work.changes.first()
+        val cell = work.changes.firstOrNull { it.position == upkeep.floor }
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unloaded")
         fun read(p: CivPosition): Block {
             requireCivs(p.y in world.minHeight until world.maxHeight, "outside-world")
             requireCivs(world.isChunkLoaded(p.x shr 4, p.z shr 4), "chunks-unloaded")
             return world.getBlockAt(p.x, p.y, p.z)
         }
-        val p = cell.position
+        val p = upkeep.floor
         requireCivs(world.worldBorder.isInside(Location(world, p.x + .5, p.y.toDouble(), p.z + .5)), "outside-border")
         val all = cities().filter { it.id != city.id } + city
         for (other in all) {
             if (other.worldId != city.worldId) continue
             requireCivs(other.id == city.id || !other.contains(p.x, p.z), "city-overlap")
-            requireCivs(other.inventory?.containers?.contains(p) != true, "registered-container")
-            requireCivs(other.pendingControls.orEmpty().none { it.position == p || it.approach.orEmpty().any { c -> c.position == p } },
+            val positions = work.changes.map { it.position } + p
+            requireCivs(positions.none { other.inventory?.containers?.contains(it) == true }, "registered-container")
+            requireCivs(other.pendingControls.orEmpty().none { it.position in positions || it.approach.orEmpty().any { c -> c.position in positions } },
                 "building-overlap")
             for (building in civsProtectedBuildings(other)) {
-                requireCivs(building.control != p, "building-overlap")
+                requireCivs(building.control !in positions, "building-overlap")
                 val ownRoad = other.id == city.id && building == upkeep.source && building.type == BuildingType.ROAD &&
                     building.transit.orEmpty().contains(p.copy(y = p.y + 1))
                 requireCivs(ownRoad || !CivsAutonomousGeometry.horizontalContains(CivsAutonomousGeometry.futureBounds(other, building), p) &&
@@ -228,23 +242,26 @@ class CivsWorld(
             }
         }
         val block = read(p)
-        val after = Bukkit.createBlockData(cell.after)
+        val after = Bukkit.createBlockData(upkeep.after)
         val already = sameConstructionState(block.blockData, after)
-        requireCivs(block.blockData.asString == cell.before || already, "world-changed")
+        requireCivs(cell?.let { block.blockData.asString == it.before } == true || already, "world-changed")
         requireCivs(block.state !is TileState && !block.isLiquid &&
             (block.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
         requireCivs(already || roadUpkeepReplaceable(block), "protected-terrain")
         // A new half step removes side support. Do not make adjacent torches, ladders or decor pop as loot.
-        if (!already && after is Stairs) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+        if (!already && (after is Stairs || after.material == Material.DIRT_PATH)) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
             val beside = read(p.copy(x = p.x + dx, z = p.z + dz))
-            requireCivs(beside.type.isAir || roadUpkeepGround(beside) || civsRetainedRouteStep(beside.blockData),
-                "protected-terrain")
+            requireCivs(roadUpkeepSideSafe(beside), "protected-terrain")
         }
         val support = read(p.copy(y = p.y - 1))
-        requireCivs(roadUpkeepGround(support) && fullTerraformSupport(support), "autonomy-no-path")
+        val retainedStepSupport = CivsRoadMaintenance.surface(support.blockData.asString) &&
+            civsRetainedRouteStep(support.blockData) && support.collisionShape.boundingBoxes.any {
+                it.maxY == 1.0 && it.maxX > it.minX && it.maxZ > it.minZ
+            }
+        requireCivs(roadUpkeepGround(support) && fullTerraformSupport(support) || retainedStepSupport, "autonomy-no-path")
         requireCivs(canModify(city.owner, block, after.material), "lands-denied")
-        val cover = work.changes.drop(1).associateBy { it.position }
-        for (dy in 1..2) {
+        val cover = work.changes.filter { it.position != p }.associateBy { it.position }
+        for (dy in 1..maxOf(2, cover.keys.maxOfOrNull { it.y - p.y } ?: 0)) {
             val head = read(p.copy(y = p.y + dy))
             val clear = cover[CivPosition(head.x, head.y, head.z)]
             if (clear == null) requireCivs(head.type.isAir, "world-changed")
@@ -253,18 +270,32 @@ class CivsWorld(
                 requireCivs(head.state !is TileState && !head.isLiquid &&
                     (head.blockData as? Waterlogged)?.isWaterlogged != true, "protected-terrain")
                 requireCivs(canModify(city.owner, head, Material.AIR), "lands-denied")
+                // Removing a bank must not spill fluid or later detach an unjournalled supported block.
+                if (CivsRoadMaintenance.clearanceGround(clear.before)) {
+                    val above = head.y + 1
+                    if (p.copy(y = above) !in cover) {
+                        val top = read(p.copy(y = above))
+                        requireCivs(top.type.isAir, "protected-terrain")
+                    }
+                    for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+                        val beside = read(p.copy(x = p.x + dx, y = head.y, z = p.z + dz))
+                        requireCivs(roadUpkeepSideSafe(beside), "protected-terrain")
+                    }
+                }
             }
         }
 
         // Stairs have two levels, not a fictional full cube. Actual neighbours retain their native shapes.
-        val localAfter = roadUpkeepBoxes(after).map { it.at(CivPosition(0, 0, 0)) }
-        if (!already) {
-            val proposed = localAfter.map { it.clone().shift(p.x.toDouble(), p.y.toDouble(), p.z.toDouble()) }
-            val cellBox = org.bukkit.util.BoundingBox(p.x.toDouble(), p.y.toDouble(), p.z.toDouble(),
-                p.x + 1.0, p.y + 1.0, p.z + 1.0)
-            requireCivs(!roadUpkeepResidentOccupied(city.worldId, p) && world.getNearbyEntities(cellBox).none { entity ->
+        val localAfter = roadUpkeepBoxes(if (already) block.blockData else after).map { it.at(CivPosition(0, 0, 0)) }
+        for (change in work.changes) {
+            val at = change.position
+            if (read(at).blockData.asString == change.after) continue
+            val cellBox = org.bukkit.util.BoundingBox(at.x.toDouble(), at.y.toDouble(), at.z.toDouble(),
+                at.x + 1.0, at.y + 1.01, at.z + 1.0)
+            requireCivs(!roadUpkeepResidentOccupied(city.worldId, at) &&
+                !roadUpkeepResidentOccupied(city.worldId, at.copy(y = at.y + 1)) && world.getNearbyEntities(cellBox).none { entity ->
                 entity.isValid && (entity is org.bukkit.entity.LivingEntity || entity is org.bukkit.entity.Vehicle) &&
-                    proposed.any(entity.boundingBox::overlaps)
+                    entity.boundingBox.overlaps(cellBox)
             }, "road-occupied")
         }
         val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
@@ -273,11 +304,12 @@ class CivsWorld(
             val native = read(at)
             val local = if (at == p) localAfter else if (at in cover) emptyList()
                 else native.collisionShape.boundingBoxes.map { it.clone() }
-            CitizenCollisionSnapshot(if (at == p) false else native.isLiquid,
+            CitizenCollisionSnapshot(if (at == p || at in cover) false else native.isLiquid,
                 at != p && citizenRouteOpenable(native.blockData) != null, local,
                 local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
         }
-        val future = CitizenPoint(p.x + .5, p.y + 1.0, p.z + .5)
+        val top = localAfter.filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }.maxOf { it.maxY }
+        val future = CitizenPoint(p.x + .5, p.y + top, p.z + .5)
         requireCivs(citizenPacketBodyClear(world, future, false, collision = ::collision), "autonomy-no-path")
         requireCivs(citizenPacketCampfireClear(world, future), "autonomy-no-path")
         for (neighbour in upkeep.neighbours) {
@@ -286,6 +318,8 @@ class CivsWorld(
             val top = floor.collisionShape.boundingBoxes.filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }
                 .maxOfOrNull { it.maxY } ?: continue
             val beside = CitizenPoint(neighbour.x + .5, neighbour.y + top, neighbour.z + .5)
+            // Adjacent unfinished banks are future jobs, not mandatory traversal edges of this job.
+            if (!citizenPacketBodyClear(world, beside, false)) continue
             requireCivs(citizenPacketBodyClear(world, beside, false, collision = ::collision) &&
                 citizenPacketStepClear(world, beside, future, false, ::collision) &&
                 citizenPacketStepClear(world, future, beside, false, ::collision), "autonomy-no-path")
@@ -296,7 +330,12 @@ class CivsWorld(
         (block.type in TERRAFORM_GROUND || block.type == Material.DIRT_PATH || block.type == Material.COBBLESTONE) &&
             block.state !is TileState && !block.isLiquid && (block.blockData as? Waterlogged)?.isWaterlogged != true
 
-    private fun roadUpkeepReplaceable(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block)
+    /** These ordinary plants attach below, never to the side of the changed column. */
+    private fun roadUpkeepSideSafe(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
+        civsRetainedRouteStep(block.blockData) || block.type == Material.SHORT_GRASS || block.type == Material.FERN
+
+    private fun roadUpkeepReplaceable(block: Block): Boolean = block.type.isAir || roadUpkeepGround(block) ||
+        CivsRoadMaintenance.surface(block.blockData.asString) && civsRetainedRouteStep(block.blockData)
 
     /** Called only for Core's accepted writes; no synthetic barrel impacts or block mutations. */
     internal fun constructionFeedback(worldId: UUID, cell: ArcSchematicBlock) {
@@ -1034,30 +1073,80 @@ class CivsWorld(
     }
 
     private inner class StorageRackRepair(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
-        private val cells: List<CivPlanBlock>) : Scan<Map<String, Int>>(cityId, owner, worldId, building) {
+        cells: List<CivPlanBlock>) : Scan<Map<String, Int>>(cityId, owner, worldId, building) {
+        private val alternatives = cells.groupBy { it.position }
+        private val positions = alternatives.keys.toList()
         private val counts = linkedMapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "occupied" to 0, "denied" to 0)
+        init {
+            cells.forEach { cell ->
+                val before = parse(cell.before)
+                val after = parse(cell.after)
+                val shelf = before.material in setOf(Material.BOOKSHELF, Material.CHISELED_BOOKSHELF)
+                val oldChest = building.type == BuildingType.WAREHOUSE && before is ChestData &&
+                    before.material == Material.CHEST && before.type == ChestData.Type.SINGLE && !before.isWaterlogged &&
+                    after is ChestData && after.material == Material.CHEST && !after.isWaterlogged
+                requireCivs((shelf || oldChest) && after.material in setOf(Material.CHEST, Material.BARREL, Material.AIR), "invalid-plan")
+                if (after is ChestData && after.type != ChestData.Type.SINGLE) {
+                    val neighbor = partner(cell.position, after)
+                    val other = alternatives[neighbor]?.firstOrNull()?.after?.let(::parse) as? ChestData
+                    requireCivs(other != null && other.material == after.material && other.facing == after.facing &&
+                        other.type != after.type && other.type != ChestData.Type.SINGLE &&
+                        partner(neighbor, other) == cell.position, "invalid-plan")
+                }
+            }
+        }
         override fun validateIdentity(city: Settlement?) {
             requireCivs(city?.pendingDeletion == null && city?.building(building.id) == building &&
                 building.phase == BuildingPhase.ACTIVE &&
                 city.construction?.buildingId != building.id, "stale-building")
         }
         override fun step() {
-            if (index == cells.size) return finish(counts.toMap())
-            val cell = cells[index++]
-            checkCell(cell.position)
-            requireCivs(cell.before.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
-                cell.after.substringBefore('[') in setOf("minecraft:chest", "minecraft:barrel", "minecraft:air"), "invalid-plan")
-            val block = read(cell.position)
-            fun count(key: String) { counts[key] = counts.getValue(key) + 1 }
-            if (block.blockData.asString == parse(cell.after).asString) { count("unchanged"); return }
-            if (block.blockData.asString != parse(cell.before).asString) { count("conflicts"); return }
-            val state = block.state
-            if ((state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true ||
-                (state as? TileState)?.persistentDataContainer?.keys?.isNotEmpty() == true) { count("occupied"); return }
-            val after = parse(cell.after)
-            if (!canModify(owner, block, after.material)) { count("denied"); return }
-            block.setBlockData(after, false)
-            count("changed")
+            if (index == positions.size) return finish(counts.toMap())
+            val position = positions[index++]
+            if (position in seen) return
+            val after = parse(alternatives.getValue(position).first().after)
+            val group = if (after is ChestData && after.type != ChestData.Type.SINGLE)
+                listOf(position, partner(position, after)) else listOf(position)
+            group.forEach(::checkCell)
+            val blocks = group.map(::read)
+            val targets = group.map { parse(alternatives.getValue(it).first().after) }
+            fun count(key: String, amount: Int = group.size) { counts[key] = counts.getValue(key) + amount }
+            if (blocks.indices.all { blocks[it].blockData.asString == targets[it].asString }) { count("unchanged"); return }
+            if (blocks.indices.any { i -> blocks[i].blockData.asString != targets[i].asString &&
+                alternatives.getValue(group[i]).none { parse(it.before).asString == blocks[i].blockData.asString } }) {
+                count("conflicts"); return
+            }
+            if (blocks.any { block ->
+                val state = block.state
+                val inventory = if (state is org.bukkit.block.Chest) state.blockInventory else (state as? InventoryHolder)?.inventory
+                inventory?.any { it != null && !it.type.isAir } == true ||
+                    (state as? InventoryHolder)?.inventory?.viewers?.isNotEmpty() == true ||
+                    (state as? TileState)?.persistentDataContainer?.keys?.isNotEmpty() == true
+            }) { count("occupied"); return }
+            if (blocks.indices.any { i -> !canModify(owner, blocks[i], targets[i].material) ||
+                targets[i] is ChestData && (hasForeignChestLink(group[i], group) ||
+                    (targets[i] as ChestData).type != ChestData.Type.SINGLE &&
+                        !read(group[i].copy(y = group[i].y + 1)).type.isAir) }) { count("denied"); return }
+            // Both halves pass their native guards in the same step before either empty block changes.
+            blocks.indices.forEach { i ->
+                if (blocks[i].blockData.asString == targets[i].asString) count("unchanged", 1)
+                else { blocks[i].setBlockData(targets[i], false); count("changed", 1) }
+            }
+        }
+
+        private fun partner(position: CivPosition, data: ChestData): CivPosition {
+            val sign = if (data.type == ChestData.Type.LEFT) 1 else -1
+            return CivPosition(position.x - data.facing.modZ * sign, position.y, position.z + data.facing.modX * sign)
+        }
+
+        private fun hasForeignChestLink(position: CivPosition, group: List<CivPosition>): Boolean {
+            for (face in listOf(BlockFace.NORTH, BlockFace.EAST, BlockFace.SOUTH, BlockFace.WEST)) {
+                val neighbor = CivPosition(position.x + face.modX, position.y, position.z + face.modZ)
+                if (neighbor in group) continue
+                val data = read(neighbor).blockData as? ChestData ?: continue
+                if (data.type != ChestData.Type.SINGLE && partner(neighbor, data) == position) return true
+            }
+            return false
         }
     }
 
@@ -1375,14 +1464,15 @@ class CivsWorld(
     }
 }
 
-/** This route-only exception never grants permission to replace a crafted step or use it as fill support. */
+/** Collision classification only; replacing or supporting a road cell also requires its bounded palette and receipt. */
 internal fun civsRetainedRouteStep(data: BlockData): Boolean =
     data is Stairs && data.half == Bisected.Half.BOTTOM && !data.isWaterlogged
 
 /** Exact collision union for the deliberately small paving palette, including native corner shapes. */
 internal fun roadUpkeepBoxes(data: BlockData): List<CitizenTerrainBox> {
     if (data.material == Material.COBBLESTONE) return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
-    require(data.material == Material.COBBLESTONE_STAIRS && data is Stairs &&
+    if (data.material == Material.DIRT_PATH) return listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0))
+    require(CivsRoadMaintenance.surface(data.asString) && data is Stairs &&
         data.half == Bisected.Half.BOTTOM && !data.isWaterlogged)
     val (dx, dz) = when (data.facing) {
         BlockFace.NORTH -> 0 to -1

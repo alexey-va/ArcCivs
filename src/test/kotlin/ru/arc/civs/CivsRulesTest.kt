@@ -18,7 +18,7 @@ class CivsRulesTest : FunSpec({
         CivsAutonomy.cost(BuildingType.PLAN_BOARD, 1) shouldBe Stock(12, 8)
         rejects("invalid-level") { CivsRules.cost(BuildingType.PLAN_BOARD, 2) }
         CivsAutonomy.allowedTypes.contains(BuildingType.PLAN_BOARD) shouldBe true
-        CivsAutonomy.profile.contains(BuildingType.PLAN_BOARD) shouldBe false
+        CivsAutonomy.profile.contains(BuildingType.PLAN_BOARD) shouldBe true
         CivsRules.slots(board) shouldBe 0
         CivsRules.resource(board.type) shouldBe null
         CivsRules.isDepot(board) shouldBe false

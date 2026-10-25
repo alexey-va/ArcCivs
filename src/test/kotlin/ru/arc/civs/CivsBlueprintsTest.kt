@@ -116,6 +116,7 @@ class CivsBlueprintsTest : FunSpec({
         val libraries = BlueprintLibraries()
         val id = CivsBlueprints.schematicId("medievaloak", BuildingType.WAREHOUSE, 1)
         every { libraries.source.load("civs/legacy-warehouse-racks/medievaloak/warehouse1", any()) } returns CompletableFuture.completedFuture(before)
+        every { libraries.source.load("civs/legacy-warehouse-chests/medievaloak/warehouse1", any()) } returns CompletableFuture.completedFuture(after)
         every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(after)
         every { libraries.source.transform(any(), any()) } answers { CompletableFuture.completedFuture(firstArg()) }
         val building = blueprintBuilding(before, CivPosition(12, 64, -10), at).copy(type = BuildingType.WAREHOUSE,
@@ -123,9 +124,39 @@ class CivsBlueprintsTest : FunSpec({
         libraries.subject.use { subject ->
             subject.buildingStorageRepair(building).join() shouldBe listOf(CivPlanBlock(CivPosition(12, 64, -10),
                 "minecraft:bookshelf", "minecraft:chest[facing=south,type=single,waterlogged=false]"))
-            verify(exactly = 2) { libraries.source.transform(any(), ArcSchematicTransform(2, false)) }
+            verify(exactly = 3) { libraries.source.transform(any(), ArcSchematicTransform(2, false)) }
             every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(
                 BlueprintCellsSnapshot(at, at, at, mapOf(at to "minecraft:diamond_block")))
+            shouldThrow<java.util.concurrent.CompletionException> { subject.buildingStorageRepair(building).join() }
+        }
+    }
+
+    test("warehouse alignment retains exact shelf and previous single chest alternatives only at authored racks") {
+        val first = ArcSchematicPoint(0, 0, 0)
+        val second = ArcSchematicPoint(1, 0, 0)
+        fun snapshot(states: List<String>) = BlueprintCellsSnapshot(first, second, first,
+            listOf(first, second).zip(states).toMap())
+        val racks = snapshot(listOf("minecraft:bookshelf", "minecraft:bookshelf"))
+        val old = snapshot(listOf("minecraft:chest[facing=west,type=single,waterlogged=false]",
+            "minecraft:chest[facing=east,type=single,waterlogged=false]"))
+        val aligned = snapshot(listOf("minecraft:chest[facing=south,type=right,waterlogged=false]",
+            "minecraft:chest[facing=south,type=left,waterlogged=false]"))
+        val libraries = BlueprintLibraries()
+        val id = CivsBlueprints.schematicId("medievaloak", BuildingType.WAREHOUSE, 1)
+        every { libraries.source.load("civs/legacy-warehouse-racks/medievaloak/warehouse1", any()) } returns CompletableFuture.completedFuture(racks)
+        every { libraries.source.load("civs/legacy-warehouse-chests/medievaloak/warehouse1", any()) } returns CompletableFuture.completedFuture(old)
+        every { libraries.source.load(id, any()) } returns CompletableFuture.completedFuture(aligned)
+        every { libraries.source.transform(any(), any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+        val building = blueprintBuilding(racks, CivPosition(12, 64, -10), first).copy(type = BuildingType.WAREHOUSE,
+            phase = BuildingPhase.ACTIVE, schematicId = id)
+        libraries.subject.use { subject ->
+            val cells = subject.buildingStorageRepair(building).join()
+            cells.groupBy { it.position }.mapValues { (_, alternatives) -> alternatives.map { it.before } } shouldBe mapOf(
+                CivPosition(12, 64, -10) to listOf("minecraft:bookshelf", "minecraft:chest[facing=west,type=single,waterlogged=false]"),
+                CivPosition(13, 64, -10) to listOf("minecraft:bookshelf", "minecraft:chest[facing=east,type=single,waterlogged=false]"))
+            cells.groupBy { it.position }.values.all { it.map(CivPlanBlock::after).distinct().size == 1 } shouldBe true
+            every { libraries.source.load("civs/legacy-warehouse-chests/medievaloak/warehouse1", any()) } returns
+                CompletableFuture.completedFuture(snapshot(listOf("minecraft:diamond_block", old.blockAt(1, 0, 0).blockData)))
             shouldThrow<java.util.concurrent.CompletionException> { subject.buildingStorageRepair(building).join() }
         }
     }

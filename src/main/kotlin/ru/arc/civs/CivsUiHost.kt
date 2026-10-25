@@ -88,6 +88,7 @@ interface CivsUiHost {
     fun beginAutonomousSelection(player: Player, name: String, style: String): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun autonomyStatus(cityId: UUID): CivsAutonomyView? = null
+    fun nextAutonomyGoal(cityId: UUID): CivAutonomyGoal? = null
     fun setAutonomousPaused(player: Player, cityId: UUID, paused: Boolean): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun canChangeSettlementSetting(player: Player, setting: CivSettlementSetting): Boolean = false

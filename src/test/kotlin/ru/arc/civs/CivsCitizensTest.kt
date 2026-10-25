@@ -1147,7 +1147,7 @@ class CivsCitizensTest : FunSpec({
         val wander = CitizenWander(worker.id)
         val cycle = CitizenCycle(plan.token, plan.workMillis)
         wander.ready(0) shouldBe false
-        wander.ready(3_250) shouldBe true
+        wander.ready(400) shouldBe true
         val targets = (0..39).map { requireNotNull(citizenWanderTarget(city, hall.entrance, worker.id, it)) }
         (targets.distinct().size >= 30) shouldBe true
         targets.all { city.contains(it.x, it.z) && it.x * it.x + it.z * it.z <= 64 && it.y in 62..66 } shouldBe true
@@ -1156,16 +1156,15 @@ class CivsCitizensTest : FunSpec({
         targets[5].let { it.x to it.z } shouldBe targets[9].let { it.x to it.z }
         (targets[0].let { it.x to it.z } != targets[5].let { it.x to it.z }) shouldBe true
         wander.reject(4_000)
-        wander.ready(4_749) shouldBe false
-        wander.ready(5_250) shouldBe true
+        wander.ready(4_099) shouldBe false
+        wander.ready(4_350) shouldBe true
         wander.step shouldBe 1
         wander.finish(6_000, true)
         wander.step shouldBe 5
-        wander.ready(7_999) shouldBe false
-        wander.ready(12_500) shouldBe true
+        wander.ready(6_000) shouldBe true
         wander.finish(13_000, false)
-        wander.ready(20_999) shouldBe false
-        wander.ready(25_000) shouldBe true
+        wander.ready(15_499) shouldBe false
+        wander.ready(17_000) shouldBe true
         cycle.phase shouldBe CitizenPhase.IDLE
         cycle.beginDelivery(Long.MAX_VALUE) shouldBe null
         worker.completedCycles shouldBe 0L
@@ -1200,7 +1199,7 @@ class CivsCitizensTest : FunSpec({
         }
         timing(ids[0]) shouldBe timing(ids[0])
         (timing(ids[0]) != timing(ids[1])) shouldBe true
-        timing(ids[0]).zipWithNext().all { (a, b) -> b - a in 2_000L..6_550L } shouldBe true
+        timing(ids[0]).zipWithNext().all { (a, b) -> b == a } shouldBe true
     }
 
     test("idle walks keep their workplace or home anchor and reject climbs without limiting a working route") {

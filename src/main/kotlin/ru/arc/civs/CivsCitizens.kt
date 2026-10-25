@@ -554,7 +554,7 @@ class CivsCitizens(
             .map { CivsThreatTarget(it.cityId, it.workerId, it.npc) }, nowMillis)
     }
 
-    /** After each bounded worksite pulse, hand an admitted field action to its existing actor. */
+    /** Hand over admitted field work and short idle legs on the existing bounded worksite pulse. */
     internal fun pulseFieldWork(nowMillis: Long) {
         checkMainThread()
         if (closed.get()) return
@@ -583,6 +583,29 @@ class CivsCitizens(
             } catch (error: Exception) {
                 pause(actor, "route-unreachable", nowMillis)
                 logFailure(actor, "field-handoff", error)
+            }
+        }
+        // Keep leisure handoffs responsive without another timer or another native admission budget.
+        // Field workers retain all eight slots; at most four idle actors share the normal wander budget.
+        val idle = actors.values.filter { it.plan.idleReason == "unassigned" && it.workerId !in pendingHarm &&
+            it.npc.isValid && !it.sleeping && !it.sheltering && it.attacker == null && it.foodSource == null &&
+            it.supplyPickup == null && it.collectedPending == null && !it.courierHeld && it.social.visit == null }.take(4)
+        for (actor in idle) {
+            citizenRotateAfterAdmission(actors, actor.workerId)
+            val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue
+            val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
+            val world = actor.npc.world
+            if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
+                !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
+            val plan = currentPlan(actor, city, worker, nowMillis)?.takeIf { it.idleReason == "unassigned" } ?: continue
+            if (!plan.chunksReady(world) || !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
+                actor.route?.chunks?.ready(world) == false || !reconcilePlan(actor, plan)) continue
+            try {
+                syncResident(actor.npc, worker, plan)
+                update(actor, city, world, nowMillis)
+            } catch (error: Exception) {
+                pause(actor, "route-unreachable", nowMillis)
+                logFailure(actor, "idle-handoff", error)
             }
         }
     }
@@ -656,6 +679,10 @@ class CivsCitizens(
                     if (navigationFailed(actor))
                         return "workers.status.route-unreachable"
                     if (plan != null) workActivityStatus(actor, plan)?.let { return "workers.status.$it" }
+                    if (plan?.idleReason == "unassigned" && actor.route?.let { route ->
+                            route.idleAnchor != null && route.motion.navigating && !route.motion.searching &&
+                                !route.motion.waitingForCollision && !route.motion.turning
+                        } == true) return "workers.status.walking"
                 }
                 plan?.idleReason?.takeUnless { it == "placing" }?.let { return "workers.status.$it" }
                 if (actors[workerId]?.plan?.token?.let { it != plan?.token } == true) return "workers.status.waiting"
@@ -2210,7 +2237,8 @@ class CivsCitizens(
         // Keep short invalid-target retries fair within the shared eight-check budget.
         citizenRotateAfterAdmission(actors, actor.workerId)
         val target = if (returning) anchor
-            else citizenWanderTarget(city, anchor, actor.workerId, actor.wander.step, setOf(home.id))
+            else citizenWanderTarget(city, anchor, actor.workerId, actor.wander.step, setOf(home.id),
+                actor.npc.location.point(), actor.npc.bodyYaw)
         // startRoute owns the single loaded-chunk, support and headroom check.
         if (target != null && actor.npc.location.point().distanceSquared(target.point()) >= 1.0 &&
             startRoute(actor, world, target, now, idleAnchor = anchor)) {
@@ -3874,17 +3902,18 @@ internal class CitizenWander(workerId: UUID) {
         private set
     private var nextAt: Long? = null
     fun ready(now: Long): Boolean {
-        if (nextAt == null) schedule(now, 250L + random.nextInt(3_001))
+        if (nextAt == null) schedule(now, 100L + random.nextInt(301))
         return now >= requireNotNull(nextAt)
     }
     fun reject(now: Long) {
         step = if (step == Int.MAX_VALUE) 0 else step + 1
-        schedule(now, 750L + random.nextInt(501))
+        schedule(now, 100L + random.nextInt(251))
     }
     fun finish(now: Long, arrived: Boolean) {
         val next = (step.toLong() / CITIZEN_WANDER_HEIGHTS.size + 1) * CITIZEN_WANDER_HEIGHTS.size
         step = if (next > Int.MAX_VALUE) 0 else next.toInt()
-        schedule(now, if (arrived) 2_000L + random.nextInt(4_501) else 8_000L + random.nextInt(4_001))
+        // The existing five-tick handoff supplies a natural pause after a successful walk.
+        schedule(now, if (arrived) 0L else 2_500L + random.nextInt(1_501))
     }
     private fun schedule(now: Long, delay: Long) {
         nextAt = if (now > Long.MAX_VALUE - delay) Long.MAX_VALUE else now + delay
@@ -3946,20 +3975,33 @@ private val CITIZEN_LEISURE_HAZARDS = setOf(Material.CAMPFIRE, Material.SOUL_CAM
 
 /** One candidate per actor admission. Native support/headroom checks belong to the bounded pulse. */
 internal fun citizenWanderTarget(city: Settlement, storage: CivPosition, workerId: UUID, step: Int,
-    allowedBuildings: Set<UUID> = emptySet()): CivPosition? {
+    allowedBuildings: Set<UUID> = emptySet(), from: CitizenPoint? = null, yaw: Float = 0f): CivPosition? {
     val seed = workerId.mostSignificantBits xor java.lang.Long.rotateLeft(workerId.leastSignificantBits, 23)
     val offset = Math.floorDiv(step, CITIZEN_WANDER_HEIGHTS.size)
     // Each horizontal attempt gets an independent reproducible choice, not the next vertex of a shared ring.
     val random = Random(seed xor (offset.toLong() * -7046029254386353131L))
-    val (dx, dz) = CITIZEN_WANDER_OFFSETS[random.nextInt(CITIZEN_WANDER_OFFSETS.size)]
     val dy = CITIZEN_WANDER_HEIGHTS[Math.floorMod(step, CITIZEN_WANDER_HEIGHTS.size)]
-    val x = storage.x.toLong() + dx
-    val y = storage.y.toLong() + dy
-    val z = storage.z.toLong() + dz
-    if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
-        z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) return null
-    return CivPosition(x.toInt(), y.toInt(), z.toInt()).takeIf {
-        citizenRouteCellAllowed(city, allowedBuildings, it.x, it.z) && citizenControlClear(city, it)
+    // Pure geometry only: prefer a useful leg ahead over a tiny shuffle or another about-face.
+    // Native support/headroom still consumes just one existing admission check.
+    return List(if (from == null) 1 else 6) {
+        val (dx, dz) = CITIZEN_WANDER_OFFSETS[random.nextInt(CITIZEN_WANDER_OFFSETS.size)]
+        val x = storage.x.toLong() + dx
+        val y = storage.y.toLong() + dy
+        val z = storage.z.toLong() + dz
+        if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
+            z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) null
+        else CivPosition(x.toInt(), y.toInt(), z.toInt()).takeIf { point ->
+            citizenRouteCellAllowed(city, allowedBuildings, point.x, point.z) && citizenControlClear(city, point)
+        }
+    }.filterNotNull().maxByOrNull { target ->
+        if (from == null) 0.0 else {
+            val dx = target.x + .5 - from.x
+            val dz = target.z + .5 - from.z
+            val distance = kotlin.math.hypot(dx, dz)
+            val angle = Math.toRadians(yaw.toDouble())
+            if (distance < 3.0) -10.0 + distance
+            else (-dx * kotlin.math.sin(angle) + dz * kotlin.math.cos(angle)) / distance + distance * .05
+        }
     }
 }
 

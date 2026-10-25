@@ -15,6 +15,7 @@ import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.whenCompleteSync
 import ru.arc.paper.menu.DialogTables
+import ru.arc.paper.menu.DialogDecoration
 import ru.arc.civs.CivsDialogPresentation.Action
 import ru.arc.paper.menu.PaperDialogActionId
 import ru.arc.paper.menu.PaperDialogBody
@@ -395,6 +396,7 @@ class CivsUi internal constructor(
         }
         val construction = city.construction
         val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
+        val expansion = nextExpansion(player, city, if (city.autonomy != null) host.nextAutonomyGoal(city.id) else null)
         present(player, "civs.overview", "city.title", listOfNotNull(
             body(tint(tr(player, "city.intro", "name" to city.name), LAND)),
             presentation.summary(Component.join(Component.newline(), listOf(
@@ -408,8 +410,9 @@ class CivsUi internal constructor(
                 detail(player, "label.construction", constructionText(player, city)),
             ))),
             construction?.failure?.let { body(text.reason(player, it)) },
-            presentation.divider(), presentation.paragraph(tint(nextStep(player, city), STOCK)), busyBody(player), feedback?.let(::body),
-            hall?.takeIf { canUpgrade(city, it) }?.let { upgradeSummary(player, city, it) },
+            presentation.divider(), expansion ?: presentation.paragraph(tint(nextStep(player, city), STOCK)),
+            busyBody(player), feedback?.let(::body),
+            hall?.takeIf { expansion == null && canUpgrade(city, it) }?.let { upgradeSummary(player, city, it) },
         ), buildList {
             add(button(player, "management", "management.open", PERSONAL) { showManagement(player) })
             add(button(player, "buildings", "buildings.open", LAND) { showBuildings(player) })
@@ -1860,28 +1863,37 @@ class CivsUi internal constructor(
         val status = if (paused) CivsAutonomyView("paused") else host.autonomyStatus(city.id) ?: CivsAutonomyView("unavailable")
         val target = status.target?.let { type -> status.level?.let { buildingName(player, type, it) } ?: text.building(player, type) }
         val missing = Resource.entries.filter { status.missing[it] > 0 }
-        val completed = CivsAutonomy.profile.count { type -> city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= 2 } }
+        val nextGoal = host.nextAutonomyGoal(city.id)
+        val completed = CivsAutonomy.profile.count { type ->
+            city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= minOf(2, type.maxLevel) }
+        }
         present(player, "civs.autonomous-city", "autonomy.detail-title", listOfNotNull(
-            body(tint(text.literal(city.name), LAND)),
             presentation.summary(Component.join(Component.newline(), buildList {
+                add(tint(text.literal(city.name), LAND))
                 add(autonomyStage(player, status))
-                target?.let { add(tr(player, "autonomy.goal", "target" to it)) }
+                if (city.construction != null) add(detail(player, "next-plan.current", constructionText(player, city)))
+                else if (nextGoal == null) target?.let { add(tr(player, "autonomy.goal", "target" to it)) }
                 add(tr(player, "autonomy.progress", "count" to completed, "total" to CivsAutonomy.profile.size))
             })),
             status.reason?.let { body(text.reason(player, it)) },
-            if (missing.isNotEmpty()) presentation.paragraph(tint(tr(player, "autonomy.missing", "resources" to
+            nextExpansion(player, city, nextGoal),
+            if (nextGoal == null && missing.isNotEmpty()) presentation.paragraph(tint(tr(player, "autonomy.missing", "resources" to
                 Component.join(Component.text(" · "), missing.map { resource ->
                     tr(player, "common.detail", "label" to text.resource(player, resource), "value" to status.missing[resource])
                 })), STOCK)) else null,
-            facts(player, Resource.entries.map { text.resource(player, it) to tint(text.literal(city.stock[it]), STOCK) }),
-            body(tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city), "workers" to city.workers.size,
-                "assigned" to city.workers.count { it.assignment != null })),
-            body(player, if (paused) "autonomy.paused-help" else "autonomy.resources-help"), feedback?.let(::body),
+            presentation.paragraph(Component.join(Component.newline(), listOf(
+                Component.join(text.literal(" · "), Resource.entries.map {
+                    tr(player, "common.detail", "label" to text.resource(player, it), "value" to tint(text.literal(city.stock[it]), STOCK))
+                }),
+                tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city), "workers" to city.workers.size,
+                    "assigned" to city.workers.count { it.assignment != null }),
+            ))), feedback?.let(::body),
         ), buildList {
             add(button(player, "buildings", "buildings.open", LAND) { showAutonomousBuildings(player, city.id) })
             add(button(player, "workers", "workers.open", PEOPLE) { showAutonomousWorkers(player, city.id) })
             add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
-            add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) })
+            add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) }
+                .copy(tooltip = tr(player, "autonomy.resources-help")))
             if (host.ready() && host.foundingAllowed() && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
                 add(button(player, "plan_board", "plan-board.place", PERSONAL, appearance = Action.FOUND) {
                     if (!isAdmin(player)) autonomyDenied(player)
@@ -1901,7 +1913,7 @@ class CivsUi internal constructor(
                 else perform(player, "civs.autonomous-city", "autonomy.detail-title",
                     { host.setAutonomousPaused(player, city.id, !paused) },
                     success = { showAutonomousCity(player, city.id) }, failure = { showAutonomousCity(player, city.id, it) })
-            })
+            }.let { if (paused) it.copy(tooltip = tr(player, "autonomy.paused-help")) else it })
             add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showAutonomousCity(player, city.id) })
             add(button(player, "villages", "autonomy.open", PERSONAL) { showAutonomous(player) })
         }, reopen = { showAutonomousCity(player, city.id) }, cityId = city.id)
@@ -2003,6 +2015,41 @@ class CivsUi internal constructor(
             else -> "city.next-grow"
         }
         return tr(player, key)
+    }
+
+    /** One accepted order or one planner projection; ordinary towns never imply automatic growth. */
+    private fun nextExpansion(player: Player, city: Settlement, projected: CivAutonomyGoal?): PaperDialogBody? {
+        val current = city.construction
+        val queued = city.constructionQueue.orEmpty().asSequence().filter { it != current?.buildingId }
+            .mapNotNull(city::building).firstOrNull()
+        val goal = projected?.takeUnless { current != null && it.buildingId == current.buildingId && it.targetLevel == current.targetLevel }
+        if (queued == null && city.autonomy == null) return null
+        val heading = when {
+            queued != null -> "queued-title"
+            current != null -> "after-current"
+            else -> "title"
+        }
+        val lines = mutableListOf(tint(tr(player, "next-plan.$heading"), LAND))
+        if (queued == null && goal == null) lines += tr(player, "next-plan.empty")
+        else {
+            val upgrade = queued?.let { it.phase == BuildingPhase.ACTIVE } ?: (goal!!.targetLevel > 1)
+            val type = queued?.type ?: goal!!.type
+            val level = queued?.let { if (upgrade) it.level + 1 else it.level } ?: goal!!.targetLevel
+            lines += tr(player, if (upgrade) "next-plan.upgrade" else "next-plan.build",
+                "building" to buildingName(player, type, level))
+            val (state, tone) = when {
+                city.autonomy?.paused == true -> "paused" to DialogDecoration.StateTone.ATTENTION
+                queued != null -> "queued" to DialogDecoration.StateTone.INFO
+                goal!!.ready -> "ready" to DialogDecoration.StateTone.SUCCESS
+                else -> "resources" to DialogDecoration.StateTone.ATTENTION
+            }
+            lines += DialogDecoration.stateBadge(tr(player, "next-plan.$state"), tone)
+            if (queued == null && goal != null && !goal.ready) lines += tr(player, "next-plan.missing", "resources" to
+                Component.join(text.literal(" · "), Resource.entries.filter { goal.missing[it] > 0 }.map { resource ->
+                    tr(player, "common.detail", "label" to text.resource(player, resource), "value" to goal.missing[resource])
+                }))
+        }
+        return presentation.callout(Component.join(Component.newline(), lines))
     }
 
     private fun workerStatus(player: Player, worker: CivWorker): Component {

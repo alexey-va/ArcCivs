@@ -159,7 +159,7 @@ internal class CivsAutonomousPlacement(
             }
             val current = blueprints.prepare(city.style, type, level, buildingId, city.worldId,
                 CivPosition(0, 0, 0), 2, 0)
-            val future = if (level == 3) current else blueprints.prepare(city.style, type, 3, buildingId,
+            val future = if (level == type.maxLevel) current else blueprints.prepare(city.style, type, type.maxLevel, buildingId,
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
             await(current.thenCombineAsync(future, { a, b -> a.building to b.building }, executor)) { pair ->
                 templates = pair
@@ -355,7 +355,7 @@ internal object CivsAutonomousGeometry {
     fun futureBounds(city: Settlement, building: CivBuilding): CivBox {
         if (building.type.isInfrastructure) return building.bounds
         if (city.style !in CivsBlueprints.STYLES) return withField(building.bounds, building)
-        val target = building.copy(schematicId = CivsBlueprints.schematicId(city.style, building.type, 3))
+        val target = building.copy(schematicId = CivsBlueprints.schematicId(city.style, building.type, building.type.maxLevel))
         val bounds = CivsWorksiteLayouts.site(target)?.getAsJsonObject("schematicBounds") ?: return withField(building.bounds, building)
         val a = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["min"]))
         val b = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["max"]))

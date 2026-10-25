@@ -8,7 +8,7 @@ import java.util.UUID
 /** Spatial contracts only: private schematic voxels are neither fixtures nor test dependencies. */
 class CivsAutonomousProfileGeometryTest : FunSpec({
     for (style in CivsBlueprints.STYLES) for (rotation in listOf(0, 90, 180, 270)) {
-        test("$style researched fifteen-building profile fits real family bounds at radius96 with hall rotation$rotation") {
+        test("$style researched sixteen-building profile fits real family bounds at radius96 with hall rotation$rotation") {
             val hall = profileBuilding(style, BuildingType.TOWN_HALL, 1, CivPosition(120, 64, -80), rotation)
                 .copy(phase = BuildingPhase.SITE)
             // Service founds around the authored control, which is offset from the entrance.
@@ -20,7 +20,7 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
             var newSites = 0
             while (true) {
                 val goal = CivsAutonomy.nextGoal(city) ?: break
-                check(++goals <= 33) { "Autonomous profile did not finish" }
+                check(++goals <= 34) { "Autonomous profile did not finish" }
                 val existing = goal.buildingId?.let(city::building)
                 if (existing != null) {
                     val upgraded = profileBuilding(style, existing.type, goal.targetLevel, existing.anchor,
@@ -32,7 +32,7 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 }
 
                 val current = profileBuilding(style, goal.type, 1)
-                val future = profileBuilding(style, goal.type, 3, id = current.id)
+                val future = profileBuilding(style, goal.type, goal.type.maxLevel, id = current.id)
                 val candidates = CivsAutonomousGeometry.candidates(city, current, future)
                 candidates shouldBe CivsAutonomousGeometry.candidates(city, current, future)
                 check(candidates.size in 1..64) { "$style ${goal.type} has ${candidates.size} candidates" }
@@ -50,15 +50,15 @@ class CivsAutonomousProfileGeometryTest : FunSpec({
                 newSites++
             }
 
-            goals shouldBe 33
-            newSites shouldBe 14
-            city.buildings.size shouldBe 15
+            goals shouldBe 34
+            newSites shouldBe 15
+            city.buildings.size shouldBe 16
             city.buildings.count { it.type == BuildingType.HOUSE } shouldBe 3
             city.buildings.map { it.type }.toSet() shouldBe CivsAutonomy.profile.toSet()
             city.buildings.all { building ->
                 building.phase == BuildingPhase.ACTIVE && building.level == when (building.type) {
                     BuildingType.TOWN_HALL, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER -> 3
-                    BuildingType.BLACKSMITH -> 1
+                    BuildingType.BLACKSMITH, BuildingType.PLAN_BOARD -> 1
                     else -> 2
                 }
             } shouldBe true
@@ -115,7 +115,12 @@ private fun profileBuilding(style: String, type: BuildingType, level: Int,
     val initial = CivBuilding(id, type, level, anchor, rotation, CivsBlueprints.schematicId(style, type, level),
         CivBox(anchor, anchor), anchor.copy(y = anchor.y + 1), BuildingPhase.ACTIVE)
     val site = CivsWorksiteLayouts.site(initial)
-    val frame = if (site != null) {
+    val frame = if (type == BuildingType.PLAN_BOARD) {
+        fun local(p: CivPosition) = CivPosition(p.x - CivsPlanBoardBlueprint.origin.x,
+            p.y - CivsPlanBoardBlueprint.origin.y, p.z - CivsPlanBoardBlueprint.origin.z)
+        ProfileFrame(local(CivsPlanBoardBlueprint.bounds.min), local(CivsPlanBoardBlueprint.bounds.max),
+            local(CivsPlanBoardBlueprint.blocks().entries.single { it.value == "minecraft:structure_void" }.key))
+    } else if (site != null) {
         val box = site.getAsJsonObject("schematicBounds")
         ProfileFrame(CivsWorksiteLayouts.vector(box["min"]), CivsWorksiteLayouts.vector(box["max"]))
     } else profileFrames.getValue(style).getValue(type)

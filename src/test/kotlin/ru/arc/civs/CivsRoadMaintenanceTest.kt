@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import com.google.gson.Gson
+import com.google.gson.GsonBuilder
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -13,6 +14,8 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
+import java.nio.file.Files
+import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
     test("Auto2 saved hill receives both stair directions and keeps the crest grade") {
@@ -50,7 +53,7 @@ class CivsRoadMaintenanceTest : FunSpec({
         Gson().toJson(plan) shouldBe before
     }
 
-    test("accepted ROAD widths and captured finishes are retained while conflicting grades are omitted") {
+    test("accepted ROAD columns retain their grade and adopt dirt path while foreign finishes are omitted") {
         val city = upkeepCity()
         val road = city.buildings.last().copy(bounds = CivBox(CivPosition(0, 63, -1), CivPosition(2, 65, 1)),
             transit = (0..2).flatMap { x -> (-1..1).map { z -> CivPosition(x, 64, z) } })
@@ -59,6 +62,7 @@ class CivsRoadMaintenanceTest : FunSpec({
         val plan = CivPlacementPlan(road.id, town.id, town.worldId, road, cells)
         val network = CivsRoadMaintenance.prepare(town, listOf(plan))
         network.targets.map { it.floor }.toSet() shouldBe cells.map { it.position }.toSet()
+        network.targets.all { it.after == "minecraft:dirt_path" } shouldBe true
         val foreign = plan.copy(blocks = cells.map { it.copy(after = "minecraft:stone_bricks") })
         CivsRoadMaintenance.prepare(town, listOf(foreign)).targets shouldBe emptyList()
     }
@@ -206,7 +210,7 @@ class CivsRoadMaintenanceTest : FunSpec({
                     shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, step) }.reason shouldBe "protected-terrain"
                     attachment.type = Material.STONE
                     native.validateRoadUpkeep(city, step)
-                    floor.type = Material.COBBLESTONE
+                    floor.type = Material.DIRT_PATH
                     native.roadUpkeepPending(city, work) shouldBe false
                     native.validateRoadUpkeep(city, work) // Recovery accepts its already written endpoint.
                     val house = city.buildings.first().copy(id = UUID(0, 90), type = BuildingType.HOUSE,
@@ -241,9 +245,12 @@ class CivsRoadMaintenanceTest : FunSpec({
 
     test("paving stair collision keeps a half-height downhill entry in all four directions and native corners") {
         MockBukkitTestRuntime.open().use {
-            for ((facing, low) in listOf("north" to (.5 to .75), "south" to (.5 to .25),
+            roadUpkeepBoxes(Bukkit.createBlockData("minecraft:dirt_path")) shouldBe
+                listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 15.0 / 16.0, 1.0))
+            for (wood in listOf("cobblestone", "oak", "spruce", "dark_oak"))
+                for ((facing, low) in listOf("north" to (.5 to .75), "south" to (.5 to .25),
                 "east" to (.25 to .5), "west" to (.75 to .5))) {
-                val data = Bukkit.createBlockData("minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]")
+                val data = Bukkit.createBlockData("minecraft:${wood}_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]")
                 val boxes = roadUpkeepBoxes(data)
                 fun top(x: Double, z: Double) = boxes.filter { x in it.minX..it.maxX && z in it.minZ..it.maxZ }.maxOf { it.maxY }
                 top(low.first, low.second) shouldBe .5
@@ -252,6 +259,153 @@ class CivsRoadMaintenanceTest : FunSpec({
                     val corner = roadUpkeepBoxes(Bukkit.createBlockData(data.asString.replace("straight", shape)))
                     corner.first() shouldBe CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, .5, 1.0)
                     corner.all { it.minX >= 0 && it.minZ >= 0 && it.maxX <= 1 && it.maxZ <= 1 && it.maxY <= 1 } shouldBe true
+                }
+            }
+        }
+    }
+
+    test("rising bend gains three-wide path profile without regrading another accepted route or entering reserves") {
+        val city = upkeepCity()
+        val source = city.buildings.last().copy(type = BuildingType.QUARRY, rotation = 180,
+            schematicId = CivsBlueprints.schematicId(city.style, BuildingType.QUARRY, 1),
+            anchor = CivPosition(2, 70, 1), bounds = CivBox(CivPosition(-7, 65, 2), CivPosition(11, 87, 20)),
+            entrance = CivPosition(2, 71, 1), transit = null)
+        val route = listOf(CivPosition(0, 67, -3), CivPosition(0, 67, -2), CivPosition(0, 68, -1),
+            CivPosition(0, 69, 0), CivPosition(0, 70, 1), CivPosition(1, 71, 1), source.entrance)
+        val town = city.copy(buildings = city.buildings.dropLast(1) + source)
+        val plan = upkeepApproach(town, source, route)
+        val network = CivsRoadMaintenance.prepare(town, listOf(plan))
+        val profile = network.targets.associateBy { civsTerrainKey(it.floor.x, it.floor.z) }
+        for (point in route) profile.getValue(civsTerrainKey(point.x, point.z)).floor shouldBe point.copy(y = point.y - 1)
+        for (x in -1..1) profile.getValue(civsTerrainKey(x, -1)).floor.y shouldBe 67
+        // Inner shoulder takes the lower nearby grade; the +2 bank is not a traversable edge.
+        profile.getValue(civsTerrainKey(1, 0)).floor.y shouldBe 68
+        val bend = profile.getValue(civsTerrainKey(0, 1))
+        bend.after shouldBe "minecraft:dark_oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        val upper = profile.getValue(civsTerrainKey(1, 1))
+        upper.after shouldBe "minecraft:dark_oak_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+        upper.neighbours.none { it == CivPosition(1, 68, 0) } shouldBe true
+        val reserved = CivsAutonomousGeometry.futureBounds(town, source)
+        network.targets.none { CivsAutonomousGeometry.horizontalContains(reserved, it.floor) } shouldBe true
+        val retained = city.buildings.last().copy(id = UUID(0, 91), anchor = CivPosition(-1, 69, 0),
+            bounds = CivBox(CivPosition(-1, 69, 0), CivPosition(-1, 71, 0)),
+            entrance = CivPosition(-1, 70, 0), transit = listOf(CivPosition(-1, 70, 0)))
+        val withRoad = town.copy(buildings = town.buildings + retained)
+        val roadPlan = CivPlacementPlan(retained.id, withRoad.id, withRoad.worldId, retained,
+            listOf(CivPlanBlock(retained.anchor, "minecraft:stone", "minecraft:cobblestone")))
+        val retainedNetwork = CivsRoadMaintenance.prepare(withRoad, listOf(plan, roadPlan))
+        retainedNetwork.targets.single { it.floor.x == -1 && it.floor.z == 0 }.floor.y shouldBe 69
+        retainedNetwork.targets.none { it.floor == CivPosition(-1, 68, 0) } shouldBe true
+        // Historical straight-only receipts still load; a new arbitrary wood/facing does not.
+        bend.copy(after = CivsSettlementLayout.pavement(bend.floor,
+            (bend.neighbours + bend.floor).associate { civsTerrainKey(it.x, it.z) to it.y })).validated(town)
+        shouldThrow<IllegalArgumentException> { bend.copy(after = bend.after.replace("south", "north")).validated(town) }
+        shouldThrow<IllegalArgumentException> { bend.copy(after = bend.after.replace("dark_oak", "spruce")).validated(town) }
+
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-bend").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val states = network.targets.associate { it.floor to Bukkit.createBlockData(it.after) }
+            fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
+                val at = CivPosition(x, y, z)
+                val local = states[at]?.let(::roadUpkeepBoxes)?.map { it.at(CivPosition(0, 0, 0)) }.orEmpty()
+                return CitizenCollisionSnapshot(false, false, local, local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
+            }
+            fun feet(p: CivPosition): CitizenPoint {
+                val boxes = roadUpkeepBoxes(states.getValue(p.copy(y = p.y - 1)))
+                val top = boxes.filter { .5 in it.minX..it.maxX && .5 in it.minZ..it.maxZ }.maxOf { it.maxY }
+                return CitizenPoint(p.x + .5, p.y - 1.0 + top, p.z + .5)
+            }
+            route.zipWithNext().forEach { (a, b) ->
+                citizenPacketStepClear(world, feet(a), feet(b), false, ::collision) shouldBe true
+                citizenPacketStepClear(world, feet(b), feet(a), false, ::collision) shouldBe true
+            }
+            System.getenv("CIVS_ROAD_PREVIEW_OUT")?.let { directory ->
+                val out = Path.of(directory)
+                Files.createDirectories(out)
+                Files.writeString(out.resolve("bend-profile.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
+                    "kind" to "production-algorithm-offline-fixture-not-live-acceptance",
+                    "worldOffset" to CivPosition(-1846, 0, -2697), "route" to route,
+                    "targets" to network.targets.map { target -> mapOf("floor" to target.floor, "after" to target.after,
+                        "boxes" to roadUpkeepBoxes(states.getValue(target.floor))) },
+                    "reserved" to reserved)))
+            }
+        }
+    }
+
+    test("bank clearance of healthy path journals only real cuts and rejects physics dependencies fluids containers and deep support") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-bank").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val city = upkeepCity().copy(worldId = world.uid)
+            val plugin = paper.createSimplePlugin("UpkeepBank")
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    val target = requireNotNull(upkeepWork(city).upkeep)
+                    val p = target.floor
+                    fun block(dx: Int = 0, dy: Int = 0) = world.getBlockAt(p.x + dx, p.y + dy, p.z)
+                    block().type = Material.DIRT_PATH
+                    for (dy in 1..4) block(dy = dy).type = Material.DIRT
+                    val work = requireNotNull(native.captureRoadUpkeep(city, city.workers.single(), target))
+                    work.changes.map { it.position } shouldBe (1..4).map { p.copy(y = p.y + it) }
+                    (work.focus in work.changes.map { it.position }) shouldBe true
+                    val after = CivsRoadMaintenance.complete(city, work, 3_000)
+                    after.stock.stone shouldBe city.stock.stone - 1
+                    CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
+                        worldChanges = work.changes, upkeep = CivRoadUpkeepReceipt(city.workers.single(), city.stock, work, 3_000)).validated()
+                    native.validateRoadUpkeep(city, work)
+                    block(dy = 5).type = Material.GRAVEL
+                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "protected-terrain"
+                    block(dy = 5).type = Material.DIRT
+                    native.captureRoadUpkeep(city, city.workers.single(), target) shouldBe null // Do not leave a roof over a capped open cut.
+                    block(dy = 5).type = Material.AIR
+                    block(1, 1).blockData = Bukkit.createBlockData("minecraft:wall_torch[facing=east]")
+                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "protected-terrain"
+                    block(1, 1).type = Material.WATER
+                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "protected-terrain"
+                    block(1, 1).type = Material.SHORT_GRASS
+                    native.validateRoadUpkeep(city, work) // This unchanged plant attaches below, not to the cut bank.
+                    block(1, 1).type shouldBe Material.SHORT_GRASS
+                    block(1, 1).type = Material.AIR
+                    block(dy = 1).type = Material.CHEST
+                    native.captureRoadUpkeep(city, city.workers.single(), target) shouldBe null
+                    block(dy = 1).type = Material.DIRT
+                    block(dy = -1).type = Material.AIR
+                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "autonomy-no-path"
+                    block(dy = -1).type = Material.STONE
+                    block(dy = 4).type = Material.AIR
+                    native.validateRoadUpkeep(city, work) // Sealed partial cut resumes from its exact after image.
+                    for (dy in 1..4) block(dy = dy).type = Material.AIR
+                    native.validateRoadUpkeep(city, work)
+                    native.roadUpkeepPending(city, work) shouldBe false
+                    native.captureRoadUpkeep(city, city.workers.single(), target) shouldBe null
+                    // An old paid cobble receipt remains recoverable with its original desired material.
+                    val old = upkeepWork(city).let { current -> current.copy(
+                        changes = current.changes.map { it.copy(after = "minecraft:cobblestone") },
+                        upkeep = current.upkeep!!.copy(after = "minecraft:cobblestone")) }
+                    block().type = Material.COBBLESTONE
+                    native.validateRoadUpkeep(city, old)
+                    // A retained dry road stair touches the new floor at Y=1 and is kept as the support.
+                    block().type = Material.AIR
+                    val supportData = "minecraft:cobblestone_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]"
+                    block(dy = -1).blockData = Bukkit.createBlockData(supportData)
+                    val neighbours = listOf(p.copy(x = p.x - 1, y = p.y - 1), p.copy(x = p.x + 1))
+                    val stepAfter = CivsSettlementLayout.pathPavement(p,
+                        (neighbours + p).associate { civsTerrainKey(it.x, it.z) to it.y }, city.style)
+                    val supportedStep = upkeepWork(city, "minecraft:air").let { current -> current.copy(
+                        changes = listOf(CivPlanBlock(p, "minecraft:air", stepAfter)),
+                        upkeep = current.upkeep!!.copy(after = stepAfter, neighbours = neighbours)) }
+                    native.validateRoadUpkeep(city, supportedStep)
+                    block(dy = -1).blockData.asString shouldBe supportData
+                    block(-1).type = Material.FERN
+                    native.validateRoadUpkeep(city, supportedStep)
+                    block(-1).type shouldBe Material.FERN
+                    block(-1).type = Material.STONE
+                    for (foreign in listOf("minecraft:stone_brick_stairs[facing=east,half=bottom,shape=straight,waterlogged=false]",
+                        "minecraft:cobblestone_slab[type=bottom,waterlogged=false]")) {
+                        block(dy = -1).blockData = Bukkit.createBlockData(foreign)
+                        shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, supportedStep) }.reason shouldBe "autonomy-no-path"
+                    }
                 }
             }
         }
@@ -277,7 +431,8 @@ private fun upkeepWork(city: Settlement, before: String = "minecraft:grass_block
     val plan = CivPlacementPlan(road.id, city.id, city.worldId, road, listOf(CivPlanBlock(p, before, "minecraft:cobblestone")))
     val target = CivsRoadMaintenance.prepare(city, listOf(plan)).targets.single()
     val worker = city.workers.single()
-    return CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, p.copy(x = 1, y = 64), plan.blocks,
+    return CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, p.copy(x = 1, y = 64),
+        plan.blocks.map { it.copy(after = target.after) },
         status = "repairing-road", focus = p, upkeep = target)
 }
 

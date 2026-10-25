@@ -22,7 +22,7 @@ data class CivAutonomyGoal(
 object CivsAutonomy {
     const val RECRUITMENT_MINUTES = 2
     val baseProfile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
-        BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE,
+        BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE, BuildingType.PLAN_BOARD,
         BuildingType.TAVERN, BuildingType.GUARD_TOWER)
     private val industryProfile = listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
     val profile = baseProfile + industryProfile
@@ -74,7 +74,11 @@ object CivsAutonomy {
             .minByOrNull { profile.indexOf(it.type) }?.let { return goal(it) }
         for (type in baseProfile) {
             val existing = city.buildings.firstOrNull { it.type == type }
-            if (existing == null) return goal(city, type, 1, null)
+            if (existing == null) {
+                // An established full village must not lose upgrades to a newly added amenity.
+                if (type == BuildingType.PLAN_BOARD && CivsRules.buildingCount(city) >= CivsRules.MAX_BUILDINGS) continue
+                return goal(city, type, 1, null)
+            }
             if (existing.phase == BuildingPhase.SITE) return goal(existing)
         }
         if (city.buildings.count { it.type == BuildingType.HOUSE } < 3 && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
@@ -108,6 +112,24 @@ object CivsAutonomy {
         return null
     }
 
+    /** Read-only UI projection of the next goal after the current accepted construction finishes. */
+    fun nextGoalAfterCurrent(city: Settlement): CivAutonomyGoal? {
+        val autonomy = city.autonomy ?: return null
+        if (city.pendingDeletion != null) return null
+        val order = city.construction
+        var projected = city.copy(autonomy = autonomy.copy(paused = false))
+        if (order != null) {
+            val building = (order.plannedBuilding ?: city.building(order.buildingId)) ?: return null
+            val completed = building.copy(level = order.targetLevel, phase = BuildingPhase.ACTIVE)
+            projected = projected.copy(construction = null,
+                buildings = city.buildings.map { if (it.id == completed.id) completed else it }.let {
+                    if (it.any { building -> building.id == completed.id }) it else it + completed
+                },
+                constructionQueue = city.constructionQueue?.filterNot { it == completed.id })
+        }
+        return nextGoal(projected)
+    }
+
     internal fun goal(city: Settlement, type: BuildingType, level: Int, id: UUID?): CivAutonomyGoal {
         val price = cost(type, level)
         val missing = Stock((price.wood - city.stock.wood).coerceAtLeast(0),
@@ -117,7 +139,7 @@ object CivsAutonomy {
 
     internal fun infrastructureDue(city: Settlement, ordinary: CivAutonomyGoal?): Boolean =
         city.buildings.count { it.type.isInfrastructure } < CivsRules.MAX_INFRASTRUCTURE &&
-            (ordinary == null || ordinary.targetLevel > 1) && baseProfile.all { type ->
+            (ordinary == null || ordinary.targetLevel > 1) && baseProfile.filterNot { it == BuildingType.PLAN_BOARD }.all { type ->
                 city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
             }
 

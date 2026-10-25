@@ -2641,12 +2641,53 @@ class CivsResidentsRuntimeTest : FunSpec({
                     remaining.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
                     remaining.all { h.owner.status(it.uniqueId) !in setOf("workers.status.meeting", "workers.status.talking") } shouldBe true
                     if (interruption == "work") {
-                        h.phase(h.workerId) shouldBe CitizenPhase.TO_WORK
+                        (h.phase(h.workerId) in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING)) shouldBe true
                         h.phase(h.city.workers.single { it.id != h.workerId }.id) shouldBe CitizenPhase.IDLE
                     }
                     h.deliveries shouldBe 0
                 }
             }
+        }
+    }
+
+    test("an unassigned adult spends most daytime frames walking with short bounded handoffs and no work credit") {
+        residentRuntime(workerId = UUID(0, 42)) { h ->
+            for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
+            val original = h.city
+            val actor = h.owner.collisionActors().single()
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            var moving = 0
+            var samples = 0
+            var gap = 0
+            var longestGap = 0
+            val waiting = mutableMapOf<String, Int>()
+            for (tick in 1..1_400) {
+                val before = actor.location
+                h.navigate()
+                if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
+                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+                val distance = before.distance(actor.location)
+                (distance <= .118251) shouldBe true
+                if (tick > 200) {
+                    samples++
+                    if (distance > .000001) { moving++; gap = 0 } else {
+                        gap++
+                        val motion = h.routeMotion(h.workerId)
+                        val reason = when { motion == null -> "handoff"; motion.searching -> "search";
+                            motion.turning -> "turn"; motion.finished -> "finished"; else -> "other" }
+                        waiting[reason] = (waiting[reason] ?: 0) + 1
+                    }
+                    longestGap = maxOf(longestGap, gap)
+                }
+            }
+            withClue("moving=$moving samples=$samples longestStillFrames=$longestGap waiting=$waiting ${h.navigationState()}") {
+                (moving.toDouble() / samples >= .75) shouldBe true
+                (longestGap <= 40) shouldBe true
+            }
+            h.city shouldBe original
+            h.deliveries shouldBe 0
+            h.steps shouldBe emptyList()
         }
     }
 
@@ -2727,7 +2768,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     actor.location.toVector() shouldBe origin.toVector()
                     h.teleports shouldBe teleports
                 }
-                // Make the next optional destination reachable; the existing eight-second delay still applies.
+                // Make the next optional destination reachable; the bounded failure delay still applies.
                 for (x in -1..1) for (z in -1..1) if (x != 0 || z != 0)
                     for (y in 66..67) h.world.getBlockAt(x, y, z).type = Material.AIR
                 var walked = false
@@ -2736,7 +2777,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.navigate()
                     if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                     (before.distance(actor.location) <= .118251) shouldBe true
-                    if (requireNotNull(h.navigationNow) < requireNotNull(failedAt) + 8_000)
+                    if (requireNotNull(h.navigationNow) < requireNotNull(failedAt) + 2_500)
                         actor.location.toVector() shouldBe origin.toVector()
                     if (actor.location.distance(origin) >= .5) { walked = true; break }
                 }
@@ -2785,7 +2826,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (walked >= .5) break
             }
             (walked >= .5) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.unassigned"
+            h.owner.status(h.workerId) shouldBe "workers.status.walking"
             h.steps shouldBe emptyList()
             h.deliveries shouldBe 0
         }

@@ -102,9 +102,10 @@ class CivsResearchIndustryTest : FunSpec({
     }
 
     test("one bound university keeps the paid city project when its researcher moves to a replacement") {
-        val base = industryCity()
+        // Reserve one of the fixed sixteen plots for this replacement-university scenario.
+        val base = industryCity().let { it.copy(buildings = it.buildings.filterNot { b -> b.type == BuildingType.PLAN_BOARD }) }
         val original = CivsResearch.university(base)!!
-        val replacement = industryBuilding(BuildingType.UNIVERSITY, 15).copy(id = UUID(0, 1))
+        val replacement = industryBuilding(BuildingType.UNIVERSITY, 16).copy(id = UUID(0, 1))
         var city = CivsRules.validate(base.copy(buildings = base.buildings + replacement))
         CivsResearch.university(city) shouldBe original
         CivsRules.slots(city, original) shouldBe 1
@@ -278,8 +279,8 @@ class CivsResearchIndustryTest : FunSpec({
 
     test("full sixteen-plot village keeps its board and advances only researched hall and new industry upgrades") {
         val base = industryCity().copy(research = CivResearchState(CivResearchId.entries.toSet()))
-        val board = industryBuilding(BuildingType.PLAN_BOARD, 15).copy(level = 1)
-        val city = CivsRules.validate(base.copy(buildings = base.buildings + board))
+        val board = base.buildings.single { it.type == BuildingType.PLAN_BOARD }
+        val city = CivsRules.validate(base)
         city.buildings.size shouldBe 16
         CivsRules.buildingCount(city) shouldBe 16
         val hallGoal = CivsAutonomy.nextGoal(city)!!
@@ -302,7 +303,8 @@ class CivsResearchIndustryTest : FunSpec({
 
 private fun industryBuilding(type: BuildingType, index: Int): CivBuilding {
     val x = index * 10
-    return CivBuilding(UUID.randomUUID(), type, 2, CivPosition(x, 64, 0), 0, "fixture/${type.name}/2",
+    val level = minOf(2, type.maxLevel)
+    return CivBuilding(UUID.randomUUID(), type, level, CivPosition(x, 64, 0), 0, "fixture/${type.name}/$level",
         CivBox(CivPosition(x - 2, 63, -2), CivPosition(x + 2, 69, 2)), CivPosition(x, 64, 3), BuildingPhase.ACTIVE,
         control = CivPosition(x, 64, 0))
 }

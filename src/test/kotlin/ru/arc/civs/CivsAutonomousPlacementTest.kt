@@ -21,6 +21,17 @@ import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 
 class CivsAutonomousPlacementTest : FunSpec({
+    test("a one-level plan board reserves its actual catalog volume without requesting a nonexistent upgrade") {
+        for (style in CivsBlueprints.STYLES) {
+            val city = spatialCity(UUID.randomUUID()).copy(style = style)
+            val board = city.buildings.single().copy(type = BuildingType.PLAN_BOARD,
+                schematicId = CivsBlueprints.schematicId(style, BuildingType.PLAN_BOARD, 1))
+            val reserved = CivsAutonomousGeometry.futureBounds(city, board)
+            reserved.contains(board.bounds.min.x, board.bounds.min.y, board.bounds.min.z) shouldBe true
+            reserved.contains(board.bounds.max.x, board.bounds.max.y, board.bounds.max.z) shouldBe true
+        }
+    }
+
     for (gatesBuilt in listOf(false, true))
     test("infrastructure drafts ${if (gatesBuilt) "walls" else "gates"} before pending road paving") {
         InfrastructurePlacementScenario().use { s ->

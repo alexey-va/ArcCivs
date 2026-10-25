@@ -410,6 +410,145 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("next expansion separates current construction from one truthful autonomous goal") {
+        listOf("ru", "en").forEach { language ->
+            listOf("", "arc:dialog_ui").forEach { font ->
+                withUi(decorationFont = font) { h ->
+                    val russian = language == "ru"
+                    h.player.setLocale(Locale.forLanguageTag(language))
+                    every { h.player.hasPermission("arccivs.admin") } returns true
+                    val base = autonomousSettlement(h.player, "Ольховка").let { village ->
+                        village.copy(buildings = village.buildings.filter { it.type != BuildingType.PLAN_BOARD }, stock = Stock(116, 60, 16))
+                    }
+                    val house = base.buildings.first { it.type == BuildingType.HOUSE }
+                    val warehouse = base.buildings.first { it.type == BuildingType.WAREHOUSE }
+                    var village = base
+                    var goal: CivAutonomyGoal? = CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock())
+                    every { h.host.settlements() } answers { listOf(village) }
+                    every { h.host.nextAutonomyGoal(village.id) } answers { goal }
+                    every { h.host.autonomyStatus(village.id) } answers {
+                        CivsAutonomyView(if (village.construction != null) "building" else if (goal == null) "complete"
+                            else if (goal?.ready == false) "resources" else "planning")
+                    }
+                    every { h.host.buildingStatus(house.id) } returns "building-status.working"
+                    fun show(name: String) {
+                        h.ui.openAutonomous(h.player, village.id)
+                        h.screen.id shouldBe "civs.autonomous-city"
+                        System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                            exportUiScreen(it, "next-plan-$name${if (font.isEmpty()) "-plain" else ""}-$language", h.screen, listOf(640, 360))
+                        }
+                    }
+                    show("ready")
+                    h.body() shouldContain if (russian) "Следующая цель" else "Next goal"
+                    h.body() shouldContain if (russian) "Построить: План поселения · ур. 1" else "Build: Settlement plan · level 1"
+                    h.body() shouldContain if (russian) "Ресурсов достаточно" else "Resources available"
+                    h.body().contains(if (russian) "Текущая стройка" else "Current construction") shouldBe false
+                    plainText(h.screen.buttons.single { it.id.value == "industry" }.tooltip) shouldContain
+                        if (russian) "в предметы инвентаря они не превращаются" else "they do not become inventory items"
+
+                    village = base.copy(buildings = base.buildings.map { if (it.id == house.id) it.copy(phase = BuildingPhase.SITE) else it })
+                    goal = CivAutonomyGoal(BuildingType.HOUSE, 1, house.id, CivsAutonomy.cost(BuildingType.HOUSE, 1), Stock())
+                    show("site")
+                    h.body() shouldContain if (russian) "Построить: Дом · ур. 1" else "Build: House · level 1"
+                    h.body().contains(if (russian) "Улучшить:" else "Upgrade:") shouldBe false
+
+                    village = base
+                    goal = CivAutonomyGoal(BuildingType.WAREHOUSE, 2, warehouse.id, CivsAutonomy.cost(BuildingType.WAREHOUSE, 2), Stock(12, 4))
+                    show("resources")
+                    h.body() shouldContain if (russian) "Улучшить: Склад · ур. 2" else "Upgrade: Warehouse · level 2"
+                    h.body() shouldContain if (russian) "Нужны ресурсы" else "Needs resources"
+                    h.body() shouldContain if (russian) "Не хватает сейчас:" else "Currently missing:"
+                    h.body() shouldContain if (russian) "Древесина: 12" else "Timber: 12"
+                    h.body() shouldContain if (russian) "Камень: 4" else "Stone: 4"
+                    h.body().contains(if (russian) "Ресурсов достаточно" else "Resources available") shouldBe false
+
+                    village = base.copy(construction = CivConstruction(UUID.randomUUID(), house.id, 2, 100, 25,
+                        ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = house.copy(level = 2)))
+                    show("after-current")
+                    h.body() shouldContain if (russian) "Текущая стройка" else "Current construction"
+                    h.body() shouldContain "25/100"
+                    h.body() shouldContain if (russian) "После этой стройки" else "After this construction"
+                    h.body() shouldContain if (russian) "Улучшить: Склад · ур. 2" else "Upgrade: Warehouse · level 2"
+                    goal = CivAutonomyGoal(BuildingType.TOWN_HALL, 2, base.buildings.first { it.type == BuildingType.TOWN_HALL }.id,
+                        CivsAutonomy.cost(BuildingType.TOWN_HALL, 2), Stock(12, 36, 8))
+                    show("after-current-all-resources")
+                    h.body() shouldContain if (russian) "Припасы: 8" else "Supplies: 8"
+
+                    village = base.copy(autonomy = CivAutonomy(paused = true))
+                    goal = CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock())
+                    show("paused")
+                    h.body() shouldContain if (russian) "Развитие приостановлено" else "Development paused"
+                    h.body().contains(if (russian) "Ресурсов достаточно" else "Resources available") shouldBe false
+                    plainText(h.screen.buttons.single { it.id.value == "pause" }.tooltip) shouldContain
+                        if (russian) "Запасы и постройки сохраняются" else "Stock and buildings are preserved"
+
+                    village = base.copy(construction = CivConstruction(UUID.randomUUID(), house.id, 2, 100, 25,
+                        ConstructionPhase.CONSTRUCTING, Stock()))
+                    goal = CivAutonomyGoal(BuildingType.HOUSE, 2, house.id, Stock(), Stock())
+                    show("same-current")
+                    h.body() shouldContain if (russian) "Новых целей пока нет." else "No further goal yet."
+                    h.body().contains(if (russian) "Улучшить: Дом" else "Upgrade: House") shouldBe false
+
+                    goal = null
+                    village = autonomousSettlement(h.player, "Ольховка").let { complete ->
+                        complete.copy(id = base.id, buildings = complete.buildings.map { it.copy(level = minOf(2, it.type.maxLevel)) })
+                    }
+                    show("complete")
+                    h.body() shouldContain "${CivsAutonomy.profile.size} / ${CivsAutonomy.profile.size}"
+                    h.body() shouldContain if (russian) "Новых целей пока нет." else "No further goal yet."
+                }
+            }
+        }
+    }
+
+    test("next accepted queue entry wins over projections without duplicating current work") {
+        listOf("ru", "en").forEach { language ->
+            listOf("", "arc:dialog_ui").forEach { font ->
+                withUi(decorationFont = font) { h ->
+                    val russian = language == "ru"
+                    h.player.setLocale(Locale.forLanguageTag(language))
+                    val base = settlement(h.player)
+                    val current = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+                    val house = base.buildings.first { it.type == BuildingType.HOUSE }
+                    every { h.host.buildingStatus(current.id) } returns "building-status.working"
+                    h.city = base.copy(construction = CivConstruction(UUID.randomUUID(), current.id, 2, 100, 25,
+                        ConstructionPhase.CONSTRUCTING, Stock()), constructionQueue = listOf(current.id, house.id))
+                    h.open()
+                    h.body() shouldContain if (russian) "Следом в очереди" else "Next in the queue"
+                    h.body() shouldContain if (russian) "Улучшить: Дом · ур. 2" else "Upgrade: House · level 2"
+                    h.body().contains(if (russian) "Следующая цель" else "Next goal") shouldBe false
+                    h.body().contains(if (russian) "Ратуша · ур. 3" else "Town hall · level 3") shouldBe false
+                    h.screen.buttons.map { it.id.value } shouldContain "upgrade"
+                    verify(exactly = 0) { h.host.nextAutonomyGoal(any()) }
+                    // The stale current ID above exercises filtering; previews show the normal pending-only queue.
+                    h.city = h.city!!.copy(constructionQueue = listOf(house.id))
+                    h.open()
+                    System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                        exportUiScreen(it, "next-plan-personal-queue${if (font.isEmpty()) "-plain" else ""}-$language", h.screen, listOf(640, 360))
+                    }
+                    every { h.player.hasPermission("arccivs.admin") } returns true
+                    val village = h.city!!.copy(autonomy = CivAutonomy(), inventory = null,
+                        buildings = h.city!!.buildings.map { if (it.id == house.id) it.copy(phase = BuildingPhase.SITE) else it })
+                    every { h.host.settlements() } returns listOf(village)
+                    every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("building")
+                    every { h.host.nextAutonomyGoal(village.id) } returns
+                        CivAutonomyGoal(BuildingType.PLAN_BOARD, 1, null, Stock(12, 8), Stock(12, 8))
+                    h.ui.openAutonomous(h.player, village.id)
+                    h.body() shouldContain if (russian) "Построить: Дом · ур. 1" else "Build: House · level 1"
+                    h.body().contains(if (russian) "Построить: План поселения" else "Build: Settlement plan") shouldBe false
+                    h.body().contains(if (russian) "Не хватает сейчас" else "Currently missing") shouldBe false
+                    System.getenv("CIVS_UI_PREVIEW_OUT")?.let {
+                        exportUiScreen(it, "next-plan-auto-queue${if (font.isEmpty()) "-plain" else ""}-$language", h.screen, listOf(640, 360))
+                    }
+                    h.city = base
+                    h.open()
+                    h.body().contains(if (russian) "Следом в очереди" else "Next in the queue") shouldBe false
+                    h.body().contains(if (russian) "Следующая цель" else "Next goal") shouldBe false
+                }
+            }
+        }
+    }
+
     test("autonomous creation reuses ground selection while its preview omits personal material shopping") {
         withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -868,13 +1007,13 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.worker"
             h.body() shouldContain "Forester"
             h.body() shouldContain "Walking to work"
-            h.body().contains("Walking around · unassigned") shouldBe false
+            h.body().contains("No assignment") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, forester.id) }
 
             assignedStatus = "working"
             h.click("unassign")
             h.paper.performTicks(2)
-            h.body() shouldContain "Walking around · unassigned"
+            h.body() shouldContain "No assignment"
             h.body().contains("Working") shouldBe false
             verify(exactly = 1) { h.host.assign(h.player, worker.id, null) }
             verify(exactly = 0) { h.runtime.close(h.player) }
@@ -2371,7 +2510,16 @@ class CivsUiTest : FunSpec({
             h.body() shouldContain "Sleeping"
             every { h.host.workerStatus(idle.id) } returns "workers.status.unassigned"
             h.ui.openWorker(h.player, base.id, idle.id)
-            h.body() shouldContain "Walking around · unassigned"
+            h.body() shouldContain "No assignment"
+            for (language in listOf("ru", "en")) {
+                h.player.setLocale(Locale.forLanguageTag(language))
+                for (status in listOf("unassigned", "no-assignment")) {
+                    every { h.host.workerStatus(idle.id) } returns "workers.status.$status"
+                    h.ui.openWorker(h.player, base.id, idle.id)
+                    h.body() shouldContain if (language == "ru") "Нет работы" else "No assignment"
+                    h.body().contains(if (language == "ru") "Гуляет без работы" else "Walking around · unassigned") shouldBe false
+                }
+            }
         }
     }
 
@@ -3507,6 +3655,7 @@ private class UiHarness(val paper: MockBukkitTestRuntime, private val realHistor
         every { host.styles() } returns listOf("medieval-oak")
         every { host.city(any()) } answers { city }
         every { host.settlements() } answers { listOfNotNull(city) }
+        every { host.nextAutonomyGoal(any()) } returns null
         every { host.preview(any()) } answers { preview }
         every { host.selection(any()) } answers { selection }
         every { host.workerStatus(any()) } returns "workers.status.sleeping"

@@ -13,7 +13,7 @@ import kotlin.math.sin
 class CivsSettlementLayoutTest : FunSpec({
     for ((facing, direction) in listOf("east" to (1 to 0), "west" to (-1 to 0),
         "south" to (0 to 1), "north" to (0 to -1)))
-    test("paved $facing rises use dry bottom cobblestone stairs and flat landings remain full blocks") {
+    test("paved $facing rises use style wood stairs and flat landings become dirt path") {
         val city = layoutFixtureCity()
         val route = (0..8).map { index -> CivPosition(12 + direction.first * index,
             65 + index / 3, 12 + direction.second * index) }
@@ -25,13 +25,13 @@ class CivsSettlementLayoutTest : FunSpec({
         val cells = roads.flatMap { it.blocks }.associate { it.position to it.after }
         for (index in listOf(3, 6)) {
             val surfacePoint = route[index].copy(y = route[index].y - 1)
-            cells[surfacePoint] shouldBe "minecraft:cobblestone_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
+            cells[surfacePoint] shouldBe "minecraft:${CivsSettlementLayout.wood(city.style)}_stairs[facing=$facing,half=bottom,shape=straight,waterlogged=false]"
             cells[surfacePoint.copy(y = surfacePoint.y + 1)] shouldBe "minecraft:air"
             cells[surfacePoint.copy(y = surfacePoint.y + 2)] shouldBe "minecraft:air"
             roads.flatMap { it.transit }.contains(route[index]) shouldBe true
         }
         for (index in listOf(1, 4, 7))
-            cells[route[index].copy(y = route[index].y - 1)] shouldBe "minecraft:cobblestone"
+            cells[route[index].copy(y = route[index].y - 1)] shouldBe "minecraft:dirt_path"
         exportRoadSection("paved-slope-$facing", surface, route, paving = roads.flatMap { it.blocks })
     }
 
@@ -208,7 +208,15 @@ class CivsSettlementLayoutTest : FunSpec({
             val corner = CivPosition(start.x, start.y, gate.center.z)
             layoutAxisRoute(start, corner) + layoutAxisRoute(corner, gate.center.copy(y = start.y)).drop(1)
         }
-        val first = CivsSettlementLayout.infrastructure(city, frame, surface, routes)
+        // Old paid captures retain their exact cobble material after the new default changes.
+        val first = CivsSettlementLayout.infrastructure(city, frame, surface, routes).let { fresh ->
+            fresh.copy(pieces = fresh.pieces.map { piece -> if (piece.type != BuildingType.ROAD) piece else
+                piece.copy(blocks = piece.blocks.map { cell -> cell.copy(after = when {
+                    cell.after == "minecraft:dirt_path" -> "minecraft:cobblestone"
+                    cell.after.contains("_stairs[") -> cell.after.replace("minecraft:${CivsSettlementLayout.wood(city.style)}_", "minecraft:cobblestone_")
+                    else -> cell.after
+                }) }) })
+        }
         val buildings = first.pieces.map { piece ->
             CivBuilding(piece.id, piece.type, 1, piece.bounds.min, 0, "fixture/infrastructure/${piece.id}",
                 piece.bounds, piece.entrance, BuildingPhase.ACTIVE, transit = piece.transit.takeIf { it.isNotEmpty() })

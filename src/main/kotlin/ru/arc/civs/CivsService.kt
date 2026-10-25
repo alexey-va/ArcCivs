@@ -616,6 +616,9 @@ class CivsService(
             }
         }
 
+    override fun nextAutonomyGoal(cityId: UUID): CivAutonomyGoal? =
+        cities[cityId]?.let(CivsAutonomy::nextGoalAfterCurrent)
+
     override fun autonomyStatus(cityId: UUID): CivsAutonomyView? {
         val city = cities[cityId]?.takeIf { it.autonomy != null } ?: return null
         if (city.autonomy?.paused == true) return CivsAutonomyView("paused")
@@ -2569,12 +2572,14 @@ class CivsService(
                 tx.upkeep?.let { receipt ->
                     val work = receipt.work
                     val upkeep = requireNotNull(work.upkeep)
+                    val surfaceChange = work.changes.firstOrNull { it.position == upkeep.floor }
                     footTraffic.registerSurface(tx.cityId, upkeep.floor)
                     CivsDiagnostics.event("road_upkeep_committed", "city" to tx.cityId, "worker" to work.workerId,
                         "cycle" to work.cycle, "transaction" to tx.id, "revision" to tx.after.revision,
                         "source_building" to upkeep.source.id, "floor" to upkeep.floor,
-                        "before" to work.changes.first().before, "after" to upkeep.after,
-                        "cleared_cover" to work.changes.size - 1,
+                        "before" to surfaceChange?.before, "after" to upkeep.after,
+                        "surface_changed" to (surfaceChange != null),
+                        "cleared_cover" to work.changes.count { it.position != upkeep.floor },
                         "stone_spent" to receipt.stockBefore.stone - tx.after.stock.stone,
                         "recovery_path" to (result == null))
                 }

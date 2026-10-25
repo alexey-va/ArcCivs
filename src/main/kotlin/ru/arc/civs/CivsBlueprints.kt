@@ -182,7 +182,7 @@ class CivsBlueprints(
             }, executor)
     }
 
-    /** Explicit maintenance compares the delivered legacy racks with the corrected private library.
+    /** Explicit maintenance accepts only exact legacy racks or the reviewed warehouse chest baseline.
      * Geometry remains private; neither arbitrary blocks nor library bookshelves are repair targets. */
     internal fun buildingStorageRepair(building: CivBuilding): CompletableFuture<List<CivPlanBlock>> {
         require(building.phase == BuildingPhase.ACTIVE)
@@ -193,18 +193,38 @@ class CivsBlueprints(
         val legacy = source.load(legacyId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         val current = source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         fun transformed(snapshot: ArcSchematicSnapshot) = source.transform(snapshot, ArcSchematicTransform(building.rotation / 90, false))
-        return legacy.thenCompose(::transformed).thenCombineAsync(current.thenCompose(::transformed), { before, after ->
+        val previousChests = if (building.type == BuildingType.WAREHOUSE)
+            source.load("civs/legacy-warehouse-chests/$style/warehouse${building.level}", ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+                .thenCompose(::transformed)
+        else CompletableFuture.completedFuture(null)
+        return legacy.thenCompose(::transformed).thenCombine(current.thenCompose(::transformed), ::Pair)
+            .thenCombineAsync(previousChests, { (before, after), previous ->
             requireVolume(before); requireVolume(after)
             if (before.minimum != after.minimum || before.maximum != after.maximum || before.origin != after.origin)
                 throw CivsRejection("control-location-changed")
             val replacements = worldCells(after, building.anchor).associateBy { it.position }
-            worldCells(before, building.anchor).mapNotNull { cell ->
+            val racks = worldCells(before, building.anchor).mapNotNull { cell ->
                 val target = replacements.getValue(cell.position)
                 if (cell.blockData == target.blockData) return@mapNotNull null
                 require(cell.blockData.substringBefore('[') in setOf("minecraft:bookshelf", "minecraft:chiseled_bookshelf") &&
                     target.blockData.substringBefore('[') in setOf("minecraft:chest", "minecraft:barrel", "minecraft:air")) { "Storage repair contains non-rack changes" }
                 CivPlanBlock(CivPosition(cell.position.x, cell.position.y, cell.position.z), cell.blockData, target.blockData)
-            }.also { require(it.size in 1..512) { "Storage repair must contain at most512 authored rack cells" } }
+            }
+            val rackPositions = racks.mapTo(hashSetOf()) { it.position }
+            val chests = previous?.let { snapshot ->
+                requireVolume(snapshot)
+                if (snapshot.minimum != after.minimum || snapshot.maximum != after.maximum || snapshot.origin != after.origin)
+                    throw CivsRejection("control-location-changed")
+                worldCells(snapshot, building.anchor).mapNotNull { cell ->
+                    val target = replacements.getValue(cell.position)
+                    if (cell.blockData == target.blockData) return@mapNotNull null
+                    val position = CivPosition(cell.position.x, cell.position.y, cell.position.z)
+                    require(position in rackPositions && cell.blockData.substringBefore('[') == "minecraft:chest" &&
+                        target.blockData.substringBefore('[') == "minecraft:chest") { "Chest alignment contains non-chest changes" }
+                    CivPlanBlock(position, cell.blockData, target.blockData)
+                }
+            }.orEmpty()
+            (racks + chests).also { require(it.size in 1..512) { "Storage repair must contain at most512 exact legacy alternatives" } }
         }, executor)
     }
 
