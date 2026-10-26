@@ -141,7 +141,10 @@ class CivsService(
     private val renderer = previewRenderer ?: CivsPreviewRenderer(plugin, tasks, nativeWork)
     private val planBoardSnapshots = CivsPlanBoardSnapshots(tasks, executor, { id ->
         if (ready()) cities[id]?.takeUnless { id in unhealthy || it.pendingDeletion != null } else null
-    }, ::loadPlanBoardPlans)
+    }, ::loadPlanBoardPlans, { city, type, level, id ->
+        blueprints.prepare(city.style, type, level, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
+            .thenApply { it.building }
+    })
     private val planBoards = CivsPlanBoardRenderer(plugin, tasks, nativeWork, executor, planBoardSnapshots::snapshot)
     private val protection = CivsProtection(cities = { cities.values.toList() }, available = { ready() }, protectedWorlds = settings.worlds,
         worldLocked = storage::isWorldLocked, forestryPath = { worldId, x, z ->
@@ -226,8 +229,8 @@ class CivsService(
     private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
 
     init {
-        world.roadUpkeepResidentOccupied = citizens::growthBlocked
         worksites.mutationBlocked = citizens::growthBlocked
+        worksites.residentFeet = citizens::residentFeet
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
@@ -1899,7 +1902,7 @@ class CivsService(
             null
         } catch (failure: CivsRejection) {
             val details = failure.values + ("reason" to failure.reason)
-            if (failure.reason in setOf("world-unavailable", "world-unloaded", "chunk-unloaded", "chunks-unloaded", "road-occupied"))
+            if (failure.reason in setOf("world-unavailable", "world-unloaded", "chunk-unloaded", "chunks-unloaded"))
                 CivInventoryApplyResult.Retry(details) else CivInventoryApplyResult.Conflict(details)
         }
     }

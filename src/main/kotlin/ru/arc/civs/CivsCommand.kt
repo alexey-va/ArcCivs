@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import org.bukkit.command.Command
 import org.bukkit.command.CommandExecutor
 import org.bukkit.command.CommandSender
+import org.bukkit.command.ConsoleCommandSender
 import org.bukkit.command.TabCompleter
 import org.bukkit.entity.Player
 import ru.arc.core.LifecycleTaskScope
@@ -25,12 +26,29 @@ class CivsCommand(
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("not-authorized")) },
     private val debugLayout: (UUID, Boolean) -> java.util.concurrent.CompletableFuture<Map<String, Any?>> = { _, _ ->
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("layout-export-unavailable")) },
+    private val prepareHotload: () -> Map<String, Any?> = { mapOf("state" to "failed", "failure" to "hotload-unavailable") },
+    private val hotloadStatus: () -> Map<String, Any?> = { mapOf("state" to "active") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
+        if (args.firstOrNull() == "hotload") {
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 2 || args[1] !in setOf("prepare", "status") -> "invalid-hotload-arguments"
+                else -> null
+            }
+            val receipt = if (error != null) mapOf("schema" to 1, "state" to "failed", "error" to error)
+                else if (args[1] == "prepare") prepareHotload() else hotloadStatus()
+            sender.sendMessage(hotloadLine(receipt))
+            return true
+        }
         val layoutExport = args.getOrNull(0) == "debug" && args.getOrNull(1) == "layout"
         if (!sender.hasPermission("arccivs.use")) {
             if (layoutExport) sender.sendMessage(CivsLayoutDebug.line(failure = CivsRejection("not-authorized")))
             else sender.sendMessage(text.error(sender as? Player, "reason.not-authorized"))
+            return true
+        }
+        if (hotloadStatus()["state"] != "active") {
+            sender.sendMessage(text.error(sender as? Player, "reason.not-ready"))
             return true
         }
         if (args.firstOrNull() == "debug") {
@@ -142,11 +160,17 @@ class CivsCommand(
     }
 
     override fun onTabComplete(sender: CommandSender, command: Command, alias: String, args: Array<out String>): List<String> =
-        completions(sender.hasPermission("arccivs.use"), sender.hasPermission("arccivs.admin"), args)
+        completions(sender.hasPermission("arccivs.use"), sender.hasPermission("arccivs.admin"), args,
+            sender is ConsoleCommandSender).let { choices ->
+            if (hotloadStatus()["state"] == "active" || args.firstOrNull() == "hotload") choices
+            else choices.filter { it == "hotload" }
+        }
 
     companion object {
-        internal fun completions(use: Boolean, admin: Boolean, args: Array<out String>): List<String> {
+        internal fun completions(use: Boolean, admin: Boolean, args: Array<out String>, console: Boolean = false): List<String> {
             if (!use) return emptyList()
+            if (console && admin && args.size == 2 && args[0] == "hotload")
+                return listOf("prepare", "status").filter { it.startsWith(args[1], true) }
             if (admin && args.size == 2 && args[0] == "debug")
                 return (listOf("all") + CivsDebug.systems + "layout").filter { it.startsWith(args[1], true) }
             if (admin && args.size == 4 && args[0] == "debug" && args[1] == "layout")
@@ -154,8 +178,11 @@ class CivsCommand(
             if (admin && args.size == 2 && args[0] == "autonomous")
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
-            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") else emptyList()).filter { it.startsWith(args[0], true) }
+            return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
+                (if (console) listOf("hotload") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
+
+        private fun hotloadLine(receipt: Map<String, Any?>): String = "ARCCIVS_HOTLOAD " + Gson().toJson(receipt)
 
         internal fun statusLine(host: CivsUiHost, city: Settlement?): String {
             val payload = linkedMapOf<String, Any?>(

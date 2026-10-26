@@ -1661,7 +1661,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         runtime.pulse(listOf(city))
                         runtime.plan(city, worker) shouldBe null
                         runtime.idleReason(city, worker) shouldBe "searching-work"
-                        (world.rayTraces in 1..8) shouldBe true
+                        // Standing checks or the time budget can yield before the first reachable ray sample.
+                        (world.rayTraces in 0..8) shouldBe true
                         messages.none { "worksite_blocked" in it } shouldBe true
                         var pulses = 1
                         while (runtime.idleReason(city, worker) == "searching-work" && pulses++ < 32) {
@@ -1671,6 +1672,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         }
                         runtime.plan(city, worker) shouldBe null
                         runtime.idleReason(city, worker) shouldBe "worksite-no-access"
+                        (world.rayTraces > 0) shouldBe true
                         val blocked = messages.single { "worksite_blocked" in it }
                         ("line-of-sight-blocked" in blocked) shouldBe true
                         (target.toString() in blocked) shouldBe true

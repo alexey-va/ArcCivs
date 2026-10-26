@@ -127,6 +127,49 @@ class CivsForestryTest : FunSpec({
         }
     }
 
+    test("a nearby tree and the forester's existing two-block stance precede a distant scan-order tree") {
+        forestryWorksite("forestry-nearby-tree", nanoTime = { 0L }) { world, runtime, city ->
+            val worker = city.workers.single()
+            val nearby = CivPosition(10, 64, 10)
+            val standing = nearby.copy(z = nearby.z - 2)
+            forestrySmallOak(world, CivPosition(-15, 64, -26))
+            forestrySmallOak(world, nearby)
+            runtime.residentFeet = { Location(world, standing.x + .5, standing.y.toDouble(), standing.z + .5) }
+            repeat(12) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe nearby
+            work.standing shouldBe standing
+            runtime.validate(city, work)
+            world.getBlockAt(nearby.x, nearby.y, nearby.z).type shouldBe Material.OAK_LOG
+        }
+    }
+
+    test("finishing a tree retains the unvisited forest instead of rescanning its empty prefix") {
+        forestryWorksite("forestry-resume-after-felling", nanoTime = { 0L }) { world, runtime, initial ->
+            var city = initial
+            var worker = city.workers.single()
+            val firstRoot = CivPosition(10, 64, 10)
+            val nextRoot = firstRoot.copy(x = 12)
+            forestrySmallOak(world, firstRoot)
+            forestrySmallOak(world, nextRoot)
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            first.focus shouldBe firstRoot
+            runtime.validate(city, first)
+            city = CivsRules.finishWorldWork(city, first, 1_000)
+            first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                .blockData = Bukkit.createBlockData(cell.after) }
+            worker = city.workers.single()
+            runtime.invalidate(worker.id)
+            repeat(8) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val next = requireNotNull(runtime.plan(city, worker))
+            next.status shouldBe "felling-tree"
+            next.focus shouldBe nextRoot
+            runtime.validate(city, next)
+        }
+    }
+
     for (arrival in listOf("carried", "building-stock")) test("$arrival saplings arriving mid-scan restore priority to an earlier mature tree") {
         var supplies = emptyMap<String, Long>()
         forestryWorksite("forestry-care-refill-$arrival", autonomous = false, supplies = { supplies }) { world, runtime, before ->
@@ -461,73 +504,79 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    test("Auto2 shaped adjacent oaks complete paid native receipts and replant before free care without touching foreign trunks") {
-        MockBukkitTestRuntime.open().use { paper ->
-            val world = CivsWorksiteWorldFixture("forestry-auto2-joined", Material.DIRT).also(paper.server::addWorld)
-            val plugin = paper.createSimplePlugin("ForestryAuto2Joined")
-            val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-            try {
-                val mill = spatialBuilding("caledonia", "lumberjack", 1, CivPosition(0, 63, 0), 180)
-                var worker = spatialWorker(mill, "IRON_AXE").copy(items = null, inventory = null)
-                var city = spatialCity(world.uid, listOf(mill), worker)
-                    .copy(style = "caledonia", inventory = null, autonomy = CivAutonomy(), stock = Stock(4))
-                val roots = (-20..-18).map { CivPosition(it, 64, -2) }
-                val remainingTrunks = linkedMapOf<CivPosition, String>()
-                for (root in roots) for (y in 64..67) {
-                    val point = root.copy(y = y)
-                    remainingTrunks[point] = "minecraft:oak_log[axis=y]"
-                    world.getBlockAt(point.x, point.y, point.z).blockData = paper.server.createBlockData(remainingTrunks.getValue(point))
-                }
-                val leaves = (-21..-17).map { CivPosition(it, 68, -2) }
-                leaves.forEach { world.getBlockAt(it.x, it.y, it.z).blockData = paper.server.createBlockData(
-                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]") }
-                for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
-                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    CivsStorage(plugin).use { storage ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                        runtime.pulse(listOf(city))
-                        val before = runtime.debug(setOf(worker.id))
-                        val entry = (before["entries"] as List<*>).single() as Map<*, *>
-                        (entry["forestSearch"] != null) shouldBe true
-                        runtime.debug(setOf(worker.id)) shouldBe before
-                        repeat(3) { cycle ->
-                            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
-                            val work = requireNotNull(runtime.plan(city, worker))
-                            work.status shouldBe "felling-tree"
-                            work.outputs shouldBe emptyMap()
-                            work.inputs shouldBe mapOf("OAK_SAPLING" to 1L)
-                            val root = requireNotNull(work.forestry).job.root
-                            work.changes.filter { CivsForestry.material(it.before) == "OAK_LOG" }.map { it.position }.toSet() shouldBe
-                                (64..67).mapTo(hashSetOf()) { root.copy(y = it) }
-                            runtime.validate(city, work)
-                            val receipt = forestryReceipt(city, work, 1_000L + cycle * 2_000L)
-                            receipt.validated()
-                            storage.replaceCities(listOf(city))
-                            storage.reserve(city, receipt.id)
-                            storage.seal(receipt)
-                            storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
-                            storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
-                            storage.unlock(receipt.id)
-                            city = receipt.after
-                            city.stock.wood shouldBe 4L + (cycle + 1) * 3L
-                            city.forestryJobs shouldBe null
-                            world.getBlockAt(root.x, root.y, root.z).blockData.asString shouldBe "minecraft:oak_sapling[stage=0]"
-                            remainingTrunks.keys.removeAll(work.changes.map { it.position }.toSet())
-                            remainingTrunks.forEach { (point, state) -> world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe state }
-                            // Shared foliage remains native until the last neighbouring trunk has also been harvested.
-                            if (cycle < 2) leaves.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.OAK_LEAVES }
-                            worker = city.workers.single()
-                            runtime.invalidate(worker.id)
-                        }
-                        repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
-                        val care = requireNotNull(runtime.plan(city, worker))
-                        care.status shouldBe "watering"
-                        care.inputs shouldBe emptyMap()
-                        runtime.validate(city, care)
-                        CivsRules.finishWorldWork(city, care, 8_000).stock shouldBe city.stock
+    test("Auto2 shaped adjacent oaks thin crowded roots and replant the isolated survivor without touching foreign trunks") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open().use { paper ->
+                val world = CivsWorksiteWorldFixture("forestry-auto2-joined", Material.DIRT).also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("ForestryAuto2Joined")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                try {
+                    val mill = spatialBuilding("caledonia", "lumberjack", 1, CivPosition(0, 63, 0), 180)
+                    var worker = spatialWorker(mill, "IRON_AXE").copy(items = null, inventory = null)
+                    var city = spatialCity(world.uid, listOf(mill), worker)
+                        .copy(style = "caledonia", inventory = null, autonomy = CivAutonomy(), stock = Stock(),
+                            forestrySeeded = setOf(mill.id.toString()))
+                    val roots = (-20..-18).map { CivPosition(it, 64, -2) }
+                    val remainingTrunks = linkedMapOf<CivPosition, String>()
+                    for (root in roots) for (y in 64..67) {
+                        val point = root.copy(y = y)
+                        remainingTrunks[point] = "minecraft:oak_log[axis=y]"
+                        world.getBlockAt(point.x, point.y, point.z).blockData = paper.server.createBlockData(remainingTrunks.getValue(point))
                     }
-                }
-            } finally { tasks.close() }
+                    val leaves = (-21..-17).map { CivPosition(it, 68, -2) }
+                    leaves.forEach { world.getBlockAt(it.x, it.y, it.z).blockData = paper.server.createBlockData(
+                        "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]") }
+                    for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        CivsStorage(plugin) { emptyArray() }.use { storage ->
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            runtime.pulse(listOf(city))
+                            val before = runtime.debug(setOf(worker.id))
+                            val entry = (before["entries"] as List<*>).single() as Map<*, *>
+                            (entry["forestSearch"] != null) shouldBe true
+                            runtime.debug(setOf(worker.id)) shouldBe before
+                            repeat(3) { cycle ->
+                                repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                                val work = requireNotNull(runtime.plan(city, worker))
+                                work.status shouldBe "felling-tree"
+                                work.outputs shouldBe emptyMap()
+                                work.inputs shouldBe if (cycle < 2) emptyMap() else mapOf("OAK_SAPLING" to 1L)
+                                work.forestry!!.job.thinning shouldBe (cycle < 2)
+                                val root = requireNotNull(work.forestry).job.root
+                                work.changes.filter { CivsForestry.material(it.before) == "OAK_LOG" }.map { it.position }.toSet() shouldBe
+                                    (64..67).mapTo(hashSetOf()) { root.copy(y = it) }
+                                runtime.validate(city, work)
+                                val receipt = forestryReceipt(city, work, 1_000L + cycle * 2_000L)
+                                receipt.validated()
+                                storage.replaceCities(listOf(city))
+                                storage.reserve(city, receipt.id)
+                                storage.seal(receipt)
+                                storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                                storage.unlock(receipt.id)
+                                city = receipt.after
+                                city.stock.wood shouldBe (cycle + 1) * 4L - if (cycle == 2) 1L else 0L
+                                city.forestryJobs shouldBe null
+                                world.getBlockAt(root.x, root.y, root.z).blockData.asString shouldBe
+                                    if (cycle < 2) "minecraft:air" else "minecraft:oak_sapling[stage=0]"
+                                remainingTrunks.keys.removeAll(work.changes.map { it.position }.toSet())
+                                remainingTrunks.forEach { (point, state) -> world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe state }
+                                // Shared foliage remains native until the last neighbouring trunk has also been harvested.
+                                if (cycle < 2) leaves.forEach { world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.OAK_LEAVES }
+                                worker = city.workers.single()
+                                runtime.invalidate(worker.id)
+                            }
+                            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                            val planting = requireNotNull(runtime.plan(city, worker))
+                            planting.status shouldBe "planting-tree"
+                            planting.inputs shouldBe mapOf("OAK_SAPLING" to 1L)
+                            (planting.focus !in roots) shouldBe true
+                            runtime.validate(city, planting)
+                            CivsRules.finishWorldWork(city, planting, 8_000).stock shouldBe city.stock.copy(wood = city.stock.wood - 1)
+                        }
+                    }
+                } finally { tasks.close() }
+            }
         }
     }
 
@@ -566,6 +615,24 @@ class CivsForestryTest : FunSpec({
                 committed.forestryJobs?.get(work.buildingId.toString()) shouldBe paid
                 blocked shouldBe true
             }
+        }
+    }
+
+    test("a physical forester without replacement saplings skips an unaccepted tree and reaches free care") {
+        forestryWorksite("forestry-no-seed-care", autonomous = false, nanoTime = { 0L }) { world, runtime, city ->
+            val root = CivPosition(-15, 64, -26)
+            val care = CivPosition(10, 64, -26)
+            forestrySmallOak(world, root)
+            world.getBlockAt(care.x, care.y, care.z).type = Material.OAK_SAPLING
+            val worker = city.workers.single()
+            runtime.residentFeet = { Location(world, root.x - 1.5, 64.0, root.z + .5) }
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "watering"
+            work.focus shouldBe care
+            work.inputs shouldBe emptyMap()
+            world.getBlockAt(root.x, root.y, root.z).type shouldBe Material.OAK_LOG
+            runtime.validate(city, work)
         }
     }
 
@@ -1008,6 +1075,34 @@ class CivsForestryTest : FunSpec({
         vanished.stock.wood shouldBe 0L
     }
 
+    test("thinning persists across batches without seed debit and old accepted jobs still replant") {
+        val before = forestryCity().copy(stock = Stock(4))
+        val original = forestryTestJob()
+        val paid = forestryReceipt(before, forestryTestWork(before, original), 1_000)
+        val legacyJson = Gson().toJson(paid).replace(",\"thinning\":false", "")
+        val restored = Gson().fromJson(legacyJson, CivInventoryTransaction::class.java).validated()
+        restored shouldBe paid
+        restored.after.forestryJobs!!.values.single().thinning shouldBe false
+        val changed = forestryTestWork(restored.after, restored.after.forestryJobs!!.values.single().copy(thinning = true))
+        shouldThrow<CivsRejection> { CivsRules.finishWorldWork(restored.after, changed, 2_000) }.reason shouldBe "stale-worksite"
+
+        var city = before.copy(stock = Stock())
+        var job: CivForestryJob? = original.copy(thinning = true)
+        var final: CivWorldWork? = null
+        while (job != null) {
+            val work = forestryTestWork(city, job)
+            work.inputs shouldBe emptyMap()
+            work.changes.filter { it.position in job!!.roots }.forEach { it.after shouldBe "minecraft:air" }
+            val receipt = forestryReceipt(city, work, 3_000 + city.revision)
+            receipt.validated()
+            city = CivsRules.validate(Gson().fromJson(Gson().toJson(receipt.after), Settlement::class.java))
+            job = city.forestryJobs?.values?.single()
+            city.stock.wood shouldBe if (job == null) 8L else 0L
+            if (job == null) final = work else job.thinning shouldBe true
+        }
+        shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, requireNotNull(final), 9_000) }.reason shouldBe "stale-delivery"
+    }
+
     test("a paid native tree job survives construction spending the exact remaining wood without charging its kit again") {
         val before = forestryCity().copy(stock = Stock(17, 8))
         val first = forestryTestWork(before, forestryTestJob())
@@ -1234,6 +1329,42 @@ class CivsForestryTest : FunSpec({
         }
     }
 
+    for (mature in listOf(false, true)) test("birch planting reserves the neighbouring oak crown when ${if (mature) "its trunk" else "its sapling"} is below leaves") {
+        forestryWorksite("forestry-species-spacing-$mature", timber = "BIRCH", nanoTime = { 0L }) { world, runtime, city ->
+            val oak = CivPosition(-5, 64, -26)
+            if (mature) forestrySmallOak(world, oak)
+            else {
+                world.getBlockAt(oak.x, oak.y, oak.z).type = Material.OAK_SAPLING
+                world.getBlockAt(oak.x, oak.y + 3, oak.z).blockData = Bukkit.createBlockData(
+                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            }
+            val worker = city.workers.single()
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "planting-tree"
+            val planted = work.changes.single().position
+            val spacing = CivsForestry.crownRadius("BIRCH_LOG") + CivsForestry.crownRadius("OAK_LOG")
+            (kotlin.math.abs(planted.x - oak.x) > spacing || kotlin.math.abs(planted.z - oak.z) > spacing) shouldBe true
+            runtime.validate(city, work)
+            world.getBlockAt(oak.x, oak.y, oak.z).type shouldBe if (mature) Material.OAK_LOG else Material.OAK_SAPLING
+        }
+    }
+
+    test("an isolated overhanging leaf does not require the whole future planting crown to be empty") {
+        forestryWorksite("forestry-overhanging-leaf", timber = "BIRCH", nanoTime = { 0L }) { world, runtime, city ->
+            val root = CivPosition(-15, 64, -26)
+            world.getBlockAt(root.x + 2, root.y + 2, root.z).blockData = Bukkit.createBlockData(
+                "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            val worker = city.workers.single()
+            repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker))
+            work.status shouldBe "planting-tree"
+            work.focus shouldBe root
+            runtime.validate(city, work)
+            world.getBlockAt(root.x + 2, root.y + 2, root.z).type shouldBe Material.OAK_LEAVES
+        }
+    }
+
     test("consecutive oak planting sees non-motion-blocking saplings and keeps the next young crown separate") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = CivsWorksiteWorldFixture("forestry-young-crowns", Material.DIRT).also(paper.server::addWorld)
@@ -1324,8 +1455,8 @@ private fun forestryTestWork(city: Settlement, job: CivForestryJob, sampleDrops:
     val progress = CivForestryProgress(job, next, drops, logs)
     return CivWorldWork(worker.id, worker.completedCycles, building.id, job.root.copy(x = job.root.x - 1), cells.map { code ->
         val point = job.position(code)
-        CivPlanBlock(point, job.state(code), if (point in job.roots) CivsForestry.saplingState(job.sapling) else "minecraft:air")
-    }, inputs = if (job.next == 0 && !job.seedDeferred) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap(),
+        CivPlanBlock(point, job.state(code), if (!job.thinning && point in job.roots) CivsForestry.saplingState(job.sapling) else "minecraft:air")
+    }, inputs = if (job.next == 0 && !job.seedDeferred && !job.thinning) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap(),
         outputs = if (city.autonomy == null) drops else emptyMap(),
         status = "felling-tree", focus = job.root, forestry = progress)
 }

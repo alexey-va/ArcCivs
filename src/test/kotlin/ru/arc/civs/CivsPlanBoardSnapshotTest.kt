@@ -12,6 +12,47 @@ import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 
 class CivsPlanBoardSnapshotTest : FunSpec({
+    test("bounded forecast reuses canonical goal order and candidate reservations without mutating the city") {
+        val base = boardCity()
+        val hall = base.buildings.first()
+        val existing = CivsAutonomy.baseProfile.filterNot {
+            it in setOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.GUARD_TOWER, BuildingType.TOWN_HALL)
+        }.mapIndexed { index, type ->
+            val p = CivPosition(-42 + index * 12, 64, -42)
+            hall.copy(id = UUID(93, index.toLong()), type = type, anchor = p, entrance = p.copy(y = 65),
+                bounds = CivBox(p.copy(z = -47), p.copy(x = p.x + 3, y = 69, z = -43)))
+        }
+        val city = base.copy(buildings = listOf(hall) + existing, autonomy = CivAutonomy(paused = true))
+        val snapshot = civsPlanBoardSnapshot(city, emptyList())
+        val calls = mutableListOf<Pair<BuildingType, Int>>()
+        val forecast = civsPlanBoardForecast(city, snapshot, Executor { it.run() }) { _, type, level, id ->
+            calls += type to level
+            CompletableFuture.completedFuture(hall.copy(id = id, type = type, level = level, anchor = CivPosition(0, 0, 0),
+                entrance = CivPosition(0, 1, 0), bounds = CivBox(CivPosition(-3, 0, -7), CivPosition(3, 7, -1))))
+        }.join()!!
+        forecast.unavailable shouldBe false
+        forecast.buildings.map { it.type } shouldBe listOf(BuildingType.HOUSE, BuildingType.TAVERN,
+            BuildingType.GUARD_TOWER, BuildingType.HOUSE, BuildingType.HOUSE)
+        calls.size shouldBe 10
+        forecast.buildings.forEachIndexed { index, building ->
+            ((city.buildings + forecast.buildings.take(index)).none {
+                CivsAutonomousGeometry.overlaps(it.bounds, building.bounds, 2)
+            }) shouldBe true
+        }
+        forecast.streets.size shouldBe 5
+        forecast.perimeter shouldBe CivsSettlementLayout.frame(city).wallObstacles
+        city.autonomy?.paused shouldBe true
+        city.buildings shouldBe listOf(hall) + existing
+        snapshot.plannedBuildings shouldBe emptyList()
+        val partial = civsPlanBoardForecast(city, snapshot, Executor { it.run() }) { _, _, _, _ ->
+            CompletableFuture.failedFuture(CivsRejection("schematic-unavailable"))
+        }.join()!!
+        partial.unavailable shouldBe true
+        partial.buildings shouldBe emptyList()
+        civsPlanBoardForecast(base, snapshot, Executor { it.run() }) { _, _, _, _ -> error("Personal city must not forecast") }
+            .join() shouldBe null
+    }
+
     test("active bodies survive upgrade overlays while registered sites and current construction deduplicate") {
         val base = boardCity()
         val existing = base.buildings.last()
@@ -76,6 +117,19 @@ class CivsPlanBoardSnapshotTest : FunSpec({
             city.copy(buildings = city.buildings.map { it.copy(rotation = 90) }), constructing).forEach {
             (civsPlanBoardLayoutKey(it) == key) shouldBe false
         }
+        val oldRoute = mutableListOf(CivPosition(0, 65, 0), CivPosition(0, 66, 1))
+        val newRoute = oldRoute.map { it.copy(y = 65) }.toMutableList()
+        val override = CivRoadRouteOverride(oldRoute, newRoute)
+        val ids = city.buildings.map { it.id.toString() }
+        val overrides = linkedMapOf(ids[0] to override, ids[1] to override)
+        val repaired = city.copy(roadRouteOverrides = overrides)
+        (civsPlanBoardLayoutKey(repaired) == key) shouldBe false
+        civsPlanBoardLayoutKey(repaired.copy(roadRouteOverrides = overrides.entries.reversed().associate { it.toPair() })) shouldBe
+            civsPlanBoardLayoutKey(repaired)
+        val detachedRepair = civsPlanBoardCapture(repaired)
+        val repairKey = civsPlanBoardLayoutKey(detachedRepair)
+        newRoute.clear(); oldRoute.clear(); overrides.clear()
+        civsPlanBoardLayoutKey(detachedRepair) shouldBe repairKey
         val transit = mutableListOf(CivPosition(3, 65, 3))
         val buildings = city.buildings.toMutableList().also { rows ->
             rows += rows.last().copy(id = UUID.randomUUID(), type = BuildingType.ROAD, transit = transit)

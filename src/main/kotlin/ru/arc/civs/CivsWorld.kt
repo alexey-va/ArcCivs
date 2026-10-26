@@ -53,8 +53,6 @@ class CivsWorld(
     private var tickSequence = 0L
     private var accessRepairChangedTick = Long.MIN_VALUE
     private var lands: CivsLandsAccess? = null
-    /** Packet residents are not Bukkit entities; the existing resident collision owner supplies this probe. */
-    internal var roadUpkeepResidentOccupied: (UUID, CivPosition) -> Boolean = { _, _ -> false }
     private val timer = tasks.runTimer(1, 1, ::tick)
 
     fun capture(
@@ -290,17 +288,6 @@ class CivsWorld(
 
         // Stairs have two levels, not a fictional full cube. Actual neighbours retain their native shapes.
         val localAfter = roadUpkeepBoxes(if (already) block.blockData else after).map { it.at(CivPosition(0, 0, 0)) }
-        for (change in work.changes) {
-            val at = change.position
-            if (read(at).blockData.asString == change.after) continue
-            val cellBox = org.bukkit.util.BoundingBox(at.x.toDouble(), at.y.toDouble(), at.z.toDouble(),
-                at.x + 1.0, at.y + 1.01, at.z + 1.0)
-            requireCivs(!roadUpkeepResidentOccupied(city.worldId, at) &&
-                !roadUpkeepResidentOccupied(city.worldId, at.copy(y = at.y + 1)) && world.getNearbyEntities(cellBox).none { entity ->
-                entity.isValid && (entity is org.bukkit.entity.LivingEntity || entity is org.bukkit.entity.Vehicle) &&
-                    entity.boundingBox.overlaps(cellBox)
-            }, "road-occupied")
-        }
         val collisions = hashMapOf<CivPosition, CitizenCollisionSnapshot>()
         fun collision(x: Int, y: Int, z: Int): CitizenCollisionSnapshot = collisions.getOrPut(CivPosition(x, y, z)) {
             val at = CivPosition(x, y, z)

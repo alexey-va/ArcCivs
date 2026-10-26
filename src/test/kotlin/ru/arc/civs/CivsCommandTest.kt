@@ -14,6 +14,74 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("hotload requires a console administrator and exact prepare or status syntax") {
+        val messages = mutableListOf<String>()
+        var prepares = 0
+        var statuses = 0
+        val router = CivsCommand(mockk(), mockk(), mockk(), mockk(),
+            prepareHotload = { prepares++; mapOf("state" to "preparing") },
+            hotloadStatus = { statuses++; mapOf("state" to "active") })
+        val command = mockk<Command>()
+        for ((sender, denied) in listOf(
+            mockk<Player>() to null,
+            mockk<CommandSender>() to null,
+            mockk<ConsoleCommandSender>() to "arccivs.use",
+            mockk<ConsoleCommandSender>() to "arccivs.admin",
+        )) {
+            every { sender.sendMessage(capture(messages)) } returns Unit
+            every { sender.hasPermission("arccivs.use") } returns true
+            every { sender.hasPermission("arccivs.admin") } returns true
+            if (denied != null) every { sender.hasPermission(denied) } returns false
+            router.onCommand(sender, command, "civs", arrayOf("hotload", "prepare")) shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["error"].asString shouldBe "not-authorized"
+        }
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        for (args in listOf(arrayOf("hotload"), arrayOf("hotload", "other"), arrayOf("hotload", "prepare", "extra"))) {
+            router.onCommand(console, command, "civs", args)
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["error"].asString shouldBe "invalid-hotload-arguments"
+        }
+        prepares shouldBe 0
+        statuses shouldBe 0
+    }
+
+    test("hotload receipts remain available after prepare closes the runtime task scope") {
+        val messages = mutableListOf<String>()
+        val console = mockk<ConsoleCommandSender> {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val tasks = ru.arc.core.LifecycleTaskScope(ru.arc.core.TestTaskScheduler())
+        var state = "active"
+        var prepares = 0
+        val router = CivsCommand(mockk(), mockk(), mockk(), tasks,
+            prepareHotload = { prepares++; tasks.close(); state = "preparing"; mapOf("state" to state, "version" to "0.9.3") },
+            hotloadStatus = { mapOf("state" to state, "version" to "0.9.3") })
+        router.onCommand(console, mockk(), "civs", arrayOf("hotload", "prepare")) shouldBe true
+        state = "ready"
+        router.onCommand(console, mockk(), "civs", arrayOf("hotload", "status")) shouldBe true
+        prepares shouldBe 1
+        messages.map { JsonParser.parseString(it.removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["state"].asString } shouldBe
+            listOf("preparing", "ready")
+        JsonParser.parseString(messages.last().removePrefix("ARCCIVS_HOTLOAD ")).asJsonObject["version"].asString shouldBe "0.9.3"
+        router.onTabComplete(console, mockk(), "civs", arrayOf("")) shouldBe listOf("hotload")
+        router.onTabComplete(console, mockk(), "civs", arrayOf("hotload", "")) shouldBe listOf("prepare", "status")
+    }
+
+    test("prepared runtime rejects gameplay commands before accessing the stopped service") {
+        val player = mockk<Player>(relaxed = true) { every { hasPermission(any<String>()) } returns true }
+        val text = mockk<CivsText>(relaxed = true)
+        val router = CivsCommand(mockk(), mockk(), text, mockk(), hotloadStatus = { mapOf("state" to "preparing") })
+        for (args in listOf(emptyArray(), arrayOf("preview"), arrayOf("reload"), arrayOf("debug", "all")))
+            router.onCommand(player, mockk(), "civs", args) shouldBe true
+        verify(exactly = 4) { text.error(player, "reason.not-ready") }
+        CivsCommand.completions(true, true, arrayOf("h"), console = false) shouldBe emptyList()
+        CivsCommand.completions(true, true, arrayOf("h"), console = true) shouldBe listOf("hotload")
+        CivsCommand.completions(true, false, arrayOf("hotload", ""), console = true) shouldBe emptyList()
+    }
+
     test("construction retry accepts only console administrators and an exact city UUID") {
         val calls = mutableListOf<UUID>()
         val router = CivsCommand(mockk(), mockk(), mockk(relaxed = true), mockk(relaxed = true), retryConstruction = { city ->

@@ -169,8 +169,10 @@ class CivsPlanBoardRenderer(
     internal fun frame(world: World, board: CivBuilding, snapshot: CivPlanBoardSnapshot,
         layout: CivPlanBoardLayout, catalog: CivsText, updating: Boolean = false): SceneFrame<String> {
         val parts = mutableListOf<ScenePart<String>>()
+        val legacy = board.schematicId == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID
+        val lift = if (legacy) 0.0 else 1.0
         fun pose(x: Double, y: Double, z: Double, sx: Double, sy: Double, sz: Double): ScenePose {
-            val p = localToWorld(board, x, y, z)
+            val p = localToWorld(board, x, y + lift, z)
             return ScenePose(Location(world, p[0], p[1], p[2]), Transformation(Vector3f(),
                 Quaternionf().rotateY(-Math.toRadians(board.rotation.toDouble()).toFloat()),
                 Vector3f(sx.toFloat(), sy.toFloat(), sz.toFloat()), Quaternionf()))
@@ -180,7 +182,7 @@ class CivsPlanBoardRenderer(
             materials.getOrPut(patch.material) { Material.valueOf(patch.material).createBlockData() })
         for (raster in layout.rasters) {
             // Rows are separate components: no oversized single UTF-8 string, even for a sparse path.
-            val content = Component.text().color(TextColor.color(0x684525)).font(Key.key("minecraft:default"))
+            val content = Component.text().color(TextColor.color(raster.color)).font(Key.key("minecraft:default"))
             raster.rows.forEachIndexed { index, row ->
                 if (index != 0) content.append(Component.newline())
                 content.append(Component.text(row))
@@ -191,13 +193,13 @@ class CivsPlanBoardRenderer(
                     shadowed = true, alignment = TextDisplay.TextAlignment.LEFT))
         }
         fun label(key: String, content: Component, x: Double, y: Double, z: Double, scale: Double, color: Int,
-            width: Double, lines: Int = 1) {
+            width: Double, lines: Int = 1, heightLimit: Double = 2.1) {
             val plain = PlainTextComponentSerializer.plainText().serialize(content)
             val pixels = plain.lineSequence().maxOfOrNull {
                 DialogTextLayout.naturalWidth(Component.text(it)) ?: it.codePointCount(0, it.length) * 9
             } ?: 1
             val fitted = min(min(scale, width / (pixels.coerceAtLeast(1) * .025)),
-                if (lines > 1) 2.1 / (lines * 9 * .025) else scale)
+                if (lines > 1) heightLimit / (lines * 9 * .025) else scale)
             val height = lines * 9 * .025 * fitted
             fun tint(value: Component): Component = value.color(TextColor.color(color)).children(value.children().map(::tint))
             parts += ScenePart.Text(key, pose(x, y - height / 2, z, fitted, fitted, 1.0), style,
@@ -206,22 +208,37 @@ class CivsPlanBoardRenderer(
         label("title", catalog.render(null, if (updating) "plan-board.updating-title" else "plan-board.title", "name" to snapshot.name),
             3.5, 4.25, 3.018, 1.0, 0xFFF4D3, 6.4)
         label("north", catalog.render(null, if (layout.northLeft) "plan-board.north-left" else "plan-board.north-up"),
-            1.38, 3.73, 2.055, .65, 0x544B3D, .45)
-        label("legend-built", catalog.render(null, "plan-board.built"), 1.85, 1.23, 2.055, .72, 0x185A67, 1.25)
-        label("legend-planned", catalog.render(null, "plan-board.planned"), 3.54, 1.23, 2.055, .72, 0x87601D, 1.85)
-        label("legend-roads", catalog.render(null, if (layout.rasters.isEmpty()) "plan-board.roads" else "plan-board.roads-points"),
-            5.16, 1.23, 2.055, .72, 0x684525, 1.2)
+            1.38, 3.91, 2.055, .50, 0x44352B, .45)
+        parts += ScenePart.Block("legend-panel", pose(4.34, 1.12, 2.045, 1.52, 2.76, .006), style,
+            materials.getOrPut("GRAY_CONCRETE") { Material.GRAY_CONCRETE.createBlockData() })
+        label("legend-built", catalog.render(null, "plan-board.built"), 5.1, 3.69, 2.065, .56, 0x8DDFE6, 1.30)
+        label("legend-planned", catalog.render(null, "plan-board.planned"), 5.1, 3.51, 2.065, .56, 0xFFD071, 1.30)
+        label("legend-forecast", catalog.render(null, "plan-board.forecast"), 5.1, 3.33, 2.065, .56, 0xD7B4FF, 1.30)
+        label("legend-roads", catalog.render(null, "plan-board.roads"), 5.1, 3.15, 2.065, .56, 0xE6CBB1, 1.30)
         val listing = Component.text()
         if (layout.showNumbers) layout.entries.forEachIndexed { index, entry ->
             if (index != 0) listing.append(Component.newline())
             listing.append(Component.text("${entry.number}. ")).append(catalog.render(null, "building.${entry.type.name.lowercase()}"))
             label("number-${entry.id}", Component.text(entry.number), entry.x, entry.y, 2.055, .65,
-                if (snapshot.buildings.any { it.id == entry.id }) 0xFFFFFF else 0x745117,
+                if (entry.forecast) 0x613681 else if (snapshot.buildings.any { it.id == entry.id }) 0xFFFFFF else 0x745117,
                 min(entry.width * .85, min(entry.height * .85 * entry.number.toString().length, .30)))
         }
         else listing.append(catalog.render(null, "plan-board.compact-key"))
-        label("building-key", listing.build(), 5.24, 2.66, 2.055, .50, 0x514537, 1.16,
-            if (layout.showNumbers) layout.entries.size.coerceAtLeast(1) else 3)
+        label("building-key", listing.build(), 5.1, 2.26, 2.065, .50, 0xFFF4DF, 1.34,
+            if (layout.showNumbers) layout.entries.size.coerceAtLeast(1) else 3, 1.36)
+        val note = when {
+            snapshot.forecast == null -> "plan-board.accepted-note"
+            snapshot.forecast.unavailable -> "plan-board.partial-forecast-note"
+            else -> "plan-board.forecast-note"
+        }
+        label("forecast-note", catalog.render(null, note), 5.1, 1.37, 2.065, .43, 0xFFF4DF, 1.34, 3, .38)
+        val controlX = if (legacy) 6.5 else 3.5
+        val controlY = if (legacy) 2.32 else .61
+        val controlZ = if (legacy) 2.065 else 3.025
+        parts += ScenePart.Block("control-label-panel", pose(controlX - .46, controlY - .12, controlZ - .008, .92, .24, .006), style,
+            materials.getValue("GRAY_CONCRETE"))
+        label("control-label", catalog.render(null, "plan-board.control"), controlX, controlY, controlZ,
+            .37, 0xFFF4DF, .84)
         check(parts.size == layout.displayParts)
         return SceneFrame(parts, audience)
     }
@@ -240,14 +257,16 @@ class CivsPlanBoardRenderer(
 
     companion object {
         internal fun localToWorld(board: CivBuilding, x: Double, y: Double, z: Double): List<Double> {
-            val dx = x - CivsPlanBoardBlueprint.origin.x; val dz = z - CivsPlanBoardBlueprint.origin.z
+            // Schematics rotate integer block cells; a block still extends +1 on each world axis.
+            // Rotate continuous display geometry around cell centres, not the block-grid corner.
+            val dx = x - CivsPlanBoardBlueprint.origin.x - .5; val dz = z - CivsPlanBoardBlueprint.origin.z - .5
             val (rx, rz) = when (Math.floorMod(board.rotation / 90, 4)) {
                 0 -> dx to dz
                 1 -> -dz to dx
                 2 -> -dx to -dz
                 else -> dz to -dx
             }
-            return listOf(board.anchor.x + rx, board.anchor.y + y, board.anchor.z + rz)
+            return listOf(board.anchor.x + rx + .5, board.anchor.y + y, board.anchor.z + rz + .5)
         }
     }
 }

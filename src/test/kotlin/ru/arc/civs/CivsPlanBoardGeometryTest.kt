@@ -11,13 +11,18 @@ class CivsPlanBoardGeometryTest : FunSpec({
     test("authored board has one normal control and the same body for every style") {
         val blocks = CivsPlanBoardBlueprint.blocks()
         blocks.values.count { it == "minecraft:structure_void" } shouldBe 1
-        blocks[CivPosition(6, 1, 2)] shouldBe "minecraft:structure_void"
+        blocks[CivPosition(3, 1, 2)] shouldBe "minecraft:structure_void"
+        blocks[CivPosition(6, 1, 2)] shouldBe "minecraft:air"
         blocks.values.groupingBy { it.substringBefore('[') }.eachCount() shouldBe mapOf(
             "minecraft:stone_bricks" to 6, "minecraft:stripped_spruce_log" to 18,
             "minecraft:smooth_sandstone" to 15, "minecraft:dark_oak_stairs" to 14,
-            "minecraft:dark_oak_slab" to 7, "minecraft:structure_void" to 1, "minecraft:air" to 55)
+            "minecraft:dark_oak_slab" to 7, "minecraft:structure_void" to 1, "minecraft:air" to 71)
         blocks[CivPosition(3, 2, 2)] shouldBe "minecraft:air"
-        blocks.containsKey(CivPosition(3, 0, 2)) shouldBe false
+        val legacy = CivsPlanBoardBlueprint.blocks(legacy = true)
+        legacy[CivPosition(6, 1, 2)] shouldBe "minecraft:structure_void"
+        legacy.containsKey(CivPosition(3, 0, 2)) shouldBe false
+        legacy.values.count { it == "minecraft:air" } shouldBe 55
+        CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID shouldBe "civs/builtin/plan_board/v1"
         CivsPlanBoardBlueprint.origin.z shouldBe CivsPlanBoardBlueprint.bounds.max.z + 1
     }
 
@@ -179,7 +184,7 @@ class CivsPlanBoardGeometryTest : FunSpec({
             routes = base.routes + walls.associate { it.id to listOf(it.entrance) })
         val layout = CivsPlanBoardGeometry.layout(snapshot)
         layout.showNumbers shouldBe false
-        layout.displayParts shouldBe 245
+        layout.displayParts shouldBe 250
         layout.patches.count { it.key.startsWith("built-") } shouldBe 112
         layout.patches.count { it.key.startsWith("planned-") } shouldBe 15
         layout.rasters.size shouldBe 112
@@ -188,12 +193,31 @@ class CivsPlanBoardGeometryTest : FunSpec({
         }
     }
 
-    test("map and body share the normal entrance pivot through every quarter turn") {
+    test("display corners fit integer-rotated physical blocks through every quarter turn") {
         val board = planBoardFixtureBuilding()
         listOf(0, 90, 180, 270).forEach { rotation ->
-            val p = CivsPlanBoardRenderer.localToWorld(board.copy(rotation = rotation), 3.0, 0.0, 3.0)
-            p shouldBe listOf(board.anchor.x.toDouble(), board.anchor.y.toDouble(), board.anchor.z.toDouble())
+            for (cell in listOf(CivPosition(1, 1, 1), CivPosition(5, 3, 1), CivPosition(6, 1, 2))) {
+                val offset = CivsBlueprintGeometry.rotate(ru.arc.paper.api.ArcSchematicPoint(
+                    cell.x - CivsPlanBoardBlueprint.origin.x, cell.y, cell.z - CivsPlanBoardBlueprint.origin.z), rotation / 90)
+                val p = CivsPlanBoardRenderer.localToWorld(board.copy(rotation = rotation), cell.x + .5, cell.y + .5, cell.z + .5)
+                p shouldBe listOf(board.anchor.x + offset.x + .5, board.anchor.y + offset.y + .5, board.anchor.z + offset.z + .5)
+            }
         }
+    }
+
+    test("forecast footprints and dashed layout remain separate from accepted roads and fit the backing") {
+        val source = planBoardAutoFixture()
+        val house = source.buildings.first { it.type == BuildingType.HOUSE }.copy(id = UUID(93, 1))
+        val layout = CivsPlanBoardGeometry.layout(source.copy(forecast = CivPlanBoardForecast(listOf(house),
+            listOf(CivBox(CivPosition(-20, 64, -20), CivPosition(20, 64, -18))), emptyList())))
+        layout.entries.single { it.id == house.id }.forecast shouldBe true
+        layout.roadCells shouldBe CivsPlanBoardGeometry.layout(source).roadCells
+        (layout.patches.any { it.key.startsWith("forecast-") } || layout.rasters.any { it.key.startsWith("forecast-") }) shouldBe true
+        layout.patches.forEach { patch ->
+            (patch.x >= 1.14 && patch.x + patch.width <= 4.200001) shouldBe true
+            (patch.y >= 1.219999 && patch.y + patch.height <= 3.860001) shouldBe true
+        }
+        (layout.displayParts <= 256) shouldBe true
     }
 })
 
@@ -204,7 +228,7 @@ internal fun planBoardAutoFixture(): CivPlanBoardSnapshot = requireNotNull(CivsP
 
 internal fun planBoardFixtureBuilding(): CivBuilding = CivBuilding(UUID(83, 1), BuildingType.PLAN_BOARD, 1,
     CivPosition(3, 0, 3), 0, CivsPlanBoardBlueprint.SCHEMATIC_ID, CivsPlanBoardBlueprint.bounds,
-    CivPosition(3, 1, 3), BuildingPhase.ACTIVE, control = CivPosition(6, 1, 2))
+    CivPosition(3, 1, 3), BuildingPhase.ACTIVE, control = CivPosition(3, 1, 2))
 
 internal fun planBoardDenseFixture(): CivPlanBoardSnapshot {
     val source = planBoardAutoFixture()

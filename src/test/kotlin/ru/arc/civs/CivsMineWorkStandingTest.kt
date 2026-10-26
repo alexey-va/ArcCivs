@@ -4,6 +4,7 @@ import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
+import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.structure.StructureRotation
@@ -75,6 +76,32 @@ class CivsMineWorkStandingTest : FunSpec({
             advanceTicks(1_201)
             runtime.invalidate(worker.id)
             (nextMineWork(runtime, city, worker).standing != first.standing) shouldBe true
+            CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+        }
+    }
+
+    test("an existing reachable miner stance wins without admitting a resident's outside-cave position") {
+        withReportedMine(nanoTime = { 0L }) { _, world, mine, city, worker, runtime ->
+            val first = nextMineWork(runtime, city, worker)
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            val alternate = nextMineWork(runtime, city, worker)
+            (alternate.standing != first.standing) shouldBe true
+            alternate.focus shouldBe first.focus
+            runtime.pulse(emptyList())
+            val standing = alternate.standing
+            runtime.residentFeet = { Location(world, standing.x + .5, standing.y.toDouble(), standing.z + .5) }
+            val current = nextMineWork(runtime, city, worker)
+            current.standing shouldBe standing
+            current.changes shouldBe first.changes
+            runtime.validate(city, current)
+
+            runtime.pulse(emptyList())
+            val cave = CivPosition(-96, 60, -51)
+            runtime.residentFeet = { Location(world, cave.x + .5, cave.y.toDouble(), cave.z + .5) }
+            val inside = nextMineWork(runtime, city, worker)
+            (inside.standing != cave) shouldBe true
+            CivsMinePlan.workStandingAllowed(mine, inside.standing) shouldBe true
+            runtime.validate(city, inside)
             CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
         }
     }

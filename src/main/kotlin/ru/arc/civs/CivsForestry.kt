@@ -22,6 +22,8 @@ data class CivForestryJob(
     val next: Int = 0,
     val harvestedLogs: Int = 0,
     val seedDeferred: Boolean = false,
+    /** A newly selected joined tree is removed to give the surviving crown room. Old jobs still replant. */
+    val thinning: Boolean = false,
 ) {
     val timber: String get() = sapling.removeSuffix("_SAPLING") + "_LOG"
     fun position(code: Int): CivPosition = CivPosition(root.x + (code and 31) - 15,
@@ -197,7 +199,7 @@ internal object CivsForestry {
         require(job.cells.takeLast(job.roots.size).map(job::position).toSet() == job.roots.toSet())
         require(job.cells.takeLast(job.roots.size).all { material(job.state(it)) == job.timber })
         require(job.harvestedLogs in 0..job.next)
-        require(!job.seedDeferred || city.autonomy != null)
+        require(!job.seedDeferred || city.autonomy != null && !job.thinning)
         val captured = job.cells.associate { job.position(it) to job.state(it) }
         val vines = captured.filterValues(::vine)
         require(attachedVines(captured - vines.keys, vines).size == vines.size)
@@ -274,7 +276,7 @@ internal object CivsForestry {
         require(if (existing == null) job.next == 0 && job.harvestedLogs == 0 else existing == job)
         if (existing == null) {
             require(claimClear(city, building.id, job))
-            require(job.seedDeferred == (city.autonomy != null && city.stock.wood == 0L))
+            require(job.seedDeferred == (!job.thinning && city.autonomy != null && city.stock.wood == 0L))
         }
         require(progress.next in job.next + 1..minOf(job.cells.size, job.next + BATCH_SIZE))
         require(progress.next <= job.cells.size - job.roots.size || progress.next == job.cells.size)
@@ -283,15 +285,15 @@ internal object CivsForestry {
         val matcher = Matcher(job)
         require(work.changes.map { it.position }.distinct().size == work.changes.size && work.changes.all { cell ->
             val code = cells[cell.position] ?: return@all false
-            val after = if (cell.position in job.roots) saplingState(job.sapling) else "minecraft:air"
+            val after = if (!job.thinning && cell.position in job.roots) saplingState(job.sapling) else "minecraft:air"
             cell.after == after && (matcher.matches(code, cell.before, readSupport) ||
                 cell.position in job.roots && material(cell.before) in setOf("AIR", "CAVE_AIR", "VOID_AIR"))
         })
         require(progress.harvestedLogs == work.changes.count { material(it.before) == job.timber })
-        require(work.inputs == if (existing == null && !job.seedDeferred) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap<String, Long>())
+        require(work.inputs == if (existing == null && !job.seedDeferred && !job.thinning) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap<String, Long>())
         require(work.outputs == if (city.autonomy == null) progress.drops else emptyMap<String, Long>())
         if (city.autonomy != null) require(progress.drops.isEmpty())
-        // The last receipt must plant every reserved root; no progress-only final grant.
+        // The last receipt must actually process every root, whether replanted or thinned.
         if (progress.next == job.cells.size) require(work.changes.filter { it.position in job.roots }.size == job.roots.size)
     }
 

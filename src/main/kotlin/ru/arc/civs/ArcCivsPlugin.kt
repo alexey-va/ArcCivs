@@ -26,32 +26,57 @@ open class ArcCivsPlugin : JavaPlugin() {
     private var runtime: PaperPluginRuntime? = null
     private var nativeWork: ru.arc.core.BudgetedTaskQueue? = null
     // Core may finish retiring captured native handles on its next tick; IO closes inline.
+    private var storageClose = CompletableFuture.completedFuture(Unit)
+    private var nativeRetirementClose = CompletableFuture.completedFuture(Unit)
     private var nativeClose = CompletableFuture.completedFuture(Unit)
     private var historyClose = CompletableFuture.completedFuture(Unit)
+    private var stopClose: CompletableFuture<Unit>? = null
     private var installedScheduler: TaskScheduler? = null
-    internal fun drained(): CompletableFuture<Unit> = CompletableFuture.allOf(nativeClose, historyClose).thenApply { Unit }
+    internal fun drained(): CompletableFuture<Unit> = stopClose?.copy()
+        ?: CompletableFuture.allOf(nativeClose, historyClose).thenApply { Unit }
 
     override fun onEnable() {
+        val previous = stopClose
+        if (previous != null) {
+            if (!previous.isDone) {
+                logger.severe("ArcCivs startup refused: previous cleanup is still pending; retry enable after it finishes")
+                server.pluginManager.disablePlugin(this)
+                return
+            }
+            try { previous.join() } // Complete already: never wait for native work on Main.
+            catch (failure: Throwable) {
+                logger.log(Level.SEVERE, "ArcCivs startup refused: previous cleanup failed", failure)
+                server.pluginManager.disablePlugin(this)
+                return
+            }
+        }
         val unavailable = pluginMeta.pluginDependencies.filterNot(server.pluginManager::isPluginEnabled)
         if (unavailable.isNotEmpty()) {
             logger.severe("ArcCivs startup refused: mandatory dependencies are not enabled: ${unavailable.joinToString()}")
             server.pluginManager.disablePlugin(this)
             return
         }
+        check(runtime == null) { "ArcCivs runtime is already active" }
+        storageClose = CompletableFuture.completedFuture(Unit)
+        nativeRetirementClose = CompletableFuture.completedFuture(Unit)
+        nativeClose = CompletableFuture.completedFuture(Unit)
+        historyClose = CompletableFuture.completedFuture(Unit)
+        stopClose = null
         val lifecycle = PaperPluginRuntime(this, "arc-civs", BukkitTaskScheduler(this)).also {
             runtime = it
             it.start("version" to pluginMeta.version)
         }
         try {
-            check(nativeClose.isDone && historyClose.isDone) { "Previous cleanup is still pending; retry enable after it finishes" }
-            nativeClose.join() // Complete already: propagate cleanup failure without blocking Main.
             PaperArcRuntime.installScheduling(this)
             installedScheduler = Tasks.scheduler
             ArcLogging.install(PaperLoggingPlatform("ArcCivs", "ArcCivs"), LoggingConfigSource { EmptyConfig })
             val history = CivsCityHistory(dataPath.resolve("logs"), logger::warning)
             CivsDiagnostics.install(history, logger)
             lifecycle.own(AutoCloseable {
-                historyClose = history.closeAfter(nativeClose).whenComplete { _, _ -> CivsDiagnostics.detach(history) }
+                historyClose = history.closeAfter(nativeClose).whenComplete { _, failure ->
+                    CivsDiagnostics.detach(history)
+                    if (failure != null) logger.log(Level.SEVERE, "ArcCivs city history drain failed", failure)
+                }
             })
             lifecycle.tasks.runTimer(1_200L, 1_200L, history::maintenance)
             prepare(lifecycle, server.servicesManager.load(ArcSchematicService::class.java), dataPath)
@@ -69,17 +94,21 @@ open class ArcCivsPlugin : JavaPlugin() {
         val nativeDrains = mutableListOf<CompletableFuture<*>>()
         var network: CivsNetworkStore? = null
         lifecycle.own(AutoCloseable {
-            val storage = executor.closeAsync().thenCompose {
+            storageClose = executor.closeAsync().thenCompose {
                 network?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
             }
-            nativeClose = CompletableFuture.allOf(storage, *nativeDrains.toTypedArray()).thenApply { Unit }
-            nativeClose.whenComplete { _, failure ->
-                if (failure == null) terminal.complete(Unit) else {
-                    terminal.completeExceptionally(failure)
-                    logger.log(Level.SEVERE, "ArcCivs terminal storage drain failed", failure)
-                }
+            nativeRetirementClose = CompletableFuture.allOf(*nativeDrains.toTypedArray()).thenApply { Unit }
+            nativeClose = CompletableFuture.allOf(storageClose, nativeRetirementClose).thenApply { Unit }
+            storageClose.whenComplete { _, failure ->
+                if (failure != null) logger.log(Level.SEVERE, "ArcCivs storage drain failed", failure)
             }
-            storage.get() // Runtime closes native scopes first; only detached file IO remains.
+            nativeRetirementClose.whenComplete { _, failure ->
+                if (failure != null) logger.log(Level.SEVERE, "ArcCivs native retirement failed", failure)
+            }
+            nativeClose.whenComplete { _, failure ->
+                if (failure == null) terminal.complete(Unit) else terminal.completeExceptionally(failure)
+            }
+            storageClose.get() // Explicit maintenance: detached file/SQL IO only, never native retirement.
         })
         try {
             val file = root.resolve("config.yml")
@@ -173,7 +202,8 @@ open class ArcCivsPlugin : JavaPlugin() {
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
             val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState, service::configureSettlementSetting,
-                service::repairBuildingStorage, service::retryConstruction, service::debugLayout)
+                service::repairBuildingStorage, service::retryConstruction, service::debugLayout,
+                this::prepareHotload, this::hotloadStatus)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)
@@ -206,15 +236,70 @@ open class ArcCivsPlugin : JavaPlugin() {
         return BackendServerId.of(id)
     }
 
-    override fun onDisable() {
+    /** Main-thread maintenance entrypoint. ArcCore remains enabled to finish detached native cleanup. */
+    internal fun prepareHotload(): Map<String, Any?> {
+        stopRuntime()
+        return hotloadStatus()
+    }
+
+    internal fun hotloadStatus(): Map<String, Any?> {
+        val completion = stopClose
+        fun stage(future: CompletableFuture<*>): Map<String, Any?> = linkedMapOf(
+            "state" to if (completion == null) "active" else when {
+                !future.isDone -> "pending"
+                future.isCompletedExceptionally -> "failed"
+                else -> "complete"
+            },
+            "failure" to completedFailure(future)?.javaClass?.simpleName,
+        )
+        return linkedMapOf(
+            "schema" to 1,
+            "version" to pluginMeta.version,
+            "state" to when {
+                completion == null -> "active"
+                !completion.isDone -> "preparing"
+                completion.isCompletedExceptionally -> "failed"
+                else -> "ready"
+            },
+            "storage" to stage(storageClose),
+            "native" to stage(nativeRetirementClose),
+            "history" to stage(historyClose),
+            "failure" to completion?.let(::completedFailure)?.javaClass?.simpleName,
+        )
+    }
+
+    private fun completedFailure(future: CompletableFuture<*>): Throwable? {
+        if (!future.isCompletedExceptionally) return null
+        return try { future.join(); null } // Exceptional completion is already terminal; this cannot wait.
+        catch (failure: Throwable) { CivsDiagnostics.cause(failure) ?: failure }
+    }
+
+    private fun stopRuntime() {
+        if (stopClose != null) return
+        val completion = CompletableFuture<Unit>().also { stopClose = it }
         val lifecycle = runtime
         runtime = null
         val queue = nativeWork
         nativeWork = null
         val scheduling = installedScheduler
         installedScheduler = null
-        queue?.close()
-        runCatching { lifecycle?.close() }.onFailure { logger.log(Level.SEVERE, "ArcCivs shutdown failed", it) }
-        if (scheduling != null && Tasks.scheduler === scheduling) Tasks.reset()
+        val failures = mutableListOf<CompletableFuture<*>>()
+        for (close in listOf<() -> Unit>({ queue?.close() }, { lifecycle?.close() }, {
+            if (scheduling != null && Tasks.scheduler === scheduling) Tasks.reset()
+        })) {
+            try { close() }
+            catch (failure: Throwable) {
+                failures += CompletableFuture.failedFuture<Unit>(failure)
+                logger.log(Level.SEVERE, "ArcCivs shutdown failed", failure)
+            }
+        }
+        CompletableFuture.allOf(nativeClose, historyClose, *failures.toTypedArray()).whenComplete { _, failure ->
+            if (failure == null) completion.complete(Unit) else completion.completeExceptionally(failure)
+        }
+    }
+
+    override fun onDisable() {
+        stopRuntime()
+        getCommand("civs")?.apply { setExecutor(null); tabCompleter = null }
     }
 }

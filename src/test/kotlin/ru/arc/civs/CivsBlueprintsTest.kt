@@ -33,9 +33,9 @@ class CivsBlueprintsTest : FunSpec({
                 val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
                 val origin = ArcSchematicPoint(3, 0, 3)
                 val cells = CivsPlanBoardBlueprint.blocks().mapKeys { (p, _) -> ArcSchematicPoint(p.x, p.y, p.z) }
-                val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 5, 2), origin, cells, hash, "minecraft:barrier")
+                val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 6, 2), origin, cells, hash, "minecraft:barrier")
                 val libraries = BlueprintLibraries(root, Executor { work.addLast(it) }, 4444)
-                every { libraries.captured.loadVerified("builtin/plan_board/v1", hash,
+                every { libraries.captured.loadVerified("builtin/plan_board/v2", hash,
                     ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(original)
                 every { libraries.captured.transform(original, any()) } answers {
                     val turns = secondArg<ArcSchematicTransform>().quarterTurns
@@ -44,14 +44,14 @@ class CivsBlueprintsTest : FunSpec({
                     val corners = listOf(0, 6).flatMap { x -> listOf(0, 2).map { z -> rotated(ArcSchematicPoint(x, 0, z)) } }
                     CompletableFuture.completedFuture(BlueprintCellsSnapshot(
                         ArcSchematicPoint(corners.minOf { it.x }, 0, corners.minOf { it.z }),
-                        ArcSchematicPoint(corners.maxOf { it.x }, 5, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
+                        ArcSchematicPoint(corners.maxOf { it.x }, 6, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
                         cells.mapKeys { (p, _) -> rotated(p) }, hash, "minecraft:barrier"))
                 }
                 try {
                     libraries.subject.use { subject ->
                         val placement = CivPosition(40, 64, 20)
-                        val controls = listOf(CivPosition(43, 65, 19), CivPosition(41, 65, 23),
-                            CivPosition(37, 65, 21), CivPosition(39, 65, 17))
+                        val controls = listOf(CivPosition(40, 65, 19), CivPosition(41, 65, 20),
+                            CivPosition(40, 65, 21), CivPosition(39, 65, 20))
                         for (turns in 0..3) {
                             val pending = subject.prepare("nordic", BuildingType.PLAN_BOARD, 1, UUID.randomUUID(), UUID.randomUUID(),
                                 placement, 2, exactRotation = turns * 90)
@@ -70,9 +70,24 @@ class CivsBlueprintsTest : FunSpec({
                             finish()
                             control.join() shouldBe controls[turns]
                         }
-                        Files.readAllBytes(root.resolve("builtin/plan_board/v1.schem")).toList() shouldBe bytes.toList()
-                        verify(exactly = 8) { libraries.captured.loadVerified("builtin/plan_board/v1", hash,
+                        Files.readAllBytes(root.resolve("builtin/plan_board/v2.schem")).toList() shouldBe bytes.toList()
+                        verify(exactly = 8) { libraries.captured.loadVerified("builtin/plan_board/v2", hash,
                             ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
+                        val legacyBytes = CivsPlanBoardBlueprint.schematic(4444, legacy = true)
+                        val legacyHash = MessageDigest.getInstance("SHA-256").digest(legacyBytes).joinToString("") { "%02x".format(it) }
+                        val legacySnapshot = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 5, 2), origin,
+                            CivsPlanBoardBlueprint.blocks(legacy = true).mapKeys { (p, _) -> ArcSchematicPoint(p.x, p.y, p.z) },
+                            legacyHash, "minecraft:barrier")
+                        every { libraries.captured.loadVerified("builtin/plan_board/v1", legacyHash,
+                            ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(legacySnapshot)
+                        val old = CivBuilding(UUID.randomUUID(), BuildingType.PLAN_BOARD, 1, placement, 270,
+                            CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID,
+                            CivBox(CivPosition(37, 64, 17), CivPosition(39, 69, 23)), CivPosition(40, 65, 20), BuildingPhase.ACTIVE,
+                            control = CivPosition(39, 65, 17))
+                        val retainedControl = subject.controlPosition(old)
+                        finish()
+                        retainedControl.join() shouldBe old.control
+                        Files.readAllBytes(root.resolve("builtin/plan_board/v1.schem")).toList() shouldBe legacyBytes.toList()
                         verify(exactly = 0) { libraries.source.load(any(), any()) }
                         verify(exactly = 0) { libraries.source.captureSource(any(), any()) }
                     }

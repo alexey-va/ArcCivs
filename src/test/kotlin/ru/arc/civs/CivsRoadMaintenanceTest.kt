@@ -190,11 +190,8 @@ class CivsRoadMaintenanceTest : FunSpec({
                     native.roadUpkeepPending(city, work) shouldBe true
                     val player = paper.addPlayer("OnRoad")
                     player.teleport(Location(world, p.x + .5, p.y.toDouble(), p.z + .5))
-                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "road-occupied"
+                    native.validateRoadUpkeep(city, work) // Occupants do not veto ordinary road resurfacing.
                     player.teleport(Location(world, 4.5, 64.0, .5))
-                    native.roadUpkeepResidentOccupied = { _, at -> at == p }
-                    shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "road-occupied"
-                    native.roadUpkeepResidentOccupied = { _, _ -> false }
                     world.getBlockAt(p.x, p.y - 1, p.z).type = Material.AIR
                     shouldThrow<CivsRejection> { native.validateRoadUpkeep(city, work) }.reason shouldBe "autonomy-no-path"
                     world.getBlockAt(p.x, p.y - 1, p.z).type = Material.STONE

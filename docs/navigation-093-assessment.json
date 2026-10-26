@@ -1,0 +1,174 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.93: mine exit, nearby work and thinning existing joined trees",
+  "assumptions": [
+    "Before quantities are source .92. Live .92 has successful forester cycles with +3 abstract WOOD and repeated pauses; do not model the entire forester or city as earning zero. Miner cycle216 has a confirmed stalled return leg; only affected future miner completions are modeled as zero before.",
+    "Low/base/high are hypothetical 0.25/1/4 active hours and 1/4/6 villages. Before forester6/24/72 versus after12/48/144 completed L1 trees is a sensitivity, not measured throughput or a new target rate. Miner restoration6/24/72 completions is separate. Values are not simultaneous physical-town income.",
+    "Gross FORESTER4/8/12 WOOD and QUARRY3/6/9 STONE by level remain unchanged. Normal replant consumes one abstract WOOD per plot. Existing joined trees may be thinned: no replacement sapling and no seed debit. In the after sensitivity2/6/12 of the12/48/144 tree completions thin existing crowded roots; the other10/42/132 replant normally. No bonus grant exists. Actual thinning is bounded by observed crowded trees, not a recurring daily entitlement; new planting reserves both crowns.",
+    "A full standalone planting later consumes the existing1 WOOD per plot. Thus relocating a thinned tree to an adequate new plot restores the original net3WOOD per harvest; the selected sensitivity excludes that later planting and conservatively counts the immediate maximum retained seed stock. Player-founded towns similarly retain their1 or4 physical saplings when no replant occurs; no sapling is minted.",
+    "Previously accepted forestry jobs and historical receipts retain their original replant and debit. The new optional thinning flag defaults false for old serialized jobs. Partial tree batches never issue a final reward. Skipped or changed decorative blocks do not grant stock or items.",
+    "One completed forestry/economic cycle grants1 profession XP. Native mine/field scenery, route progress, hotload and plan-board forecasts grant none. XP before6/24/72 and after18/72/216 includes two independent worker streams.",
+    "QUARRY observed work remains60000ms (120000ms at hunger<=6), followed by real depot travel and its normal receipt. Food, construction prices, storage caps, work budgets and reward quantities remain unchanged. Board v2 moves one barrel within the same free-standing blueprint; footprint, slots and12WOOD+8STONE price stay unchanged.",
+    "Abstract WOOD, STONE, resident profession XP, player inventory, Vault and tokens remain separate. Hotload, forecasts and road occupancy removal do not directly mint anything. A road repair retains its existing1STONE charge and3second work. Faster access can restore realized production/resale; current physical output and sales are unmeasured, not assumed zero.",
+    "Existing EconomyShopGUI SELL remains current and the SELL-off/contracts transition remains future. No shop quote, exchange rate, contract or monetization changes. Thinning reduces excess tree density and later replacement restores the existing seed cost; no new economic cap is added."
+  ],
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "l1_forester_completed_tree_gross",
+          "kind": "mint",
+          "source": "ArcCivs CivsForestry completed native-tree receipt and existing L1 delivery amount",
+          "basis": "Same4WOOD gross per final L1 tree; modeled before6/24/72 and restored12/48/144 completions.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              12,
+              48,
+              144
+            ]
+          }
+        },
+        {
+          "id": "l1_forester_replant_seed_plot_cost",
+          "kind": "burn",
+          "source": "ArcCivs existing completed-tree replant receipt",
+          "basis": "1WOOD only when planting replacements;2/6/12 of after harvests thin existing joined roots without planting. A later new plot costs1WOOD normally.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              42,
+              132
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "l1_quarry_economic_delivery",
+          "kind": "mint",
+          "source": "ArcCivs CivsRules L1 QUARRY delivery after observed session and real depot trip",
+          "basis": "Existing 3 abstract STONE per successful economic delivery; ore alternatives replace this flow and are not added.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          }
+        }
+      ]
+    },
+    "resident_profession_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "two_independent_l1_worker_cycles",
+          "kind": "item",
+          "source": "ArcCivs completed FORESTER tree and QUARRY economic cycles",
+          "basis": "1 profession XP per completed cycle. Before modeled FORESTER6/24/72 plus blocked future QUARRY0; after FORESTER12/48/144 plus QUARRY6/24/72.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              18,
+              72,
+              216
+            ]
+          }
+        }
+      ]
+    },
+    "native_transferable_items": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "vault_direct": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

@@ -100,6 +100,8 @@ def main():
                  'front':((3.5,3,15),(3.5,3,1.5),(0,1,0),30),
                  'side':((17,3.0,1.5),(3.5,2.8,1.5),(0,1,0),32),
                  'top':((3.5,17,1.5),(3.5,0,1.5),(0,0,-1),30)}
+        cameras.update({name:(value['eye'],value['target'],value['up'],value['fov'])
+                        for name,value in state.get('cameras',{}).items()})
         for name in args.views.split(','):
             eye,target,up,fov=cameras[name];view=projection.View(eye,target,width=1600,height=1000,fov=fov,up=up)
             for x in range(-8,15):

@@ -2808,8 +2808,9 @@ class CivsCitizens(
 
     private fun resolvedTarget(actor: Actor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
+    // Returning after cosmetic work has no worldWork, but still leaves the assigned mine.
     private fun routeMine(actor: Actor, city: Settlement): CivBuilding? = actor.plan.takeIf {
-        it.type == BuildingType.QUARRY && it.worldWork != null && it.courier == null && !actor.sheltering &&
+        it.type == BuildingType.QUARRY && it.courier == null && !actor.sheltering &&
             actor.attacker == null && actor.foodSource == null && actor.social.visit == null &&
             actor.collectionSeek == null && actor.collectionHome == null
     }?.token?.assignmentId?.let(city::building)?.takeIf { it.type == BuildingType.QUARRY }
@@ -4437,7 +4438,7 @@ internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: 
         plan.courier?.cargo?.takeIf { it.sourceWorkerId != null }?.let { allowed += it.sourceBuildingId }
     }
 
-/** Authored shafts split a deep search into the actual entrance, climb and gallery legs. */
+/** Authored shafts split underground travel and the return outside into actual entrance, climb and gallery legs. */
 internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location, target: CivPosition): CivPosition? {
     for (mine in city.buildings.filter { it.type == BuildingType.QUARRY }) {
         val geometry = CivsMinePlan.forBuilding(mine) ?: continue
@@ -4448,8 +4449,13 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
         fun inMine(x: Int, y: Int, z: Int): Boolean = y < bottom.y &&
             (geometry.containsWorkStanding(local(x, y, z)) ||
                 citizenMineWorkRouteAllowed(mine, CitizenPoint(x + .5, y.toDouble(), z + .5), access, state))
-        if (abs(from.y - target.y) <= 1.01 ||
-            !inMine(from.blockX, from.blockY, from.blockZ) && !inMine(target.x, target.y, target.z)) continue
+        val fromBelow = inMine(from.blockX, from.blockY, from.blockZ)
+        val targetBelow = inMine(target.x, target.y, target.z)
+        val leaving = (fromBelow || mine.bounds.contains(from.blockX, from.blockY, from.blockZ)) &&
+            !targetBelow && !mine.bounds.contains(target.x, target.y, target.z)
+        // Equal-height outdoor storage can still require a climb out of the mine.
+        // After reaching the shaft bottom, finish the authored stairs at the real entrance.
+        if (!leaving && (abs(from.y - target.y) <= 1.01 || !fromBelow && !targetBelow)) continue
         val onShaft = from.blockX == bottom.x && from.blockZ == bottom.z
         // A migrated resident must be able to leave its retained V3 ladder before
         // ordinary V4 receipts remodel that old access. Never route into future V3 cells.
@@ -4467,8 +4473,10 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
                 else -> transfer
             }
         } else when {
+            leaving && from.y >= bottom.y - .5 -> mine.entrance
             from.y > bottom.y + .5 -> bottom
             !onShaft -> bottom.copy(y = from.blockY)
+            leaving -> bottom
             target.y >= bottom.y -> bottom
             else -> bottom.copy(y = target.y)
         }

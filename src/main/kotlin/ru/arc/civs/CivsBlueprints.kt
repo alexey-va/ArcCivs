@@ -83,34 +83,37 @@ class CivsBlueprints(
     private val source = service.open("arccivs-library", sourceRoot)
     private val captured = service.open("arccivs-construction", capturedRoot)
     private data class Builtin(val bytes: ByteArray, val sha256: String)
-    private var builtin: CompletableFuture<Builtin>? = null
+    private val builtins = mutableMapOf<String, CompletableFuture<Builtin>>()
     private var closed = false
 
     /** Encoded generated source only; decoded snapshots stay with the expiring caller and Core cache. */
-    @Synchronized private fun planBoard(): CompletableFuture<Builtin> {
+    private fun isPlanBoard(id: String) = id == CivsPlanBoardBlueprint.SCHEMATIC_ID || id == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID
+
+    @Synchronized private fun planBoard(id: String): CompletableFuture<Builtin> {
         if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
-        builtin?.let { return it }
+        require(isPlanBoard(id))
+        builtins[id]?.let { return it }
         val prepared = CompletableFuture.supplyAsync({
-            val bytes = CivsPlanBoardBlueprint.schematic(dataVersion)
-            val file = AtomicFileStore(capturedRoot, Path.of("builtin", "plan_board", "v1.schem"),
+            val bytes = CivsPlanBoardBlueprint.schematic(dataVersion, id == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID)
+            val file = AtomicFileStore(capturedRoot, Path.of("builtin", "plan_board", "${id.substringAfterLast('/')}.schem"),
                 CivsStore.MAX_SCHEMATIC_BYTES.toLong(), { value: ByteArray -> value }, { it })
             file.write(bytes)
             val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
             Builtin(bytes, hash)
         }, executor)
-        builtin = prepared
-        prepared.whenComplete { _, failure -> if (failure != null) synchronized(this) { if (builtin === prepared) builtin = null } }
+        builtins[id] = prepared
+        prepared.whenComplete { _, failure -> if (failure != null) synchronized(this) { builtins.remove(id, prepared) } }
         return prepared
     }
 
     private fun sourceSnapshot(id: String): CompletableFuture<ArcSchematicSnapshot> =
-        if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) planBoard().thenCompose {
-            captured.loadVerified("builtin/plan_board/v1", it.sha256, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        if (isPlanBoard(id)) planBoard(id).thenCompose {
+            captured.loadVerified("builtin/plan_board/${id.substringAfterLast('/')}", it.sha256, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         }
         else source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
 
     private fun sourceBytes(id: String, snapshot: ArcSchematicSnapshot): CompletableFuture<ByteArray> =
-        if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) planBoard().thenApply { it.bytes.copyOf() }
+        if (isPlanBoard(id)) planBoard(id).thenApply { it.bytes.copyOf() }
         else source.captureSource(id, snapshot.fileSha256)
 
     /** A marker lookup needs no material bill, transformed block palette or preview surface. */
@@ -143,7 +146,7 @@ class CivsBlueprints(
             requireVolume(original)
             val (anchor, turns, entrance, worldControl) = CivsBlueprintGeometry.alignment(original, placement, facing, exactRotation, fixedEntrance)
             sourceBytes(id, original).thenComposeAsync({ bytes ->
-                val library = if (id == CivsPlanBoardBlueprint.SCHEMATIC_ID) captured else source
+                val library = if (isPlanBoard(id)) captured else source
                 library.transform(original, ArcSchematicTransform(turns, false)).thenApplyAsync({ transformed ->
                     val bounds = CivBox(
                         CivPosition(anchor.x + transformed.minimum.x, anchor.y + transformed.minimum.y, anchor.z + transformed.minimum.z),
@@ -272,7 +275,7 @@ class CivsBlueprints(
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 
     override fun close() {
-        synchronized(this) { closed = true; builtin = null }
+        synchronized(this) { closed = true; builtins.clear() }
         source.close(); captured.close()
     }
 
