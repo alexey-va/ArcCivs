@@ -1405,9 +1405,19 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     citizenStandable(world, target.copy(x = target.x + dx, y = target.y + 1 + dy, z = target.z + dz)) shouldBe false
                 }
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                    runtime.pulse(listOf(city))
-                    val work = requireNotNull(runtime.plan(city, worker))
+                    // This is a native geometry oracle; budget timing has its own forced-yield tests.
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                    var selected: CivWorldWork? = null
+                    for (pulse in 0 until 64) {
+                        if (pulse > 0) paper.performTicks(5)
+                        runtime.pulse(listOf(city))
+                        selected = runtime.plan(city, worker)
+                        if (selected != null) break
+                        withClue(runtime.debug(setOf(worker.id))) {
+                            runtime.idleReason(city, worker) shouldBe "searching-work"
+                        }
+                    }
+                    val work = withClue(runtime.debug(setOf(worker.id))) { requireNotNull(selected) }
                     work.standing shouldBe standing
                     work.focus shouldBe target
                     citizenCanReachBlock(world, Location(world, standing.x + .5, standing.y + 1.62, standing.z + .5), target) shouldBe true

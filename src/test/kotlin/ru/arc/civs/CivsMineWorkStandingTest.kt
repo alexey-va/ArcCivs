@@ -431,7 +431,8 @@ class CivsMineWorkStandingTest : FunSpec({
                     world.getBlockAt(reported.x, reported.y - 1, reported.z).type = Material.COBBLESTONE
                     for (y in reported.y..reported.y + 1) world.getBlockAt(reported.x, y, reported.z).type = Material.AIR
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        // Geometry and paid replay must not depend on a CI machine completing a 2ms slice.
+                        var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                         val work = nextMineWork(runtime, city, worker)
                         work.miningPlanVersion shouldBe CivsMinePlan.VERSION
                         (work.standing != reported) shouldBe true
@@ -475,7 +476,7 @@ class CivsMineWorkStandingTest : FunSpec({
                                 if (!restarted && paidLining.isNotEmpty() && !removedLining) {
                                     restarted = true
                                     city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
-                                    runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                                    runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                                 }
                                 city.minePlans!!.getValue(mine.id.toString()).v3Step shouldBe 83L
                                 runtime.invalidate(currentWorker.id)
@@ -524,7 +525,9 @@ class CivsMineWorkStandingTest : FunSpec({
 
 private fun nextMineWork(runtime: CivsWorksites, city: Settlement, worker: CivWorker): CivWorldWork {
     repeat(64) { runtime.pulse(listOf(city)) }
-    return withClue("idle=${runtime.idleReason(city, worker)}") { requireNotNull(runtime.plan(city, worker)) }
+    return withClue("idle=${runtime.idleReason(city, worker)} state=${runtime.debug(setOf(worker.id))}") {
+        requireNotNull(runtime.plan(city, worker))
+    }
 }
 
 private fun withReportedMine(
