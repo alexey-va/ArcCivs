@@ -641,7 +641,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun scanFarm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): FarmScan {
         val scan = farmScans[worker.id]?.takeIf { it.building == building }
             ?: FarmScan(building, CivsWorksiteLayouts.field(building)).also { farmScans[worker.id] = it }
-        val available by lazy { if (city.autonomy != null) emptyMap() else CivsEquipment.available(worker, stock(city, building.id)) }
+        val autonomous = CivsAutonomousWorksites.supports(city, building)
+        val available by lazy { if (autonomous) emptyMap() else CivsEquipment.available(worker, stock(city, building.id)) }
         val crop = cropAndSeed(building).first
         repeat(minOf(16, scan.plots.size)) {
             val point = scan.plots[scan.next]
@@ -655,7 +656,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val age = top.blockData as? Ageable ?: return@repeat
                 if (age.age == age.maximumAge) scan.harvest += point
                 else if (cropCareChanges(world, top, soil, age,
-                        age.age == 5 && (available["BONE_MEAL"] ?: 0) > 0).isNotEmpty()) scan.care += point
+                        autonomous || (available["BONE_MEAL"] ?: 0) > 0).isNotEmpty()) scan.care += point
             } else if (top.type != crop) scan.field += point
         }
         return scan
@@ -690,8 +691,14 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val nearest = compareBy<CivPosition> { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
             .thenBy { val dx = from.x.toDouble() - it.x; val dz = from.z.toDouble() - it.z; dx * dx + dz * dz }
             .thenBy { it.x }.thenBy { it.z }
-        val candidates = scan.harvest.sortedWith(nearest) + if (!harvestOnly && scan.examined == scan.plots.size)
-            scan.field.sortedWith(nearest) + scan.care.sortedWith(nearest) else emptyList()
+        val candidates = scan.harvest.sortedWith(nearest) + if (!harvestOnly && scan.examined == scan.plots.size) {
+            // Visit the next authored plot instead of repeatedly boosting the plant we just left.
+            val after = scan.plots.indexOfFirst { it == scan.lastFocus || it.copy(y = it.y + 1) == scan.lastFocus } + 1
+            val care = scan.plots.indices.map { scan.plots[(after + it) % scan.plots.size] }
+                .filter { it in scan.care }
+                .sortedBy { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
+            scan.field.sortedWith(nearest) + care
+        } else emptyList()
         var checked = 0
         for (soilPoint in candidates) {
             if (farmClaimed(city, worker, building, soilPoint)) continue
@@ -762,11 +769,12 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val soil = read(city, building, world, focus.copy(y = focus.y - 1)) ?: return null
         val age = crop.blockData as? Ageable ?: return null
         if (soil.type != Material.FARMLAND || crop.type != cropAndSeed(building).first || age.age == age.maximumAge) return null
-        val fertilizing = age.age == 5 && (available["BONE_MEAL"] ?: 0) > 0
+        val autonomous = CivsAutonomousWorksites.supports(city, building)
+        val fertilizing = autonomous || (available["BONE_MEAL"] ?: 0) > 0
         val changes = cropCareChanges(world, crop, soil, age, fertilizing)
         if (changes.isEmpty()) return null
         val standing = beside(city, worker, building, world, focus) ?: return null
-        return work(worker, building, standing, changes, if (fertilizing) mapOf("BONE_MEAL" to 1L) else emptyMap(),
+        return work(worker, building, standing, changes, if (fertilizing && !autonomous) mapOf("BONE_MEAL" to 1L) else emptyMap(),
             status = if (fertilizing) "fertilizing" else "watering", duration = 4_000, focus = focus)
     }
 
@@ -774,8 +782,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val rainExposed = world.hasStorm() && world.getHighestBlockYAt(crop.x, crop.z) <= crop.y
         if (!rainExposed && soil.blockData.asString != "minecraft:farmland[moisture=7]")
             add(change(soil, "minecraft:farmland[moisture=7]"))
-        // Rain needs no manual watering; otherwise keep the existing one free and one paid extra stage.
-        if (!rainExposed && age.age == 3 || fertilizing)
+        // Exposed rain needs no watering; accepted fertilizer still advances exactly one immature stage.
+        if (!rainExposed || fertilizing)
             add(change(crop, (age.clone() as Ageable).also { it.age++ }.asString))
     }
 

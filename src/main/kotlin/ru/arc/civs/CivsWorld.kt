@@ -573,9 +573,10 @@ class CivsWorld(
             return false
         }
 
-        /** Vanilla may recompute only leaf distance while a durable cutting batch is waiting. */
+        /** Natural grass and leaf distance may advance before an admitted earthwork reaches its cell. */
         protected fun matchesTerraformBefore(expected: String, current: BlockData): Boolean {
             if (expected == current.asString) return true
+            if (expected == "minecraft:dirt" && current.material == Material.GRASS_BLOCK) return true
             val before = parse(expected) as? Leaves ?: return false
             val leaves = current as? Leaves ?: return false
             if (before.material != leaves.material || before.isPersistent || leaves.isPersistent ||
@@ -1391,9 +1392,9 @@ class CivsWorld(
             val block = read(cell.position)
             val after = parse(cell.after)
             checkTerraformBlock(block, after, tree)
-            val current = block.blockData.asString
-            if (current != after.asString && !matchesTerraformBefore(cell.before, block.blockData)) rejectAt("world-changed", block)
-            if (current != after.asString) {
+            val applied = sameConstructionState(block.blockData, after)
+            if (!applied && !matchesTerraformBefore(cell.before, block.blockData)) rejectAt("world-changed", block)
+            if (!applied) {
                 // No breakNaturally, inventory transfer or physics: earthwork never drops items.
                 block.setBlockData(after, false)
                 changed++
@@ -1450,9 +1451,10 @@ class CivsWorld(
     }
 
     companion object {
-        /** Normal interactions can open doors/gates; neighbour updates can reshape stairs and fences. */
+        /** Natural grass, opening passages and neighbour connections may change an otherwise intact cell. */
         internal fun sameConstructionState(actual: BlockData, expected: BlockData): Boolean {
             if (actual.asString == expected.asString) return true
+            if (expected.material == Material.DIRT && actual.material == Material.GRASS_BLOCK) return true
             if (actual.material != expected.material) return false
             if (actual is Door && expected is Door)
                 return (actual.clone() as Door).apply { isOpen = expected.isOpen }.asString == expected.asString

@@ -468,15 +468,19 @@ not timed item grants: FARM tills real soil, plants and waits for mature crops
 before harvesting native drops (1.5 seconds per action). No new bread-baking jobs
 are created; a legacy BREAD selection resolves to wheat harvesting.
 When a complete bounded field pass finds no harvest or field preparation job, FARM tends an
-unripe crop for four seconds. Watering maintains soil moisture and advances only
-age 3 to 4; optional fertilizer consumes one real bone meal at age 5 to reach 6.
+unripe crop for four seconds. Watering maintains soil moisture and advances any
+immature stage by one; optional fertilizer consumes one real bone meal for that
+same one-stage advance at any immature stage.
 Care requires an actual soil or growth change. Each farmer indexes the whole field in
 16-cell slices, including while walking or working, and retains known targets across
 receipts. Harvest outranks care, selects a nearby known ripe crop, and reserves its
 target against other farmers; new maturity can replace unfinished care without
 reusing its work timer. Each selected target is rechecked live before the existing
-receipt validation. Exposed rain suppresses manual watering, including its free age checkpoint; covered plots may still need care. Native age checkpoints
-bound each growth-cycle bonus without a separate timer or restart catch-up.
+receipt validation. Care cycles through authored plots rather than repeatedly
+boosting one plant. Exposed rain suppresses manual watering; supplied fertilizer
+can still work, and covered plots may still need watering. Native Auto scenery
+uses its paid worksite's supplies for one-stage fertilizer without carried items
+or an economic credit. Care has no separate timer or restart catch-up.
 Temporary city saves pause work admission without deleting residents' scan cursors,
 partial field passes or valid targets. An incomplete field search holds the farmer
 in place; waiting for growth requires a completed pass without actionable work.

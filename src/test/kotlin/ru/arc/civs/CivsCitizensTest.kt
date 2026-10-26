@@ -258,6 +258,17 @@ class CivsCitizensTest : FunSpec({
         }
     }
 
+    test("an Auto search placeholder yields to resumed work without discarding an admitted production session") {
+        val farm = building(BuildingType.FARM, CivPosition(20, 64, 0))
+        val searching = CitizenPlan(CitizenToken(farm.id, 241, 60_000, null), CivPosition(0, 64, 0),
+            farm.entrance, BuildingType.FARM, 0, "searching-work", autonomousWork = farm)
+        val resumed = searching.copy(idleReason = null)
+        citizenCurrentPlan(searching, CitizenPhase.RETURNING) { resumed } shouldBe resumed
+        for (reason in listOf("waiting-reassignment", "waiting-orders", "waiting-inputs")) {
+            citizenCurrentPlan(resumed, CitizenPhase.RETURNING) { resumed.copy(idleReason = reason) } shouldBe resumed
+        }
+    }
+
     test("item builders start at their own hut even when the hall is nearer the construction") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val hut = building(BuildingType.BUILDER_HUT, CivPosition(24, 64, 0))

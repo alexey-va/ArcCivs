@@ -41,3 +41,32 @@ Direct Vault, tokens, player XP and generated transferable items remain zero.
 Source tests, CI artifact, delivered bytes, active version and observed live
 recovery must be recorded separately. Auto2 has abstract inventory and no
 physical courier: its stock credits cannot demonstrate moving-courier pickup.
+
+## Farmer follow-up and natural grass
+
+The next human observation reproduced repeated pauses after individual farm
+actions. The 09:10–09:16 UTC series showed no route, no receipt pause, ready
+chunks and a `waiting-growth` worksite behind a stale `searching-work` actor
+plan. Native terrain at 09:18 contained 71 crops: 70 immature, none at age 3,
+and 71 fully moist farmland cells. The former age-3-only free-care rule excluded
+all those immature crops; nearest-neighbour care would also repeatedly boost
+one plant if the stage restriction alone were removed.
+
+All immature stages now permit exactly one stage of dry-weather watering or
+paid bone-meal care. Auto's protected scenery uses free fertilizer in any
+weather. Four-second care, harvest priority, native input/drop accounting and
+the economic session/depot receipt remain unchanged. Care visits plots in order
+using the existing scan and last focus; receipt completion does not reset a
+whole-field scan. An idle search placeholder no longer pins the old actor plan.
+
+Natural GRASS_BLOCK spread over DIRT is allowed in buildings, retaining exact
+transient world locks and pre-existing event cancellations. Fire, fluids,
+mycelium and player edits keep their protection. Saved earthwork and upgrade
+checks accept this one-way natural change, without accepting other soils.
+
+The [farm/grass assessment](farm-care-091-assessment.json) and its
+[calculation](farm-care-091-assessment-result.json) distinguish physical crop
+items and conditional shop resale from protected Auto scenery. More active
+care can increase realized output; unchanged amounts do not prove unchanged
+throughput. Disk shop quotes and controlled no-natural-growth calculations are
+explicitly separate from live rates and in-memory prices.

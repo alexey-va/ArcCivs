@@ -46,7 +46,7 @@ internal object CivsAutonomousWorksites {
         })
         if (building.type == BuildingType.FARM) {
             requireWork(work.miningStep == null && work.miningPlanVersion == null && !work.miningGenerator)
-            requireWork(work.status in setOf("working-field", "watering"))
+            requireWork(work.status in setOf("working-field", "watering", "fertilizing"))
             requireWork(work.changes.all { fieldChangeAllowed(building, work.status, it) })
         } else {
             val plan = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("worksite-layout")
@@ -69,7 +69,9 @@ internal object CivsAutonomousWorksites {
         if (contains("soilCells", point)) return before in SOILS && cell.after == "minecraft:farmland[moisture=7]"
         if (!contains("soilCells", point.copy(y = point.y - 1))) return false
         val crop = when (CivsProduction.material(building)) { "CARROT" -> "carrots"; "POTATO" -> "potatoes"; else -> "wheat" }
-        return if (status == "watering") cell.before == "minecraft:$crop[age=3]" && cell.after == "minecraft:$crop[age=4]"
+        return if (status == "watering" || status == "fertilizing") (0..6).any { age ->
+            cell.before == "minecraft:$crop[age=$age]" && cell.after == "minecraft:$crop[age=${age + 1}]"
+        }
         else cell.after == "minecraft:$crop[age=0]" && (before == "AIR" || before in WEEDS || cell.before == "minecraft:$crop[age=7]") ||
             cell.after == "minecraft:air" && before in WEEDS
     }

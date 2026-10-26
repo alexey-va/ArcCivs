@@ -3668,6 +3668,44 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a completed native Auto receipt drops a search placeholder once the field scan confirms growth") {
+        residentRuntime { h ->
+            val farm = h.assignCanonicalAutoFarm()
+            h.city = h.city.copy(stock = h.city.stock.copy(food = CivsRules.capacity(h.city)))
+            val original = h.city
+            val work = h.autoCrop(farm, 0, duration = 60_000)
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, work.standing.x + .5, work.standing.y.toDouble(), work.standing.z + .5))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            for (now in 3_000L..62_000L step 1_000) h.owner.pulse(now)
+            h.phase() shouldBe CitizenPhase.DELIVERING
+            h.autonomousObservedMillis() shouldBe 60_000L
+            h.deliveries shouldBe 1
+            work.changes.forEach { cell ->
+                h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+            }
+            h.city = CivsRules.finishAutonomousVisual(h.city, work)
+            h.work = null
+            h.pendingDelivery.complete(h.city) shouldBe true
+            h.owner.pulse(62_250)
+            h.phase() shouldBe CitizenPhase.RETURNING
+            // The previous action is displayed for at most twenty native ticks after its receipt.
+            h.navigationNow = 62_250
+            repeat(21) { h.navigate() }
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
+
+            h.idleReason = "waiting-growth"
+            h.owner.pulse(requireNotNull(h.navigationNow) + 250)
+            (h.owner.status(h.workerId) == "workers.status.searching-work") shouldBe false
+            h.autonomousObservedMillis() shouldBe 60_000L
+            h.city.stock shouldBe original.stock
+            h.city.workers shouldBe original.workers
+            h.deliveries shouldBe 1
+        }
+    }
+
     test("Auto observation ignores wall-clock gaps pause night and unreachable work and fences changed residents") {
         residentRuntime { h ->
             val farm = h.assignCanonicalAutoFarm()

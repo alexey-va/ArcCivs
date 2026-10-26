@@ -273,6 +273,11 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun spread(event: BlockSpreadEvent) {
+        if (event.block.type == Material.DIRT && event.source.type == Material.GRASS_BLOCK &&
+            event.newState.type == Material.GRASS_BLOCK) {
+            if (transientPhysicsLock(event.block) || transientPhysicsLock(event.source)) event.isCancelled = true
+            return
+        }
         if (protected(event.block) || protected(event.source)) event.isCancelled = true
     }
 

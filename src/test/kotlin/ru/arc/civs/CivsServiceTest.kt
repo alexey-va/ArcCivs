@@ -1399,7 +1399,11 @@ class CivsServiceTest : FunSpec({
             repeat(32) { if (runtime.plan(h.service.city(h.player)!!, worker) == null) h.paper.performTicks(5) }
             val work = requireNotNull(runtime.plan(h.service.city(h.player)!!, worker))
             work.status shouldBe "watering"
-            work.changes.size shouldBe 1
+            work.changes.size shouldBe 2
+            work.changes.map { it.before to it.after }.toSet() shouldBe setOf(
+                "minecraft:farmland[moisture=3]" to "minecraft:farmland[moisture=7]",
+                "minecraft:wheat[age=2]" to "minecraft:wheat[age=3]",
+            )
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }

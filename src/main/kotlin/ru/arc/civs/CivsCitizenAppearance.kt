@@ -48,7 +48,7 @@ internal fun citizenWorking(plan: CitizenPlan, phase: CitizenPhase): Boolean =
         plan.type != BuildingType.GUARD_TOWER && plan.idleReason == null &&
         (phase == CitizenPhase.WORKING || plan.worldWork != null && phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING))
 
-/** Watering reuses the accepted crop/sapling care; fertilizer belongs only to a farmer's paid inputs. */
+/** Care props follow accepted work: physical fertilizer is paid, while Auto scenery owns its supplies. */
 internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
     val work = plan.worldWork ?: return null
     if (plan.idleReason != null || work.focus == null || citizenWorkFocus(work) == null) return null
@@ -56,7 +56,7 @@ internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
     if (plan.type != BuildingType.FARM) return null
     return when (work.status) {
         "watering" -> Material.WATER_BUCKET
-        "fertilizing" -> Material.BONE_MEAL.takeIf { (work.inputs["BONE_MEAL"] ?: 0) > 0 }
+        "fertilizing" -> Material.BONE_MEAL.takeIf { work.autonomousVisual || (work.inputs["BONE_MEAL"] ?: 0) > 0 }
         else -> null
     }
 }

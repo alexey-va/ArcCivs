@@ -183,6 +183,27 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("natural grass over captured dirt does not invalidate an autonomous upgrade") {
+        worldScenario { s ->
+            val position = CivPosition(0, 64, 0)
+            val building = worldBuilding(worldBox(0, 0))
+            val city = worldCity(s.world.uid, building).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val plan = CivPlacementPlan(UUID.randomUUID(), city.id, s.world.uid, building,
+                listOf(CivPlanBlock(position, "minecraft:dirt", "minecraft:stone")))
+            val block = s.world.getBlockAt(0, 64, 0)
+            block.blockData = Bukkit.createBlockData("minecraft:grass_block[snowy=false]")
+            val result = s.subject.revalidate(plan, city.owner)
+            s.scheduler.tick()
+            completed(result) shouldBe Unit
+            block.type shouldBe Material.GRASS_BLOCK
+            for (material in listOf(Material.COARSE_DIRT, Material.MYCELIUM, Material.PODZOL)) {
+                CivsWorld.sameConstructionState(material.createBlockData(), Material.DIRT.createBlockData()) shouldBe false
+            }
+            CivsWorld.sameConstructionState(Material.DIRT.createBlockData(), Material.GRASS_BLOCK.createBlockData()) shouldBe false
+        }
+    }
+
     test("other multiple-facing blocks retain exact construction state") {
         worldScenario {
             val expected = Bukkit.createBlockData("minecraft:vine[east=false,north=true,south=false,up=false,west=false]")
@@ -1744,6 +1765,57 @@ class CivsWorldTest : FunSpec({
             completed(apply) shouldBe Unit
             placed shouldBe cells
             (64..66).map { s.world.getBlockAt(0, it, 0).type } shouldBe listOf(Material.DIRT, Material.DIRT, Material.COARSE_DIRT)
+        }
+    }
+
+    test("an uncommitted dirt fill replays after grass growth without rewriting the grown ground") {
+        worldScenario(collisionWorld = true) { s ->
+            val point = CivPosition(0, 64, 0)
+            val cell = CivPlanBlock(point, "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val block = s.world.getBlockAt(point.x, point.y, point.z)
+            // The first attempt placed dirt but did not commit its durable batch cursor.
+            block.blockData = Bukkit.createBlockData("minecraft:grass_block[snowy=true]")
+            repeat(2) {
+                val placed = mutableListOf<CivPlanBlock>()
+                val replay = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, placed::add)
+                s.scheduler.tick()
+                completed(replay) shouldBe Unit
+                placed shouldBe listOf(cell)
+                block.blockData.asString shouldBe "minecraft:grass_block[snowy=true]"
+            }
+            for (material in listOf(Material.MYCELIUM, Material.PODZOL, Material.COARSE_DIRT)) {
+                block.type = material
+                val rejected = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                s.scheduler.tick()
+                failureReason(rejected) shouldBe "world-changed"
+                block.type shouldBe material
+            }
+        }
+    }
+
+    test("retained dirt earthwork accepts natural grass without accepting other ground substitutions") {
+        worldScenario(collisionWorld = true) { s ->
+            val point = CivPosition(0, 64, 0)
+            val cell = CivPlanBlock(point, "minecraft:dirt", "minecraft:coarse_dirt")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val block = s.world.getBlockAt(point.x, point.y, point.z)
+            for (state in listOf("minecraft:grass_block[snowy=false]", "minecraft:grass_block[snowy=true]")) {
+                block.blockData = Bukkit.createBlockData(state)
+                val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                s.scheduler.tick()
+                completed(apply) shouldBe Unit
+                block.type shouldBe Material.COARSE_DIRT
+            }
+            for (material in listOf(Material.MYCELIUM, Material.PODZOL, Material.ROOTED_DIRT)) {
+                block.type = material
+                val guarded = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                s.scheduler.tick()
+                failureReason(guarded) shouldBe "world-changed"
+                block.type shouldBe material
+            }
         }
     }
 

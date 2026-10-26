@@ -181,6 +181,7 @@ class CivsCitizenAppearanceTest : FunSpec({
         val fertilizing = watering.copy(status = "fertilizing", inputs = mapOf("BONE_MEAL" to 1L))
         citizenFieldCareItem(plan.copy(worldWork = fertilizing)) shouldBe Material.BONE_MEAL
         citizenFieldCareItem(plan.copy(worldWork = fertilizing.copy(inputs = mapOf("BONE_MEAL" to 0L)))) shouldBe null
+        citizenFieldCareItem(plan.copy(worldWork = fertilizing.copy(inputs = emptyMap(), autonomousVisual = true))) shouldBe Material.BONE_MEAL
         citizenFieldCareItem(plan.copy(type = BuildingType.QUARRY, worldWork = watering)) shouldBe null
         citizenFieldCareItem(plan.copy(idleReason = "waiting-growth", worldWork = watering)) shouldBe null
         citizenFieldCareItem(plan.copy(worldWork = watering.copy(focus = null))) shouldBe null

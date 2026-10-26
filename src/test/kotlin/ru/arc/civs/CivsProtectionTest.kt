@@ -24,6 +24,7 @@ import org.bukkit.event.block.BlockDropItemEvent
 import org.bukkit.event.block.BlockExplodeEvent
 import org.bukkit.event.block.BlockFromToEvent
 import org.bukkit.event.block.BlockGrowEvent
+import org.bukkit.event.block.BlockSpreadEvent
 import org.bukkit.event.block.BlockMultiPlaceEvent
 import org.bukkit.event.block.BlockPistonExtendEvent
 import org.bukkit.event.block.BlockPistonRetractEvent
@@ -443,6 +444,48 @@ class CivsProtectionTest : FunSpec({
                 ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = farm.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)))
             listener.refresh()
             grow(crop).isCancelled shouldBe false
+        }
+    }
+
+    for (autonomous in listOf(false, true)) test("natural grass spreads over dirt in ${if (autonomous) "Auto" else "player"} buildings while exact locks stay protected") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("grass-spread-$autonomous")
+            val owner = paper.addPlayer("GrassOwner")
+            val house = protectionBuilding(0, 2).copy(type = BuildingType.HOUSE)
+            val city = protectionCity(world.uid, owner.uniqueId, house).let {
+                if (autonomous) it.copy(inventory = null, autonomy = CivAutonomy()) else it
+            }
+            val target = world.getBlockAt(0, 64, 0).also { it.type = Material.DIRT }
+            val source = world.getBlockAt(1, 64, 0).also { it.type = Material.GRASS_BLOCK }
+            var locked: CivPosition? = null
+            var available = true
+            val listener = CivsProtection({ listOf(city) }, { available }, setOf(world.name),
+                worldLocked = { _, point -> point == locked })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("GrassSpreadProtection"))
+            fun spread(material: Material = Material.GRASS_BLOCK, cancelled: Boolean = false): BlockSpreadEvent {
+                val after = target.state.also { it.type = material }
+                return paper.callEvent(BlockSpreadEvent(target, source, after).also { it.isCancelled = cancelled })
+            }
+            spread().isCancelled shouldBe false
+            paper.callEvent(BlockBreakEvent(target, paper.addPlayer("GrassStranger"))).isCancelled shouldBe true
+            locked = CivPosition(target.x, target.y, target.z)
+            spread().isCancelled shouldBe true
+            locked = CivPosition(source.x, source.y, source.z)
+            spread().isCancelled shouldBe true
+            locked = null
+            available = false
+            spread().isCancelled shouldBe true
+            available = true
+            spread(cancelled = true).isCancelled shouldBe true
+            source.type = Material.MYCELIUM
+            spread(Material.MYCELIUM).isCancelled shouldBe true
+            source.type = Material.FIRE
+            spread(Material.FIRE).isCancelled shouldBe true
+            source.type = Material.GRASS_BLOCK
+            target.type = Material.COARSE_DIRT
+            spread().isCancelled shouldBe true
+            target.type = Material.DIRT
+            spread().isCancelled shouldBe false
         }
     }
 

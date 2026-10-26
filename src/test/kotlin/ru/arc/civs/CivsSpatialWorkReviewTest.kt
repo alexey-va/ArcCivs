@@ -582,7 +582,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
 
     for ((production, material) in listOf("WHEAT" to Material.WHEAT, "CARROT" to Material.CARROTS,
         "POTATO" to Material.POTATOES, "BREAD" to Material.WHEAT)) {
-        test("$production farmer waters and optionally fertilizes an unripe field through replayable receipts without repeated boosts or tool wear") {
+        test("$production farmer advances every immature stage through replayable watering and paid fertilizer without tool wear") {
             failOnUnsupportedMockBukkitOperation {
                 MockBukkitTestRuntime.open().use { paper ->
                     val world = CivsWorksiteWorldFixture("care-${production.lowercase()}").also(paper.server::addWorld)
@@ -643,38 +643,53 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             val crop = world.getBlockAt(focus.x, focus.y, focus.z)
                             (crop.blockData as Ageable).age shouldBe 4
                             world.getBlockAt(soil.x, soil.y, soil.z).blockData.asString shouldBe "minecraft:farmland[moisture=7]"
-                            // Keep one target to observe repeated care at the same native stage.
+                            // Keep one target to verify each native stage independently.
                             plots.filter { it != soil }.forEach { world.getBlockAt(it.x, it.y + 1, it.z).type = Material.STONE }
-                            repeat(8) { runtime.pulse(listOf(city)) }
-                            runtime.plan(city, city.workers.single()) shouldBe null
-                            (crop.blockData as Ageable).age shouldBe 4
-
-                            crop.blockData = (crop.blockData as Ageable).also { it.age = 5 }
-                            repeat(8) { runtime.pulse(listOf(city)) }
-                            runtime.plan(city, city.workers.single()) shouldBe null
-                            runtime.invalidate(initial.id)
+                            for (age in 0 until (crop.blockData as Ageable).maximumAge) {
+                                crop.blockData = (crop.blockData as Ageable).also { it.age = age }
+                                runtime.invalidate(initial.id)
+                                val care = next()
+                                care.status shouldBe "watering"
+                                care.durationMillis shouldBe 4_000L
+                                care.inputs shouldBe emptyMap()
+                                care.outputs shouldBe emptyMap()
+                                care.equipmentAfter shouldBe null
+                                care.changes shouldBe listOf(CivPlanBlock(focus, crop.blockData.asString,
+                                    (crop.blockData.clone() as Ageable).also { it.age = age + 1 }.asString))
+                                commit(care)
+                                (crop.blockData as Ageable).age shouldBe age + 1
+                            }
                             val fromStorage = production == "WHEAT"
                             city = if (fromStorage) city.copy(inventory = requireNotNull(city.inventory).copy(
-                                buildingMaterials = mapOf(farm.id.toString() to mapOf("BONE_MEAL" to 2L))))
-                            else city.copy(workers = listOf(CivsEquipment.collectSupplies(city.workers.single(), mapOf("BONE_MEAL" to 2L))))
-                            val fertilizing = next()
-                            fertilizing.status shouldBe "fertilizing"
-                            fertilizing.durationMillis shouldBe 4_000L
-                            fertilizing.focus shouldBe focus
-                            fertilizing.inputs shouldBe mapOf("BONE_MEAL" to 1L)
-                            fertilizing.outputs shouldBe emptyMap()
-                            fertilizing.equipmentAfter shouldBe null
-                            fertilizing.storageInputs(city.workers.single()) shouldBe if (fromStorage) mapOf("BONE_MEAL" to 1L) else emptyMap()
-                            commit(fertilizing)
-                            (crop.blockData as Ageable).age shouldBe 6
-                            if (fromStorage) storage.buildingAvailable(city, farm.id)["BONE_MEAL"] shouldBe 1L
-                            else CivsEquipment.plainCount(city.workers.single(), "BONE_MEAL") shouldBe 1
+                                buildingMaterials = mapOf(farm.id.toString() to mapOf("BONE_MEAL" to 7L))))
+                            else city.copy(workers = listOf(CivsEquipment.collectSupplies(city.workers.single(), mapOf("BONE_MEAL" to 7L))))
+                            world.setStorm(true)
+                            for (age in 0 until (crop.blockData as Ageable).maximumAge) {
+                                crop.blockData = (crop.blockData as Ageable).also { it.age = age }
+                                runtime.invalidate(initial.id)
+                                val fertilizing = next()
+                                fertilizing.status shouldBe "fertilizing"
+                                fertilizing.durationMillis shouldBe 4_000L
+                                fertilizing.focus shouldBe focus
+                                fertilizing.inputs shouldBe mapOf("BONE_MEAL" to 1L)
+                                fertilizing.outputs shouldBe emptyMap()
+                                fertilizing.equipmentAfter shouldBe null
+                                fertilizing.changes shouldBe listOf(CivPlanBlock(focus, crop.blockData.asString,
+                                    (crop.blockData.clone() as Ageable).also { it.age = age + 1 }.asString))
+                                fertilizing.storageInputs(city.workers.single()) shouldBe if (fromStorage) mapOf("BONE_MEAL" to 1L) else emptyMap()
+                                commit(fertilizing)
+                                (crop.blockData as Ageable).age shouldBe age + 1
+                                if (fromStorage) (storage.buildingAvailable(city, farm.id)["BONE_MEAL"] ?: 0L) shouldBe 6L - age
+                                else CivsEquipment.plainCount(city.workers.single(), "BONE_MEAL") shouldBe 6 - age
+                            }
+                            crop.blockData = (crop.blockData as Ageable).also { it.age = 2 }
                             repeat(8) { runtime.pulse(listOf(city)) }
                             runtime.plan(city, city.workers.single()) shouldBe null
+                            world.setStorm(false)
                             world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=0]")
                             val repeatedFertilizing = next()
                             repeatedFertilizing.status shouldBe "watering"
-                            repeatedFertilizing.changes.map(CivPlanBlock::position) shouldBe listOf(soil)
+                            repeatedFertilizing.changes.map(CivPlanBlock::position).toSet() shouldBe setOf(soil, focus)
                             repeatedFertilizing.inputs shouldBe emptyMap()
                             runtime.validate(city, repeatedFertilizing)
                             locked = focus
@@ -856,6 +871,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
                 }
                 CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+                world.setStorm(true)
                 var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
@@ -902,7 +918,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
         FarmWeatherCase("exposed-rain", true, false, 2, 0, false),
         FarmWeatherCase("exposed-rain-checkpoint", true, false, 3, 7, false),
         FarmWeatherCase("covered-rain", true, true, 2, 0, true),
-        FarmWeatherCase("healthy-wet-soil", false, false, 2, 7, false),
+        FarmWeatherCase("healthy-wet-soil", false, false, 2, 7, true),
         FarmWeatherCase("dry-checkpoint", false, false, 3, 7, true),
     )) test("farmer care respects $name without empty watering receipts") {
         failOnUnsupportedMockBukkitOperation {
@@ -962,7 +978,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     val plots = CivsWorksiteLayouts.field(farm)
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                     plots.forEach { soil ->
-                        world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=0]")
+                        world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
                         world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
                             (Material.WHEAT.createBlockData() as Ageable).also { it.age = 2 }
                     }
@@ -975,7 +991,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             val work = requireNotNull(runtime.plan(city, city.workers.single()))
                             work.status shouldBe "watering"
                             work.changes.size shouldBe 1
-                            visited += requireNotNull(work.focus)
+                            visited.add(requireNotNull(work.focus)) shouldBe true
                             runtime.validate(city, work)
                             work.changes.forEach { cell ->
                                 world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)

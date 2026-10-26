@@ -89,10 +89,11 @@ class CivsAutonomousWorksitesTest : FunSpec({
             plant.changes.single().position shouldBe crop
             plant.changes.single().after shouldBe "minecraft:wheat[age=0]"
             apply(plant)
+            plots.filter { it != soil }.forEach { world.getBlockAt(it.x, it.y + 1, it.z).type = Material.STONE }
             world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=0]")
             world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=3]")
             val care = next()
-            care.status shouldBe "watering"
+            care.status shouldBe "fertilizing"
             care.changes.any { it.position == crop && it.after == "minecraft:wheat[age=4]" } shouldBe true
             apply(care)
             world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=7]")
@@ -106,6 +107,83 @@ class CivsAutonomousWorksitesTest : FunSpec({
             city.workers.single() shouldBe worker
             city.stock shouldBe Stock(7, 8, 9)
             city.minePlans shouldBe null
+        }
+    }
+
+    test("Auto care advances every immature crop by exactly one stage even in rain without inventory inputs") {
+        withAutoWorksite("auto-all-stage-care", "farmer", Material.DIRT) { world, originalFarm, originalCity, runtime ->
+            val worker = originalCity.workers.single()
+            val plots = CivsWorksiteLayouts.field(originalFarm)
+            plots.forEach { soil ->
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y + 1, soil.z).type = Material.STONE
+            }
+            CivsWorksiteLayouts.irrigation(originalFarm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            val crop = plots.first().let { it.copy(y = it.y + 1) }
+            for ((production, name) in listOf("WHEAT" to "wheat", "CARROT" to "carrots", "POTATO" to "potatoes")) {
+                val farm = originalFarm.copy(production = production)
+                val city = originalCity.copy(buildings = originalCity.buildings.map { if (it.id == farm.id) farm else it })
+                for (rain in listOf(false, true)) for (age in 0..6) {
+                    world.setStorm(rain)
+                    world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData("minecraft:$name[age=$age]")
+                    runtime.invalidate(worker.id)
+                    val work = nextAutoWork(runtime, city)
+                    withClue("$production age=$age rain=$rain") {
+                        work.status shouldBe "fertilizing"
+                        work.durationMillis shouldBe 4_000L
+                        work.changes shouldBe listOf(CivPlanBlock(crop, "minecraft:$name[age=$age]", "minecraft:$name[age=${age + 1}]"))
+                        work.inputs shouldBe emptyMap()
+                        work.outputs shouldBe emptyMap()
+                        work.equipmentAfter shouldBe null
+                        runtime.validate(city, work)
+                        val after = CivsRules.finishAutonomousVisual(city, work)
+                        after.workers shouldBe city.workers
+                        after.stock shouldBe city.stock
+                        after.autonomy shouldBe city.autonomy
+                        after.revision shouldBe city.revision + 1
+                        for (invalidAfter in listOf("minecraft:$name[age=${(age + 2) % 8}]", "minecraft:beetroots[age=1]")) {
+                            shouldThrow<CivsRejection> { CivsAutonomousWorksites.validate(city,
+                                work.copy(changes = listOf(work.changes.single().copy(after = invalidAfter)))) }
+                        }
+                        if (age == 3) CivsAutonomousWorksites.validate(city, work.copy(status = "watering"))
+                    }
+                }
+                world.setStorm(false)
+                world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData("minecraft:$name[age=7]")
+                runtime.invalidate(worker.id)
+                nextAutoWork(runtime, city).status shouldBe "working-field"
+            }
+        }
+    }
+
+    test("Auto care hands off to different known plots after each receipt and yields to a ripe crop") {
+        withAutoWorksite("auto-care-handoff", "farmer", Material.DIRT) { world, farm, city, runtime ->
+            val worker = city.workers.single()
+            val plots = CivsWorksiteLayouts.field(farm)
+            plots.forEach { soil ->
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=1]")
+            }
+            CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            var work = nextAutoWork(runtime, city)
+            val visited = linkedSetOf<CivPosition>()
+            repeat(12) {
+                work.status shouldBe "fertilizing"
+                visited.add(requireNotNull(work.focus)) shouldBe true
+                runtime.validate(city, work)
+                work.changes.forEach { world.getBlockAt(it.position.x, it.position.y, it.position.z).blockData = Bukkit.createBlockData(it.after) }
+                runtime.invalidate(worker.id)
+                // The completed initial field scan survives a receipt; known care does not wait another full scan.
+                work = (1..2).firstNotNullOfOrNull { runtime.pulse(listOf(city)); runtime.plan(city, worker) }
+                    ?: error("Known care was lost after a native receipt")
+            }
+            val ripe = plots.last().let { it.copy(y = it.y + 1) }
+            world.getBlockAt(ripe.x, ripe.y, ripe.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=7]")
+            repeat((plots.size + 15) / 16) { runtime.pulse(listOf(city)) }
+            requireNotNull(runtime.plan(city, worker)).let {
+                it.status shouldBe "working-field"
+                it.focus shouldBe ripe
+            }
         }
     }
 

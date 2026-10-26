@@ -3650,7 +3650,8 @@ internal fun citizenCurrentPlan(previous: CitizenPlan, phase: CitizenPhase, curr
     val next = current()
     if (next != null && phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED) &&
         next.workplace == previous.workplace && next.storage == previous.storage) {
-        if (previous.autonomousWork != null && next.token.copy(industryRecipe = previous.token.industryRecipe) == previous.token &&
+        if (previous.autonomousWork != null && previous.idleReason == null &&
+            next.token.copy(industryRecipe = previous.token.industryRecipe) == previous.token &&
             next.idleReason in listOf(null, "waiting-reassignment", "waiting-orders", "waiting-inputs")) return previous
     }
     return next
