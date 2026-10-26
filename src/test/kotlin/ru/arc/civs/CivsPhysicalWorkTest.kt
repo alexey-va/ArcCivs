@@ -37,7 +37,8 @@ class CivsPhysicalWorkTest : FunSpec({
             water.forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
             val counts = mutableMapOf<String, Long>()
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false })
+                // This is a bounded-admission crop scenario, not a benchmark of MockBukkit/JIT wall time.
+                val runtime = CivsWorksites(plugin, access, { _, _ -> counts }, { _, _ -> false }, nanoTime = { 0L })
                 // Initial work follows the bounded whole-field scan for mature crops.
                 val till = (1..8).firstNotNullOfOrNull {
                     runtime.pulse(listOf(city))

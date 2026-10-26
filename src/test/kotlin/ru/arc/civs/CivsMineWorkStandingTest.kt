@@ -80,7 +80,7 @@ class CivsMineWorkStandingTest : FunSpec({
     }
 
     test("idle admissions share one native budget instead of spending a complete service slot per worker") {
-        withReportedMine { advanceTicks, world, _, original, worker, runtime ->
+        withReportedMine(nanoTime = { 0L }) { advanceTicks, world, _, original, worker, runtime ->
             nextMineWork(runtime, original, worker)
             val city = original.copy(workers = (0..8).map { worker.copy(id = UUID.randomUUID()) })
             repeat(8) {

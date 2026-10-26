@@ -876,6 +876,9 @@ class CivsServiceTest : FunSpec({
             h.start()
             val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
+            // This fixture checks native application and saving, independently of host/MockK speed.
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }
+                .set(worksites, { 0L })
             repeat(16) { worksites.pulse(listOf(village)) }
             val work = requireNotNull(worksites.plan(village, worker))
             every { h.citizens.autonomousVisualWork(village.id, worker.id) } returns work
