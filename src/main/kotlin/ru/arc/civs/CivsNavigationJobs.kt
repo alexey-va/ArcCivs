@@ -13,6 +13,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
+import java.util.UUID
 import kotlin.math.floor
 
 /**
@@ -41,6 +42,7 @@ internal class CivsResidentNavigation(
     private val ownedExecutor = if (executor == null) BoundedAsyncExecutor("ArcCivs-navigation", 1, settings.maximumJobs) else null
     private val executor = executor ?: requireNotNull(ownedExecutor)
     private val jobs = linkedMapOf<CitizenPacketRoute, Job>()
+    private val terrain = CivsNavigationTerrain(settings.terrainCacheBlocks, settings.terrainRefreshTicks)
     private var closed = false
     private var terminal = CompletableFuture.completedFuture(Unit)
 
@@ -49,7 +51,7 @@ internal class CivsResidentNavigation(
         return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to settings.maximumJobs,
             "native_pending" to jobs.values.count { it.capturing?.isDone == false },
             "worker_pending" to jobs.values.count { it.searching?.isDone == false },
-            "captured_blocks" to jobs.values.sumOf { it.terrain.size })
+            "captured_blocks" to jobs.values.sumOf { it.terrain.size }, "terrain_cache" to terrain.debug())
     }
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
@@ -59,6 +61,10 @@ internal class CivsResidentNavigation(
 
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute {
         checkOwner()
+        from.world?.let { world ->
+            terrain.removeChunk(world.uid, from.blockX shr 4, from.blockZ shr 4)
+            route.destination?.let { terrain.changed(world.uid, CivPosition(it.blockX, it.blockY, it.blockZ)) }
+        }
         // Replacing an unfinished search releases its admission slot. A ready previous path
         // remains with the caller so a blocked-person detour can fall back to waiting on it.
         if (route.searching) route.cancel()
@@ -105,7 +111,7 @@ internal class CivsResidentNavigation(
                         job.route.acceptSearch(result)
                     } else {
                         job.route.phase("capturing")
-                        val cursor = CitizenNavigationCapture(job.route, result.probes, job.terrain)
+                        val cursor = CitizenNavigationCapture(job.route, result.probes, job.terrain, terrain)
                         job.capture = cursor
                         job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching }, cursor::step)
                     }
@@ -142,6 +148,9 @@ internal class CivsResidentNavigation(
             job.capturing?.cancel(false)
             job.searching?.cancel(false)
             job.capture = null
+            // Retry a closed region against fresh shapes even when another plugin changed it without an event.
+            // Budget exhaustion keeps its hot geometry; it is not evidence of a blocked region.
+            if (job.route.failure == "no-path") terrain.discard(job.route.worldId, job.terrain.keys)
             job.terrain.clear()
             iterator.remove()
         }
@@ -153,11 +162,16 @@ internal class CivsResidentNavigation(
         closed = true
         jobs.keys.toList().forEach(CitizenPacketRoute::cancel)
         retireCancelled()
+        terrain.clear()
         if (ownsWork) work.close()
         terminal = ownedExecutor?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
     }
 
     fun drained(): CompletableFuture<Unit> = terminal.copy()
+
+    fun changed(world: UUID, point: CivPosition) { checkOwner(); terrain.changed(world, point) }
+    fun removeChunk(world: UUID, x: Int, z: Int) { checkOwner(); terrain.removeChunk(world, x, z) }
+    fun removeWorld(world: UUID) { checkOwner(); terrain.removeWorld(world) }
 
     private fun checkOwner() = check(Thread.currentThread() === owner) { "Resident navigation requires its owning thread" }
 
@@ -182,20 +196,20 @@ internal class CivsResidentNavigation(
 internal class CitizenNavigationCaptureLimit : RuntimeException()
 
 /**
- * One native block or policy callback per step. Geometry is retained only for this search;
- * rebuilding a route starts with fresh terrain, and movement always bypasses the planning cache.
- * A shared cache would require change listeners for all writers; the current bounded MVP does not.
+ * One native block or policy callback per step. Hot shapes may be shared; permissions/costs
+ * belong to this search. Movement always checks fresh native geometry.
  */
 internal class CitizenNavigationCapture(
     private val route: CitizenPacketRoute,
     probes: List<CitizenSearchProbe>,
     private val cached: MutableMap<CivPosition, CitizenTerrainBlock>,
+    private val shapes: CivsNavigationTerrain? = null,
 ) {
     private val probes = probes.toMutableList()
     private val requestedCount = probes.size
     private val seen = probes.mapTo(hashSetOf()) { it.node }
-    // The initial origin/goal proof stays small. Later native batches include one adjacent
-    // graph layer so the worker can traverse captured nodes without a round trip per step.
+    // Nearby routes need just one neighbour layer. Long trips fill the configured connected
+    // frontier so the worker can traverse several grid steps without returning for each one.
     private val prefetch = probes.none { it.incoming || it.node.initial }
     private val maximumProbes = route.captureProbeLimit()
     private val bounds = route.captureLimits()
@@ -232,7 +246,7 @@ internal class CitizenNavigationCapture(
                 if (probeIndex >= requestedCount) { probeIndex = probes.size; return true }
                 throw CitizenNavigationCaptureLimit()
             }
-            cached[point] = route.captureBlock(point)
+            cached[point] = route.captureBlock(point, shapes)
             return false
         }
         if (candidates == null) {
@@ -247,7 +261,7 @@ internal class CitizenNavigationCapture(
             return false
         }
         completed += CitizenSearchCapture(probe, blocks, admitted.toList())
-        if (prefetch && probeIndex < requestedCount) for (edge in admitted) {
+        if (prefetch && (probeIndex < requestedCount || route.prefetchConnectedFrontier())) for (edge in admitted) {
             if (probes.size >= maximumProbes) break
             if (edge.permitted && seen.add(edge.node)) probes += CitizenSearchProbe(edge.node, edge.node.point())
         }

@@ -210,7 +210,7 @@ class CivsResearchIndustryTest : FunSpec({
         reselected.workers.single().skills shouldBe assigned.workers.single().skills
     }
 
-    test("busy extra quarry finishes once then becomes idle and reassigns while sole critical producers remain") {
+    test("busy extra quarry finishes once then staffs the missing warehouse before research while sole producers remain") {
         val base = industryCity().copy(workers = emptyList())
         fun assigned(type: BuildingType) = CivWorker(UUID.randomUUID(), type.name, base.buildings.first { it.type == type }.id, nextDeliveryAt = 1_000)
         val food = assigned(BuildingType.FARM); val wood = assigned(BuildingType.FORESTER); val stone = assigned(BuildingType.QUARRY)
@@ -237,7 +237,7 @@ class CivsResearchIndustryTest : FunSpec({
         next.cycle().phase shouldBe CitizenPhase.IDLE
         next.autonomousWork shouldBe null
         val reassigned = CivsRules.autoAssign(completed, completed.owner, 60_002) { it == extra.id }
-        reassigned.workers.first { it.id == extra.id }.assignment shouldBe CivsResearch.university(reassigned)!!.id
+        reassigned.workers.first { it.id == extra.id }.assignment shouldBe reassigned.buildings.first { it.type == BuildingType.WAREHOUSE }.id
         reassigned.workers.first { it.id == extra.id }.completedCycles shouldBe 1L
         listOf(food, wood, stone).forEach { expected -> reassigned.workers.first { it.id == expected.id }.assignment shouldBe expected.assignment }
         val paused = deferred.copy(idleReason = "autonomy-paused")
@@ -247,13 +247,14 @@ class CivsResearchIndustryTest : FunSpec({
         citizenCurrentPlan(previous, CitizenPhase.WORKING) { changed } shouldBe changed
     }
 
-    test("a stationary guard relinquishes its endless shift at idle reconciliation without a fake completed cycle") {
+    for (courierPresent in listOf(false, true)) test("a stationary guard fills ${if (courierPresent) "research" else "the missing warehouse"} without a fake completed cycle") {
         val base = industryCity().copy(workers = emptyList())
         fun assigned(type: BuildingType) = CivWorker(UUID.randomUUID(), type.name,
             base.buildings.first { it.type == type }.id, nextDeliveryAt = 1_000)
         val food = assigned(BuildingType.FARM); val wood = assigned(BuildingType.FORESTER); val stone = assigned(BuildingType.QUARRY)
         val guard = assigned(BuildingType.GUARD_TOWER)
-        val before = CivsRules.validate(base.copy(workers = listOf(food, wood, stone, guard)))
+        val courier = if (courierPresent) assigned(BuildingType.WAREHOUSE) else null
+        val before = CivsRules.validate(base.copy(workers = listOfNotNull(food, wood, stone, courier, guard)))
         val previous = requireNotNull(citizenPlan(before, guard))
         val cycle = previous.cycle()
         cycle.start(); cycle.arrive(0); cycle.arrive(0)
@@ -270,11 +271,13 @@ class CivsResearchIndustryTest : FunSpec({
         next.courier shouldBe null
         next.worldWork shouldBe null
         val assigned = CivsRules.autoAssign(city, city.owner, 2_000) { it == guard.id }
-        assigned.workers.last().assignment shouldBe CivsResearch.university(assigned)!!.id
+        assigned.workers.last().assignment shouldBe if (courierPresent) CivsResearch.university(assigned)!!.id
+            else assigned.buildings.first { it.type == BuildingType.WAREHOUSE }.id
         assigned.workers.last().completedCycles shouldBe guard.completedCycles
         assigned.workers.last().skills shouldBe guard.skills
         assigned.stock shouldBe city.stock
         listOf(food, wood, stone).forEach { expected -> assigned.workers.first { it.id == expected.id } shouldBe expected }
+        courier?.let { assigned.workers.first { worker -> worker.id == it.id } shouldBe it }
     }
 
     test("full sixteen-plot village keeps its board and advances only researched hall and new industry upgrades") {

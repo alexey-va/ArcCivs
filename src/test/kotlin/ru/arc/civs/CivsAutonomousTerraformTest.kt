@@ -311,6 +311,17 @@ class CivsAutonomousTerraformTest : FunSpec({
         shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(draft, cells) }.reason shouldBe "autonomy-no-path"
     }
 
+    test("a retained road column replaced by water fails native support proof without creating a bridge") {
+        val city = terraceCity()
+        val entry = city.buildings.single().entrance
+        val draft = CivTerraformDraft(terraceBuilder(city),
+            listOf(CivTerraformColumn(entry.x, entry.z, 64, 64, 64, preserve = true)), listOf(entry), 64)
+        val cells = terraceCapture(draft, terraceSurface { _, _ -> 64 }).toMutableMap()
+        val floor = entry.copy(y = 64)
+        cells[floor] = CivTerraformCell(floor, "minecraft:water[level=0]", false, false, false)
+        shouldThrow<CivsRejection> { CivsAutonomousTerraform.materialize(draft, cells) }.reason shouldBe "autonomy-no-path"
+    }
+
     test("candidate effort and route grading remain deterministic including negative world columns") {
         val city = terraceCity()
         val b = terraceBuilder(city)
@@ -343,6 +354,28 @@ class CivsAutonomousTerraformTest : FunSpec({
         plan.blocks.filter { it.position.y > 64 }.all { it.after == "minecraft:air" } shouldBe true
         plan.blocks.filter { it.position.y == 64 } shouldBe plan.preparedRouteSurfaces()
         plan.blocks.filter { it.position.x == 2 && it.position.z == 22 }.map { it.position.y } shouldBe (74 downTo 65).toList()
+    }
+
+    test("full-plan branches reuse a nearby paid road without changing its grade or crossing footprints") {
+        val original = terraceCity()
+        val existing = original.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = CivPosition(3, 64, 16), entrance = CivPosition(3, 65, 16), phase = BuildingPhase.ACTIVE, rotation = 90,
+            bounds = CivBox(CivPosition(4, 64, 11), CivPosition(8, 71, 15)), control = CivPosition(5, 65, 14))
+        val city = original.copy(buildings = original.buildings + existing)
+        val road = (0..3).map { CivPosition(it, 65, 0) } + (1..16).map { CivPosition(3, 65, it) }
+        val access = CivAutonomousAccess(mapOf(existing.id to road))
+        val before = Gson().toJson(access)
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }
+        val draft = CivsAutonomousTerraform.draft(city, CivTerraformOption(building, 0), surface, access,
+            preferredRoads = road.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) })
+        (draft.route.count { it in road } >= 15) shouldBe true
+        draft.route.all { point -> city.buildings.none { CivsAutonomousGeometry.horizontalContains(it.bounds, point) } } shouldBe true
+        val plan = CivsAutonomousTerraform.materialize(draft, terraceCapture(draft, surface))
+        val paidColumns = road.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        plan.blocks.none { civsTerrainKey(it.position.x, it.position.z) in paidColumns } shouldBe true
+        draft.route.filter { civsTerrainKey(it.x, it.z) in paidColumns }.forEach { it.y shouldBe 65 }
+        Gson().toJson(access) shouldBe before
     }
 
     test("a new graded road cannot raise the neighbouring forester entrance or its approach") {

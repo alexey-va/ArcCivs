@@ -5,10 +5,14 @@ import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import org.bukkit.Axis
 import org.bukkit.Bukkit
 import org.bukkit.Material
 import org.bukkit.block.Barrel
+import org.bukkit.block.BlockFace
 import org.bukkit.block.Chest
+import org.bukkit.block.data.Directional
+import org.bukkit.block.data.Orientable
 import org.bukkit.inventory.ItemStack
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.TestTaskScheduler
@@ -21,6 +25,97 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 
 class CivsWorldTest : FunSpec({
+    for (source in listOf(CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID, CivsPlanBoardBlueprint.SMALL_SCHEMATIC_ID))
+        for (rotation in listOf(0, 90, 180, 270))
+    test("$source refit at $rotation preserves the filled control and captures the actual rotated before images") {
+        worldScenario { s ->
+            val anchor = CivPosition(0, 64, 0)
+            fun point(p: CivPosition): CivPosition {
+                val q = CivsBlueprintGeometry.rotate(ArcSchematicPoint(p.x - 3, p.y, p.z - 3), rotation / 90)
+                return CivPosition(anchor.x + q.x, anchor.y + q.y, anchor.z + q.z)
+            }
+            fun box(b: CivBox): CivBox {
+                val corners = listOf(b.min, b.max, b.min.copy(z = b.max.z), b.max.copy(z = b.min.z)).map(::point)
+                return CivBox(CivPosition(corners.minOf { it.x }, corners.minOf { it.y }, corners.minOf { it.z }),
+                    CivPosition(corners.maxOf { it.x }, corners.maxOf { it.y }, corners.maxOf { it.z }))
+            }
+            val faces = listOf(BlockFace.NORTH, BlockFace.EAST, BlockFace.SOUTH, BlockFace.WEST)
+            fun data(value: String) = Bukkit.createBlockData(value).also { state ->
+                if (state is Directional && state.facing in faces)
+                    state.facing = faces[(faces.indexOf(state.facing) + rotation / 90) % 4]
+                if (state is Orientable && rotation % 180 != 0) state.axis = when (state.axis) {
+                    Axis.X -> Axis.Z
+                    Axis.Z -> Axis.X
+                    Axis.Y -> Axis.Y
+                }
+            }
+            (data("minecraft:dark_oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]") as Directional).facing shouldBe when (rotation) {
+                0 -> BlockFace.NORTH
+                90 -> BlockFace.EAST
+                180 -> BlockFace.SOUTH
+                else -> BlockFace.WEST
+            }
+            (data("minecraft:stripped_spruce_log[axis=x]") as Orientable).axis shouldBe
+                if (rotation == 90 || rotation == 270) Axis.Z else Axis.X
+            val oldBody = CivsPlanBoardBlueprint.blocks(source)
+            oldBody.forEach { (p, value) ->
+                val at = point(p)
+                val rotated = data(
+                    if (value == "minecraft:structure_void") "minecraft:barrel" else value)
+                val block = s.world.getBlockAt(at.x, at.y, at.z)
+                // MockBukkit's block-data setter does not create the container state.
+                block.type = rotated.material
+                block.blockData = rotated
+            }
+            val control = point(oldBody.entries.single { it.value == "minecraft:structure_void" }.key)
+            val barrel = s.world.getBlockAt(control.x, control.y, control.z)
+            (barrel.state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val old = CivBuilding(UUID.randomUUID(), BuildingType.PLAN_BOARD, 1, anchor, rotation, source,
+                box(if (source == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID) CivsPlanBoardBlueprint.legacyBounds
+                    else CivsPlanBoardBlueprint.smallBounds), anchor.copy(y = 65), BuildingPhase.ACTIVE, control = control)
+            val city = worldCity(s.world.uid, old).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val target = old.copy(schematicId = CivsPlanBoardBlueprint.refitId(old),
+                bounds = box(CivsPlanBoardBlueprint.bounds(CivsPlanBoardBlueprint.refitId(old))), phase = BuildingPhase.CONSTRUCTING)
+            val delta = CivsPlanBoardBlueprint.blocks(target.schematicId)
+            val cells = buildList {
+                val bounds = CivsPlanBoardBlueprint.bounds(target.schematicId)
+                for (y in bounds.min.y..bounds.max.y) for (z in bounds.min.z..bounds.max.z) for (x in bounds.min.x..bounds.max.x) {
+                    val local = CivPosition(x, y, z)
+                    val value = delta[local] ?: "minecraft:barrier"
+                    val at = point(local)
+                    add(ArcSchematicBlock(ArcSchematicPoint(at.x, at.y, at.z), data(value).asString,
+                        value == "minecraft:air", value == "minecraft:barrier"))
+                }
+            }
+            val capture = s.subject.captureSite(city.id, city.owner, city.worldId, target, cells, old)
+            repeat(10) { if (!capture.isDone) s.scheduler.tick() }
+            val plan = completed(capture)
+            plan.blocks.any { it.position == control } shouldBe false
+            val revalidation = s.subject.revalidate(plan, city.owner)
+            repeat(10) { if (!revalidation.isDone) s.scheduler.tick() }
+            completed(revalidation) shouldBe Unit
+            (barrel.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+            // Natural changes to old air cells use the ordinary journal, without an extra old-shape lock.
+            val changed = delta.entries.first { (p, state) -> oldBody[p] in listOf(null, "minecraft:air") &&
+                state != "minecraft:barrier" && state != "minecraft:structure_void" }.key.let(::point)
+            s.world.getBlockAt(changed.x, changed.y, changed.z).type = Material.SHORT_GRASS
+            val fresh = s.subject.captureSite(city.id, city.owner, city.worldId, target, cells, old)
+            repeat(10) { if (!fresh.isDone) s.scheduler.tick() }
+            val captured = completed(fresh)
+            captured.blocks.first { it.position == changed }.before shouldBe "minecraft:short_grass"
+            captured.blocks.forEach { cell ->
+                s.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+            }
+            delta.filterValues { it != "minecraft:barrier" && it != "minecraft:structure_void" }.forEach { (p, state) ->
+                val at = point(p)
+                s.world.getBlockAt(at.x, at.y, at.z).blockData.asString shouldBe data(state).asString
+            }
+            barrel.type shouldBe Material.BARREL
+            (barrel.state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
     test("the retained route step exception accepts only dry bottom stair block states") {
         worldScenario { _ ->
             for (material in listOf("cobblestone", "oak")) for (facing in listOf("north", "east", "south", "west"))

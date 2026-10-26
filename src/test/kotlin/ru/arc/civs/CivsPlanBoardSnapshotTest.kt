@@ -12,45 +12,19 @@ import java.util.concurrent.Executor
 import java.util.concurrent.RejectedExecutionException
 
 class CivsPlanBoardSnapshotTest : FunSpec({
-    test("bounded forecast reuses canonical goal order and candidate reservations without mutating the city") {
-        val base = boardCity()
-        val hall = base.buildings.first()
-        val existing = CivsAutonomy.baseProfile.filterNot {
-            it in setOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.GUARD_TOWER, BuildingType.TOWN_HALL)
-        }.mapIndexed { index, type ->
-            val p = CivPosition(-42 + index * 12, 64, -42)
-            hall.copy(id = UUID(93, index.toLong()), type = type, anchor = p, entrance = p.copy(y = 65),
-                bounds = CivBox(p.copy(z = -47), p.copy(x = p.x + 3, y = 69, z = -43)))
-        }
-        val city = base.copy(buildings = listOf(hall) + existing, autonomy = CivAutonomy(paused = true))
-        val snapshot = civsPlanBoardSnapshot(city, emptyList())
-        val calls = mutableListOf<Pair<BuildingType, Int>>()
-        val forecast = civsPlanBoardForecast(city, snapshot, Executor { it.run() }) { _, type, level, id ->
-            calls += type to level
-            CompletableFuture.completedFuture(hall.copy(id = id, type = type, level = level, anchor = CivPosition(0, 0, 0),
-                entrance = CivPosition(0, 1, 0), bounds = CivBox(CivPosition(-3, 0, -7), CivPosition(3, 7, -1))))
-        }.join()!!
-        forecast.unavailable shouldBe false
-        forecast.buildings.map { it.type } shouldBe listOf(BuildingType.HOUSE, BuildingType.TAVERN,
-            BuildingType.GUARD_TOWER, BuildingType.HOUSE, BuildingType.HOUSE)
-        calls.size shouldBe 10
-        forecast.buildings.forEachIndexed { index, building ->
-            ((city.buildings + forecast.buildings.take(index)).none {
-                CivsAutonomousGeometry.overlaps(it.bounds, building.bounds, 2)
-            }) shouldBe true
-        }
-        forecast.streets.size shouldBe 5
-        forecast.perimeter shouldBe CivsSettlementLayout.frame(city).wallObstacles
-        city.autonomy?.paused shouldBe true
-        city.buildings shouldBe listOf(hall) + existing
+    test("the board reads and detaches the same adopted plan used by construction") {
+        val base = settlementPlanCity()
+        val plan = CivsSettlementPlans.prepare(base, settlementPlanTemplates(), settlementPlanSurface(base), CivAutonomousAccess())
+        val city = base.copy(autonomy = base.autonomy!!.copy(plan = plan))
+        val captured = civsPlanBoardCapture(city)
+        val snapshot = civsPlanBoardSnapshot(captured, emptyList())
+        snapshot.plan shouldBe plan
+        snapshot.plan!!.plots.size shouldBe 16
         snapshot.plannedBuildings shouldBe emptyList()
-        val partial = civsPlanBoardForecast(city, snapshot, Executor { it.run() }) { _, _, _, _ ->
-            CompletableFuture.failedFuture(CivsRejection("schematic-unavailable"))
-        }.join()!!
-        partial.unavailable shouldBe true
-        partial.buildings shouldBe emptyList()
-        civsPlanBoardForecast(base, snapshot, Executor { it.run() }) { _, _, _, _ -> error("Personal city must not forecast") }
-            .join() shouldBe null
+        city.buildings shouldBe base.buildings
+        (civsPlanBoardLayoutKey(base) != civsPlanBoardLayoutKey(city)) shouldBe true
+        (civsPlanBoardLayoutKey(city) != civsPlanBoardLayoutKey(city.copy(autonomy = city.autonomy!!.copy(
+            plan = plan.copy(revision = plan.revision + 1))))) shouldBe true
     }
 
     test("active bodies survive upgrade overlays while registered sites and current construction deduplicate") {

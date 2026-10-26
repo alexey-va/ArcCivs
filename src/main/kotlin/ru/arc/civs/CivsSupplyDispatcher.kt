@@ -35,7 +35,7 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
     val constructionTargets: Map<UUID, UUID> = emptyMap(),
     val craftWorkers: List<CivCraftWorker> = emptyList(), val craftJobs: Map<UUID, CivCraftJob> = emptyMap(),
     val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null,
-    val stockTargets: Map<UUID, Map<String, Long>> = emptyMap()) {
+    val stockTargets: Map<UUID, Map<String, Long>> = emptyMap(), val autonomousStock: Boolean = false) {
     internal fun detached() = copy(inputKey = Unit,
         stores = stores.mapValues { (_, value) -> value.copy(stock = value.stock.toMap(), desiredStock = value.desiredStock.toMap(),
             capacity = value.capacity.copy(partialRoom = value.capacity.partialRoom.toMap())) },
@@ -151,7 +151,7 @@ internal class CivsSupplyDispatcher(
                 "assignments" to sample(plans) { (worker, plan) ->
                     val cargo = plan.cargo
                     mapOf("worker" to worker.toString(), "shipment" to cargo.id.toString(),
-                        "carrying" to plan.carrying, "inventoryBacked" to cargo.inventoryBacked,
+                        "carrying" to plan.carrying, "inventoryBacked" to cargo.inventoryBacked, "stockResource" to cargo.stockResource,
                         "material" to cargo.material, "amount" to cargo.amount,
                         "warehouse" to cargo.warehouseId.toString(), "sourceBuilding" to cargo.sourceBuildingId.toString(),
                         "sourceWorker" to cargo.sourceWorkerId?.toString(), "sourceEntrance" to point(cargo.sourceEntrance),
@@ -499,7 +499,8 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             if (amount <= 0) return
             val cargo = CivCargo(CivsLogistics.shipmentId(snapshot.cityId, courier.workerId, courier.cycle,
                 source.id, target.id, material, producer?.workerId), warehouse.id, source.id, target.id,
-                producer?.meeting ?: source.entrance, material, amount, sourceWorkerId = producer?.workerId)
+                producer?.meeting ?: source.entrance, material, amount, sourceWorkerId = producer?.workerId,
+                stockResource = if (snapshot.autonomousStock) Resource.valueOf(material) else null)
             val plan = CivCourierPlan(cargo, target.id, target.entrance, false)
             if (CivSupplyTrip.of(plan) in blockedTrips) return
             candidates += Candidate(plan, key, distance(courier.position, from) + distance(from, target.control))

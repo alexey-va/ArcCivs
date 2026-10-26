@@ -1673,10 +1673,15 @@ class CivsUi internal constructor(
                 if (worker.completedCycles > 0) tr(player, "label.deliveries") to text.literal(worker.completedCycles) else null,
             )), request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
-            worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to materialName(player, cargo.material),
+            worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to
+                (cargo.stockResource?.let { text.resource(player, it) } ?: materialName(player, cargo.material)),
                 "amount" to cargo.amount, "target" to (CivsLogistics.destination(city, cargo)?.let {
                     buildingName(player, it.type, it.level) } ?: tr(player, "buildings.generic")))) },
             if (worker.cargo != null) body(player, "logistics.cargo-help") else null,
+            worker.pendingStock?.takeUnless { it == Stock() }?.let { body(tr(player, "logistics.pending-stock",
+                "goods" to Component.join(text.literal(" · "), Resource.entries.filter { resource -> it[resource] > 0 }.map { resource ->
+                    tr(player, "logistics.stock-count", "item" to text.resource(player, resource), "amount" to it[resource])
+                }))) },
             busyBody(player), error?.let(::body),
         ), buildList {
             if (building != null && CivsRules.isBuilder(city, building) && city.construction != null)
@@ -1736,6 +1741,18 @@ class CivsUi internal constructor(
                 runtime.beginFlow(player)
                 roots[player.uniqueId] = "civs.worker"
                 showWorker(player, workerId)
+            }, stockDetails = {
+                val latest = host.settlements().firstOrNull { it.id == city.id }?.workers?.firstOrNull { it.id == workerId }
+                if (latest == null || city.autonomy == null) emptyList() else buildList {
+                    Resource.entries.filter { (latest.pendingStock?.get(it) ?: 0L) > 0 }.forEach { resource ->
+                        add(tr(player, "logistics.pending-resource", "item" to text.resource(player, resource),
+                            "amount" to requireNotNull(latest.pendingStock)[resource]))
+                    }
+                    latest.cargo?.stockResource?.let { resource ->
+                        add(tr(player, "logistics.carried-resource", "item" to text.resource(player, resource),
+                            "amount" to requireNotNull(latest.cargo).amount))
+                    }
+                }
             })
     }
 

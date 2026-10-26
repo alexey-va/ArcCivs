@@ -30,6 +30,8 @@ internal data class CivTerraformCell(val position: CivPosition, val data: String
 internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xffff_ffffL)
 
 internal data class CivTerraformOption(val building: CivBuilding, val effort: Long)
+internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
+    val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
 
 /** Finite cut/fill terraces and a graded, three-block-wide connection to an existing entrance. */
 internal object CivsAutonomousTerraform {
@@ -37,7 +39,7 @@ internal object CivsAutonomousTerraform {
     const val MAXIMUM_SURFACE_COLUMNS = 65_536
     const val MAXIMUM_CAPTURE_CELLS = 131_072
     const val MAXIMUM_CHANGED_CELLS = 32_768
-    const val MAXIMUM_ROUTE_NODES = 32_768
+    const val MAXIMUM_ROUTE_NODES = 131_072
     const val MAXIMUM_ROUTE_LENGTH = 256
 
     /** A median terrace minimises excavation; nearby levels allow a less costly graded connection. */
@@ -83,7 +85,8 @@ internal object CivsAutonomousTerraform {
 
     fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
         access: CivAutonomousAccess = CivAutonomousAccess(), additionalObstacles: List<CivBox> = emptyList(),
-        infrastructureFloors: Map<Long, Int> = emptyMap()): CivTerraformDraft {
+        infrastructureFloors: Map<Long, Int> = emptyMap(), reservedRoute: List<CivPosition>? = null,
+        preferredRoads: Set<Long> = emptySet(), inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
         val standing = access.standing(city, building.id)
         if (!building.type.isInfrastructure && standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
@@ -92,9 +95,19 @@ internal object CivsAutonomousTerraform {
             .filter { it.id != building.id && !civsPublicTransit(it) }.distinctBy { it.id }
             .map { CivsAutonomousGeometry.futureBounds(city, it) }
         val routeObstacles = obstacles + additionalObstacles
-        val route = sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, routeObstacles, standing, it)
-        }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
+        val routeFailures = sortedMapOf<String, Int>()
+        val route = reservedRoute?.also { points ->
+            if (points.isEmpty() || points.size > MAXIMUM_ROUTE_LENGTH || points.last() != building.entrance ||
+                points.first() !in sources(city, building) || points.any { p ->
+                    routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }
+                } || points.zipWithNext().any { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) != 1 || abs(a.y - b.y) > 1 })
+                throw CivsRejection("autonomy-no-path")
+        } ?: sources(city, building).asSequence().mapNotNull {
+            route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute) { reason ->
+                routeFailures.merge(reason, 1, Int::plus)
+            }
+        }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
+            mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
         val profile = roadProfile(route)
@@ -105,7 +118,9 @@ internal object CivsAutonomousTerraform {
             if (!native.loaded) throw CivsRejection("chunks-unloaded")
             val key = civsTerrainKey(x, z)
             val protected = standing[key]
-            if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path")
+            if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path",
+                mapOf("stage" to "retained-grade", "x" to "$x", "z" to "$z",
+                    "floor" to "$ground", "retained" to "${protected.y - 1}"))
             val retained = preserve || protected != null
             val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
             if (!retained && !native.natural && !control) throw CivsRejection("autonomy-terrain")
@@ -182,6 +197,15 @@ internal object CivsAutonomousTerraform {
         }
         if (count > MAXIMUM_CAPTURE_CELLS) throw CivsRejection("autonomy-search-budget")
         return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access)
+    }
+
+    internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
+        access: CivAutonomousAccess, additionalObstacles: List<CivBox>): List<CivPosition> {
+        val obstacles = city.buildings.filter { it.id != building.id && !civsPublicTransit(it) }
+            .map { CivsAutonomousGeometry.futureBounds(city, it) } + additionalObstacles
+        return sources(city, building).asSequence().mapNotNull {
+            route(city, building, surface, obstacles, access.standing(city, building.id), it)
+        }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
     }
 
     /** Exact before-images, ordered approach-first, with cuts top-down and fill from real support up. */
@@ -270,7 +294,10 @@ internal object CivsAutonomousTerraform {
     private data class Open(val node: Node, val cost: Int, val score: Int, val ordinal: Int)
 
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
-        standing: Map<Long, CivPosition>, from: CivPosition): List<CivPosition>? {
+        standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
+        inspect: (CivRouteSearchStats) -> Unit = {},
+        rejected: (String) -> Unit = {}): List<CivPosition>? {
+        val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
         val to = building.entrance
         val target = Node(to.x, to.y - 1, to.z)
@@ -279,7 +306,7 @@ internal object CivsAutonomousTerraform {
             val horizontal = abs(n.x - target.x) + abs(n.z - target.z)
             val vertical = abs(n.y - target.y)
             // Every vertical change also consumes a horizontal step; both terms are lower bounds on real cost.
-            return maxOf(horizontal, vertical) * 10 + vertical * 8
+            return maxOf(horizontal, vertical) * (if (preferredRoads.isEmpty()) 10 else 6) + vertical * 8
         }
         fun allowed(x: Int, y: Int, z: Int): Boolean {
             if (!city.contains(x, z) || y <= surface.minHeight || y + 2 >= surface.maxHeight) return false
@@ -292,7 +319,6 @@ internal object CivsAutonomousTerraform {
             standing[key]?.let { return native.loaded && y == it.y - 1 }
             return native.loaded && native.natural && abs(native.groundY - y) <= MAXIMUM_CHANGE
         }
-        if (start == target) return listOf(from)
         val open = PriorityQueue(compareBy<Open> { it.score }.thenBy { it.ordinal })
         val costs = hashMapOf(start to 0)
         val parents = hashMapOf<Node, Node>()
@@ -300,17 +326,28 @@ internal object CivsAutonomousTerraform {
         var ordinal = 0
         open += Open(start, 0, distance(start), ordinal++)
         var expanded = 0
-        while (open.isNotEmpty() && expanded++ < MAXIMUM_ROUTE_NODES) {
+        var peakQueue = 1
+        fun finish(points: List<CivPosition>?, outcome: String): List<CivPosition>? {
+            if (points == null) rejected(outcome)
+            inspect(CivRouteSearchStats(expanded, ordinal, peakQueue, costs.size,
+                (System.nanoTime() - started) / 1_000_000, outcome, from, to))
+            return points
+        }
+        if (start == target) return finish(listOf(from), "found")
+        while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()
             if (costs[current.node] != current.cost || !closed.add(current.node)) continue
+            // Stale queue entries are bookkeeping, not expanded spatial states.
+            expanded++
             val n = current.node
             if (n.x == target.x && n.y == target.y && n.z == target.z) {
                 val reversed = mutableListOf(n)
                 var cursor = n
-                while (cursor != start) { cursor = parents[cursor] ?: return null; reversed += cursor }
-                if (reversed.size > MAXIMUM_ROUTE_LENGTH || reversed.map { civsTerrainKey(it.x, it.z) }.distinct().size != reversed.size)
-                    return null
-                return reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) }
+                while (cursor != start) { cursor = parents[cursor] ?: return finish(null, "route-history"); reversed += cursor }
+                if (reversed.size > MAXIMUM_ROUTE_LENGTH || reversed.map { civsTerrainKey(it.x, it.z) }.distinct().size != reversed.size) {
+                    return finish(null, "route-length-or-repeat")
+                }
+                return finish(reversed.asReversed().map { CivPosition(it.x, it.y + 1, it.z) }, "found")
             }
             for ((direction, offset) in DIRECTIONS.withIndex()) for (dy in 0..2) {
                 val (dx, dz) = offset
@@ -334,13 +371,17 @@ internal object CivsAutonomousTerraform {
                 if (repeatedColumn) continue
                 val native = requireNotNull(surface.at(candidate.x, candidate.z))
                 // A brief hummock or hollow should be cut/filled instead of adding two gratuitous climbs.
-                val cost = current.cost + 10 + abs(candidate.y - n.y) * 8 + abs(native.groundY - candidate.y) * 2
+                val column = civsTerrainKey(candidate.x, candidate.z)
+                val shared = column in preferredRoads && column in standing
+                val cost = current.cost + (if (shared) 6 else 10) + abs(candidate.y - n.y) * 8 +
+                    if (shared) 0 else abs(native.groundY - candidate.y) * 2
                 if (cost >= costs.getOrDefault(candidate, Int.MAX_VALUE)) continue
                 costs[candidate] = cost; parents[candidate] = n
                 open += Open(candidate, cost, cost + distance(candidate), ordinal++)
+                peakQueue = maxOf(peakQueue, open.size)
             }
         }
-        return null
+        return finish(null, if (open.isNotEmpty()) "route-budget" else "route-exhausted")
     }
 
     private fun air(data: String) = data.substringBefore('[') in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")

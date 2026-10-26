@@ -786,7 +786,46 @@ class CivsServiceTest : FunSpec({
             verify(exactly = 2) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
             h.service.settlements().single().stock shouldBe Stock()
             h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
         }
+    }
+
+    for (atInfrastructureCap in listOf(false, true))
+    test("a failed full plan backs off while ordinary growth remains admissible atInfrastructureCap=$atInfrastructureCap") {
+        mockkConstructor(CivsAutonomousPlacement::class)
+        try {
+            every { anyConstructed<CivsAutonomousPlacement>().plan(any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-no-site", mapOf("type" to "SMELTERY")))
+            every { anyConstructed<CivsAutonomousPlacement>().search(any(), any(), any(), any()) } returns CompletableFuture()
+            serviceScenario { h ->
+                val oldWalls = if (!atInfrastructureCap) emptyList() else (0 until CivsRules.MAX_INFRASTRUCTURE).map { i ->
+                    val at = CivPosition(30 + i % 12 * 2, 64, 30 + i / 12 * 2)
+                    CivBuilding(UUID.randomUUID(), BuildingType.WALL, 1, at, 0, "civs/infrastructure/v1/wall/fixture",
+                        CivBox(at, at.copy(y = 67)), at.copy(z = at.z - 1), BuildingPhase.ACTIVE)
+                }
+                val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), workers = emptyList(),
+                    buildings = h.city.buildings + oldWalls))
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+                h.start()
+                h.paper.addPlayer("GrowthObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
+                val repair = CivsService::class.java.getDeclaredMethod("pulseAutonomousAccessRepair").also { it.isAccessible = true }
+                val pulse = CivsService::class.java.getDeclaredMethod("pulseAutonomy").also { it.isAccessible = true }
+                repair.invoke(h.service); h.tick()
+                h.time += 5_001
+                pulse.invoke(h.service); h.tick()
+                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
+                verify(exactly = 0) { anyConstructed<CivsAutonomousPlacement>().search(any(), any(), any(), any()) }
+                h.time += 30_001
+                pulse.invoke(h.service); h.tick()
+                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
+                verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().search(any(), BuildingType.BUILDER_HUT, 1, any()) }
+                val after = h.service.settlements().single()
+                after.buildings shouldBe city.buildings
+                after.stock shouldBe city.stock
+                after.autonomy?.plan shouldBe null
+                h.saves shouldBe emptyList()
+            }
+        } finally { unmockkConstructor(CivsAutonomousPlacement::class) }
     }
 
     test("autonomous production requires entrance arrival and a durable unique trip receipt without physical inventory") {
@@ -822,6 +861,43 @@ class CivsServiceTest : FunSpec({
             h.saves.size shouldBe 1
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
+        }
+    }
+
+    test("pending autonomous goods require arrival and unload once without another production reward") {
+        serviceScenario { h ->
+            val quarry = h.city.buildings.last().copy(type = BuildingType.QUARRY, control = CivPosition(10, 64, 0))
+            val worker = h.city.workers.first().copy(assignment = quarry.id, nextDeliveryAt = 1,
+                pendingStock = Stock(stone = 32))
+            val village = h.city.copy(autonomy = CivAutonomy(), stock = Stock(),
+                buildings = listOf(h.city.buildings.first(), quarry), workers = listOf(worker))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start()
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
+            fun complete() = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            every { h.citizens.pendingStockDelivery(village.id, worker.id) } returns worker.pendingStock
+            every { h.citizens.requirePendingStockDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
+            h.saves shouldBe emptyList()
+            every { h.citizens.requirePendingStockDelivery(village.id, worker.id, token) } returns requireNotNull(worker.pendingStock)
+            val delivery = complete()
+            delivery.isDone shouldBe false
+            h.service.settlements().single() shouldBe village
+            h.commit(); delivery.join()
+            val saved = h.service.settlements().single()
+            saved.stock shouldBe Stock(stone = 32)
+            saved.workers.single().let {
+                it.pendingStock shouldBe null
+                it.completedCycles shouldBe worker.completedCycles
+                it.skills shouldBe worker.skills
+            }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "stale-delivery"
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.citizens.requireAutonomousDelivery(any(), any(), any()) }
         }
     }
 
@@ -5592,6 +5668,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         every { store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(emptyList())
         every { store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
         every { citizens.autonomousVisualWork(any(), any()) } returns null
+        every { citizens.pendingStockDelivery(any(), any()) } returns null
         every { store.markConsumedItems(any()) } answers { CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY.adding(
             firstArg<CivInventoryTransaction>().collected?.ground.orEmpty().map(CivGroundItemChange::entityId))) }
         every { player.uniqueId } returns owner

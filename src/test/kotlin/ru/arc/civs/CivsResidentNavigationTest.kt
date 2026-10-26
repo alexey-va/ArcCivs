@@ -864,6 +864,119 @@ class CivsResidentNavigationTest : FunSpec({
         }
     }
 
+    test("stair movement touches every half tread in both directions at every walking speed") {
+        MockBukkitTestRuntime.open().use {
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
+                for (speed in listOf(.55, .8, 1.0, 1.3)) for (returning in listOf(false, true))
+                    for (loweredPath in listOf(false, true)) {
+                        val terrain = ResidentRouteTerrain()
+                        if (loweredPath) terrain.blocks[CivPosition(0, 63, 0)] = Material.DIRT_PATH
+                        for (index in 1..3) {
+                            val stair = CivPosition(dx * index, 63 + index, dz * index)
+                            terrain.blocks[stair] = Material.OAK_STAIRS
+                            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                                dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                                dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                                dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                                else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                            })
+                        }
+                        terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.OAK_PLANKS
+                        val lower = Location(terrain.world, .5, if (loweredPath) 63.9375 else 64.0, .5)
+                        val upper = Location(terrain.world, dx * 4 + .5, 67.0, dz * 4 + .5)
+                        val sign = if (returning) -1 else 1
+                        var at = (if (returning) upper else lower).clone().also {
+                            it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+                        }
+                        val target = if (returning) lower else upper
+                        val route = CitizenPacketRoute(terrain.world, at, target,
+                            { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 63..67 },
+                            { _, _ -> true }, { 1.0 })
+                        route.prepare()
+                        val contacts = linkedSetOf<Double>()
+                        val verticalOnly = mutableListOf<String>()
+                        fun wire(point: Location) = point.clone().also {
+                            it.x = kotlin.math.round(it.x * 4096) / 4096
+                            it.y = kotlin.math.round(it.y * 4096) / 4096
+                            it.z = kotlin.math.round(it.z * 4096) / 4096
+                        }
+                        repeat(250) { tick ->
+                            route.move(at, speed) { true }?.let { next ->
+                                val horizontal = next.clone().also { it.y = at.y }
+                                (at.distance(horizontal) <= .215 * speed + .000001) shouldBe true
+                                if (returning && next.y < at.y - .000001 && at.distanceSquared(horizontal) < .00000001)
+                                    verticalOnly += "$tick: $at -> $next"
+                                val a = wire(at)
+                                val b = wire(next)
+                                for (sample in 0..16) {
+                                    val point = a.clone().add(b.toVector().subtract(a.toVector()).multiply(sample / 16.0))
+                                    withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath from=$a to=$b") {
+                                        citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                                    }
+                                }
+                                for (height in listOf(64.5, 65.5, 66.5))
+                                    if (kotlin.math.abs(next.y - height) < .000001 &&
+                                        citizenPacketSupported(terrain.world, CitizenPoint(next.x, next.y, next.z))) contacts += height
+                                at = next
+                            }
+                        }
+                        withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath at=$at contacts=$contacts vertical=$verticalOnly") {
+                            route.failure shouldBe null
+                            route.finished shouldBe true
+                            at.distanceSquared(target) shouldBe 0.0
+                            contacts.toList() shouldBe if (returning) listOf(66.5, 65.5, 64.5) else listOf(64.5, 65.5, 66.5)
+                            verticalOnly shouldBe emptyList()
+                        }
+                    }
+        }
+    }
+
+    test("short native corner stairs follow their half-height surface and validate shape changes") {
+        MockBukkitTestRuntime.open().use {
+            for (returning in listOf(false, true)) for (inner in listOf(false, true)) {
+                val terrain = ResidentRouteTerrain()
+                val stair = CivPosition(1, 64, 1)
+                terrain.blocks[stair] = Material.OAK_STAIRS
+                terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0)) + if (inner)
+                    listOf(BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0), BoundingBox(.5, .5, 0.0, 1.0, 1.0, .5))
+                else listOf(BoundingBox(.5, .5, .5, 1.0, 1.0, 1.0))
+                val lower = Location(terrain.world, .5, 64.0, .5)
+                val upper = Location(terrain.world, 1.5, 65.0, 1.5)
+                var at = (if (returning) upper else lower).clone().also { it.yaw = if (returning) 135f else -45f }
+                val route = CitizenPacketRoute(terrain.world, at, if (returning) lower else upper,
+                    { it.x in 0..1 && it.z in 0..1 && it.y in 64..65 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                var halfContact = false
+                repeat(100) {
+                    route.move(at, .8) { true }?.let { next ->
+                        for (sample in 0..16) {
+                            val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 16.0))
+                            citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
+                        }
+                        if (kotlin.math.abs(next.y - 64.5) < .000001) halfContact = true
+                        at = next
+                    }
+                }
+                route.failure shouldBe null
+                route.finished shouldBe true
+                halfContact shouldBe true
+            }
+            val terrain = ResidentRouteTerrain()
+            val stair = CivPosition(1, 64, 0)
+            terrain.blocks[stair] = Material.OAK_STAIRS
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+            val start = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+            val route = CitizenPacketRoute(terrain.world, start, Location(terrain.world, 1.5, 65.0, .5),
+                { it.x in 0..1 && it.z == 0 && it.y in 64..65 }, { _, _ -> true }, { 1.0 })
+            route.prepare()
+            val at = requireNotNull(route.move(start, .8) { true })
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+            route.move(at, .8) { true } shouldBe null
+            route.failure shouldBe "path-changed"
+        }
+    }
+
     test("descending native stair shapes keep forward movement at the ordinary horizontal packet stride") {
         MockBukkitTestRuntime.open().use {
             for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) for (speed in listOf(.55, .8, 1.0, 1.3)) {
@@ -1709,6 +1822,117 @@ class CivsResidentNavigationTest : FunSpec({
                 at.x shouldBe 5.5
                 at.z shouldBe .5
             }
+        }
+    }
+
+    test("entrance arrival waits for support instead of cancelling within tolerance before gravity moves outside it") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val stair = CivPosition(-1844, 70, -2696)
+            terrain.blocks[stair] = Material.OAK_STAIRS
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+            val entrance = stair.copy(y = 71)
+            val airborne = CitizenPoint(-1843.984, 70.65, -2695.5)
+            citizenNearEndpoint(airborne, entrance) shouldBe true
+            citizenAtSupportedEndpoint(terrain.world, airborne, entrance) shouldBe false
+            val fallen = airborne.copy(y = 70.53584064)
+            (kotlin.math.abs(kotlin.math.sqrt(fallen.distanceSquared(CitizenPoint(entrance.x + .5, entrance.y.toDouble(), entrance.z + .5))) - .6705966831677087) < .000001) shouldBe true
+            citizenAtSupportedEndpoint(terrain.world, fallen, entrance) shouldBe false
+            citizenAtSupportedEndpoint(terrain.world, CitizenPoint(entrance.x + .5, entrance.y.toDouble(), entrance.z + .5), entrance) shouldBe true
+            // Native half-tread contacts remain valid when already within the same unchanged tolerance.
+            citizenAtSupportedEndpoint(terrain.world, CitizenPoint(-1843.8, 70.5, -2695.5), entrance) shouldBe true
+        }
+    }
+
+    for (speed in listOf(.55, .8, 1.0, 1.3)) test("a wide built diagonal corridor removes grid zigzags and keeps overall heading at speed $speed") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            fun built(x: Int, z: Int) = x in -1..7 && z in -1..7 && kotlin.math.abs(x - z) <= 1
+            var at = Location(terrain.world, .5, 64.0, .5, -45f, 0f)
+            val target = Location(terrain.world, 6.5, 64.0, 6.5)
+            val route = CitizenPacketRoute(terrain.world, at, target,
+                { p -> p.y == 64 && p.x in -1..7 && p.z in -1..7 }, { _, _ -> true },
+                { block -> if (built(block.x, block.z)) 1.0 else 6.0 })
+            val grid = (0 until 6).flatMap { n -> listOf(CitizenPoint(n + 1.5, 64.0, n + .5),
+                CitizenPoint(n + 1.5, 64.0, n + 1.5)) }
+            route.acceptSearch(CitizenSearchResult(emptyList(), grid.size,
+                grid.map { CitizenPlannedStep(it, CitizenRouteAction.WALK) }))
+            var walked = 0.0
+            repeat(200) {
+                route.move(at, speed) { true }?.let { next ->
+                    (next.distance(at) <= .215 * speed + .000001) shouldBe true
+                    citizenPacketStepClear(terrain.world, CitizenPoint(at.x, at.y, at.z),
+                        CitizenPoint(next.x, next.y, next.z), false) shouldBe true
+                    (kotlin.math.abs(next.x - next.z) < .000001) shouldBe true
+                    (kotlin.math.abs(citizenAngleChange(next.yaw, -45f)) < .01f) shouldBe true
+                    built(next.blockX, next.blockZ) shouldBe true
+                    walked += at.distance(next)
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+            (kotlin.math.abs(walked - kotlin.math.sqrt(72.0)) < .000001) shouldBe true
+        }
+    }
+
+    test("a flat shortcut cannot graze a barrel control corner that later packet steps would reject") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            val control = CivPosition(20, 64, 0)
+            terrain.blocks[control] = Material.BARREL
+            val farm = CivBuilding(UUID.randomUUID(), BuildingType.FARM, 1, control, 0, "farm1",
+                CivBox(CivPosition(18, 64, -2), CivPosition(26, 68, 2)), control, BuildingPhase.ACTIVE,
+                control = control, production = "WHEAT")
+            val city = pathsCity().copy(worldId = terrain.world.uid, buildings = listOf(farm))
+            var at = Location(terrain.world, 20.5, 64.0, -.5, -90f, 0f)
+            val target = Location(terrain.world, 24.5, 64.0, .5)
+            // The 4:1 chord touches the shared policy's expanded barrel corner at (21.3,-.3).
+            citizenControlStepClear(city, CitizenPoint(at.x, at.y, at.z), CitizenPoint(target.x, target.y, target.z)) shouldBe false
+            val route = CitizenPacketRoute(terrain.world, at, target,
+                { p -> p.y == 64 && citizenControlClear(city, p) },
+                { from, to -> citizenControlStepClear(city, from, to) }, { 1.0 })
+            val grid = (21..24).map { CitizenPoint(it + .5, 64.0, -.5) } + CitizenPoint(24.5, 64.0, .5)
+            route.acceptSearch(CitizenSearchResult(emptyList(), grid.size,
+                grid.map { CitizenPlannedStep(it, CitizenRouteAction.WALK) }))
+            repeat(120) {
+                route.move(at, .8) { true }?.let { next ->
+                    citizenControlStepClear(city, CitizenPoint(at.x, at.y, at.z), CitizenPoint(next.x, next.y, next.z)) shouldBe true
+                    (at.distance(next) <= .172001) shouldBe true
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+        }
+    }
+
+    test("flat smoothing follows the built L corridor instead of cutting across its lawn") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            fun built(x: Int, z: Int) = z == 0 && x in 0..4 || x == 4 && z in 0..4
+            var at = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+            val target = Location(terrain.world, 4.5, 64.0, 4.5)
+            val route = CitizenPacketRoute(terrain.world, at, target,
+                { p -> p.y == 64 && p.x in 0..4 && p.z in 0..4 }, { _, _ -> true },
+                { block -> if (built(block.x, block.z)) 1.0 else 6.0 })
+            val grid = (1..4).map { CitizenPoint(it + .5, 64.0, .5) } +
+                (1..4).map { CitizenPoint(4.5, 64.0, it + .5) }
+            route.acceptSearch(CitizenSearchResult(emptyList(), grid.size,
+                grid.map { CitizenPlannedStep(it, CitizenRouteAction.WALK) }))
+            repeat(180) {
+                route.move(at, .8) { true }?.let { next ->
+                    built(next.blockX, next.blockZ) shouldBe true
+                    (next.distance(at) <= .172001) shouldBe true
+                    at = next
+                }
+            }
+            route.failure shouldBe null
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
         }
     }
 

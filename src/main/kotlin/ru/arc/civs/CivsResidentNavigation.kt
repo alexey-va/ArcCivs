@@ -31,9 +31,14 @@ internal class CitizenPacketRoute(
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
-                           val action: CitizenRouteAction = CitizenRouteAction.WALK) {
+                           val action: CitizenRouteAction = CitizenRouteAction.WALK,
+                           val support: CitizenPoint = point,
+                           val profileTerrain: Map<CivPosition, CitizenCollisionSnapshot>? = null,
+                           val straightCorridor: Boolean = false) {
         private val length = sqrt(start.distanceSquared(point))
         private var highWater = 0.0
+        var profileChecked = false
+        var corridorChecked = false
 
         private fun projection(at: CitizenPoint): Double = if (length < .000001) 0.0 else
             (((at.x - start.x) * (point.x - start.x) + (at.y - start.y) * (point.y - start.y) +
@@ -52,6 +57,7 @@ internal class CitizenPacketRoute(
             return min(earned, sqrt(from.distanceSquared(to)))
         }
     }
+    internal val worldId get() = world.uid
     private val origin = CitizenPoint(from.x, from.y, from.z)
     private val minimumY = world.minHeight
     private val maximumY = world.maxHeight
@@ -65,6 +71,8 @@ internal class CitizenPacketRoute(
     var preparationPhase = "queued"
         private set
     var capturedBlocks = 0
+        private set
+    var nativeShapeReads = 0
         private set
     var searchNanos = 0L
         private set
@@ -139,22 +147,29 @@ internal class CitizenPacketRoute(
     internal fun captureLimits() = minimumY to maximumY
     internal fun captureBlockLimit() = settings.maximumCapturedBlocks
     internal fun captureProbeLimit() = settings.searchNodesPerBatch
+    internal fun prefetchConnectedFrontier() = origin.distanceSquared(CitizenPoint(target.x, target.y, target.z)) >
+        settings.closeRouteDistance * settings.closeRouteDistance
     internal fun preparationTickLimit(): Long =
         if (origin.distanceSquared(CitizenPoint(target.x, target.y, target.z)) <=
             settings.closeRouteDistance * settings.closeRouteDistance) settings.closePreparationTicks.toLong()
         else settings.preparationTicks.toLong()
 
     /** One bounded native capture. The resulting graph contains no World/Block or mutable shapes. */
-    internal fun captureBlock(point: CivPosition): CitizenTerrainBlock {
+    internal fun captureBlock(point: CivPosition, shapes: CivsNavigationTerrain? = null): CitizenTerrainBlock {
         if (point.y !in minimumY until maximumY || !citizenChunkReady(world, point.x shr 4, point.z shr 4))
             return CitizenTerrainBlock.UNAVAILABLE
         val block = world.getBlockAt(point.x, point.y, point.z)
-        val boxes = block.collisionShape.boundingBoxes.map {
-            CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
+        val capture = {
+            nativeShapeReads++
+            CitizenTerrainShape(block.isLiquid, citizenRouteOpenable(block.blockData) != null,
+                Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), block.collisionShape.boundingBoxes.map {
+                    CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ)
+                })
         }
+        val shape = shapes?.read(world.uid, point, org.bukkit.Bukkit.getCurrentTick().toLong(), capture) ?: capture()
         capturedBlocks++
-        return CitizenTerrainBlock(true, block.isLiquid, citizenRouteOpenable(block.blockData) != null,
-            Tag.CLIMBABLE.isTagged(block.type), citizenCampfireLit(block), allowed(point), travelCost(block), boxes)
+        return CitizenTerrainBlock(true, shape.liquid, shape.door, shape.climbable,
+            shape.hot, allowed(point), travelCost(block), shape.boxes)
     }
 
     internal fun capturePermission(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to)
@@ -194,6 +209,7 @@ internal class CitizenPacketRoute(
         if (searching || failure != null || finished) return null
         val observed = CitizenPoint(from.x, from.y, from.z)
         path.firstOrNull()?.observe(observed)
+        straightenCorridor(observed)
         roundCorner(observed)
         // A large handoff turns in place first. Translating backwards while the body
         // catches up makes the native humanoid renderer reverse its own body heading.
@@ -223,17 +239,33 @@ internal class CitizenPacketRoute(
         var earned = 0.0
         var usedGravity = false
         var previousDirection: org.bukkit.util.Vector? = null
+        var checkedProfile: Map<CivPosition, CitizenCollisionSnapshot>? = null
         // A normal step can cross a cell centre. Spend its remainder in this same tick,
         // never save it for a later tick or accelerate after an obstruction clears.
         for (segment in 0 until 8) {
-            val entry = path.firstOrNull()
+            if (segment > 0) straightenCorridor(CitizenPoint(point.x, point.y, point.z))
+            var entry = path.firstOrNull()
             if (entry == null) { finished = true; break }
+            if (!entry.profileChecked && entry.profileTerrain == null) {
+                entry.profileChecked = true
+                prepareStepProfile(entry, point)
+                entry = requireNotNull(path.firstOrNull())
+            }
+            val profile = entry.profileTerrain
+            if (profile != null && profile !== checkedProfile) {
+                if (profile.any { (position, captured) ->
+                        !citizenChunkReady(world, position.x shr 4, position.z shr 4) ||
+                            citizenCollisionSnapshot(world, position.x, position.y, position.z) != captured
+                    }) { fail("path-changed"); break }
+                checkedProfile = profile
+            }
             val next = entry.point
             val to = Location(world, next.x, next.y, next.z)
+            val support = entry.support
             if (!citizenChunkReady(world, to.blockX shr 4, to.blockZ shr 4) ||
                 !allowed(CivPosition(to.blockX, floor(to.y + .001).toInt(), to.blockZ)) ||
-                !citizenPacketSupported(world, next) ||
-                !travelCost(world.getBlockAt(to.blockX, citizenSupportY(next.y), to.blockZ)).isFinite()) {
+                !citizenPacketSupported(world, support) ||
+                !travelCost(world.getBlockAt(floor(support.x).toInt(), citizenSupportY(support.y), floor(support.z).toInt())).isFinite()) {
                 fail("path-changed"); break
             }
             if (!openDoor(to)) { fail("passage-blocked"); break }
@@ -241,14 +273,17 @@ internal class CitizenPacketRoute(
             // follows the horizontal route while gravity settles onto native support.
             val descending = gravityStep(entry, point.y)
             val waypoint = to.clone()
-            if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
-                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
-                waypoint.y = point.y
-            } else if (to.y > point.y + .0001) {
-                waypoint.x = point.x
-                waypoint.z = point.z
-            } else if (descending || to.y < point.y - .0001 &&
-                (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) waypoint.y = point.y
+            // A native profile already contains the clear ramps and mandatory tread contacts.
+            if (profile == null) {
+                if ((entry.action == CitizenRouteAction.CLIMB || entry.action == CitizenRouteAction.LADDER_ENTER) &&
+                    (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) {
+                    waypoint.y = point.y
+                } else if (to.y > point.y + .0001) {
+                    waypoint.x = point.x
+                    waypoint.z = point.z
+                } else if (descending || to.y < point.y - .0001 &&
+                    (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) waypoint.y = point.y
+            }
             val delta = waypoint.toVector().subtract(point.toVector())
             val distance = delta.length()
             if (distance < .0001) {
@@ -271,7 +306,7 @@ internal class CitizenPacketRoute(
             if (point.distanceSquared(candidate) < .000000000001) break
             val a = CitizenPoint(point.x, point.y, point.z)
             val b = CitizenPoint(candidate.x, candidate.y, candidate.z)
-            if (!permits(a, b) || !(if (descending) citizenPacketSegmentClear(world, a, b, false, a, null)
+            if (!permits(a, b) || !(if (descending || profile != null) citizenPacketSegmentClear(world, a, b, false, a, null)
                     else citizenPacketStepClear(world, a, b, false))) {
                 fail("movement-blocked"); break
             }
@@ -291,7 +326,7 @@ internal class CitizenPacketRoute(
             // A supported lower node still constrains the route, but its centre is
             // not a stop in mid-air. Keep the last landing and every climb boundary.
             val nextEntry = path.elementAtOrNull(1)
-            if (point.distanceSquared(to) < .000001 || descending &&
+            if (point.distanceSquared(to) < .000001 || profile == null && descending &&
                 abs(point.x - to.x) < .000001 && abs(point.z - to.z) < .000001 &&
                 nextEntry != null && nextEntry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
                 nextEntry.point.y <= to.y + .0001) path.removeFirst()
@@ -318,9 +353,50 @@ internal class CitizenPacketRoute(
         return point
     }
 
-    private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.point.y < y - .0001 &&
+    private fun gravityStep(entry: Waypoint, y: Double): Boolean = entry.profileTerrain == null && entry.point.y < y - .0001 &&
         entry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
         (floor(entry.start.x) != floor(entry.point.x) || floor(entry.start.z) != floor(entry.point.z))
+
+    /** Refine only this admitted edge; the A* cells, route policy and capture budgets stay unchanged. */
+    private fun prepareStepProfile(entry: Waypoint, at: Location) {
+        val from = CitizenPoint(at.x, at.y, at.z)
+        val to = entry.point
+        val horizontal = (to.x - from.x) * (to.x - from.x) + (to.z - from.z) * (to.z - from.z)
+        if (entry.action != CitizenRouteAction.STEP || horizontal !in .0025..4.0 ||
+            abs(to.y - from.y) <= .13 || !citizenStepHeightAllowed(from.y, to.y)) return
+        val low = min(from.y, to.y)
+        val high = max(from.y, to.y)
+        val terrain = linkedMapOf<CivPosition, CitizenCollisionSnapshot>()
+        val floors = mutableListOf<BoundingBox>()
+        // One adjacent-cell edge: at most 4 x 4 x 4 native cells, never a world scan.
+        for (x in floor(min(from.x, to.x) - .3).toInt()..floor(max(from.x, to.x) + .3).toInt())
+            for (z in floor(min(from.z, to.z) - .3).toInt()..floor(max(from.z, to.z) + .3).toInt()) {
+                if (!citizenChunkReady(world, x shr 4, z shr 4)) return
+                for (y in floor(low).toInt() - 1..floor(high).toInt()) {
+                    if (y !in minimumY until maximumY) return
+                    val state = citizenCollisionSnapshot(world, x, y, z)
+                    if (state.liquid || state.door) continue
+                    val support = state.boxes.filter { it.maxY in low - .001..high + .001 }
+                    if (support.isEmpty()) continue
+                    terrain[CivPosition(x, y, z)] = state
+                    floors += support
+                }
+            }
+        val points = citizenStepProfile(from, to, floors) ?: return
+        var previous = from
+        for (point in points) {
+            if (!allowed(CivPosition(floor(point.x).toInt(), floor(point.y + .001).toInt(), floor(point.z).toInt())) ||
+                !permits(previous, point) || !citizenPacketSegmentClear(world, previous, point, false, previous, null)) return
+            previous = point
+        }
+        previous = from
+        val refined = points.map { point ->
+            Waypoint(previous, point, corner = false, action = CitizenRouteAction.STEP,
+                support = entry.support, profileTerrain = terrain).also { previous = point }
+        }
+        path.removeFirst()
+        for (waypoint in refined.asReversed()) path.addFirst(waypoint)
+    }
 
     /** Clip gravity against the swept feet, then validate the actual packet chord above. */
     private fun fall(from: Location, candidate: Location): Location? {
@@ -351,6 +427,52 @@ internal class CitizenPacketRoute(
                 candidate.y = max(candidate.y, floor.maxY)
         }
         return candidate
+    }
+
+    /**
+     * Remove grid zigzags only inside a built, flat corridor. Every sampled body
+     * footprint keeps the original cheap surface; an adjacent lawn never licenses a shortcut.
+     */
+    private fun straightenCorridor(from: CitizenPoint) {
+        val first = path.firstOrNull() ?: return
+        if (first.corridorChecked || first.behindHighWater(from)) return
+        first.corridorChecked = true
+        val candidates = path.take(6).takeWhile { it.action == CitizenRouteAction.WALK && it.profileTerrain == null &&
+            abs(it.point.y - from.y) <= .0001 && from.distanceSquared(it.point) <= 25.0 }
+        if (candidates.size < 2) return
+        var previousPoint = from
+        val gridLength = candidates.sumOf { step -> sqrt(previousPoint.distanceSquared(step.point)).also { previousPoint = step.point } }
+        // Collinear nodes need no shortcut; keep the next corner available to ordinary rounding.
+        if (gridLength - sqrt(from.distanceSquared(candidates.last().point)) < .05) return
+        fun built(point: CitizenPoint): Boolean {
+            for (x in floor(point.x - .299).toInt()..floor(point.x + .299).toInt())
+                for (z in floor(point.z - .299).toInt()..floor(point.z + .299).toInt()) {
+                    if (!citizenChunkReady(world, x shr 4, z shr 4) ||
+                        !allowed(CivPosition(x, floor(point.y + .001).toInt(), z)) ||
+                        travelCost(world.getBlockAt(x, citizenSupportY(point.y), z)).let { !it.isFinite() || it > 1.000001 }) return false
+                }
+            return citizenPacketSupported(world, point)
+        }
+        if (!built(from)) return
+        val target = candidates.last().point
+        val length = sqrt(from.distanceSquared(target))
+        if (length < .2) return
+        // The eventual packets follow this whole chord. A policy boundary touched at
+        // a sample join must not disappear when the ray is split into shorter pieces.
+        if (!permits(from, target) || !citizenPacketStepClear(world, from, target, false)) return
+        // One candidate and at most twenty-five short chords per admitted segment.
+        val count = kotlin.math.ceil(length / .2).toInt()
+        var previous = from
+        for (sample in 1..count) {
+            val fraction = sample.toDouble() / count
+            val point = CitizenPoint(from.x + (target.x - from.x) * fraction, from.y,
+                from.z + (target.z - from.z) * fraction)
+            if (!built(point) || !permits(previous, point) ||
+                !citizenPacketSegmentClear(world, previous, point, false, previous, null)) return
+            previous = point
+        }
+        repeat(candidates.size) { path.removeFirst() }
+        path.addFirst(Waypoint(from, target, corner = false, straightCorridor = true).also { it.corridorChecked = true })
     }
 
     /**
@@ -402,10 +524,15 @@ internal class CitizenPacketRoute(
 
     /** Anticipate a corner along the validated polyline; never move along this look-ahead chord. */
     private fun heading(from: Location, stride: Double): Float? {
+        path.firstOrNull()?.takeIf { it.straightCorridor }?.point?.let { point ->
+            val dx = point.x - from.x
+            val dz = point.z - from.z
+            if (dx * dx + dz * dz > .00001) return Math.toDegrees(atan2(-dx, dz)).toFloat()
+        }
         var previous = CitizenPoint(from.x, from.y, from.z)
-        // A right-angle turn takes twelve frames at 8 degrees per frame. Begin its
-        // first half before the corner, including when Trails increases the stride.
-        var remaining = (stride * 6).coerceIn(.65, 2.0)
+        // Follow the overall admitted corridor rather than alternately facing every
+        // cardinal grid edge. Level changes still terminate the look-ahead below.
+        var remaining = (stride * 12).coerceIn(1.5, 3.0)
         var aim = previous
         for (waypoint in path) {
             val next = waypoint.point
@@ -459,6 +586,68 @@ internal fun citizenFace(npc: ru.arc.paper.npc.PacketPlayerNpc, yaw: Float, pitc
     npc.bodyYaw = citizenTurn(npc.bodyYaw, yaw, limit)
     npc.headYaw = citizenTurn(npc.headYaw, yaw, limit)
     npc.pitch += (pitch - npc.pitch).coerceIn(-limit, limit)
+}
+
+/** Native top-face profile under the moving body, independent of material, orientation and stair shape. */
+internal fun citizenStepProfile(from: CitizenPoint, to: CitizenPoint, floors: List<BoundingBox>): List<CitizenPoint>? {
+    data class Span(val start: Double, val end: Double, val height: Double)
+    val dx = to.x - from.x
+    val dz = to.z - from.z
+    val distance = sqrt(dx * dx + dz * dz)
+    if (distance < .05 || distance > 2.0 || abs(to.y - from.y) <= .13) return null
+    // One wire-position quantum keeps interpolated packets off the riser boundary.
+    val half = .299 + 1.0 / 4096.0
+    val spans = floors.mapNotNull { box ->
+        var start = 0.0
+        var end = 1.0
+        fun axis(origin: Double, delta: Double, low: Double, high: Double): Boolean {
+            if (abs(delta) < .0000001) return origin > low && origin < high
+            val first = (low - origin) / delta
+            val second = (high - origin) / delta
+            start = max(start, min(first, second))
+            end = min(end, max(first, second))
+            return end - start > .0000001
+        }
+        if (axis(from.x, dx, box.minX - half, box.maxX + half) &&
+            axis(from.z, dz, box.minZ - half, box.maxZ + half)) Span(start, end, box.maxY) else null
+    }
+    val boundaries = (listOf(0.0, 1.0) + spans.flatMap { listOf(it.start, it.end) }).distinct().sorted()
+    if (boundaries.size > 64) return null
+    val levels = mutableListOf<Span>()
+    for ((start, end) in boundaries.zipWithNext()) {
+        if (end - start <= .0000001) continue
+        val middle = (start + end) / 2
+        val height = spans.filter { middle > it.start && middle < it.end }.maxOfOrNull { it.height } ?: return null
+        val last = levels.lastOrNull()
+        if (last != null && abs(last.height - height) < .000001) levels[levels.lastIndex] = last.copy(end = end)
+        else levels += Span(start, end, height)
+    }
+    if (levels.size < 3 || abs(levels.first().height - from.y) > .001 || abs(levels.last().height - to.y) > .001) return null
+    val ascending = to.y > from.y
+    // Ordinary treads rise by 1/2; entering one from a 15/16 path raises the first riser to 9/16.
+    if (levels.zipWithNext().any { (a, b) ->
+            val rise = (b.height - a.height) * if (ascending) 1 else -1
+            rise <= .000001 || rise > .562501
+        } || levels.any { (it.end - it.start) * distance < .025 }) return null
+    fun point(t: Double, y: Double) = CitizenPoint(from.x + dx * t, y, from.z + dz * t)
+    val points = mutableListOf<CitizenPoint>()
+    fun add(point: CitizenPoint) {
+        if ((points.lastOrNull() ?: from).distanceSquared(point) > .000000000001) points += point
+    }
+    for ((before, after) in levels.zipWithNext()) {
+        val contact = before.end
+        if (ascending) {
+            val ramp = min(.2 / distance, (before.end - before.start) * .45)
+            add(point(contact - ramp, before.height))
+            add(point(contact, after.height))
+        } else {
+            val ramp = min(.2 / distance, (after.end - after.start) * .45)
+            add(point(contact, before.height))
+            add(point(contact + ramp, after.height))
+        }
+    }
+    add(to)
+    return points
 }
 
 internal data class CitizenCollisionSnapshot(val liquid: Boolean, val door: Boolean,

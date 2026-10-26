@@ -16,6 +16,8 @@ data class CivCargo(
     val inventoryBacked: Boolean = false,
     /** Null retains the existing local-container endpoint and shipment identity. */
     val sourceWorkerId: UUID? = null,
+    /** Closed autonomous stock uses the same shipment identity without materializing an item. */
+    val stockResource: Resource? = null,
 )
 
 data class CivCourierPlan(val cargo: CivCargo, val destinationBuildingId: UUID,
@@ -37,7 +39,10 @@ object CivsLogistics {
     private val MATERIAL = Regex("[A-Z][A-Z0-9_]{0,63}")
 
     fun validCargo(city: Settlement, cargo: CivCargo?): Boolean = cargo == null || runCatching {
-        require(city.inventory != null && listOf<Any?>(cargo.id, cargo.warehouseId, cargo.sourceBuildingId, cargo.targetBuildingId,
+        require((city.inventory != null && cargo.stockResource == null ||
+            city.autonomy != null && city.inventory == null && cargo.stockResource != null && !cargo.inventoryBacked &&
+                cargo.material == cargo.stockResource.name && cargo.sourceWorkerId != null) &&
+            listOf<Any?>(cargo.id, cargo.warehouseId, cargo.sourceBuildingId, cargo.targetBuildingId,
             cargo.sourceEntrance, cargo.material).all { it != null })
         require(cargo.amount in 1..MAX_CARGO && MATERIAL.matches(cargo.material) && cargo.material !in setOf("AIR", "CAVE_AIR", "VOID_AIR"))
         require(cargo.sourceBuildingId != cargo.targetBuildingId &&
@@ -159,6 +164,9 @@ object CivsLogistics {
 
     /** Equipped and custom items stay personal; real work inputs and sixteen bread stay available. */
     internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
+        if (city.autonomy != null && city.inventory == null) return if (worker.cargo == null && !CivsResidents.isChild(worker))
+            Resource.entries.associate { it.name to (worker.pendingStock?.get(it) ?: 0L) }.filterValues { it > 0 }
+        else emptyMap()
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
             ?: return emptyMap()
         if (worker.cargo != null || CivsResidents.isChild(worker) || CivsRules.isBuilder(city, building) ||
@@ -235,6 +243,7 @@ object CivsLogistics {
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,
         craftInputs: Map<UUID, Map<String, Long>> = emptyMap()): Settlement {
+        if (cargo.stockResource != null) return CivsAutonomousLogistics.pickup(city, workerId, cargo)
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         if (worker.cargo == cargo.copy(inventoryBacked = true)) return city
         val source = city.building(cargo.sourceBuildingId) ?: throw CivsRejection("stale-delivery")
@@ -272,7 +281,7 @@ object CivsLogistics {
     /** The service durably commits this revision before exposing old shipments to gameplay. */
     fun materializeCargo(city: Settlement): Settlement {
         val workers = city.workers.map { worker ->
-            val cargo = worker.cargo?.takeUnless { it.inventoryBacked } ?: return@map worker
+            val cargo = worker.cargo?.takeUnless { it.inventoryBacked || it.stockResource != null } ?: return@map worker
             CivsEquipment.materializeLegacyCargo(worker, cargo)
         }
         return if (workers == city.workers) city else CivsRules.validate(city.copy(workers = workers,
@@ -283,6 +292,7 @@ object CivsLogistics {
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         reject(worker.cargo?.id != cargoId, "stale-delivery")
         val cargo = requireNotNull(worker.cargo)
+        if (cargo.stockResource != null) return CivsAutonomousLogistics.unload(city, worker, cargo, at)
         reject(!cargo.inventoryBacked, "materials-migration-pending")
         val emptied = CivsEquipment.consume(worker.copy(cargo = null), cargo.material, cargo.amount.toInt())
         val updated = CivsResidents.trained(emptied.copy(completedCycles = Math.addExact(worker.completedCycles, 1),

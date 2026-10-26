@@ -353,17 +353,25 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    for (forestBudget in listOf(128, 192)) test("exhausted approaches recover with forest budget $forestBudget without changing the captured tree") {
+    for (forestBudget in listOf(128, 192)) test("an accepted tree recovers exhausted approaches with forest budget $forestBudget without changing its batch") {
         var yieldRetry = false
         var nanos = 0L
         forestryWorksite("forestry-exhausted-recovery", nanoTime = {
             if (yieldRetry) nanos.also { nanos += 500_000L } else 0L
-        }, settings = CivsWorksiteSettings(forestWorkUnitsPerPulse = forestBudget)) { world, runtime, city ->
+        }, settings = CivsWorksiteSettings(forestWorkUnitsPerPulse = forestBudget)) { world, runtime, initial ->
             val clock = Bukkit.getScheduler() as BukkitSchedulerMock
-            val worker = city.workers.single()
+            val worker = initial.workers.single()
             forestrySmallOak(world, CivPosition(-15, 64, -26))
-            repeat(50_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            repeat(50_000) { if (runtime.plan(initial, worker) == null) runtime.pulse(listOf(initial)) }
+            val admitted = requireNotNull(runtime.plan(initial, worker)).forestry!!.job
+            val cut = admitted.position(admitted.cells.first())
+            world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+            val accepted = admitted.copy(next = 1)
+            val city = initial.copy(forestryJobs = mapOf(requireNotNull(worker.assignment).toString() to accepted))
+            runtime.invalidate(worker.id)
+            repeat(64) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val first = requireNotNull(runtime.plan(city, worker))
+            first.forestry!!.job shouldBe accepted
             var current = first
             val tried = linkedSetOf<CivPosition>()
             var exhausted = false
@@ -405,6 +413,367 @@ class CivsForestryTest : FunSpec({
             val recovered = requireNotNull(runtime.plan(city, worker))
             recovered shouldBe first
             runtime.validate(city, recovered)
+            city.forestryJobs?.values?.single() shouldBe accepted
+            city.stock shouldBe Stock()
+        }
+    }
+
+    for (paid in listOf(false, true)) test("a ${if (paid) "paid" else "unpaid"} tree can work remotely through its own captured crown after one rejected approach") {
+        forestryWorksite("forestry-remote-$paid", nanoTime = { 0L }) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            val leaf = "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]"
+            for (y in 64..66) for (z in root.z - 1..root.z + 1)
+                world.getBlockAt(root.x - 2, y, z).blockData = Bukkit.createBlockData(leaf)
+            world.getBlockAt(root.x - 1, 65, root.z).blockData = Bukkit.createBlockData(leaf)
+            var city = initial
+            fun select(): CivWorldWork {
+                repeat(3_000) {
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker)?.let { return it }
+                }
+                error("No forestry candidate: ${runtime.debug(setOf(worker.id))}")
+            }
+            var first = select()
+            if (paid) {
+                val job = requireNotNull(first.forestry).job
+                val cut = job.position(job.cells.first())
+                world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+                city = city.copy(forestryJobs = mapOf(first.buildingId.toString() to job.copy(next = 1)))
+                runtime.invalidate(worker.id)
+                first = select()
+            }
+            val feet = Location(world, root.x - 5.5, 64.0, root.z + .5)
+            runtime.residentFeet = { feet }
+            val eye = feet.clone().add(0.0, 1.62, 0.0)
+            citizenReachableBlockPoint(world, eye, root, CITIZEN_REMOTE_WORK_REACH) shouldBe null
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            val remote = select()
+            remote.remoteWork shouldBe true
+            remote.standing shouldBe CivPosition(feet.blockX, 64, feet.blockZ)
+            remote.copy(standing = first.standing, remoteWork = false) shouldBe first
+            runtime.validate(city, remote)
+            (citizenReachableBlockPoint(world, eye, root, citizenWorkReach(BuildingType.FORESTER, remote), remote) != null) shouldBe true
+            val receipt = forestryReceipt(city, remote, 200_000).validated()
+            receipt.worldChanges shouldBe first.changes
+            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(receipt.after, remote, 200_001) }.reason shouldBe "stale-delivery"
+            // Another natural crown may hide the animation, without becoming part of this receipt.
+            for (y in 64..66) for (z in root.z - 1..root.z + 1)
+                world.getBlockAt(root.x - 3, y, z).blockData = Bukkit.createBlockData(leaf)
+            (citizenReachableBlockPoint(world, eye, root, CITIZEN_REMOTE_WORK_REACH, remote) != null) shouldBe true
+            runtime.validate(city, remote)
+            remote.changes shouldBe first.changes
+            // Decorative foliage and an actual wall remain obstacles.
+            for (state in listOf("minecraft:oak_leaves[distance=1,persistent=true,waterlogged=false]", "minecraft:stone")) {
+                for (y in 64..66) for (z in root.z - 1..root.z + 1)
+                    world.getBlockAt(root.x - 3, y, z).blockData = Bukkit.createBlockData(state)
+                citizenReachableBlockPoint(world, eye, root, CITIZEN_REMOTE_WORK_REACH, remote) shouldBe null
+                shouldThrow<CivsRejection> { runtime.validate(city, remote) }.reason shouldBe "stale-worksite"
+            }
+            city.stock shouldBe Stock()
+        }
+    }
+
+    for (paid in listOf(false, true)) test("initial ${if (paid) "paid" else "unpaid"} tree admission works from safe distant feet when nearby stances are unsupported") {
+        forestryWorksite("forestry-initial-remote-$paid", autonomous = false, nanoTime = { 0L },
+            settings = CivsWorksiteSettings(standingChecksPerPulse = 1, rayChecksPerPulse = 1)) { world, runtime, initial ->
+            val worker = initial.workers.single().let { it.copy(items = it.items!!.toMutableList().also { slots ->
+                slots[CivsEquipment.BAG] = CivResidentItem("OAK_SAPLING", 4)
+            }) }
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+                if (x != root.x || z != root.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            while (!scan.complete && !scan.failed) scan.advance(128) { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
+            val captured = requireNotNull(scan.job(listOf(root)))
+            val job = if (paid) captured.copy(next = 1) else null
+            job?.let {
+                val previous = it.position(it.cells.first())
+                world.getBlockAt(previous.x, previous.y, previous.z).type = Material.AIR
+            }
+            val city = initial.copy(workers = listOf(worker),
+                forestryJobs = job?.let { mapOf(requireNotNull(worker.assignment).toString() to it) })
+            // This neighbouring natural crown is not part of either immutable tree batch.
+            for (y in 64..66) for (z in root.z - 1..root.z + 1)
+                world.getBlockAt(root.x - 3, y, z).blockData = Bukkit.createBlockData(
+                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            val feet = Location(world, root.x - 5.5, 64.0, root.z + .5)
+            runtime.residentFeet = { feet }
+            citizenCanReachBlock(world, feet.clone().add(0.0, 1.62, 0.0), root, CITIZEN_BLOCK_REACH) shouldBe false
+            runtime.plan(city, worker) shouldBe null
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = requireNotNull(runtime.plan(city, worker)) { "No initial remote work: ${runtime.debug(setOf(worker.id))}" }
+            work.remoteWork shouldBe true
+            work.standing shouldBe CivPosition(feet.blockX, 64, feet.blockZ)
+            work.focus shouldBe root
+            work.inputs shouldBe if (paid) emptyMap() else mapOf("OAK_SAPLING" to 1L)
+            if (paid) requireNotNull(work.forestry).job shouldBe job
+            runtime.validate(city, work)
+            val after = CivsRules.finishWorldWork(city, work, 200_000)
+            after.workers.single().completedCycles shouldBe worker.completedCycles + 1
+            CivsEquipment.plainCount(after.workers.single(), "OAK_SAPLING") shouldBe if (paid) 4L else 3L
+            CivsEquipment.plainCount(after.workers.single(), "OAK_LOG") shouldBe work.outputs.getValue("OAK_LOG")
+            after.stock shouldBe city.stock
+            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, work, 200_001) }.reason shouldBe "stale-delivery"
+            work.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+            city.workers.single() shouldBe worker
+            CivsEquipment.plainCount(worker, "OAK_SAPLING") shouldBe 4L
+            city.forestryJobs?.values?.single() shouldBe job
+        }
+    }
+
+    test("one ordinary ray slice yields to a safe remote tree approach on the very next pulse") {
+        forestryWorksite("forestry-bounded-initial-remote", autonomous = false, nanoTime = { 0L },
+            settings = CivsWorksiteSettings(rayChecksPerPulse = 1)) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            while (!scan.complete && !scan.failed) scan.advance(128) { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
+            val job = requireNotNull(scan.job(listOf(root))).copy(next = 1)
+            val cut = job.position(job.cells.first())
+            world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+            val city = initial.copy(forestryJobs = mapOf(requireNotNull(worker.assignment).toString() to job))
+            for (y in 64..66) for (z in root.z - 3..root.z + 3)
+                world.getBlockAt(root.x - 1, y, z).blockData = Bukkit.createBlockData(
+                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            val ordinary = root.copy(x = root.x - 2)
+            citizenStandable(world, ordinary) shouldBe true
+            citizenCanReachBlock(world, Location(world, ordinary.x + .5, ordinary.y + 1.62, ordinary.z + .5), root) shouldBe false
+            val feet = Location(world, root.x - 5.5, 64.0, root.z + .5)
+            runtime.residentFeet = { feet }
+            runtime.pulse(listOf(city))
+            runtime.plan(city, worker) shouldBe null
+            (runtime.debug()["remainingPulseBudget"] as Map<*, *>)["rays"] shouldBe 0
+            // One service pulse is 250ms; the other ordinary aim points must not consume seconds first.
+            runtime.pulse(listOf(city))
+            val work = requireNotNull(runtime.plan(city, worker)) { "Remote probe did not follow its ordinary slice: ${runtime.debug()}" }
+            work.remoteWork shouldBe true
+            work.standing shouldBe CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+            requireNotNull(work.forestry).job shouldBe job
+            runtime.validate(city, work)
+            city.forestryJobs?.values?.single() shouldBe job
+            work.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+        }
+    }
+
+    test("ordinary slices before actor spawn preserve the early remote attempt for its first real feet") {
+        forestryWorksite("forestry-cold-start-remote", autonomous = false, nanoTime = { 0L },
+            settings = CivsWorksiteSettings(rayChecksPerPulse = 1)) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            while (!scan.complete && !scan.failed) scan.advance(128) { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
+            val job = requireNotNull(scan.job(listOf(root))).copy(next = 1)
+            val cut = job.position(job.cells.first())
+            world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+            val city = initial.copy(forestryJobs = mapOf(requireNotNull(worker.assignment).toString() to job))
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
+                for (y in 61..63) world.getBlockAt(root.x + dx, y, root.z + dz).type = Material.AIR
+            for (y in 64..66) for (z in root.z - 3..root.z + 3)
+                world.getBlockAt(root.x + 1, y, z).blockData = Bukkit.createBlockData(
+                    "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            val ordinary = root.copy(x = root.x + 2)
+            citizenStandable(world, ordinary) shouldBe true
+            citizenCanReachBlock(world, Location(world, ordinary.x + .5, ordinary.y + 1.62, ordinary.z + .5), root) shouldBe false
+            runtime.residentFeet = { null }
+            repeat(2) {
+                val raysBefore = world.rayTraces
+                runtime.pulse(listOf(city))
+                runtime.plan(city, worker) shouldBe null
+                // Missing actor must neither consume the remote attempt nor stall the ordinary aim cursor.
+                world.rayTraces - raysBefore shouldBe 1
+                (runtime.debug()["remainingPulseBudget"] as Map<*, *>)["rays"] shouldBe 0
+            }
+            val feet = Location(world, root.x + 6.5, 64.0, root.z + .5)
+            citizenPacketSupported(world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+            citizenPacketBodyClear(world, CitizenPoint(feet.x, feet.y, feet.z), false) shouldBe true
+            runtime.residentFeet = { feet }
+            runtime.pulse(listOf(city))
+            val work = requireNotNull(runtime.plan(city, worker)) { "Spawn did not unlock the reserved remote probe: ${runtime.debug()}" }
+            work.remoteWork shouldBe true
+            work.standing shouldBe CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+            requireNotNull(work.forestry).job shouldBe job
+            runtime.validate(city, work)
+            city.forestryJobs?.values?.single() shouldBe job
+            work.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+        }
+    }
+
+    test("an optional unloaded stance cannot pin a paid tree ahead of its loaded remote worker") {
+        forestryWorksite("forestry-optional-unloaded-stance", autonomous = false, nanoTime = { 0L },
+            settings = CivsWorksiteSettings(standingChecksPerPulse = 128, rayChecksPerPulse = 1)) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val root = CivPosition(15, 64, -26)
+            forestrySmallOak(world, root)
+            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+                if (x != root.x || z != root.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            while (!scan.complete && !scan.failed) scan.advance(128) { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
+            val job = requireNotNull(scan.job(listOf(root))).copy(next = 1)
+            val cut = job.position(job.cells.first())
+            world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+            val city = initial.copy(forestryJobs = mapOf(requireNotNull(worker.assignment).toString() to job))
+            val feet = Location(world, root.x - 5.5, 64.0, root.z + .5)
+            runtime.residentFeet = { feet }
+            val missingX = (root.x + 1) shr 4
+            val missingZ = root.z shr 4
+            world.unloadChunk(missingX, missingZ)
+            world.isChunkLoaded(root.x shr 4, root.z shr 4) shouldBe true
+            world.isChunkLoaded(feet.blockX shr 4, feet.blockZ shr 4) shouldBe true
+            runtime.pulse(listOf(city))
+            val work = requireNotNull(runtime.plan(city, worker)) { "Unloaded optional stance pinned ${runtime.debug(setOf(worker.id))}" }
+            work.remoteWork shouldBe true
+            work.standing shouldBe CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+            work.focus shouldBe root
+            requireNotNull(work.forestry).job shouldBe job
+            work.inputs shouldBe emptyMap()
+            runtime.validate(city, work)
+            world.isChunkLoaded(missingX, missingZ) shouldBe false
+            city.forestryJobs?.values?.single() shouldBe job
+            work.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+        }
+    }
+
+    for (stepped in listOf(false, true)) test("remote forestry uses actual fractional feet on ${if (stepped) "an off-centre lower stair" else "a lower slab"}") {
+        forestryWorksite("forestry-fractional-$stepped", nanoTime = { 0L }, collisionForData = { data ->
+            when (data.material) {
+                Material.OAK_SLAB -> listOf(org.bukkit.util.BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0))
+                Material.OAK_STAIRS -> listOf(org.bukkit.util.BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                    org.bukkit.util.BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+                else -> null
+            }
+        }) { world, runtime, city ->
+            val worker = city.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            fun select(): CivWorldWork {
+                repeat(3_000) { runtime.pulse(listOf(city)); runtime.plan(city, worker)?.let { return it } }
+                error("No fractional forestry fallback: ${runtime.debug(setOf(worker.id))}")
+            }
+            val first = select()
+            val feet = Location(world, root.x - 6.0 + if (stepped) .15 else .5, 64.5, root.z + .5)
+            world.getBlockAt(feet.blockX, 64, feet.blockZ).type = if (stepped) Material.OAK_STAIRS else Material.OAK_SLAB
+            runtime.residentFeet = { feet }
+            citizenPacketSupported(world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+            citizenPacketBodyClear(world, CitizenPoint(feet.x, feet.y, feet.z), false) shouldBe true
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            val remote = select()
+            remote.remoteWork shouldBe true
+            remote.copy(standing = first.standing, remoteWork = false) shouldBe first
+            runtime.validate(city, remote)
+            forestryReceipt(city, remote, 200_000).validated().worldChanges shouldBe first.changes
+        }
+    }
+
+    test("a known distant forester skips a failed unpaid tree after one approach instead of retrying its stances") {
+        forestryWorksite("forestry-remote-too-far", nanoTime = { 0L }) { world, runtime, city ->
+            val worker = city.workers.single()
+            val firstRoot = CivPosition(-15, 64, -26)
+            val laterRoot = CivPosition(10, 64, -26)
+            forestrySmallOak(world, firstRoot)
+            forestrySmallOak(world, laterRoot)
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            runtime.residentFeet = { Location(world, 8.5, 64.0, -25.5) }
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val next = requireNotNull(runtime.plan(city, worker))
+            next.focus shouldBe laterRoot
+            next.remoteWork shouldBe false
+            runtime.validate(city, next)
+            city.forestryJobs shouldBe null
+        }
+    }
+
+    test("a route rejected unpaid tree yields to a later tree and stays deferred when discovery restarts") {
+        forestryWorksite("forestry-route-rejected-field", nanoTime = { 0L }) { world, runtime, city ->
+            val clock = Bukkit.getScheduler() as BukkitSchedulerMock
+            val worker = city.workers.single()
+            val firstRoot = CivPosition(-15, 64, -26)
+            val laterRoot = CivPosition(10, 64, -26)
+            val onlyStanding = firstRoot.copy(x = firstRoot.x + 1)
+            forestrySmallOak(world, firstRoot)
+            forestrySmallOak(world, laterRoot)
+            // The isolated footing passes support/body/ray checks, but has no supported incoming step.
+            for (x in firstRoot.x - 2..firstRoot.x + 2) for (z in firstRoot.z - 2..firstRoot.z + 2)
+                if ((x != firstRoot.x || z != firstRoot.z) && (x != onlyStanding.x || z != onlyStanding.z))
+                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            fun select(): CivWorldWork {
+                repeat(3_000) {
+                    clock.performTicks(5)
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker)?.let { return it }
+                }
+                error("No forestry candidate: ${runtime.debug(setOf(worker.id))}")
+            }
+            val first = select()
+            first.focus shouldBe firstRoot
+            first.standing shouldBe onlyStanding
+            runtime.validate(city, first)
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            val later = select()
+            later.focus shouldBe laterRoot
+            runtime.validate(city, later)
+            val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            (entry["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 1
+            // Restart discovery without a receipt; elapsed time must not put the bad root first again.
+            runtime.invalidate(worker.id)
+            runtime.invalidate(worker.id)
+            clock.performTicks(1_921)
+            select().focus shouldBe laterRoot
+            city.forestryJobs shouldBe null
+            city.stock shouldBe Stock()
+            for (cell in first.changes)
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+        }
+    }
+
+    test("an unpaid failed tree is retried only after the whole field and bounded pause are exhausted") {
+        forestryWorksite("forestry-deferred-full-sweep", nanoTime = { 0L }) { world, runtime, initial ->
+            val clock = Bukkit.getScheduler() as BukkitSchedulerMock
+            val worker = initial.workers.single()
+            val city = initial.copy(forestrySeeded = setOf(requireNotNull(worker.assignment).toString()))
+            val root = CivPosition(-15, 64, -26)
+            val onlyStanding = root.copy(x = root.x + 1)
+            forestrySmallOak(world, root)
+            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+                if ((x != root.x || z != root.z) && (x != onlyStanding.x || z != onlyStanding.z))
+                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            first.standing shouldBe onlyStanding
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            var retryAt: Long? = null
+            repeat(3_000) {
+                if (retryAt == null) {
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe null
+                    val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+                    retryAt = ((entry["forestSearch"] as? Map<*, *>)?.get("retryAtTick") as? Number)?.toLong()
+                }
+            }
+            requireNotNull(retryAt) shouldBe Bukkit.getCurrentTick().toLong() + 100
+            runtime.idleReason(city, worker) shouldBe "worksite-no-access"
+            clock.performTicks(99)
+            repeat(20) { runtime.pulse(listOf(city)); runtime.plan(city, worker) shouldBe null }
+            clock.performTicks(1)
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val retried = requireNotNull(runtime.plan(city, worker))
+            retried.focus shouldBe root
+            retried.standing shouldBe onlyStanding
+            runtime.validate(city, retried)
             city.forestryJobs shouldBe null
             city.stock shouldBe Stock()
         }
@@ -633,6 +1002,65 @@ class CivsForestryTest : FunSpec({
             work.inputs shouldBe emptyMap()
             world.getBlockAt(root.x, root.y, root.z).type shouldBe Material.OAK_LOG
             runtime.validate(city, work)
+        }
+    }
+
+    test("lost unreserved saplings do not pin an exhausted unpaid tree before free care") {
+        val supplies = mutableMapOf("OAK_SAPLING" to 1L)
+        forestryWorksite("forestry-exhausted-supply-loss", autonomous = false, supplies = { supplies },
+            nanoTime = { 0L }) { world, runtime, city ->
+            val worker = city.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            val care = CivPosition(10, 64, -26)
+            val onlyStanding = root.copy(x = root.x + 1)
+            forestrySmallOak(world, root)
+            world.getBlockAt(care.x, care.y, care.z).type = Material.OAK_SAPLING
+            // Preserve one locally valid stance whose incoming route was rejected.
+            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+                if ((x != root.x || z != root.z) && (x != onlyStanding.x || z != onlyStanding.z))
+                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            fun entry(): Map<*, *> =
+                (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            fun select(): CivWorldWork {
+                repeat(3_000) {
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker)?.let { return it }
+                }
+                error("No forestry candidate: ${runtime.debug(setOf(worker.id))}")
+            }
+            val first = select()
+            first.focus shouldBe root
+            first.standing shouldBe onlyStanding
+            first.inputs shouldBe mapOf("OAK_SAPLING" to 1L)
+            runtime.validate(city, first)
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            var retryAt: Long? = null
+            repeat(3_000) {
+                if (retryAt == null) {
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe null
+                    retryAt = ((entry()["failedStances"] as? Map<*, *>)?.get("retryAtTick") as? Number)?.toLong()
+                }
+            }
+            requireNotNull(retryAt) shouldBe Bukkit.getCurrentTick().toLong() + 100
+            supplies.clear()
+            runtime.pulse(listOf(city))
+            (entry()["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 1
+            entry()["pendingApproach"] shouldBe null
+            (runtime.idleReason(city, worker) != "waiting-saplings") shouldBe true
+            // Do not reopen the route or wait out the failed root's retry interval.
+            (Bukkit.getCurrentTick().toLong() < requireNotNull(retryAt)) shouldBe true
+            val work = select()
+            work.status shouldBe "watering"
+            work.focus shouldBe care
+            work.inputs shouldBe emptyMap()
+            runtime.validate(city, work)
+            supplies shouldBe emptyMap()
+            city.forestryJobs shouldBe null
+            city.stock shouldBe Stock()
+            worker.completedCycles shouldBe 0L
+            for (cell in first.changes)
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
         }
     }
 
@@ -1495,9 +1923,10 @@ private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: B
     paused: () -> Boolean = { false },
     nanoTime: () -> Long = System::nanoTime,
     settings: CivsWorksiteSettings = CivsWorksiteSettings(),
+    collisionForData: ((org.bukkit.block.data.BlockData) -> List<org.bukkit.util.BoundingBox>?)? = null,
     scenario: (CivsWorksiteWorldFixture, CivsWorksites, Settlement) -> Unit) {
     MockBukkitTestRuntime.open().use { paper ->
-        val world = CivsWorksiteWorldFixture(name, Material.DIRT).also(paper.server::addWorld)
+        val world = CivsWorksiteWorldFixture(name, Material.DIRT, collisionForData).also(paper.server::addWorld)
         val plugin = paper.createSimplePlugin("ForestryCare")
         val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
         try {

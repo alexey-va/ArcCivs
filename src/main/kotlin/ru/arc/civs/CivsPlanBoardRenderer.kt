@@ -169,13 +169,21 @@ class CivsPlanBoardRenderer(
     internal fun frame(world: World, board: CivBuilding, snapshot: CivPlanBoardSnapshot,
         layout: CivPlanBoardLayout, catalog: CivsText, updating: Boolean = false): SceneFrame<String> {
         val parts = mutableListOf<ScenePart<String>>()
+        val large = CivsPlanBoardBlueprint.large(board)
         val legacy = board.schematicId == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID
-        val lift = if (legacy) 0.0 else 1.0
-        fun pose(x: Double, y: Double, z: Double, sx: Double, sy: Double, sz: Double): ScenePose {
-            val p = localToWorld(board, x, y + lift, z)
+        val sx = if (large) 1.0 else 5.0 / 9.0
+        val sy = if (large) 1.0 else .75
+        fun pose(x: Double, y: Double, z: Double, width: Double, height: Double, depth: Double,
+            surface: Boolean = true, glyph: Boolean = false): ScenePose {
+            val px = (if (surface && !large) 1 + (x + 1) * sx else x) +
+                if (surface) CivsPlanBoardBlueprint.faceOffset(board.schematicId) else 0
+            val py = if (surface && !large) 1 + (y - 2) * sy + if (legacy) 0 else 1 else y
+            val p = localToWorld(board, px, py, z)
+            val gx = if (!surface) 1.0 else if (glyph) min(sx, sy) else sx
+            val gy = if (!surface) 1.0 else if (glyph) min(sx, sy) else sy
             return ScenePose(Location(world, p[0], p[1], p[2]), Transformation(Vector3f(),
                 Quaternionf().rotateY(-Math.toRadians(board.rotation.toDouble()).toFloat()),
-                Vector3f(sx.toFloat(), sy.toFloat(), sz.toFloat()), Quaternionf()))
+                Vector3f((width * gx).toFloat(), (height * gy).toFloat(), depth.toFloat()), Quaternionf()))
         }
         for (patch in layout.patches) parts += ScenePart.Block(patch.key,
             pose(patch.x, patch.y, patch.z, patch.width, patch.height, .006), style,
@@ -193,7 +201,7 @@ class CivsPlanBoardRenderer(
                     shadowed = true, alignment = TextDisplay.TextAlignment.LEFT))
         }
         fun label(key: String, content: Component, x: Double, y: Double, z: Double, scale: Double, color: Int,
-            width: Double, lines: Int = 1, heightLimit: Double = 2.1) {
+            width: Double, lines: Int = 1, heightLimit: Double = 2.1, left: Boolean = false, surface: Boolean = true) {
             val plain = PlainTextComponentSerializer.plainText().serialize(content)
             val pixels = plain.lineSequence().maxOfOrNull {
                 DialogTextLayout.naturalWidth(Component.text(it)) ?: it.codePointCount(0, it.length) * 9
@@ -202,43 +210,48 @@ class CivsPlanBoardRenderer(
                 if (lines > 1) heightLimit / (lines * 9 * .025) else scale)
             val height = lines * 9 * .025 * fitted
             fun tint(value: Component): Component = value.color(TextColor.color(color)).children(value.children().map(::tint))
-            parts += ScenePart.Text(key, pose(x, y - height / 2, z, fitted, fitted, 1.0), style,
-                tint(content).font(Key.key("minecraft:default")).decoration(TextDecoration.ITALIC, false), textStyle)
+            val textX = if (left) x + pixels * .025 * fitted / 2 else x
+            parts += ScenePart.Text(key, pose(textX, y - height / 2, z, fitted, fitted, 1.0, surface, glyph = true), style,
+                tint(content).font(Key.key("minecraft:default")).decoration(TextDecoration.ITALIC, false),
+                textStyle.copy(alignment = if (left) TextDisplay.TextAlignment.LEFT else TextDisplay.TextAlignment.CENTER))
         }
         label("title", catalog.render(null, if (updating) "plan-board.updating-title" else "plan-board.title", "name" to snapshot.name),
-            3.5, 4.25, 3.018, 1.0, 0xFFF4D3, 6.4)
+            3.5, 6.25, 3.018, 1.15, 0xFFF4D3, 10.4)
         label("north", catalog.render(null, if (layout.northLeft) "plan-board.north-left" else "plan-board.north-up"),
-            1.38, 3.91, 2.055, .50, 0x44352B, .45)
-        parts += ScenePart.Block("legend-panel", pose(4.34, 1.12, 2.045, 1.52, 2.76, .006), style,
+            -.58, 5.93, 2.055, .50, 0x44352B, .45)
+        parts += ScenePart.Block("legend-panel", pose(4.89, 2.12, 2.045, 2.97, 3.76, .006), style,
             materials.getOrPut("GRAY_CONCRETE") { Material.GRAY_CONCRETE.createBlockData() })
-        label("legend-built", catalog.render(null, "plan-board.built"), 5.1, 3.69, 2.065, .56, 0x8DDFE6, 1.30)
-        label("legend-planned", catalog.render(null, "plan-board.planned"), 5.1, 3.51, 2.065, .56, 0xFFD071, 1.30)
-        label("legend-forecast", catalog.render(null, "plan-board.forecast"), 5.1, 3.33, 2.065, .56, 0xD7B4FF, 1.30)
-        label("legend-roads", catalog.render(null, "plan-board.roads"), 5.1, 3.15, 2.065, .56, 0xE6CBB1, 1.30)
-        val listing = Component.text()
-        if (layout.showNumbers) layout.entries.forEachIndexed { index, entry ->
-            if (index != 0) listing.append(Component.newline())
-            listing.append(Component.text("${entry.number}. ")).append(catalog.render(null, "building.${entry.type.name.lowercase()}"))
-            label("number-${entry.id}", Component.text(entry.number), entry.x, entry.y, 2.055, .65,
-                if (entry.forecast) 0x613681 else if (snapshot.buildings.any { it.id == entry.id }) 0xFFFFFF else 0x745117,
-                min(entry.width * .85, min(entry.height * .85 * entry.number.toString().length, .30)))
+        label("legend-built", catalog.render(null, "plan-board.built"), 5.07, 5.64, 2.065, .65, 0x8DDFE6, 2.60, left = true)
+        label("legend-planned", catalog.render(null, "plan-board.planned"), 5.07, 5.39, 2.065, .65, 0xFFD071, 2.60, left = true)
+        label("legend-future", catalog.render(null, "plan-board.future"), 5.07, 5.14, 2.065, .65, 0xD7B4FF, 2.60, left = true)
+        label("legend-infrastructure", catalog.render(null, "plan-board.infrastructure"), 5.07, 2.42, 2.065,
+            .46, 0xE6CBB1, 2.60, left = true)
+        val rows = (layout.entries.size + 1) / 2
+        for (column in 0..1) {
+            val entries = layout.entries.drop(column * rows).take(rows)
+            val listing = Component.text()
+            if (layout.showNumbers) entries.forEachIndexed { index, entry ->
+                if (index != 0) listing.append(Component.newline())
+                listing.append(Component.text("${entry.number}. ")).append(catalog.render(null,
+                    if (entry.type in CivsAutonomy.profile) "plan-board.key.${entry.type.name.lowercase()}"
+                    else "building.${entry.type.name.lowercase()}"))
+            } else if (column == 0) listing.append(catalog.render(null, "plan-board.compact-key"))
+            label("building-key-$column", listing.build(), 5.07 + column * 1.40, 3.98, 2.065, .66,
+                0xFFF4DF, 1.22, if (layout.showNumbers) entries.size.coerceAtLeast(1) else 3, 2.0, left = true)
         }
-        else listing.append(catalog.render(null, "plan-board.compact-key"))
-        label("building-key", listing.build(), 5.1, 2.26, 2.065, .50, 0xFFF4DF, 1.34,
-            if (layout.showNumbers) layout.entries.size.coerceAtLeast(1) else 3, 1.36)
-        val note = when {
-            snapshot.forecast == null -> "plan-board.accepted-note"
-            snapshot.forecast.unavailable -> "plan-board.partial-forecast-note"
-            else -> "plan-board.forecast-note"
+        if (layout.showNumbers) layout.entries.forEach { entry ->
+            label("number-${entry.id}", Component.text(entry.number), entry.x, entry.y, 2.055, .80,
+                if (entry.future) 0x613681 else if (snapshot.buildings.any { it.id == entry.id }) 0xFFFFFF else 0x745117,
+                min(entry.width * .85, min(entry.height * .85 * entry.number.toString().length, .44)))
         }
-        label("forecast-note", catalog.render(null, note), 5.1, 1.37, 2.065, .43, 0xFFF4DF, 1.34, 3, .38)
-        val controlX = if (legacy) 6.5 else 3.5
-        val controlY = if (legacy) 2.32 else .61
+        val sideControl = board.schematicId in setOf(CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID, CivsPlanBoardBlueprint.REFIT_V1)
+        val controlX = if (sideControl) 6.5 else 3.5
+        val controlY = if (large || !legacy) 1.61 else 2.32
         val controlZ = if (legacy) 2.065 else 3.025
-        parts += ScenePart.Block("control-label-panel", pose(controlX - .46, controlY - .12, controlZ - .008, .92, .24, .006), style,
-            materials.getValue("GRAY_CONCRETE"))
+        parts += ScenePart.Block("control-label-panel", pose(controlX - .46, controlY - .12, controlZ - .008,
+            .92, .24, .006, surface = false), style, materials.getValue("GRAY_CONCRETE"))
         label("control-label", catalog.render(null, "plan-board.control"), controlX, controlY, controlZ,
-            .37, 0xFFF4DF, .84)
+            .37, 0xFFF4DF, .84, surface = false)
         check(parts.size == layout.displayParts)
         return SceneFrame(parts, audience)
     }

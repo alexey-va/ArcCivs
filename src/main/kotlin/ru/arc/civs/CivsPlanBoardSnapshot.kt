@@ -18,12 +18,8 @@ data class CivPlanBoardSnapshot(
     val buildings: List<CivBuilding>,
     val plannedBuildings: List<CivBuilding>,
     val routes: Map<UUID, List<CivPosition>>,
-    val forecast: CivPlanBoardForecast? = null,
+    val plan: CivSettlementPlan? = null,
 )
-
-/** Candidate reservations only: no terrain approval, construction order, deadline or material grant. */
-data class CivPlanBoardForecast(val buildings: List<CivBuilding>, val streets: List<CivBox>,
-    val perimeter: List<CivBox>, val unavailable: Boolean = false)
 
 /** Geometry identity deliberately excludes stock, residents and construction work cursors. */
 internal fun civsPlanBoardLayoutKey(city: Settlement): String {
@@ -49,6 +45,12 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
     city.construction?.plannedBuilding?.let(::building)
     field(city.constructionQueue.orEmpty().size)
     city.constructionQueue.orEmpty().forEach(::field)
+    CivsSettlementPlans.current(city)?.let { plan ->
+        field(plan.version); field(plan.revision); field(plan.halfWidth)
+        plan.plots.forEach { building(it.building); field(it.envelope) }
+        plan.routes.toSortedMap().forEach { (id, route) -> field(id); route.forEach(::field) }
+        plan.walls.forEach(::field); plan.gates.forEach(::field); plan.gateSides.orEmpty().forEach(::field)
+    }
     field(city.roadRouteOverrides.orEmpty().size)
     city.roadRouteOverrides.orEmpty().toSortedMap().forEach { (id, route) ->
         field(id); field(route.originalRoute.size); route.originalRoute.forEach(::field)
@@ -63,7 +65,7 @@ internal fun queuedUpgradeId(buildingId: UUID, targetLevel: Int): UUID =
     UUID.nameUUIDFromBytes("arccivs-upgrade/$buildingId/$targetLevel".toByteArray(Charsets.UTF_8))
 
 internal fun queuedDesignId(building: CivBuilding): UUID = if (building.phase == BuildingPhase.SITE) building.id
-    else queuedUpgradeId(building.id, building.level + 1)
+    else queuedUpgradeId(building.id, if (CivsPlanBoardBlueprint.needsRefit(building)) building.level else building.level + 1)
 
 /** The existing queue's captured-design identity, shared by activation and the detached board view. */
 internal fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, building: CivBuilding) {
@@ -71,7 +73,8 @@ internal fun requireQueuedDesign(plan: CivPlacementPlan, city: Settlement, build
     require(if (building.phase == BuildingPhase.SITE)
         plan.building.copy(phase = BuildingPhase.SITE, production = building.production) == building
     else building.phase == BuildingPhase.ACTIVE && plan.building.id == building.id && plan.building.type == building.type &&
-        plan.building.phase == BuildingPhase.CONSTRUCTING && plan.building.level == building.level + 1 &&
+        plan.building.phase == BuildingPhase.CONSTRUCTING && (plan.building.level == building.level + 1 ||
+            CivsPlanBoardBlueprint.refit(building, plan.building)) &&
         plan.building.entrance == building.entrance && plan.building.rotation == building.rotation &&
         civsContainsBox(plan.building.bounds, building.bounds)) { "Queued design no longer matches building ${building.id}" }
 }
@@ -85,6 +88,7 @@ internal fun civsPlanBoardCapture(city: Settlement): Settlement = city.copy(
     roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, value) ->
         value.copy(originalRoute = value.originalRoute.toList(), route = value.route.toList())
     },
+    autonomy = city.autonomy?.let { it.copy(plan = CivsSettlementPlans.detached(CivsSettlementPlans.current(city))) },
     workers = emptyList(),
 )
 
@@ -101,52 +105,8 @@ internal fun civsPlanBoardSnapshot(city: Settlement, saved: List<CivPlacementPla
     city.construction?.plannedBuilding?.let { planned[it.id] = it.boardCopy() }
     return CivPlanBoardSnapshot(city.id, city.name, civsPlanBoardLayoutKey(city), city.worldId, city.center, city.radius,
         city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.map { it.boardCopy() }, planned.values.toList(),
-        CivAutonomousAccess.from(city, saved.filter { it.id == it.building.id }).routes.mapValues { (_, route) -> route.toList() })
-}
-
-/** Replays the existing goal order and placement candidates on detached copies, never the live planner. */
-internal fun civsPlanBoardForecast(city: Settlement, snapshot: CivPlanBoardSnapshot, executor: Executor,
-    template: (Settlement, BuildingType, Int, UUID) -> CompletableFuture<CivBuilding>): CompletableFuture<CivPlanBoardForecast?> {
-    val autonomy = city.autonomy ?: return CompletableFuture.completedFuture(null)
-    val accepted = snapshot.plannedBuildings.associateBy { it.id }
-    var projected = city.copy(autonomy = autonomy.copy(paused = false), construction = null, constructionQueue = emptyList(),
-        buildings = (city.buildings.map { accepted[it.id] ?: it } + accepted.values.filter { city.building(it.id) == null })
-            .map { it.copy(phase = BuildingPhase.ACTIVE) })
-    val frame = CivsSettlementLayout.frame(projected)
-    val streets = frame.streets.map { street ->
-        val dx = if (street.from.x == street.to.x) 1 else 0
-        val dz = if (street.from.z == street.to.z) 1 else 0
-        CivBox(CivPosition(minOf(street.from.x, street.to.x) - dx, city.center.y, minOf(street.from.z, street.to.z) - dz),
-            CivPosition(maxOf(street.from.x, street.to.x) + dx, city.center.y, maxOf(street.from.z, street.to.z) + dz))
-    }
-    val buildings = mutableListOf<CivBuilding>()
-    val access = CivAutonomousAccess(snapshot.routes)
-    fun result(unavailable: Boolean = false) = CivPlanBoardForecast(buildings.toList(), streets, frame.wallObstacles.toList(), unavailable)
-    fun next(): CompletableFuture<CivPlanBoardForecast?> {
-        val goal = CivsAutonomy.nextGoal(projected)
-        // ponytail: eight new-site reservations, stopping at the first upgrade or unavailable site.
-        // Later revisions use the same planner again; this is not a second long-term simulation.
-        if (buildings.size == 8 || CivsRules.buildingCount(projected) >= CivsRules.MAX_BUILDINGS ||
-            goal == null || goal.buildingId != null || goal.targetLevel != 1)
-            return CompletableFuture.completedFuture(result())
-        val id = UUID.nameUUIDFromBytes("arccivs-board-forecast/${city.id}/${buildings.size}/${goal.type}".toByteArray(Charsets.UTF_8))
-        val current = template(projected, goal.type, 1, id)
-        val future = if (goal.type.maxLevel == 1) current else template(projected, goal.type, goal.type.maxLevel, id)
-        return current.thenCombineAsync(future, { a, b ->
-            CivsSettlementLayout.candidates(projected, a, b, access, frame).firstOrNull()
-                ?: CivsSettlementLayout.infill(projected, a, b, access, frame).firstOrNull()
-        }, executor).thenCompose { candidate ->
-            if (candidate == null) CompletableFuture.completedFuture(result(unavailable = true))
-            else {
-                val reserved = candidate.building.copy(phase = BuildingPhase.ACTIVE)
-                buildings += reserved
-                projected = projected.copy(buildings = projected.buildings + reserved)
-                next()
-            }
-        }
-    }
-    return runCatching { next() }.getOrElse { CompletableFuture.failedFuture(it) }
-        .exceptionally { result(unavailable = true) }
+        CivAutonomousAccess.from(city, saved.filter { it.id == it.building.id }).routes.mapValues { (_, route) -> route.toList() },
+        CivsSettlementPlans.detached(CivsSettlementPlans.current(city)))
 }
 
 /** Main captures and publishes; the existing plan loader and executor own all file/pure layout work. */
@@ -155,7 +115,6 @@ internal class CivsPlanBoardSnapshots(
     private val executor: Executor,
     private val currentCity: (UUID) -> Settlement?,
     private val loadPlans: (Settlement) -> CompletableFuture<List<CivPlacementPlan>>,
-    private val template: ((Settlement, BuildingType, Int, UUID) -> CompletableFuture<CivBuilding>)? = null,
 ) : AutoCloseable {
     private class Request(val cityId: UUID, val key: String) {
         val result = CompletableFuture<CivPlanBoardSnapshot>()
@@ -187,10 +146,6 @@ internal class CivsPlanBoardSnapshots(
         }
         request.completion = runCatching { loadPlans(captured) }.getOrElse { CompletableFuture.failedFuture(it) }
             .thenApplyAsync({ saved -> civsPlanBoardSnapshot(captured, saved) }, executor)
-            .thenCompose { snapshot ->
-                template?.let { loader -> civsPlanBoardForecast(captured, snapshot, executor, loader)
-                    .thenApply { snapshot.copy(forecast = it) } } ?: CompletableFuture.completedFuture(snapshot)
-            }
             .thenCompose { snapshot ->
                 tasks.callSync(token) {
                     synchronized(monitor) {

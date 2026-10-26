@@ -226,7 +226,8 @@ internal object CivsForestry {
         if (finished && progress?.job?.seedDeferred == true && amount == 0L || city.stock.wood + amount < cost)
             throw CivsRejection("materials-missing")
         val wood = city.stock.wood + amount - cost
-        if (wood > CivsRules.capacity(city)) throw CivsRejection("storage-full")
+        if (CivsAutonomousLogistics.held(city, Resource.WOOD) + amount - cost > CivsRules.capacity(city))
+            throw CivsRejection("storage-full")
         return city.stock.copy(wood = wood)
     }
 

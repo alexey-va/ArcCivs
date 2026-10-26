@@ -10,7 +10,7 @@ internal data class CivPlanBoardPatch(val key: String, val x: Double, val y: Dou
 internal data class CivPlanBoardRaster(val key: String, val x: Double, val y: Double, val z: Double,
     val width: Double, val height: Double, val columns: Int, val rows: List<String>, val color: Int = 0x684525)
 internal data class CivPlanBoardEntry(val id: UUID, val number: Int, val type: BuildingType,
-    val x: Double, val y: Double, val width: Double, val height: Double, val forecast: Boolean = false)
+    val x: Double, val y: Double, val width: Double, val height: Double, val future: Boolean = false)
 internal data class CivPlanBoardLayout(val patches: List<CivPlanBoardPatch>, val rasters: List<CivPlanBoardRaster>,
     val entries: List<CivPlanBoardEntry>, val northLeft: Boolean, val roadCells: Set<CivPlanBoardCell>,
     val roadRectangles: List<CivPlanBoardRect>, val showNumbers: Boolean = true) {
@@ -18,16 +18,16 @@ internal data class CivPlanBoardLayout(val patches: List<CivPlanBoardPatch>, val
     companion object { const val FIXED_PARTS = 11 }
 }
 
-/** Detached geometry only. Candidate sketches remain separate from accepted buildings and routes. */
+/** Detached geometry only. Adopted future geometry and paid world geometry remain distinct. */
 internal object CivsPlanBoardGeometry {
-    private const val LEFT = 1.14
-    private const val RIGHT = 4.20
-    private const val BOTTOM = 1.22
-    private const val TOP = 3.86
+    private const val LEFT = -.84
+    private const val RIGHT = 4.72
+    private const val BOTTOM = 2.16
+    private const val TOP = 5.84
     const val MAX_PARTS = 256
     // Our allocation/packet guard, not a Minecraft protocol maximum or a gameplay route limit.
     const val MAX_RASTER_TEXT_CHARS = 262_144
-    private const val MAX_FORECAST_RASTER_TEXT_CHARS = 131_072
+    private const val MAX_PLAN_RASTER_TEXT_CHARS = 262_144
 
     /** Exact row-run union: every output cell existed in the input, including gaps between parallel paths. */
     fun rectangles(cells: Set<CivPlanBoardCell>): List<CivPlanBoardRect> {
@@ -76,22 +76,20 @@ internal object CivsPlanBoardGeometry {
             it.type != BuildingType.ROAD && it.type != BuildingType.GATE || it.transit.isNullOrEmpty()
         }
         val planned = snapshot.plannedBuildings
-        val forecast = snapshot.forecast?.buildings.orEmpty()
-        require(forecast.size <= 8)
-        val occupied = (snapshot.buildings + planned + forecast).map { it.bounds }
-        fun sketch(boxes: List<CivBox>): Set<CivPlanBoardCell> = buildSet {
-            for (box in boxes) for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) {
-                val along = if (box.max.x - box.min.x >= box.max.z - box.min.z) x else z
-                val cell = CivPlanBoardCell(x.toLong(), z.toLong())
-                if (Math.floorMod(along, 6) < 3 && cell !in roadCells && occupied.none {
-                    x in it.min.x..it.max.x && z in it.min.z..it.max.z
-                }) add(cell)
-            }
-        }
-        val sketches = mapOf("forecast-layout" to sketch(snapshot.forecast?.streets.orEmpty() +
-            snapshot.forecast?.perimeter.orEmpty())).filterValues { it.isNotEmpty() }
+        val acceptedIds = (snapshot.buildings + planned).mapTo(hashSetOf()) { it.id }
+        val future = snapshot.plan?.plots.orEmpty().map { it.building }.filter { it.id !in acceptedIds }
+        require(future.size <= CivsRules.MAX_BUILDINGS)
+        val completedInfrastructure = snapshot.buildings.filter { it.type.isInfrastructure }.map { it.bounds }
+        val futureCells = buildSet {
+            snapshot.plan?.routes.orEmpty().values.flatten().forEach { add(CivPlanBoardCell(it.x.toLong(), it.z.toLong())) }
+            for (box in snapshot.plan?.let { it.walls + it.gates }.orEmpty())
+                for (x in box.min.x..box.max.x) for (z in box.min.z..box.max.z) add(CivPlanBoardCell(x.toLong(), z.toLong()))
+        }.filterTo(linkedSetOf()) { cell -> cell !in roadCells && completedInfrastructure.none {
+            cell.x in it.min.x.toLong()..it.max.x.toLong() && cell.z in it.min.z.toLong()..it.max.z.toLong()
+        } }
+        val sketches = mapOf("future-layout" to futureCells).filterValues { it.isNotEmpty() }
         val sketchRects = sketches.mapValues { rectangles(it.value) }
-        val extents = (snapshot.buildings + planned + forecast).map(::bounds) + merged + sketchRects.values.flatten()
+        val extents = (snapshot.buildings + planned + future).map(::bounds) + merged + sketchRects.values.flatten()
         val all = extents.ifEmpty { listOf(CivPlanBoardRect(snapshot.center.x.toLong(), snapshot.center.z.toLong(),
             snapshot.center.x.toLong() + 1, snapshot.center.z.toLong() + 1)) }
         val minX = all.minOf { it.x0 } - 3; val maxX = all.maxOf { it.x1 } + 3
@@ -109,12 +107,12 @@ internal object CivsPlanBoardGeometry {
             return CivPlanBoardPatch(key, left + (lo.x - minU) * scale, bottom + y * scale, depth,
                 (hi.x - lo.x) * scale, (hi.z - lo.z) * scale, material)
         }
-        val ordinary = (snapshot.buildings + planned + forecast).filterNot { it.type.isInfrastructure }
+        val ordinary = (snapshot.buildings + planned + future).filterNot { it.type.isInfrastructure }
             .distinctBy { it.id }.sortedWith(compareBy({ it.type.ordinal }, { it.id.toString() }))
         val entries = ordinary.mapIndexed { index, building ->
             val patch = project(bounds(building), "", "", 0.0)
             CivPlanBoardEntry(building.id, index + 1, building.type, patch.x + patch.width / 2,
-                patch.y + patch.height / 2, patch.width, patch.height, forecast.any { it.id == building.id })
+                patch.y + patch.height / 2, patch.width, patch.height, future.any { it.id == building.id })
         }
         val patches = mutableListOf<CivPlanBoardPatch>()
         sketchRects.forEach { (key, rectangles) -> rectangles.forEachIndexed { index, rect ->
@@ -131,18 +129,13 @@ internal object CivsPlanBoardGeometry {
             patches += p.copy(key = "${p.key}-left", y = p.y + t, width = t, height = p.height - 2 * t)
             patches += p.copy(key = "${p.key}-right", x = p.x + p.width - t, y = p.y + t, width = t, height = p.height - 2 * t)
         }
-        forecast.forEach { building ->
-            val p = project(bounds(building), "forecast-${building.id}", "PURPLE_CONCRETE", 2.040)
-            val t = min(.022, min(p.width, p.height) / 5)
-            val arm = min(p.width, p.height) * .32
-            for (right in listOf(false, true)) for (top in listOf(false, true)) {
-                val x = if (right) p.x + p.width - arm else p.x
-                val y = if (top) p.y + p.height - t else p.y
-                val key = "${p.key}-$right-$top"
-                patches += p.copy(key = "$key-h", x = x, y = y, width = arm, height = t)
-                patches += p.copy(key = "$key-v", x = if (right) p.x + p.width - t else p.x,
-                    y = if (top) p.y + p.height - arm else p.y, width = t, height = arm)
-            }
+        future.forEach { building ->
+            val p = project(bounds(building), "future-${building.id}", "PURPLE_CONCRETE", 2.040)
+            val t = min(.035, min(p.width, p.height) / 4)
+            patches += p.copy(key = "${p.key}-bottom", height = t)
+            patches += p.copy(key = "${p.key}-top", y = p.y + p.height - t, height = t)
+            patches += p.copy(key = "${p.key}-left", y = p.y + t, width = t, height = p.height - 2 * t)
+            patches += p.copy(key = "${p.key}-right", x = p.x + p.width - t, y = p.y + t, width = t, height = p.height - 2 * t)
         }
         if (patches.size + entries.size + CivPlanBoardLayout.FIXED_PARTS <= MAX_PARTS)
             return CivPlanBoardLayout(patches, emptyList(), entries, northLeft, roadCells, merged)
@@ -163,8 +156,8 @@ internal object CivsPlanBoardGeometry {
             // An empty cell uses nine UTF-16 characters, an occupied one four; include line breaks.
             // At 512 columns, even an all-ink row is only 6,144 UTF-8 bytes in its own NBT string.
             val characters = width * height * 9 - mapped.size * 5L + height - 1
-            if (key.startsWith("forecast-")) require(characters <= MAX_FORECAST_RASTER_TEXT_CHARS) {
-                "Settlement forecast raster exceeds $MAX_FORECAST_RASTER_TEXT_CHARS characters"
+            if (key.startsWith("future-")) require(characters <= MAX_PLAN_RASTER_TEXT_CHARS) {
+                "Settlement future raster exceeds $MAX_PLAN_RASTER_TEXT_CHARS characters"
             } else rasterCharacters += characters
             require(rasterCharacters <= MAX_RASTER_TEXT_CHARS) {
                 "Settlement plan raster text exceeds $MAX_RASTER_TEXT_CHARS characters at $key: $rasterCharacters"
@@ -177,12 +170,12 @@ internal object CivsPlanBoardGeometry {
             val y = if (northLeft) z0 - minV else maxV - z1
             CivPlanBoardRaster(key, left + (x0 - minU) * scale, bottom + y * scale, 2.012,
                 (x1 - x0) * scale, (z1 - z0) * scale, (x1 - x0).toInt(), rows,
-                if (key.startsWith("forecast-")) 0x7944A0 else 0x684525)
+                if (key.startsWith("future-")) 0x7944A0 else 0x684525)
         }
         val compact = built.map { building -> project(bounds(building), "built-${building.id}",
             if (building.type.isInfrastructure) "GRAY_CONCRETE" else "CYAN_CONCRETE", 2.026) } +
             planned.map { project(bounds(it), "planned-${it.id}", "ORANGE_STAINED_GLASS", 2.040) } +
-            forecast.map { project(bounds(it), "forecast-${it.id}", "PURPLE_STAINED_GLASS", 2.040) }
+            future.map { project(bounds(it), "future-${it.id}", "PURPLE_STAINED_GLASS", 2.040) }
         val numbered = CivPlanBoardLayout(compact, raster, entries, northLeft, roadCells, merged)
         // All map geometry wins over optional number labels at the full-city/queued-upgrade boundary.
         // The renderer explicitly directs readers to the building menu instead of showing an unlinked key.

@@ -37,6 +37,8 @@ class CivsSettingsTest : FunSpec({
             set("navigation.preparation-ticks", 240)
             set("native-work.operations-per-tick", 20000)
             set("native-work.budget-millis", 3.0)
+            set("navigation.terrain-cache-blocks", 65536)
+            set("navigation.terrain-refresh-ticks", 1200)
             set("worksites.standing-checks-per-pulse", 128)
             set("worksites.ray-checks-per-pulse", 24)
             set("worksites.mine-checks-per-pulse", 96)
@@ -45,7 +47,7 @@ class CivsSettingsTest : FunSpec({
             set("worksites.budget-millis", 3.0)
         }
         val settings = CivsSettings.read(config)
-        settings.navigation shouldBe CivsNavigationSettings(1024, 8192, 65536, 32, 24.0, 8, 3, 60, 240, 20000, 3.0)
+        settings.navigation shouldBe CivsNavigationSettings(1024, 8192, 65536, 32, 24.0, 8, 3, 60, 240, 20000, 3.0, 65536, 1200)
         settings.worksites shouldBe CivsWorksiteSettings(128, 24, 96, 512, 32, 3.0)
     }
 
@@ -59,6 +61,8 @@ class CivsSettingsTest : FunSpec({
         "navigation.initial-vertical-margin" to 97,
         "navigation.close-preparation-ticks" to 0,
         "navigation.preparation-ticks" to 1201,
+        "navigation.terrain-cache-blocks" to 255,
+        "navigation.terrain-refresh-ticks" to 0,
         "native-work.operations-per-tick" to 100001,
         "native-work.budget-millis" to Double.POSITIVE_INFINITY,
         "worksites.standing-checks-per-pulse" to 0,

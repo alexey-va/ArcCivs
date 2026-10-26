@@ -1271,7 +1271,8 @@ class CivsWorld(
             requireCivs(city?.building(building.id) == previous, "invalid-building")
             if (previous != null) requireCivs(previous.id == building.id && previous.type == building.type &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
-                (previous.level + 1 == building.level && previous.phase == BuildingPhase.ACTIVE ||
+                (previous.phase == BuildingPhase.ACTIVE && (previous.level + 1 == building.level ||
+                    CivsPlanBoardBlueprint.refit(previous, building)) ||
                     previous.level == building.level && previous.phase == BuildingPhase.SITE), "invalid-building")
             if (previous != null) requireCivs(civsContainsBox(building.bounds, previous.bounds), "upgrade-footprint-changed")
         }
@@ -1410,7 +1411,8 @@ class CivsWorld(
             val current = city?.building(building.id)
             requireCivs(current == null || current == building || current.type == building.type &&
                 current.entrance == building.entrance && current.rotation == building.rotation &&
-                current.level + 1 == building.level && current.phase == BuildingPhase.ACTIVE, "invalid-building")
+                (current.level + 1 == building.level || CivsPlanBoardBlueprint.refit(current, building)) &&
+                current.phase == BuildingPhase.ACTIVE, "invalid-building")
             if (current != null) requireCivs(civsContainsBox(building.bounds, current.bounds), "upgrade-footprint-changed")
             city?.construction?.let {
                 requireCivs(it.id == plan.id && it.buildingId == building.id && it.plannedBuilding == building, "invalid-plan")

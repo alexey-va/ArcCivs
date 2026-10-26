@@ -87,14 +87,14 @@ class CivsBlueprints(
     private var closed = false
 
     /** Encoded generated source only; decoded snapshots stay with the expiring caller and Core cache. */
-    private fun isPlanBoard(id: String) = id == CivsPlanBoardBlueprint.SCHEMATIC_ID || id == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID
+    private fun isPlanBoard(id: String) = id in CivsPlanBoardBlueprint.versions
 
     @Synchronized private fun planBoard(id: String): CompletableFuture<Builtin> {
         if (closed) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
         require(isPlanBoard(id))
         builtins[id]?.let { return it }
         val prepared = CompletableFuture.supplyAsync({
-            val bytes = CivsPlanBoardBlueprint.schematic(dataVersion, id == CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID)
+            val bytes = CivsPlanBoardBlueprint.schematic(dataVersion, id)
             val file = AtomicFileStore(capturedRoot, Path.of("builtin", "plan_board", "${id.substringAfterLast('/')}.schem"),
                 CivsStore.MAX_SCHEMATIC_BYTES.toLong(), { value: ByteArray -> value }, { it })
             file.write(bytes)
@@ -140,8 +140,18 @@ class CivsBlueprints(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
         placement: CivPosition, facing: Int, exactRotation: Int? = null,
         fixedEntrance: CivPosition? = null,
-    ): CompletableFuture<CivBlueprint> {
-        val id = schematicId(style, type, level)
+    ): CompletableFuture<CivBlueprint> = prepareSource(schematicId(style, type, level), type, level,
+        buildingId, worldId, placement, facing, exactRotation, fixedEntrance)
+
+    internal fun preparePlanBoardRefit(board: CivBuilding, worldId: UUID): CompletableFuture<CivBlueprint> =
+        prepareSource(CivsPlanBoardBlueprint.refitId(board), board.type, board.level, board.id, worldId,
+            board.anchor, board.rotation / 90, board.rotation, board.entrance).thenApply {
+            if (!CivsPlanBoardBlueprint.refit(board, it.building)) throw CivsRejection("invalid-building")
+            it
+        }
+
+    private fun prepareSource(id: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
+        placement: CivPosition, facing: Int, exactRotation: Int?, fixedEntrance: CivPosition?): CompletableFuture<CivBlueprint> {
         return sourceSnapshot(id).thenComposeAsync({ original ->
             requireVolume(original)
             val (anchor, turns, entrance, worldControl) = CivsBlueprintGeometry.alignment(original, placement, facing, exactRotation, fixedEntrance)
@@ -177,7 +187,8 @@ class CivsBlueprints(
                 val exact = cells.filterNot { it.isBarrier }.associate {
                     CivPosition(it.position.x, it.position.y, it.position.z) to it.blockData
                 }
-                if (exact != piece.blocks.associate { it.position to it.after }) throw CivsRejection("invalid-plan")
+                if (exact != piece.blocks.filterNot { it.after == "minecraft:barrier" }
+                        .associate { it.position to it.after }) throw CivsRejection("invalid-plan")
                 rejectHazards(cells)
                 val estimate = CivsMaterials.required(CivPlacementPlan(piece.id, piece.id, worldId, building,
                     exact.map { (position, after) -> CivPlanBlock(position, "minecraft:air", after) }))

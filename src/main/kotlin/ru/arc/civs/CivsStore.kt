@@ -474,7 +474,7 @@ class CivsStore(
         roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, route) ->
             route.copy(originalRoute = route.originalRoute.toList(), route = route.route.toList())
         },
-        autonomy = city.autonomy?.let { it.copy(products = it.products?.toMap()) },
+        autonomy = city.autonomy?.let { it.copy(products = it.products?.toMap(), plan = CivsSettlementPlans.detached(it.plan)) },
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {

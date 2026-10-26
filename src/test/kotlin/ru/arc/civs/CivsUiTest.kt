@@ -2951,7 +2951,8 @@ class CivsUiTest : FunSpec({
             val offer = h.screen.buttons.single { plainText(it.label).contains("План поселения") }
             h.click(offer.id.value)
             h.screen.id shouldBe "civs.offer"
-            h.body() shouldContain "Большая карта показывает"
+            h.body() shouldContain "Карта поселения с домами, дорогами, воротами и стенами"
+            h.body() shouldContain "показывает будущую застройку"
             h.screen.buttons.any { it.id.value == "prepare" } shouldBe true
             h.ui.openBuilding(h.player, base.id, board.id)
             h.screen.id shouldBe "civs.building"

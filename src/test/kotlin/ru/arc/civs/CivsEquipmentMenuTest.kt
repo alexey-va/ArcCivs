@@ -28,7 +28,27 @@ class CivsEquipmentMenuTest : FunSpec({
     test("gear and bag occupy 33 unique cells and furniture cannot become an inventory slot") {
         (0..32).map(::civsEquipmentViewSlot).distinct().size shouldBe 33
         (0..32).forEach { civsEquipmentLogicalSlot(civsEquipmentViewSlot(it)) shouldBe it }
-        listOf(-999, 0, 5, 8, 9, 13, 17, 45, 49, 53, 54, 89).forEach { civsEquipmentLogicalSlot(it) shouldBe null }
+        listOf(-999, 0, 5, 8, 9, 13, 15, 17, 45, 49, 53, 54, 89).forEach { civsEquipmentLogicalSlot(it) shouldBe null }
+    }
+
+    test("autonomous stock badge refreshes exact quantities without offering a transferable inventory slot") {
+        nativeEquipment { h ->
+            var pending = 9
+            h.open(stockDetails = { if (pending > 0) listOf(Component.text("Ждёт кладовщика: Еда × $pending")) else emptyList() })
+            h.name(15) shouldBe "Ресурсы поселения"
+            h.player.openInventory.topInventory.getItem(15)!!.type shouldBe Material.BARREL
+            h.click(15).isCancelled shouldBe true
+            h.click(15, ClickType.SHIFT_LEFT).isCancelled shouldBe true
+            h.calls shouldBe emptyList()
+            h.player.itemOnCursor.type shouldBe Material.AIR
+            pending = 3
+            h.paper.performTicks(20)
+            PlainTextComponentSerializer.plainText().serialize(
+                h.player.openInventory.topInventory.getItem(15)!!.itemMeta.lore()!!.first()) shouldBe "Ждёт кладовщика: Еда × 3"
+            pending = 0
+            h.paper.performTicks(20)
+            h.player.openInventory.topInventory.getItem(15)!!.type shouldBe Material.GRAY_STAINED_GLASS_PANE
+        }
     }
 
     test("overflow pages preserve gear positions and each saved bag slot has an exact round trip") {
@@ -326,12 +346,12 @@ private class EquipmentHarness(val paper: MockBukkitTestRuntime) {
     var backs = 0
     var failSnapshot = false
 
-    fun open(canDeposit: Boolean = true, details: List<Component> = emptyList()) = menu.open(player, "Василий", {
+    fun open(canDeposit: Boolean = true, details: List<Component> = emptyList(), stockDetails: () -> List<Component> = { emptyList() }) = menu.open(player, "Василий", {
         if (failSnapshot) throw CivsRejection("inventory-recovery")
         items
     }, { _, npc, slot, click -> calls += Triple(npc, slot, click); future }, { backs++ }, canDeposit = canDeposit,
         titleKey = if (canDeposit) "equipment.title" else "corpse.inventory-title",
-        backKey = if (canDeposit) "equipment.back" else "corpse.back", details = details)
+        backKey = if (canDeposit) "equipment.back" else "corpse.back", details = details, stockDetails = stockDetails)
 
     fun click(raw: Int, click: ClickType = ClickType.LEFT, action: InventoryAction = InventoryAction.PICKUP_ALL): InventoryClickEvent = InventoryClickEvent(
         player.openInventory, InventoryType.SlotType.CONTAINER, raw, click, action,

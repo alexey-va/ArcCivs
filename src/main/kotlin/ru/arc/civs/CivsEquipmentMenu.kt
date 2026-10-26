@@ -42,6 +42,7 @@ class CivsEquipmentMenu(
         val back: () -> Unit,
         val canDeposit: Boolean,
         val details: List<Component>,
+        val stockDetails: () -> List<Component>,
     ) : InventoryHolder {
         lateinit var view: Inventory
         var pending = false
@@ -75,9 +76,10 @@ class CivsEquipmentMenu(
         titleKey: String = "equipment.title",
         backKey: String = "equipment.back",
         details: List<Component> = emptyList(),
+        stockDetails: () -> List<Component> = { emptyList() },
     ) {
         if (closed || !player.isOnline) return
-        val session = Session(player, tasks.token(), items, transfer, back, canDeposit, details)
+        val session = Session(player, tasks.token(), items, transfer, back, canDeposit, details, stockDetails)
         val title = text.render(player, titleKey, "name" to workerName)
             .color(TextColor.color(0x20252B))
         session.view = plugin.server.createInventory(session, CIVS_EQUIPMENT_SIZE, title)
@@ -236,6 +238,12 @@ class CivsEquipmentMenu(
         if (pages > 1) bag.editMeta { it.displayName(text.render(session.player, "equipment.bag-page",
             "page" to session.page + 1, "pages" to pages)) }
         if (session.view.getItem(13) != bag) session.view.setItem(13, bag)
+        val stock = session.stockDetails()
+        val goods = if (stock.isEmpty()) filler.clone() else icon(Material.BARREL, session.player, "logistics.internal-stock").apply {
+            editMeta { it.lore(stock + listOf(text.render(session.player, "logistics.internal-stock-help"),
+                text.render(session.player, "logistics.internal-stock-closed"))) }
+        }
+        if (session.view.getItem(15) != goods) session.view.setItem(15, goods)
         session.view.setItem(47, if (session.page > 0) icon(Material.ARROW, session.player, "common.previous") else filler.clone())
         session.view.setItem(51, if (session.page + 1 < pages) icon(Material.ARROW, session.player, "common.next") else filler.clone())
     }

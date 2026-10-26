@@ -245,6 +245,79 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    test("activating a road SITE keeps skipped paid spine grades and captures only new shoulders") {
+        spatialScenario { s ->
+            val paid = (0..16).map { CivPosition(0, 65, it) }
+            val forester = s.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+                anchor = CivPosition(0, 64, 16), entrance = paid.last(), rotation = 90,
+                bounds = CivBox(CivPosition(1, 64, 13), CivPosition(5, 70, 19)), control = CivPosition(2, 65, 16))
+            val piece = CivSettlementPiece(UUID.randomUUID(), BuildingType.ROAD,
+                CivBox(CivPosition(-1, 64, 8), CivPosition(1, 66, 12)), CivPosition(-2, 65, 10),
+                buildList {
+                    for (x in -1..1) for (z in 8..12) for (y in 64..66) add(CivSettlementBlock(CivPosition(x, y, z),
+                        if (x == 0) "minecraft:barrier" else if (y == 64) "minecraft:cobblestone" else "minecraft:air"))
+                }, (-1..1).flatMap { x -> (8..12).map { z -> CivPosition(x, 65, z) } })
+            val building = CivsInfrastructure.building(piece)
+            val cells = piece.blocks.map { cell -> ArcSchematicBlock(
+                ArcSchematicPoint(cell.position.x, cell.position.y, cell.position.z), cell.after,
+                cell.after == "minecraft:air", cell.after == "minecraft:barrier") }
+            val blueprint = CivBlueprint(building, s.city.worldId, mockk<ArcSchematicSnapshot>(), cells, cells, byteArrayOf(1))
+            val site = building.copy(phase = BuildingPhase.SITE)
+            s.city = s.city.copy(autonomy = CivAutonomy(), buildings = s.city.buildings + forester + site)
+            s.access = CompletableFuture.completedFuture(CivAutonomousAccess(mapOf(forester.id to paid)))
+            paid.drop(1).forEach { p -> s.world.getBlockAt(p.x, p.y - 1, p.z).type = Material.DIRT_PATH }
+            val activation = s.planner.prepareExisting(s.city, blueprint)
+            s.finish(activation)
+            val design = activation.join()
+            design.blueprint.building.transit shouldBe piece.transit
+            design.blueprint.cells.filter { it.position.x == 0 }.all { it.isBarrier } shouldBe true
+            val terrain = requireNotNull(design.terrain)
+            terrain.blocks.none { it.position.x == 0 && it.position.z in 8..12 } shouldBe true
+            val capture = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
+                design.blueprint.building, design.blueprint.cells, site, terrain)
+            s.finish(capture)
+            capture.join().blocks.none { it.position.x == 0 && it.position.z in 8..12 } shouldBe true
+            paid.drop(1).forEach { p -> s.world.getBlockAt(p.x, p.y - 1, p.z).type shouldBe Material.DIRT_PATH }
+        }
+    }
+
+    for (version in listOf(CivsSettlementPlans.VERSION, 99))
+    test("existing SITE activation ${if (version == CivsSettlementPlans.VERSION) "retains its adopted route" else "ignores obsolete intent"}") {
+        spatialScenario { s ->
+            val blueprint = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 90, 1)
+            val site = blueprint.building.copy(phase = BuildingPhase.SITE)
+            val route = (0..15).map { CivPosition(0, 65, it) } +
+                (1..18).map { CivPosition(it, 65, 15) } + (14 downTo 10).map { CivPosition(18, 65, it) }
+            val frame = CivsSettlementLayout.frame(s.city)
+            val intent = CivSettlementPlan(version, 0, frame.halfWidth,
+                (s.city.buildings + site).map { CivSettlementPlot(it, it.bounds) },
+                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage })
+            s.city = s.city.copy(autonomy = CivAutonomy(plan = intent), buildings = s.city.buildings + site)
+            val control = requireNotNull(site.control)
+            s.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            (s.world.getBlockAt(control.x, control.y, control.z).state as Barrel).inventory.setItem(0, ItemStack(Material.DIAMOND, 2))
+            val activation = s.planner.prepareExisting(s.city, blueprint)
+            s.finish(activation)
+            val design = activation.join()
+            (design.terrain!!.route == route) shouldBe (version == CivsSettlementPlans.VERSION)
+            design.terrain.route.last() shouldBe site.entrance
+            design.blueprint.building shouldBe blueprint.building
+            (s.world.getBlockAt(control.x, control.y, control.z).state as Barrel).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 2)
+        }
+    }
+
+    test("infrastructure selection ignores obsolete routes and reserved plots") {
+        InfrastructurePlacementScenario().use { s ->
+            val frame = CivsSettlementLayout.frame(s.city)
+            val bad = CivSettlementPlan(99, 0, frame.halfWidth, emptyList(),
+                mapOf(UUID.randomUUID().toString() to listOf(CivPosition(9999, 65, 9999))),
+                frame.wallObstacles, frame.gates.map { it.passage })
+            s.city = s.city.copy(autonomy = s.city.autonomy!!.copy(plan = bad))
+            spatialFailure(s.planner.infrastructure(s.city)) shouldBe "test-selected-infrastructure-draft"
+            s.drafts.single().building.type shouldBe BuildingType.GATE
+        }
+    }
+
     test("native terrain rejects water steep ground and a player wall without clearing them") {
         spatialScenario { s ->
             val b = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(18, 64, 10), 0, 1).building

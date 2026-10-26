@@ -689,7 +689,10 @@ class CivsResidentsRuntimeTest : FunSpec({
                     "planner=${h.navigationState()} diagnostics=${messages.takeLast(4)}") {
                     arrived shouldBe true
                 }
-                messages.none { "citizen_route_recovered" in it || "ARCCIVS_NAVIGATION_FAILED" in it } shouldBe true
+                withClue("diagnostics=${messages.filter { "citizen_route_recovered" in it || "ARCCIVS_NAVIGATION_FAILED" in it }} " +
+                    "planner=${h.navigationState()}") {
+                    messages.none { "citizen_route_recovered" in it || "ARCCIVS_NAVIGATION_FAILED" in it } shouldBe true
+                }
                 h.spawns shouldBe 1
                 h.steps.isNotEmpty() shouldBe true
                 h.deliveries shouldBe 1
@@ -1430,6 +1433,49 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.deliveries shouldBe 1
             shouldThrow<CivsRejection> { h.owner.requireAutonomousDelivery(h.city.id, h.workerId, token) }
             h.workPlans shouldBe 0
+        }
+    }
+
+    test("native placement counts toward the next builder session without premature credit or a second idle session") {
+        residentRuntime { h ->
+            val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
+            val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.PLACING,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), materials = mapOf("STONE" to 1L),
+                payment = CivConstructionPayment(reservedBatch = 0), workCredit = 1)
+            h.city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), hut, target), construction = order,
+                workers = h.city.workers.map { CivsEquipment.collectSupplies(it, mapOf("STONE" to 1L)) }))
+            h.world.getBlockAt(30, 64, 0).type = Material.BARREL
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, 29.5, 64.0, .5))
+            h.onDelivery = { token -> token.constructionId shouldBe order.id }
+            h.owner.pulse(2_000)
+            for (tick in 1..12) h.owner.pulseFieldWork(2_000 + tick * 250L)
+            h.phase() shouldBe CitizenPhase.READY
+            h.owner.constructionReady(h.city.id, order.id) shouldBe true
+            h.deliveries shouldBe 0 // Existing credited placement never pre-fills more credit.
+            h.city.workers.single().completedCycles shouldBe 0L
+            h.city = CivsRules.completeBatch(h.city, h.city.owner, order.id)
+            h.city.construction!!.workCredit shouldBe 0
+            h.owner.pulseFieldWork(5_250)
+            h.phase() shouldBe CitizenPhase.DELIVERING
+            h.deliveries shouldBe 1 // First 250ms handoff, without another 2s session or full pulse.
+            h.owner.status(h.workerId) shouldBe "workers.status.building"
+            repeat(8) { h.owner.pulseFieldWork(5_500 + it * 250L) }
+            h.deliveries shouldBe 1
+            h.pendingDelivery.isDone shouldBe false
+            h.city.construction!!.workCredit shouldBe 0
+            val worker = h.city.workers.single()
+            h.city = CivsRules.deliver(h.city, h.city.owner, worker.id, hut.id, worker.completedCycles, worker.nextDeliveryAt, 5_250)
+            h.pendingDelivery.complete(h.city)
+            h.owner.pulseFieldWork(7_500)
+            h.city.workers.single().completedCycles shouldBe 1L
+            h.city.construction!!.workCredit shouldBe 1 // Only the remaining row is credited.
+            h.phase() shouldBe CitizenPhase.WORKING
+            h.owner.constructionReady(h.city.id, order.id) shouldBe true
+            h.deliveries shouldBe 1
         }
     }
 
@@ -3537,6 +3583,141 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     // Native Auto scenery and its separate observed economic session.
+    test("courier loss sends a full saved queue to the actual depot without new work or reward even if a courier returns") {
+        residentRuntime { h ->
+            val farm = h.assignCanonicalAutoFarm()
+            val actor = h.owner.collisionActors().single()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                schematicId = "warehouse1", production = null, anchor = CivPosition(10, 64, 0),
+                entrance = CivPosition(10, 64, -1), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            h.city = CivsRules.validate(h.city.copy(stock = Stock(), buildings = h.city.buildings + warehouse,
+                workers = h.city.workers.map { it.copy(pendingStock = Stock(food = 384), nextDeliveryAt = 999_999) }))
+            val original = h.city.workers.single()
+            val first = h.autoCrop(farm, 0, duration = 5_000)
+            actor.teleport(Location(h.world, first.standing.x + .5, first.standing.y.toDouble(), first.standing.z + .5))
+            val origin = actor.location
+            (origin.distance(Location(h.world, warehouse.entrance.x + .5, warehouse.entrance.y.toDouble(),
+                warehouse.entrance.z + .5)) > 8.0) shouldBe true
+            val token = CitizenToken(farm.id, original.completedCycles, original.nextDeliveryAt, null)
+            var committed: Settlement? = null
+            val pending = CompletableFuture<Settlement>()
+            h.workerDelivery = { workerId, deliveredToken ->
+                workerId shouldBe original.id
+                deliveredToken shouldBe token
+                h.owner.autonomousVisualWork(h.city.id, workerId) shouldBe null
+                val goods = h.owner.requirePendingStockDelivery(h.city.id, workerId, token)
+                goods shouldBe Stock(food = 384)
+                citizenNearEndpoint(CitizenPoint(actor.location.x, actor.location.y, actor.location.z), warehouse.entrance) shouldBe true
+                committed = CivsAutonomousLogistics.unloadPending(h.city, workerId, farm.id, token.completedCycles,
+                    token.nextDeliveryAt, goods, requireNotNull(h.navigationNow))
+                pending
+            }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            h.phase() shouldBe CitizenPhase.RETURNING
+            shouldThrow<CivsRejection> { h.owner.requirePendingStockDelivery(h.city.id, h.workerId, token) }
+                .reason shouldBe "route-unreachable"
+            var walked = 0.0
+            for (tick in 1..3_000) {
+                val before = actor.location
+                h.navigate()
+                val step = before.distance(actor.location)
+                (step <= .500001) shouldBe true
+                walked += step
+                if (tick == 10) h.city = CivsRules.validate(h.city.copy(workers = h.city.workers +
+                    CivWorker(UUID(0, 43), "Replacement courier", warehouse.id, nextDeliveryAt = 1)))
+                val now = requireNotNull(h.navigationNow)
+                if (tick % 20 == 0) { h.owner.pulse(now); h.clearRecordedCalls() }
+                if (tick % 5 == 0) h.owner.pulseFieldWork(now)
+                if (h.deliveries == 1) break
+            }
+            withClue(h.navigationState()) { h.deliveries shouldBe 1 }
+            (walked > 8.0) shouldBe true
+            h.autonomousObservedMillis() shouldBe 0L
+            h.owner.courierSupplySources(h.city.id).containsKey(h.workerId) shouldBe false
+            h.city.stock shouldBe Stock()
+            h.city.workers.first() shouldBe original
+            val after = requireNotNull(committed)
+            after.stock shouldBe Stock(food = 384)
+            after.workers.first().pendingStock shouldBe null
+            after.workers.first().completedCycles shouldBe original.completedCycles
+            after.workers.first().skills shouldBe original.skills
+            after.workers.first().items shouldBe original.items
+            h.city = after
+            h.work = null
+            pending.complete(after) shouldBe true
+            pending.complete(after) shouldBe false
+            shouldThrow<CivsRejection> { CivsAutonomousLogistics.unloadPending(after, original.id, farm.id,
+                token.completedCycles, token.nextDeliveryAt, original.pendingStock!!, requireNotNull(h.navigationNow)) }
+                .reason shouldBe "stale-delivery"
+        }
+    }
+
+    test("a staffed Auto courier lets real crop work queue two sessions at the field without a hall trip") {
+        residentRuntime { h ->
+            val farm = h.assignCanonicalAutoFarm()
+            val producer = h.city.workers.single()
+            val actor = h.owner.collisionActors().single()
+            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                schematicId = "warehouse1", production = null, anchor = CivPosition(10, 64, 0),
+                entrance = CivPosition(10, 64, -1), control = CivPosition(10, 64, 0),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
+                workers = h.city.workers + CivWorker(UUID(0, 43), "Courier", warehouse.id, nextDeliveryAt = 1)))
+            val initial = h.city
+            val first = h.autoCrop(farm, 0, duration = 5_000)
+            actor.teleport(Location(h.world, first.standing.x + .5, first.standing.y.toDouble(), first.standing.z + .5))
+            var native = 0
+            var earned = 0
+            var lastWorkedAt = first.standing
+            h.workerDelivery = { workerId, token ->
+                workerId shouldBe producer.id
+                val visual = h.owner.autonomousVisualWork(h.city.id, workerId)
+                if (visual != null) {
+                    h.owner.requireWorldWorkArrival(h.city.id, workerId, visual)
+                    h.city = CivsRules.finishAutonomousVisual(h.city, visual)
+                    visual.changes.forEach { cell -> h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+                        .blockData = Bukkit.createBlockData(cell.after) }
+                    lastWorkedAt = visual.standing
+                    native++
+                    h.autoCrop(farm, native, duration = 5_000)
+                } else {
+                    h.owner.requireAutonomousObservedSession(h.city.id, workerId)
+                    val observed = h.owner.requireAutonomousDelivery(h.city.id, workerId, token)
+                    observed.completeAtWorkplace shouldBe true
+                    observed.workplace shouldBe lastWorkedAt
+                    citizenNearEndpoint(CitizenPoint(actor.location.x, actor.location.y, actor.location.z), lastWorkedAt) shouldBe true
+                    h.city = CivsRules.deliver(h.city, h.city.owner, workerId, farm.id,
+                        token.completedCycles, token.nextDeliveryAt, requireNotNull(h.navigationNow))
+                    earned++
+                    h.city.stock shouldBe initial.stock
+                    h.city.workers.first().pendingStock shouldBe Stock(food = earned * 3L)
+                    h.autoCrop(farm, native, duration = 5_000)
+                }
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            for (tick in 1..6_000) {
+                val before = actor.location
+                h.navigate()
+                (before.distance(actor.location) <= .500001) shouldBe true
+                val now = requireNotNull(h.navigationNow)
+                if (tick % 20 == 0) { h.owner.pulse(now); h.clearRecordedCalls() }
+                if (tick % 5 == 0) h.owner.pulseFieldWork(now)
+                if (earned == 2) break
+            }
+            withClue(h.navigationState()) { earned shouldBe 2 }
+            h.city.workers.first().completedCycles shouldBe producer.completedCycles + 2
+            h.city.workers.first().skills!!["FARM"] shouldBe 5L
+            h.city.workers.first().items shouldBe producer.items
+            h.city.inventory shouldBe null
+        }
+    }
+
     test("canonical Auto crop receipts preserve the worker token then return sixty observed seconds to the real depot once") {
         residentRuntime { h ->
             val farm = h.assignCanonicalAutoFarm()
@@ -3682,6 +3863,44 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("a completed native Auto receipt drops a search placeholder once the field scan confirms growth") {
         residentRuntime { h ->
             val farm = h.assignCanonicalAutoFarm()
+            val original = h.city
+            val work = h.autoCrop(farm, 0, duration = 5_000)
+            val actor = h.owner.collisionActors().single()
+            actor.teleport(Location(h.world, work.standing.x + .5, work.standing.y.toDouble(), work.standing.z + .5))
+            h.navigationNow = 2_000
+            h.owner.pulse(2_000)
+            for (now in 3_000L..7_000L step 1_000) h.owner.pulse(now)
+            h.phase() shouldBe CitizenPhase.DELIVERING
+            h.autonomousObservedMillis() shouldBe 5_000L
+            h.deliveries shouldBe 1
+            work.changes.forEach { cell ->
+                h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+            }
+            h.city = CivsRules.finishAutonomousVisual(h.city, work)
+            h.work = null
+            h.pendingDelivery.complete(h.city) shouldBe true
+            h.owner.pulse(7_250)
+            h.phase() shouldBe CitizenPhase.IDLE
+            // The previous action is displayed for at most twenty native ticks after its receipt.
+            h.navigationNow = 7_250
+            repeat(21) { h.navigate() }
+            h.owner.pulse(requireNotNull(h.navigationNow))
+            h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
+
+            h.idleReason = "waiting-growth"
+            h.owner.pulse(requireNotNull(h.navigationNow) + 250)
+            (h.owner.status(h.workerId) == "workers.status.searching-work") shouldBe false
+            h.autonomousObservedMillis() shouldBe 5_000L
+            shouldThrow<CivsRejection> { h.owner.requireAutonomousObservedSession(h.city.id, h.workerId) }
+            h.city.stock shouldBe original.stock
+            h.city.workers shouldBe original.workers
+            h.deliveries shouldBe 1
+        }
+    }
+
+    test("a completed native Auto session waits for full storage without another native or economic receipt") {
+        residentRuntime { h ->
+            val farm = h.assignCanonicalAutoFarm()
             h.city = h.city.copy(stock = h.city.stock.copy(food = CivsRules.capacity(h.city)))
             val original = h.city
             val work = h.autoCrop(farm, 0, duration = 60_000)
@@ -3701,19 +3920,19 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.pendingDelivery.complete(h.city) shouldBe true
             h.owner.pulse(62_250)
             h.phase() shouldBe CitizenPhase.RETURNING
-            // The previous action is displayed for at most twenty native ticks after its receipt.
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            // Both discovery states must yield to a completed session's conserved storage limit.
             h.navigationNow = 62_250
-            repeat(21) { h.navigate() }
-            h.owner.pulse(requireNotNull(h.navigationNow))
-            h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
-
-            h.idleReason = "waiting-growth"
-            h.owner.pulse(requireNotNull(h.navigationNow) + 250)
-            (h.owner.status(h.workerId) == "workers.status.searching-work") shouldBe false
-            h.autonomousObservedMillis() shouldBe 60_000L
-            h.city.stock shouldBe original.stock
-            h.city.workers shouldBe original.workers
-            h.deliveries shouldBe 1
+            for (reason in listOf("searching-work", "waiting-growth")) {
+                h.idleReason = reason
+                repeat(21) { h.navigate() }
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+                h.autonomousObservedMillis() shouldBe 60_000L
+                h.city.stock shouldBe original.stock
+                h.city.workers shouldBe original.workers
+                h.deliveries shouldBe 1
+            }
         }
     }
 
@@ -4568,7 +4787,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
         // The second pass observes ordinary native growth; the receipt only applies the subsequent care action.
         world.getBlockAt(crop.x, crop.y, crop.z).blockData = Bukkit.createBlockData(before)
-        return CivWorldWork(workerId, city.workers.single().completedCycles, farm.id,
+        return CivWorldWork(workerId, city.workers.first { it.id == workerId }.completedCycles, farm.id,
             soil.copy(z = soil.z - 1), listOf(CivPlanBlock(crop, before,
                 if (watering) "minecraft:wheat[age=4]" else "minecraft:wheat[age=0]")), durationMillis = duration,
             status = if (watering) "watering" else "working-field", focus = crop, autonomousVisual = true).also { work = it }

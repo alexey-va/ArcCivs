@@ -6,9 +6,10 @@ import java.util.UUID
 /** Only supply inputs participate in optimistic validation, never the city's general revision. */
 internal fun civSupplyInputs(city: Settlement): Any = listOf(
     city.worldId, city.center, city.radius, city.buildings, city.construction, city.pendingDeletion, city.research,
-    city.inventory?.mode, city.inventory?.containers,
+    city.inventory?.mode, city.inventory?.containers, city.autonomy?.paused,
     city.inventory?.takeIf { it.mode == CivStorageMode.VIRTUAL },
-    city.workers.map { listOf(it.id, it.assignment, it.completedCycles, it.inventory, it.items, it.cargo, it.childMinutes != null) },
+    city.workers.map { listOf(it.id, it.assignment, it.completedCycles, it.inventory, it.items, it.cargo, it.pendingStock, it.childMinutes != null) },
+    city.stock.takeIf { city.autonomy != null },
 )
 
 /** Owner metadata is stripped before dispatch; no native inventory or callback enters the worker. */

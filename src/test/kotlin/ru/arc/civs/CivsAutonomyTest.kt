@@ -172,9 +172,9 @@ class CivsAutonomyTest : FunSpec({
         val assigned = CivsRules.autoAssign(city, city.owner, 300_000)
         assigned.workers.map { worker -> assigned.building(worker.assignment!!)!!.type } shouldBe listOf(
             BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
-            BuildingType.GUARD_TOWER, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM)
+            BuildingType.WAREHOUSE, BuildingType.GUARD_TOWER, BuildingType.FORESTER, BuildingType.QUARRY)
         CivsRules.slots(city, hall) shouldBe 0
-        CivsRules.slots(city, buildings.first { it.type == BuildingType.WAREHOUSE }) shouldBe 0
+        CivsRules.slots(city, buildings.first { it.type == BuildingType.WAREHOUSE }) shouldBe 2
         CivsRules.isBuilder(city, hall) shouldBe false
         CivsRules.autoAssign(assigned, city.owner, 400_000) shouldBe assigned
     }
@@ -279,6 +279,7 @@ class CivsAutonomyTest : FunSpec({
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
         val completed = mutableListOf<Pair<BuildingType, Int>>()
+        val supplyAges = mutableMapOf<CivSupplyTask, Long>()
         var minutes = 0
         while (completed.size < 23 && CivsAutonomy.nextGoal(city) != null && minutes++ < 1_000) {
             val goal = requireNotNull(CivsAutonomy.nextGoal(city))
@@ -308,8 +309,19 @@ class CivsAutonomyTest : FunSpec({
                 val job = worker.assignment?.let(city::building) ?: continue
                 val resource = CivsRules.resource(job.type) ?: continue
                 if (now >= worker.nextDeliveryAt && CivsRules.productionAvailable(city, job) &&
-                    CivsRules.capacity(city) - city.stock[resource] >= CivsRules.deliveryAmount(job)) city =
+                    CivsAutonomousLogistics.room(city, resource) >= CivsRules.deliveryAmount(job)) city =
                     if (job.type == BuildingType.FORESTER) autonomyForestryReceipt(city, worker, now) else autonomyTrip(city, worker, now)
+            }
+            val sources = city.workers.filter { it.pendingStock != null }.mapNotNull { worker ->
+                worker.assignment?.let(city::building)?.let { worker.id to it.entrance }
+            }.toMap()
+            val supply = CivsAutonomousLogistics.snapshot(city, emptyMap(), { null }, sources) { false }
+            val deliveries = allocateCivSupplies(supply.detached(), supplyAges, now = now)
+            deliveries.seen.forEach { supplyAges.putIfAbsent(it, now) }
+            deliveries.served.forEach(supplyAges::remove)
+            for ((worker, plan) in deliveries.plans) {
+                city = CivsLogistics.pickup(city, worker, plan.cargo)
+                city = CivsLogistics.unload(city, worker, plan.cargo.id, now)
             }
             city = CivsPopulation.advance(city, city.workers.filter { it.assignment != null }.mapTo(hashSetOf()) { it.id }, CivsNames::name)
             city = CivsAutonomy.activeMinute(city)

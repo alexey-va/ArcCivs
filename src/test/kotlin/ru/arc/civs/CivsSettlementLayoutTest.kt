@@ -13,6 +13,29 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 class CivsSettlementLayoutTest : FunSpec({
+    test("new footways pave only their centreline while an accepted wide road remains exact") {
+        val baseCity = layoutFixtureCity()
+        val old = CivSettlementPiece(layoutId("paid-wide-road"), BuildingType.ROAD,
+            CivBox(CivPosition(10, 64, 10), CivPosition(12, 66, 14)), CivPosition(11, 65, 9),
+            buildList {
+                for (x in 10..12) for (z in 10..14) for (y in 64..66) add(CivSettlementBlock(CivPosition(x, y, z),
+                    if (y == 64) "minecraft:cobblestone" else "minecraft:air"))
+            }, (10..12).flatMap { x -> (10..14).map { z -> CivPosition(x, 65, z) } })
+        val city = baseCity.copy(buildings = baseCity.buildings + CivsInfrastructure.building(old).copy(phase = BuildingPhase.ACTIVE))
+        val route = (11..20).map { x -> CivPosition(x, 65 + (x - 11) / 3, 12) }
+        val surface = layoutSurface(city, "flat").let { base -> base.copy(columns = base.columns +
+            route.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(it.y - 1, true) } +
+            old.transit.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(it.y - 1, false) }) }
+        val plan = CivsSettlementLayout.infrastructure(city, CivsSettlementLayout.frame(city), surface, listOf(route), listOf(old))
+        plan.rejected shouldBe emptyMap()
+        plan.pieces.single { it.id == old.id } shouldBe old
+        val fresh = plan.pieces.filter { it.type == BuildingType.ROAD && it.id != old.id }
+        fresh.flatMap { it.blocks }.map { civsTerrainKey(it.position.x, it.position.z) }.toSet() shouldBe
+            route.filter { it.x > 12 }.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+        fresh.flatMap { it.transit }.toSet() shouldBe route.filter { it.x > 12 }.toSet()
+        route.zipWithNext().all { (a, b) -> kotlin.math.abs(a.y - b.y) <= 1 } shouldBe true
+    }
+
     for ((facing, direction) in listOf("east" to (1 to 0), "west" to (-1 to 0),
         "south" to (0 to 1), "north" to (0 to -1)))
     test("paved $facing rises use style wood stairs and flat landings become dirt path") {
@@ -207,7 +230,7 @@ class CivsSettlementLayoutTest : FunSpec({
         }
     }
 
-    test("road shoulders retain a later raised route centre and pass the actual terraform draft") {
+    test("road paving retains a later raised route centre and passes the actual terraform draft") {
         val city = layoutFixtureCity()
         val frame = CivsSettlementLayout.frame(city)
         val route = layoutAxisRoute(CivPosition(0, 65, 0), CivPosition(0, 65, 4)) +
@@ -225,6 +248,33 @@ class CivsSettlementLayoutTest : FunSpec({
             frame.wallObstacles, floors)
         draft.columns.single { it.x == 1 && it.z == 4 }.groundY shouldBe 65
         draft.columns.single { it.x == 1 && it.z == 4 }.preserve shouldBe true
+    }
+
+    test("a verified paid road spine joins a new extension without authoring central writes or shoulders") {
+        val city = layoutFixtureCity()
+        val route = layoutAxisRoute(CivPosition(0, 65, 6), CivPosition(0, 65, 20))
+        val base = layoutSurface(city, "flat")
+        val artificial = base.copy(columns = base.columns + route.associate {
+            civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(64, false)
+        })
+        val frame = CivsSettlementLayout.frame(city)
+        val extended = route + (21..24).map { CivPosition(0, 65, it) }
+        val planned = CivsSettlementLayout.infrastructure(city, frame, artificial, listOf(extended), retainedRoutes = listOf(route))
+        val roads = planned.pieces.filter { it.type == BuildingType.ROAD }
+        roads.size shouldBe 1
+        route.forEach { point ->
+            (point in roads.single().transit) shouldBe true
+            roads.single().blocks.filter { it.position.x == point.x && it.position.z == point.z }
+                .map { it.after } shouldBe List(3) { "minecraft:barrier" }
+        }
+        roads.single().blocks.all { it.position.x == 0 } shouldBe true
+        roads.single().transit shouldBe extended
+        CivsSettlementLayout.infrastructure(city, frame, artificial, listOf(route), retainedRoutes = listOf(route))
+            .pieces.none { it.type == BuildingType.ROAD } shouldBe true
+        val unknown = CivsSettlementLayout.infrastructure(city, frame, artificial, listOf(extended))
+        unknown.pieces.filter { it.type == BuildingType.ROAD }.forEach { piece ->
+            route.none { CivsAutonomousGeometry.horizontalContains(piece.bounds, it) } shouldBe true
+        }
     }
 
     test("completed infrastructure replays from the captured journal after its surface becomes artificial") {

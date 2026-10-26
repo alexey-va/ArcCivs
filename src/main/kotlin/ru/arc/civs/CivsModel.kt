@@ -63,7 +63,7 @@ data class CivWorker(
     val health: Double? = null,
     val skills: Map<String, Long>? = null,
     val inventory: Map<String, Long>? = null,
-    /** A separately journalled shipment; these items have already left their source container. */
+    /** Accepted native items or closed autonomous stock, already debited from its source. */
     val cargo: CivCargo? = null,
     /** Six equipment slots followed by 27 bag slots; null migrates the old plain personal store. */
     val items: List<CivResidentItem?>? = null,
@@ -77,6 +77,8 @@ data class CivWorker(
     val hunger: Int? = null,
     /** A real ground pickup requests a home visit; quantities remain solely in the native bag. */
     val hasCollectedItems: Boolean? = null,
+    /** Earned autonomous goods waiting for a courier; never native or extractable items. */
+    val pendingStock: Stock? = null,
 )
 
 /** A stable pair occupies one house. Progress records active minutes, never wall-clock catch-up. */

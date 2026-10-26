@@ -1,0 +1,402 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.94: builder handoff, deferred forestry approaches, stairs and complete village plan",
+  "assumptions": [
+    "Baseline is source/runtime .93. Live Roman construction pauses4.260–6.046s between64-row groups while the matching durable operation took39–57ms. The code removes repeated2s session waiting and coarse handoff polling; no after live throughput has been measured.",
+    "Builder credit remains64rows, normal work2s doubled at hunger<=6, placement5tick cadence and material quantities unchanged. The finite observed467-row project gives8 profession XP before and after. Faster completion may increase XP per wall-clock hour when paid projects remain; it does not mint additional credit or repeat acknowledged sessions.",
+    "Forester Egor had a confirmed unchanged-focus episode with no progress. Hypothetical low/base/high restoration6/24/72 L1 completions over0.25/1/4 active hours applies only to this affected future stream, not all previous production. Gross4/8/12WOOD by level and1WOOD normal seed cost stay unchanged. Accepted jobs remain pinned and partial jobs pay no final output.",
+    "Participants1/4/6 are village owners. A board is one per village and the calculator repeats the selected scenario-day only for comparison; it is not a daily free-board/refit entitlement. Building/removing/placing a board again keeps the existing authored price/material rules.",
+    "The full stable plan reserves future plots/routes/walls and gates only. It creates no building, items or payment on adoption. Ordinary16/infrastructure96, warehouse capacities, producer quantities, prices, research gates and level requirements remain unchanged.",
+    "Board v1/v2 uses18 stripped spruce logs,6 stone bricks,15 smooth sandstone,14 dark oak stairs and7 dark oak slabs (60 structural solids). New v3 uses30/6/36/22/11 respectively (105 structural solids), plus the same single27-slot barrel. Auto new-board price remains12WOOD+8STONE; physical-town construction pays the exact captured item bill. Net structural delta is12 logs+21 sandstone+8 stairs+4 slabs, in their own item units. One-time legacy refit placement totals differ from this net count because relocated old decoration is not returned as items; final captured delta is recorded separately.",
+    "A one-time authored v1/v2 refit preserves building/control identity and all contents, uses existing native construction work, and does not grant removed decorative materials or a second barrel. It is maintenance of an existing paid display, not a repeatable resource claim.",
+    "Stair interpolation changes movement geometry only. Normal resource work durations and road repair3s/1STONE are unchanged. Less wasted travel/idle can restore realized production but no precise network multiplier is claimed.",
+    "AbstractWOOD, abstractSTONE, resident professionXP, authored world geometry, player items, Vault, tokens and playerXP stay separate. Current physical item sales and effective resale deltas are unmeasured; no currency conversion is invented. Current EconomyShopGUI SELL and future SELL-off/contracts remain separate and unchanged.",
+    "Autonomous warehouse staffing restores courier transport. Production mints closed pending stock once; pickup and unload only transfer it. Existing per-resource city capacity counts spendable stock, pending goods, live courier cargo and unexpired corpse holdings. The existing maximum shipment remains64. No vanilla items are materialized from closed stock.",
+    "For one independently operating L1 quarry or farmer, the explicit low/base/high courier sensitivity assumes0.25/1/4 active hours, before15/20/30 completed sessions per hour (work plus self-return), after20/40/60 (work without self-return, subject to courier transport). Integer scenario completions are3/20/120 before and5/40/240 after. These are assumptions, not a measurement. The unchanged60s healthy observed-work interval caps production at60 sessions/hour or180/360/540 STONE or FOOD per hour byL1/L2/L3 before sleep, hunger, storage and native-work delays; hunger<=6 doubles work to120s. Native forestry completion depends on tree size and work; it is modeled separately above, not added as another simultaneous quarry occupation.",
+    "One courier is an additional resident role. Each successful unload earns its existing1 professionXP, independently of the producing resident1 XP/session. Low/base/high assumed unloads4/15/60 carry15/120/720 L1 STONE and separately15/120/720 FOOD, requiring2/4/24 single-resource full-or-partial64-unit shipments at minimum respectively; assumed counts fit the limit and reflect partial pickups. No dedicatedcourier XP existed in autonomous villages before. These are village-day scenarios with the same active hours, not guaranteed throughput.",
+    "Changing assignment, depot absence, restart and death must preserve existing pending/cargo records; corpse expiry remains the existing loss sink. Production capacity is checked before earning; unload does not mint a second production batch. Faster availability accelerates the already priced finite building/research progression; no price, research gate, global building cap, storage cap, sale flow or currency conversion changes.",
+    "A producer left without a courier first self-delivers its already earned pending stock, even when total held goods fill capacity. This transfer has no new production credit or profession XP. Partial storage shrink preserves the remaining pending balance; restoring a courier does not duplicate an already observed self-return.",
+    "Exact one-time board refit writes: v1 retains8 smooth sandstone and places97 structural solids (30 logs,6 stone bricks,28 sandstone,22 stairs,11 slabs), replacing/removing52 old solids; v2 retains20 solids and places85 (25 logs,6 stone bricks,21 sandstone,22 stairs,11 slabs), replacing/removing40. Removed decoration yields no stock/items, control barrel and its27 slots remain identical.",
+    "Controlled full-plan quote comparison on the same captured Auto2 terrain, same 16 plots and same closed perimeter: the unadopted three-wide paving candidate required 104 orders (3 GATE, 34 WALL, 67 ROAD), quoted at 308 abstract WOOD and 1128 abstract STONE. Initial one-column footpaths require 55 orders (3 GATE, 34 WALL, 18 ROAD), quoted at 308 WOOD and 736 STONE: delta 0 WOOD and -392 STONE. No candidate was paid or activated. Exact paid approaches and accepted infrastructure remain unchanged; all-barrier old-road-only orders are omitted. Unit prices stay ROAD=8 STONE, WALL=8 WOOD+16 STONE, GATE=12 WOOD+16 STONE; ordinary/infrastructure caps stay 16/96. This is a one-time potential future construction liability, not recurring player income or a current ledger sink.",
+    "In that controlled paving comparison, proposed native road floor states fall from 776 to 133 (714 to 124 dirt paths, 61 to 8 dark-oak stairs, one turning plank remains). Proposed air-clearance states fall from 1552 to 266. Existing native routes and canonical approach earthworks remain governed by their accepted geometry. These are authored world operations, not dropped or withdrawable player items; no automatic widening scheduler is introduced."
+  ],
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "plan_board_existing_price",
+          "kind": "burn",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "One new board per village campaign, separately from one-time existing-board refit.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "12",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "restored_l1_forester_gross",
+          "kind": "mint",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "Affected future stalled worker only; existing L1 gross 4WOOD per completed tree.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "4",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          }
+        },
+        {
+          "id": "restored_l1_forester_seed",
+          "kind": "burn",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "Normal replant costs 1WOOD. Existing .93 thinning is an alternative unchanged case, not added.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "plan_board_existing_price",
+          "kind": "burn",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "One new board per village campaign.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "8",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        {
+          "id": "l1_quarry_courier_cadence",
+          "kind": "mint",
+          "source": "ArcCivs0.1.94 autonomous courier staffing",
+          "basis": "One quarry production stream, before self-delivery versus staffed warehouse after. Pending and carried balances are included in mint time; unloading is a transfer.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              3,
+              20,
+              120
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              40,
+              240
+            ]
+          }
+        }
+      ]
+    },
+    "resident_profession_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "same_finite_construction_sessions",
+          "kind": "item",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "467-row observed project needs eight 64-row sessions before and after; repeated forced idle is removed, not session identity.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              8,
+              8,
+              8
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              8,
+              8,
+              8
+            ]
+          }
+        },
+        {
+          "id": "restored_forester_cycles",
+          "kind": "item",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "One profession XP per completed tree; independent forester work, not builder XP.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              24,
+              72
+            ]
+          }
+        },
+        {
+          "id": "quarry_and_farmer_production_xp",
+          "kind": "item",
+          "source": "ArcCivs0.1.94 autonomous courier staffing",
+          "basis": "Two distinct workers each earn1XP/session; no XP on intermediate native visual operations.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              6,
+              40,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              80,
+              480
+            ]
+          }
+        },
+        {
+          "id": "autonomous_courier_unload_xp",
+          "kind": "item",
+          "source": "ArcCivs0.1.94 autonomous courier staffing",
+          "basis": "One additional courier role; existing1XP per completed unload, never pickup or duplicate acknowledgement.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              4,
+              15,
+              60
+            ]
+          }
+        }
+      ]
+    },
+    "authored_world_blocks": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "new_board_solid_blocks",
+          "kind": "item",
+          "source": "ArcCivs 0.1.94 requested recovery and plan-board revision",
+          "basis": "One physical board: non-air structural cells excluding its single registered control barrel; world geometry, not minted transferable items.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "60",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "105",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_transferable_items": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "vault_direct": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "abstract_food": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "l1_farmer_courier_cadence",
+          "kind": "mint",
+          "source": "ArcCivs0.1.94 autonomous courier staffing",
+          "basis": "A distinct simultaneously working farmer, same work timer and independent FOOD unit.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              3,
+              20,
+              120
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              40,
+              240
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

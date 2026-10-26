@@ -17,6 +17,41 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
+    test("infrastructure preparation keeps paid spine barriers skipped and verifies every new shoulder cell") {
+        MockBukkitTestRuntime.open().use {
+            val id = UUID.randomUUID()
+            val cells = buildList {
+                for (x in 10..12) for (y in 64..66) add(CivSettlementBlock(CivPosition(x, y, 20),
+                    if (x == 11) "minecraft:barrier" else if (y == 64) "minecraft:cobblestone" else "minecraft:air"))
+            }
+            val piece = CivSettlementPiece(id, BuildingType.ROAD,
+                CivBox(CivPosition(10, 64, 20), CivPosition(12, 66, 20)), CivPosition(10, 65, 19), cells,
+                (10..12).map { x -> CivPosition(x, 65, 20) })
+            val bytes = CivsInfrastructure.schematic(piece, 4444)
+            val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            val snapshot = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(2, 2, 0),
+                ArcSchematicPoint(0, 0, 0), cells.associate { block ->
+                    ArcSchematicPoint(block.position.x - 10, block.position.y - 64, block.position.z - 20) to block.after
+                }, hash, "minecraft:barrier")
+            val libraries = BlueprintLibraries()
+            every { libraries.captured.loadVerified(id.toString(), hash,
+                ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(snapshot)
+            libraries.subject.use { blueprints ->
+                val prepared = blueprints.prepareInfrastructure(piece, UUID.randomUUID(), bytes).join()
+                prepared.building.transit shouldBe piece.transit
+                prepared.building.bounds shouldBe piece.bounds
+                prepared.cells.filter { it.position.x == 11 }.all { it.isBarrier } shouldBe true
+                prepared.materials shouldBe mapOf("COBBLESTONE" to 2L)
+                val changed = piece.copy(blocks = cells.map { cell -> if (cell.position == CivPosition(10, 64, 20))
+                    cell.copy(after = "minecraft:dirt") else cell })
+                val failure = shouldThrow<java.util.concurrent.CompletionException> {
+                    blueprints.prepareInfrastructure(changed, UUID.randomUUID(), bytes).join()
+                }
+                (failure.cause as CivsRejection).reason shouldBe "invalid-plan"
+            }
+        }
+    }
+
     test("builtin board uses its owned verified capture off thread and restores the ordinary control in all rotations") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open().use {
@@ -33,18 +68,18 @@ class CivsBlueprintsTest : FunSpec({
                 val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
                 val origin = ArcSchematicPoint(3, 0, 3)
                 val cells = CivsPlanBoardBlueprint.blocks().mapKeys { (p, _) -> ArcSchematicPoint(p.x, p.y, p.z) }
-                val original = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 6, 2), origin, cells, hash, "minecraft:barrier")
+                val original = BlueprintCellsSnapshot(ArcSchematicPoint(-2, 0, 0), ArcSchematicPoint(8, 7, 2), origin, cells, hash, "minecraft:barrier")
                 val libraries = BlueprintLibraries(root, Executor { work.addLast(it) }, 4444)
-                every { libraries.captured.loadVerified("builtin/plan_board/v2", hash,
+                every { libraries.captured.loadVerified("builtin/plan_board/v3", hash,
                     ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(original)
                 every { libraries.captured.transform(original, any()) } answers {
                     val turns = secondArg<ArcSchematicTransform>().quarterTurns
                     fun rotated(p: ArcSchematicPoint) = CivsBlueprintGeometry.rotate(
                         ArcSchematicPoint(p.x - origin.x, p.y - origin.y, p.z - origin.z), turns)
-                    val corners = listOf(0, 6).flatMap { x -> listOf(0, 2).map { z -> rotated(ArcSchematicPoint(x, 0, z)) } }
+                    val corners = listOf(-2, 8).flatMap { x -> listOf(0, 2).map { z -> rotated(ArcSchematicPoint(x, 0, z)) } }
                     CompletableFuture.completedFuture(BlueprintCellsSnapshot(
                         ArcSchematicPoint(corners.minOf { it.x }, 0, corners.minOf { it.z }),
-                        ArcSchematicPoint(corners.maxOf { it.x }, 6, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
+                        ArcSchematicPoint(corners.maxOf { it.x }, 7, corners.maxOf { it.z }), ArcSchematicPoint(0, 0, 0),
                         cells.mapKeys { (p, _) -> rotated(p) }, hash, "minecraft:barrier"))
                 }
                 try {
@@ -64,14 +99,14 @@ class CivsBlueprintsTest : FunSpec({
                             blueprint.building.entrance shouldBe CivPosition(40, 65, 20)
                             blueprint.building.control shouldBe controls[turns]
                             blueprint.sourceBytes.toList() shouldBe bytes.toList()
-                            blueprint.materials shouldBe mapOf("STRIPPED_SPRUCE_LOG" to 18L, "STONE_BRICKS" to 6L,
-                                "SMOOTH_SANDSTONE" to 15L, "DARK_OAK_STAIRS" to 14L, "DARK_OAK_SLAB" to 7L)
+                            blueprint.materials shouldBe mapOf("STRIPPED_SPRUCE_LOG" to 30L, "STONE_BRICKS" to 6L,
+                                "SMOOTH_SANDSTONE" to 36L, "DARK_OAK_STAIRS" to 22L, "DARK_OAK_SLAB" to 11L)
                             val control = subject.controlPosition(blueprint.building.copy(phase = BuildingPhase.ACTIVE))
                             finish()
                             control.join() shouldBe controls[turns]
                         }
-                        Files.readAllBytes(root.resolve("builtin/plan_board/v2.schem")).toList() shouldBe bytes.toList()
-                        verify(exactly = 8) { libraries.captured.loadVerified("builtin/plan_board/v2", hash,
+                        Files.readAllBytes(root.resolve("builtin/plan_board/v3.schem")).toList() shouldBe bytes.toList()
+                        verify(exactly = 8) { libraries.captured.loadVerified("builtin/plan_board/v3", hash,
                             ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
                         val legacyBytes = CivsPlanBoardBlueprint.schematic(4444, legacy = true)
                         val legacyHash = MessageDigest.getInstance("SHA-256").digest(legacyBytes).joinToString("") { "%02x".format(it) }

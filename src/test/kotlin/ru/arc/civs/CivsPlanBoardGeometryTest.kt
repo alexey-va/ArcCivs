@@ -14,9 +14,9 @@ class CivsPlanBoardGeometryTest : FunSpec({
         blocks[CivPosition(3, 1, 2)] shouldBe "minecraft:structure_void"
         blocks[CivPosition(6, 1, 2)] shouldBe "minecraft:air"
         blocks.values.groupingBy { it.substringBefore('[') }.eachCount() shouldBe mapOf(
-            "minecraft:stone_bricks" to 6, "minecraft:stripped_spruce_log" to 18,
-            "minecraft:smooth_sandstone" to 15, "minecraft:dark_oak_stairs" to 14,
-            "minecraft:dark_oak_slab" to 7, "minecraft:structure_void" to 1, "minecraft:air" to 71)
+            "minecraft:stone_bricks" to 6, "minecraft:stripped_spruce_log" to 30,
+            "minecraft:smooth_sandstone" to 36, "minecraft:dark_oak_stairs" to 22,
+            "minecraft:dark_oak_slab" to 11, "minecraft:structure_void" to 1, "minecraft:air" to 131)
         blocks[CivPosition(3, 2, 2)] shouldBe "minecraft:air"
         val legacy = CivsPlanBoardBlueprint.blocks(legacy = true)
         legacy[CivPosition(6, 1, 2)] shouldBe "minecraft:structure_void"
@@ -24,6 +24,18 @@ class CivsPlanBoardGeometryTest : FunSpec({
         legacy.values.count { it == "minecraft:air" } shouldBe 55
         CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID shouldBe "civs/builtin/plan_board/v1"
         CivsPlanBoardBlueprint.origin.z shouldBe CivsPlanBoardBlueprint.bounds.max.z + 1
+    }
+
+    test("legacy refit centres the large physical face on its unchanged barrel") {
+        val id = CivsPlanBoardBlueprint.REFIT_V1
+        val body = CivsPlanBoardBlueprint.body(id)
+        val solids = body.filterValues { it != "minecraft:air" }
+        val control = solids.entries.single { it.value == "minecraft:structure_void" }.key
+        control shouldBe CivPosition(6, 1, 2)
+        (solids.keys.maxOf { it.x } - solids.keys.minOf { it.x } + 1) shouldBe 11
+        (solids.keys.maxOf { it.x } + solids.keys.minOf { it.x }) / 2 shouldBe control.x
+        CivsPlanBoardBlueprint.blocks(id)[control] shouldBe "minecraft:structure_void"
+        civsContainsBox(CivsPlanBoardBlueprint.bounds(id), CivsPlanBoardBlueprint.legacyBounds) shouldBe true
     }
 
     test("exact union preserves disconnected parallel paths at negative coordinates") {
@@ -205,17 +217,17 @@ class CivsPlanBoardGeometryTest : FunSpec({
         }
     }
 
-    test("forecast footprints and dashed layout remain separate from accepted roads and fit the backing") {
+    test("adopted future footprints and complete layout remain separate from accepted roads and fit the backing") {
         val source = planBoardAutoFixture()
         val house = source.buildings.first { it.type == BuildingType.HOUSE }.copy(id = UUID(93, 1))
-        val layout = CivsPlanBoardGeometry.layout(source.copy(forecast = CivPlanBoardForecast(listOf(house),
+        val layout = CivsPlanBoardGeometry.layout(source.copy(plan = CivSettlementPlan(1, 0, 56, listOf(CivSettlementPlot(house, house.bounds)), emptyMap(),
             listOf(CivBox(CivPosition(-20, 64, -20), CivPosition(20, 64, -18))), emptyList())))
-        layout.entries.single { it.id == house.id }.forecast shouldBe true
+        layout.entries.single { it.id == house.id }.future shouldBe true
         layout.roadCells shouldBe CivsPlanBoardGeometry.layout(source).roadCells
-        (layout.patches.any { it.key.startsWith("forecast-") } || layout.rasters.any { it.key.startsWith("forecast-") }) shouldBe true
+        (layout.patches.any { it.key.startsWith("future-") } || layout.rasters.any { it.key.startsWith("future-") }) shouldBe true
         layout.patches.forEach { patch ->
-            (patch.x >= 1.14 && patch.x + patch.width <= 4.200001) shouldBe true
-            (patch.y >= 1.219999 && patch.y + patch.height <= 3.860001) shouldBe true
+            (patch.x >= -.840001 && patch.x + patch.width <= 4.720001) shouldBe true
+            (patch.y >= 2.159999 && patch.y + patch.height <= 5.840001) shouldBe true
         }
         (layout.displayParts <= 256) shouldBe true
     }

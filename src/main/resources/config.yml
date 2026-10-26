@@ -45,6 +45,9 @@ navigation:
   # Hard preparation deadlines in server ticks; reaching one never permits a teleport.
   close-preparation-ticks: 80
   preparation-ticks: 320
+  # Shared native collision shapes for active routes; block/chunk events invalidate locally.
+  terrain-cache-blocks: 131072
+  terrain-refresh-ticks: 6000
 native-work:
   # Shared by all queued native work, including geometry capture. Whichever limit is hit first wins.
   operations-per-tick: 10000

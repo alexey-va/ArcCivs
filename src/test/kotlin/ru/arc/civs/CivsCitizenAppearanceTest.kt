@@ -134,8 +134,11 @@ class CivsCitizenAppearanceTest : FunSpec({
             listOf(CivPlanBlock(point.copy(y = point.y - 1), "minecraft:dirt", "minecraft:cobblestone")),
             status = "repairing-road", upkeep = mockk<CivRoadUpkeep>())
         val plan = base.copy(worldWork = work)
-        for (phase in CitizenPhase.entries) citizenWorking(plan, phase) shouldBe
-            (phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING))
+        for (phase in CitizenPhase.entries) {
+            val working = phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING)
+            citizenWorking(plan, phase) shouldBe working
+            citizenWorkStatus(plan, phase) shouldBe "repairing-road".takeIf { working }
+        }
         citizenWorking(plan.copy(idleReason = "no-construction"), CitizenPhase.WORKING) shouldBe false
         citizenTool(plan) shouldBe null // No invented held item; the actual resident HAND remains authoritative.
     }
@@ -156,6 +159,23 @@ class CivsCitizenAppearanceTest : FunSpec({
             citizenPlacementItem(Material.STONE) shouldBe Material.STONE
             citizenPlacementItem(Material.WATER) shouldBe Material.WATER_BUCKET
             citizenPlacementItem(Material.AIR) shouldBe null
+        }
+    }
+
+    test("an accepted construction keeps its building status while the work receipt is being saved") {
+        val base = appearancePlan(BuildingType.BUILDER_HUT)
+        val plan = base.copy(token = base.token.copy(constructionId = UUID(0, 23)))
+        for (phase in CitizenPhase.entries) {
+            val expected = "building".takeIf {
+                phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING)
+            }
+            citizenWorkStatus(plan, phase) shouldBe expected
+            citizenWorkStatus(plan.copy(idleReason = "placing"), phase) shouldBe expected
+            citizenWorkStatus(base, phase) shouldBe null
+            citizenWorkStatus(plan.copy(type = BuildingType.FARM), phase) shouldBe null
+            for (reason in listOf("waiting-materials", "construction-paused", "building-unavailable")) {
+                citizenWorkStatus(plan.copy(idleReason = reason), phase) shouldBe null
+            }
         }
     }
 

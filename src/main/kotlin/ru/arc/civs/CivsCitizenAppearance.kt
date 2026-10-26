@@ -62,7 +62,8 @@ internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
 }
 
 internal fun citizenWorkStatus(plan: CitizenPlan, phase: CitizenPhase): String? =
-    if (plan.type == BuildingType.GUARD_TOWER && plan.idleReason == null && phase == CitizenPhase.WORKING) "guarding"
+    if (plan.token.constructionId?.let { citizenConstructionWorking(plan, phase, it) } == true) "building"
+    else if (plan.type == BuildingType.GUARD_TOWER && plan.idleReason == null && phase == CitizenPhase.WORKING) "guarding"
     else plan.worldWork?.status?.takeIf { phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING) }
 
 internal fun citizenConstructionWorking(plan: CitizenPlan, phase: CitizenPhase, orderId: UUID): Boolean =

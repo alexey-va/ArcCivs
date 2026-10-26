@@ -6,8 +6,8 @@ internal object CivsCorpses {
 
     fun create(worker: CivWorker, death: CivDeathContext): CivCorpse {
         require(death.at >= 0 && death.at <= Long.MAX_VALUE - LIFETIME_MILLIS)
-        require(worker.cargo == null || worker.cargo.inventoryBacked)
-        return CivCorpse(worker.copy(cargo = null), death.position, death.at, death.at + LIFETIME_MILLIS,
+        require(worker.cargo == null || worker.cargo.inventoryBacked || worker.cargo.stockResource != null)
+        return CivCorpse(worker.copy(cargo = worker.cargo?.takeIf { it.stockResource != null }), death.position, death.at, death.at + LIFETIME_MILLIS,
             death.killerName?.take(64), death.killerType, death.cause, death.feetY)
     }
 
@@ -22,7 +22,9 @@ internal object CivsCorpses {
             require(corpse.feetY == null || corpse.feetY.isFinite() &&
                 kotlin.math.floor(corpse.feetY).toInt() == corpse.position.y)
             require(corpse.worker.name.isNotBlank() && corpse.worker.name.length <= 32)
-            require(corpse.worker.cargo == null)
+            require(corpse.worker.cargo == null || corpse.worker.cargo.stockResource != null && CivsLogistics.validCargo(city, corpse.worker.cargo))
+            require(corpse.worker.pendingStock?.let { pending -> city.autonomy != null &&
+                Resource.entries.all { pending[it] in 0..(128L + (CivsRules.MAX_BUILDINGS - 1) * 1024L) } } != false)
             require(corpse.cause.matches(Regex("[A-Z_]{1,64}")))
             require(corpse.killerType == null || corpse.killerType.matches(Regex("[A-Z_]{1,64}")))
             require(corpse.killerName == null || corpse.killerName.length in 1..64 && corpse.killerName.none(Char::isISOControl))

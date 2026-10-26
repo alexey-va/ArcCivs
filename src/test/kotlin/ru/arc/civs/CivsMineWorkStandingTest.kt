@@ -106,6 +106,171 @@ class CivsMineWorkStandingTest : FunSpec({
         }
     }
 
+    for (outside in listOf(false, true)) test("remote miner recovery ${if (outside) "rejects the outside cave" else "retains the exact paid cut inside the built mine"}") {
+        withReportedMine(nanoTime = { 0L }) { _, world, mine, city, worker, runtime ->
+            val first = nextMineWork(runtime, city, worker)
+            val feet = if (outside) CivPosition(-96, 60, -51) else first.standing
+            runtime.residentFeet = { Location(world, feet.x + .5, feet.y.toDouble(), feet.z + .5) }
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            val recovered = nextMineWork(runtime, city, worker)
+            recovered.remoteWork shouldBe !outside
+            CivsMinePlan.forBuilding(mine)!!.builtStanding(CivsMinePlan.localPoint(mine, recovered.standing),
+                requireNotNull(recovered.miningAccessStep)) shouldBe true
+            recovered.changes shouldBe first.changes
+            recovered.inputs shouldBe first.inputs
+            recovered.miningStep shouldBe first.miningStep
+            runtime.validate(city, recovered)
+            CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+            first.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+        }
+    }
+
+    test("a farmer's first rejected approach can use the same bounded remote mode without changing its harvest") {
+        withReportedMine(nanoTime = { 0L }) { _, world, _, original, _, runtime ->
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(-25, 63, 15)).copy(production = "WHEAT")
+            val farmer = spatialWorker(farm, "IRON_HOE")
+            val city = original.copy(buildings = original.buildings + farm, workers = listOf(farmer))
+            for (x in -4..1) for (z in -2..3) world.loadChunk(x, z)
+            CivsWorksiteLayouts.field(farm).forEach { soil ->
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                    (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+            }
+            CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            val first = nextMineWork(runtime, city, farmer)
+            val focus = requireNotNull(citizenWorkFocus(first))
+            val feet = listOf(6 to 0, -6 to 0, 0 to 6, 0 to -6).map { (dx, dz) ->
+                Location(world, focus.x + dx + .5, 64.0, focus.z + dz + .5)
+            }.first { at ->
+                citizenStandable(world, CivPosition(at.blockX, 64, at.blockZ)) &&
+                    citizenPacketBodyClear(world, CitizenPoint(at.x, at.y, at.z), false) &&
+                    citizenCanReachBlock(world, at.clone().add(0.0, 1.62, 0.0), focus, CITIZEN_REMOTE_WORK_REACH)
+            }
+            runtime.residentFeet = { feet }
+            runtime.rejectStanding(city, farmer, first) shouldBe true
+            val recovered = nextMineWork(runtime, city, farmer)
+            recovered.remoteWork shouldBe true
+            recovered.copy(standing = first.standing, remoteWork = false) shouldBe first
+            runtime.validate(city, recovered)
+            city.workers.single() shouldBe farmer
+            first.changes.forEach { cell ->
+                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+            }
+        }
+    }
+
+    test("a farmer admits its first harvest remotely when the ordinary stance ring has no support") {
+        withReportedMine(nanoTime = { 0L }) { _, world, _, original, _, runtime ->
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(-25, 63, 15)).copy(production = "WHEAT")
+            val farmer = spatialWorker(farm, "IRON_HOE")
+            val city = original.copy(buildings = original.buildings + farm, workers = listOf(farmer))
+            for (x in -4..1) for (z in -2..3) world.loadChunk(x, z)
+            val soil = CivsWorksiteLayouts.field(farm).first()
+            val focus = soil.copy(y = soil.y + 1)
+            for (x in soil.x - 2..soil.x + 2) for (z in soil.z - 2..soil.z + 2)
+                if (x != soil.x || z != soil.z) for (y in soil.y - 2..soil.y) world.getBlockAt(x, y, z).type = Material.AIR
+            world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+            val crop = (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+            world.getBlockAt(focus.x, focus.y, focus.z).blockData = crop
+            CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            val feet = Location(world, soil.x - 5.5, focus.y.toDouble(), soil.z + .5)
+            world.getBlockAt(feet.blockX, feet.blockY - 1, feet.blockZ).type = Material.STONE
+            for (y in feet.blockY..feet.blockY + 1) world.getBlockAt(feet.blockX, y, feet.blockZ).type = Material.AIR
+            citizenPacketSupported(world, CitizenPoint(feet.x, feet.y, feet.z)) shouldBe true
+            citizenPacketBodyClear(world, CitizenPoint(feet.x, feet.y, feet.z), false) shouldBe true
+            runtime.residentFeet = { feet }
+            citizenCanReachBlock(world, feet.clone().add(0.0, 1.62, 0.0), focus, CITIZEN_BLOCK_REACH) shouldBe false
+            val work = nextMineWork(runtime, city, farmer)
+            work.remoteWork shouldBe true
+            work.focus shouldBe focus
+            work.standing shouldBe CivPosition(feet.blockX, feet.blockY, feet.blockZ)
+            work.outputs shouldBe mapOf("WHEAT" to 1L, "WHEAT_SEEDS" to 1L)
+            work.inputs shouldBe emptyMap()
+            runtime.validate(city, work)
+            world.getBlockAt(focus.x, focus.y, focus.z).blockData.asString shouldBe crop.asString
+            city.workers.single() shouldBe farmer
+        }
+    }
+
+    test("a mine admits a first remote repair only from its own completed gallery after nearby footing is lost") {
+        failOnUnsupportedMockBukkitOperation {
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CivsWorksiteWorldFixture("mine-initial-remote").also(paper.server::addWorld)
+                val plugin = paper.createSimplePlugin("MineInitialRemote")
+                val tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+                try {
+                    val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 68, 0))
+                    val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+                    val worker = spatialWorker(mine, "IRON_PICKAXE")
+                    val prefix = geometry.steps.size.toLong()
+                    val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans =
+                        mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, prefix)))
+                    for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
+                    for (step in geometry.steps) {
+                        val point = CivsWorksiteLayouts.point(mine, step.point)
+                        world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
+                    }
+                    val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
+                    for (y in top.y..top.y + 3) world.getBlockAt(top.x, y, top.z).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
+                    val localFace = requireNotNull(geometry.generator)
+                    val localStanding = requireNotNull(geometry.generatorStanding)
+                    val dx = localFace.x - localStanding.x
+                    val dz = localFace.z - localStanding.z
+                    val face = CivsWorksiteLayouts.point(mine, localFace)
+                    val inside = CivsWorksiteLayouts.point(mine,
+                        localStanding.copy(x = localStanding.x - dx * 6, z = localStanding.z - dz * 6))
+                    for (x in face.x - 5..face.x + 5) for (z in face.z - 5..face.z + 5)
+                        for (y in inside.y - 5 until inside.y) world.getBlockAt(x, y, z).type = Material.AIR
+                    val feet = Location(world, inside.x + .5, inside.y.toDouble(), inside.z + .5)
+                    citizenStandable(world, inside) shouldBe true
+                    geometry.builtStanding(CivsMinePlan.localPoint(mine, inside), prefix) shouldBe true
+                    CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                        runtime.residentFeet = { feet }
+                        repeat(64) { runtime.pulse(listOf(city)) }
+                        val expectedRepair = CivsWorksiteLayouts.point(mine, localStanding.copy(y = localStanding.y - 1))
+                        val eye = feet.clone().add(0.0, 1.62, 0.0)
+                        val centre = Location(world, expectedRepair.x + .5, expectedRepair.y + .5, expectedRepair.z + .5)
+                        val hit = world.rayTraceBlocks(eye, centre.toVector().subtract(eye.toVector()), eye.distance(centre),
+                            org.bukkit.FluidCollisionMode.ALWAYS, true)
+                        val work = withClue("feet=$feet expectedRepair=$expectedRepair " +
+                            "support=${citizenPacketSupported(world, CitizenPoint(feet.x, feet.y, feet.z))} " +
+                            "body=${citizenPacketBodyClear(world, CitizenPoint(feet.x, feet.y, feet.z), false)} " +
+                            "remoteRay=${citizenCanReachBlock(world, eye, expectedRepair, CITIZEN_REMOTE_WORK_REACH)} " +
+                            "hit=${hit?.hitBlock?.location}/${hit?.hitBlock?.type} state=${runtime.debug(setOf(worker.id))}") {
+                            requireNotNull(runtime.plan(city, worker))
+                        }
+                        work.remoteWork shouldBe true
+                        work.standing shouldBe inside
+                        work.status shouldBe "securing-mine"
+                        work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                        work.miningStep shouldBe prefix
+                        val focus = requireNotNull(work.focus)
+                        citizenCanReachBlock(world, feet.clone().add(0.0, 1.62, 0.0), focus, CITIZEN_MINE_REACH) shouldBe false
+                        runtime.validate(city, work)
+                        work.changes.forEach { cell ->
+                            world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+                        }
+                        CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+                        // A supported cave outside the completed passage is never a fallback stance.
+                        val outside = inside.copy(x = inside.x - dz * 8, z = inside.z + dx * 8)
+                        geometry.builtStanding(CivsMinePlan.localPoint(mine, outside), prefix) shouldBe false
+                        world.getBlockAt(outside.x, outside.y - 1, outside.z).type = Material.STONE
+                        for (y in outside.y..outside.y + 1) world.getBlockAt(outside.x, y, outside.z).type = Material.AIR
+                        runtime.pulse(emptyList())
+                        runtime.residentFeet = { Location(world, outside.x + .5, outside.y.toDouble(), outside.z + .5) }
+                        repeat(128) { runtime.pulse(listOf(city)) }
+                        runtime.plan(city, worker) shouldBe null
+                        CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+                    }
+                } finally { tasks.close() }
+            }
+        }
+    }
+
     test("idle admissions share one native budget instead of spending a complete service slot per worker") {
         withReportedMine(nanoTime = { 0L }) { advanceTicks, world, _, original, worker, runtime ->
             nextMineWork(runtime, original, worker)

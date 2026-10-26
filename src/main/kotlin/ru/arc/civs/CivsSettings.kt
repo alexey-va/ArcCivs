@@ -54,6 +54,8 @@ data class CivsNavigationSettings(
     val preparationTicks: Int = 320,
     val nativeOperationsPerTick: Int = 10000,
     val nativeBudgetMillis: Double = 4.0,
+    val terrainCacheBlocks: Int = 131072,
+    val terrainRefreshTicks: Int = 6000,
 ) {
     init {
         require(searchNodesPerBatch in 1..65536)
@@ -64,6 +66,7 @@ data class CivsNavigationSettings(
         require(initialHorizontalMargin in 1..96 && initialVerticalMargin in 1..96)
         require(closePreparationTicks in 1..1200 && preparationTicks in 1..1200)
         require(nativeOperationsPerTick in 1..100000 && nativeBudgetMillis in 0.1..20.0)
+        require(terrainCacheBlocks in 256..1048576 && terrainRefreshTicks in 1..72000)
     }
 
     companion object {
@@ -79,6 +82,8 @@ data class CivsNavigationSettings(
             config.limit("navigation.preparation-ticks", 320, 1..1200),
             config.limit("native-work.operations-per-tick", 10000, 1..100000),
             config.decimal("native-work.budget-millis", 4.0, 0.1..20.0),
+            config.limit("navigation.terrain-cache-blocks", 131072, 256..1048576),
+            config.limit("navigation.terrain-refresh-ticks", 6000, 1..72000),
         )
     }
 }
