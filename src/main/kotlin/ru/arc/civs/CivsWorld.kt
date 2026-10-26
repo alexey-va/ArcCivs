@@ -43,6 +43,7 @@ class CivsWorld(
     private val plugin: Plugin,
     tasks: LifecycleTaskScope,
     private val nanoTime: () -> Long = System::nanoTime,
+    private val navigationSettings: CivsNavigationSettings = CivsNavigationSettings(),
     private val cities: () -> Collection<Settlement>,
 ) : AutoCloseable {
     private val monitor = Any()
@@ -1025,7 +1026,7 @@ class CivsWorld(
                     Location(world, endpoint.x + .5, endpoint.y.toDouble(), endpoint.z + .5),
                     { p -> citySnapshot.contains(p.x, p.z) && obstacles.none { CivsAutonomousGeometry.horizontalContains(it, p) } &&
                         citySnapshot.buildings.none { CivsWorksiteLayouts.isField(it, p.x, p.z) } },
-                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 })
+                    { a, b -> citizenControlStepClear(citySnapshot, a, b) }, { 1.0 }, settings = navigationSettings)
                 route = path
                 search = path.newSearch()
                 dispatch(emptyList())

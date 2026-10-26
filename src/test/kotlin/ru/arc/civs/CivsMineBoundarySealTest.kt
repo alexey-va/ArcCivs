@@ -98,6 +98,87 @@ class CivsMineBoundarySealTest : FunSpec({
         }
     }
 
+    test("Auto scenery cuts a deferred AIR frontier then repairs it without replaying a cosmetic receipt") {
+        withMineBoundary { world, mine, original, access, plugin ->
+            var city = CivsRules.validate(original.copy(inventory = null, autonomy = CivAutonomy()))
+            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+            val cut = nextBoundaryWork(runtime, city, world)
+            cut.autonomousVisual shouldBe true
+            cut.status shouldBe "digging-mine"
+            cut.focus shouldBe BOUNDARY_CUT
+            cut.inputs shouldBe emptyMap()
+            cut.outputs shouldBe emptyMap()
+            // The admission permits only this deferred AIR wall, never liquid in the same place.
+            world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type = Material.WATER
+            shouldThrow<CivsRejection> { runtime.applyAutonomousVisual(city, cut) }.reason shouldBe "stale-worksite"
+            world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y, BOUNDARY_CUT.z).type shouldBe Material.STONE
+            world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type = Material.AIR
+            val next = CivsRules.finishAutonomousVisual(city, cut)
+            runtime.applyAutonomousVisual(city, cut)
+            world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y, BOUNDARY_CUT.z).type shouldBe Material.AIR
+            next.workers shouldBe city.workers
+            next.stock shouldBe city.stock
+            next.autonomy shouldBe city.autonomy
+            next.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe 216L
+            city = next
+            runtime.invalidate(cut.workerId)
+            val seal = nextBoundaryWork(runtime, city, world)
+            seal.status shouldBe "securing-mine"
+            seal.focus shouldBe BOUNDARY_WALL
+            seal.inputs shouldBe emptyMap()
+            seal.outputs shouldBe emptyMap()
+            runtime.applyAutonomousVisual(city, seal)
+            world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type shouldBe Material.COBBLESTONE
+        }
+    }
+
+    test("successive paid frontier seals preserve discovery progress and still reject newly exposed liquid before the next cut") {
+        withMineBoundary { world, mine, original, access, plugin ->
+            var city = original
+            val otherWall = CivPosition(-89, 62, -39)
+            world.getBlockAt(otherWall.x, otherWall.y, otherWall.z).type = Material.AIR
+            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+            fun commit(work: CivWorldWork) {
+                runtime.validate(city, work)
+                val after = CivsRules.finishWorldWork(city, work, 100_000 + work.cycle * 5_000)
+                work.changes.forEach { cell ->
+                    world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+                }
+                city = after
+                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(city, work, 3_000_000) }.reason shouldBe "stale-delivery"
+                runtime.invalidate(work.workerId)
+            }
+            val cut = nextBoundaryWork(runtime, city, world)
+            cut.status shouldBe "digging-mine"
+            cut.focus shouldBe BOUNDARY_CUT
+            commit(cut)
+            val repaired = linkedSetOf<CivPosition>()
+            repeat(2) {
+                var work: CivWorldWork? = null
+                for (admission in 1..8) {
+                    val rays = world.rayTraces
+                    runtime.pulse(listOf(city))
+                    (world.rayTraces - rays <= 8) shouldBe true
+                    work = runtime.plan(city, city.workers.single())
+                    if (work != null) break
+                }
+                val seal = withClue("${runtime.debug()} repaired=$repaired") { requireNotNull(work) }
+                seal.status shouldBe "securing-mine"
+                seal.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                repaired.add(requireNotNull(seal.focus)) shouldBe true
+                commit(seal)
+            }
+            repaired shouldBe setOf(BOUNDARY_WALL, otherWall)
+            CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe
+                CivsEquipment.plainCount(original.workers.single(), "COBBLESTONE") - 1
+            val next = nextBoundaryWork(runtime, city, world)
+            next.status shouldBe "digging-mine"
+            runtime.validate(city, next)
+            world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type = Material.WATER
+            shouldThrow<CivsRejection> { runtime.validate(city, next) }.reason shouldBe "stale-worksite"
+        }
+    }
+
     test("missing carried cobblestone never opens the step215 native cell beside the hidden AIR boundary") {
         withMineBoundary { world, mine, original, access, plugin ->
             val worker = original.workers.single().let { worker -> worker.copy(items =

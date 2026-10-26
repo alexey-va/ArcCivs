@@ -32,6 +32,32 @@ maximum-active-npcs: 48
 npc-viewer-range: 96
 chunk-loading:
   maximum-chunks: 2048
+navigation:
+  # Detached A* nodes per worker batch; each node needs several surrounding block reads.
+  nodes-per-batch: 256
+  maximum-nodes: 4096
+  maximum-captured-blocks: 32768
+  maximum-jobs: 48
+  close-route-distance: 16.0
+  # Try a narrow corridor first, then reuse its frontier for wider detours.
+  initial-horizontal-margin: 4
+  initial-vertical-margin: 2
+  # Hard preparation deadlines in server ticks; reaching one never permits a teleport.
+  close-preparation-ticks: 80
+  preparation-ticks: 320
+native-work:
+  # Shared by all queued native work, including geometry capture. Whichever limit is hit first wins.
+  operations-per-tick: 10000
+  budget-millis: 4.0
+worksites:
+  # Aggregate discovery quotas per pulse across all residents, with an additional wall-time limit.
+  standing-checks-per-pulse: 32
+  ray-checks-per-pulse: 8
+  mine-checks-per-pulse: 24
+  # Minimum128: one accepted forestry batch contains up to128 cells.
+  forest-work-units-per-pulse: 192
+  maximum-forest-columns-per-pulse: 16
+  budget-millis: 2.0
 npc-voices:
   # Enable together with the resource pack that defines male1/female1 idle/work/greet events.
   enabled: false

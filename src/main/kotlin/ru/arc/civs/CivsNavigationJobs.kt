@@ -24,8 +24,10 @@ internal class CivsResidentNavigation(
     private val tasks: LifecycleTaskScope,
     nativeWork: BudgetedTaskQueue? = null,
     executor: Executor? = null,
+    private val settings: CivsNavigationSettings = CivsNavigationSettings(),
 ) {
     private class Job(val route: CitizenPacketRoute, val search: CitizenNavigationSearch) {
+        val startedTick = Bukkit.getCurrentTick().toLong()
         val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
         var searching: CompletableFuture<CitizenSearchResult>? = null
         var capturing: CompletableFuture<Unit>? = null
@@ -34,9 +36,9 @@ internal class CivsResidentNavigation(
     private val owner = Thread.currentThread()
     private val epoch = tasks.token()
     private val ownsWork = nativeWork == null
-    private val work = nativeWork ?: BudgetedTaskQueue(tasks, SEARCH_OPERATIONS_PER_TICK, SEARCH_BUDGET_NANOS,
-        System::nanoTime, MAXIMUM_JOBS)
-    private val ownedExecutor = if (executor == null) BoundedAsyncExecutor("ArcCivs-navigation", 1, MAXIMUM_JOBS) else null
+    private val work = nativeWork ?: BudgetedTaskQueue(tasks, settings.nativeOperationsPerTick,
+        (settings.nativeBudgetMillis * 1_000_000.0).toLong(), System::nanoTime, settings.maximumJobs)
+    private val ownedExecutor = if (executor == null) BoundedAsyncExecutor("ArcCivs-navigation", 1, settings.maximumJobs) else null
     private val executor = executor ?: requireNotNull(ownedExecutor)
     private val jobs = linkedMapOf<CitizenPacketRoute, Job>()
     private var closed = false
@@ -44,7 +46,7 @@ internal class CivsResidentNavigation(
 
     internal fun debug(): Map<String, Any?> {
         checkOwner()
-        return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to MAXIMUM_JOBS,
+        return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to settings.maximumJobs,
             "native_pending" to jobs.values.count { it.capturing?.isDone == false },
             "worker_pending" to jobs.values.count { it.searching?.isDone == false },
             "captured_blocks" to jobs.values.sumOf { it.terrain.size })
@@ -53,7 +55,7 @@ internal class CivsResidentNavigation(
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
                 stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
                 travelCost: (Block) -> Double): CitizenPacketRoute =
-        admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost))
+        admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost, settings = settings))
 
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute {
         checkOwner()
@@ -67,7 +69,7 @@ internal class CivsResidentNavigation(
         checkOwner()
         retireCancelled()
         if (closed || !tasks.isCurrent(epoch)) { route.planningFailed("cancelled"); return route }
-        if (jobs.size >= MAXIMUM_JOBS) { route.planningFailed("planner-busy"); return route }
+        if (jobs.size >= settings.maximumJobs) { route.planningFailed("planner-busy"); return route }
         val job = Job(route, route.newSearch())
         jobs[route] = job
         route.attachAsync(job.search::cancel)
@@ -89,6 +91,10 @@ internal class CivsResidentNavigation(
     private fun poll() {
         for (job in jobs.values.toList()) {
             if (!job.route.searching) continue
+            if (Bukkit.getCurrentTick().toLong() - job.startedTick >= job.route.preparationTickLimit()) {
+                job.route.planningFailed("preparation-budget")
+                continue
+            }
             try {
                 val searching = job.searching
                 if (searching != null && searching.isDone) {
@@ -167,8 +173,8 @@ internal class CivsResidentNavigation(
     }
 
     companion object {
-        const val SEARCH_OPERATIONS_PER_TICK = 384
-        const val SEARCH_BUDGET_NANOS = 1_000_000L
+        const val SEARCH_OPERATIONS_PER_TICK = 10_000
+        const val SEARCH_BUDGET_NANOS = 4_000_000L
         const val MAXIMUM_JOBS = 48
     }
 }
@@ -182,10 +188,18 @@ internal class CitizenNavigationCaptureLimit : RuntimeException()
  */
 internal class CitizenNavigationCapture(
     private val route: CitizenPacketRoute,
-    private val probes: List<CitizenSearchProbe>,
+    probes: List<CitizenSearchProbe>,
     private val cached: MutableMap<CivPosition, CitizenTerrainBlock>,
 ) {
+    private val probes = probes.toMutableList()
+    private val requestedCount = probes.size
+    private val seen = probes.mapTo(hashSetOf()) { it.node }
+    // The initial origin/goal proof stays small. Later native batches include one adjacent
+    // graph layer so the worker can traverse captured nodes without a round trip per step.
+    private val prefetch = probes.none { it.incoming || it.node.initial }
+    private val maximumProbes = route.captureProbeLimit()
     private val bounds = route.captureLimits()
+    private val maximumBlocks = route.captureBlockLimit()
     private val completed = mutableListOf<CitizenSearchCapture>()
     val result: List<CitizenSearchCapture> get() = completed.toList()
     private var probeIndex = 0
@@ -212,7 +226,12 @@ internal class CitizenNavigationCapture(
         while (positionIndex < positions.size) {
             val point = positions[positionIndex++]
             if (point in cached) continue
-            if (cached.size >= MAXIMUM_BLOCKS) throw CitizenNavigationCaptureLimit()
+            if (cached.size >= maximumBlocks) {
+                // A speculative neighbour must not discard already captured required work.
+                // If the solver still needs more terrain, its next required probe reports the cap.
+                if (probeIndex >= requestedCount) { probeIndex = probes.size; return true }
+                throw CitizenNavigationCaptureLimit()
+            }
             cached[point] = route.captureBlock(point)
             return false
         }
@@ -223,10 +242,15 @@ internal class CitizenNavigationCapture(
         val edges = requireNotNull(candidates)
         if (candidateIndex < edges.size) {
             val edge = edges[candidateIndex++]
-            admitted += edge.copy(permitted = route.capturePermission(probe.from, edge.node.point()))
+            admitted += edge.copy(permitted = if (probe.incoming) route.capturePermission(edge.node.point(), probe.from)
+                else route.capturePermission(probe.from, edge.node.point()))
             return false
         }
         completed += CitizenSearchCapture(probe, blocks, admitted.toList())
+        if (prefetch && probeIndex < requestedCount) for (edge in admitted) {
+            if (probes.size >= maximumProbes) break
+            if (edge.permitted && seen.add(edge.node)) probes += CitizenSearchProbe(edge.node, edge.node.point())
+        }
         admitted.clear()
         probeIndex++
         positions = emptyList()

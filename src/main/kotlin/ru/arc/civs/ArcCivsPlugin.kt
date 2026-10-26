@@ -54,8 +54,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 historyClose = history.closeAfter(nativeClose).whenComplete { _, _ -> CivsDiagnostics.detach(history) }
             })
             lifecycle.tasks.runTimer(1_200L, 1_200L, history::maintenance)
-            val queue = ru.arc.core.BudgetedTaskQueue(lifecycle.tasks, 512, 4_000_000L, System::nanoTime, 4096).also { nativeWork = it }
-            prepare(lifecycle, queue, server.servicesManager.load(ArcSchematicService::class.java), dataPath)
+            prepare(lifecycle, server.servicesManager.load(ArcSchematicService::class.java), dataPath)
         } catch (failure: Throwable) {
             lifecycle.health.markDown()
             logger.log(Level.SEVERE, "ArcCivs could not initialize", failure)
@@ -63,8 +62,7 @@ open class ArcCivsPlugin : JavaPlugin() {
         }
     }
 
-    private fun prepare(lifecycle: PaperPluginRuntime, queue: ru.arc.core.BudgetedTaskQueue,
-        schematicService: ArcSchematicService?, root: Path) {
+    private fun prepare(lifecycle: PaperPluginRuntime, schematicService: ArcSchematicService?, root: Path) {
         val terminal = CompletableFuture<Unit>()
         lifecycle.own(PaperSqlServices.installConsumer(this, terminal))
         val executor = BoundedAsyncExecutor("ArcCivs-storage", 1, 256)
@@ -95,6 +93,21 @@ open class ArcCivsPlugin : JavaPlugin() {
             CivsSettings.chunkLoadingMaximum(configuration, logger::warning)
             val serverId = networkServer(configuration)
             val settings = CivsSettings.read(configuration)
+            val defaults = requireNotNull(getResource("config.yml")).use {
+                YamlConfiguration.loadConfiguration(it.reader(Charsets.UTF_8))
+            }
+            var updated = false
+            for (section in listOf("navigation", "native-work", "worksites")) {
+                for ((key, value) in defaults.getConfigurationSection(section)?.getValues(false).orEmpty()) {
+                    if (!configuration.contains("$section.$key")) {
+                        configuration.set("$section.$key", value)
+                        updated = true
+                    }
+                }
+            }
+            if (updated) configuration.save(file.toFile())
+            val queue = ru.arc.core.BudgetedTaskQueue(lifecycle.tasks, settings.navigation.nativeOperationsPerTick,
+                (settings.navigation.nativeBudgetMillis * 1_000_000).toLong(), System::nanoTime, 4096).also { nativeWork = it }
             val text = CivsText.load(this, configuration)
             val dataRoot = root
             val provider = requireNotNull(schematicService) { "ArcCore schematic service is not available" }

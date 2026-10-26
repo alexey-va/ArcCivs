@@ -5,6 +5,7 @@ import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Material
+import org.bukkit.block.data.Ageable
 import org.bukkit.block.structure.StructureRotation
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
@@ -56,7 +57,7 @@ class CivsMineWorkStandingTest : FunSpec({
         }
     }
 
-    test("a failed inside stance selects another for the same action and expires without spending inputs") {
+    test("a failed inside stance survives elapsed time while alternatives of the same action are still being tried") {
         withReportedMine { advanceTicks, _, mine, city, worker, runtime ->
             val first = nextMineWork(runtime, city, worker)
             runtime.rejectStanding(city, worker, first) shouldBe true
@@ -73,8 +74,69 @@ class CivsMineWorkStandingTest : FunSpec({
             runtime.validate(city, second)
             advanceTicks(1_201)
             runtime.invalidate(worker.id)
-            nextMineWork(runtime, city, worker).standing shouldBe first.standing
+            (nextMineWork(runtime, city, worker).standing != first.standing) shouldBe true
             CivsEquipment.plainCount(worker, "COBBLESTONE") shouldBe 32L
+        }
+    }
+
+    test("idle admissions share one native budget instead of spending a complete service slot per worker") {
+        withReportedMine { advanceTicks, world, _, original, worker, runtime ->
+            nextMineWork(runtime, original, worker)
+            val city = original.copy(workers = (0..8).map { worker.copy(id = UUID.randomUUID()) })
+            repeat(8) {
+                advanceTicks(5)
+                val before = world.rayTraces
+                runtime.pulse(listOf(city))
+                (world.rayTraces - before <= 8) shouldBe true
+            }
+            city.workers.forEach { selected ->
+                val work = withClue("worker=${selected.id} ${runtime.debug()}") { requireNotNull(runtime.plan(city, selected)) }
+                work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+                runtime.validate(city, work)
+                CivsEquipment.plainCount(selected, "COBBLESTONE") shouldBe 32L
+            }
+        }
+    }
+
+    for (rayBudget in listOf(1, 8)) test("a cached farm cannot starve mine discovery after $rayBudget cached miners consume the shared rays") {
+        withReportedMine(settings = CivsWorksiteSettings(rayChecksPerPulse = rayBudget), nanoTime = { 0L }) {
+                advanceTicks, world, _, original, worker, runtime ->
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(-25, 63, 15)).copy(production = "WHEAT")
+            val farmer = spatialWorker(farm, "IRON_HOE")
+            val miners = List(rayBudget) { worker.copy(id = UUID.randomUUID()) }
+            val warm = original.copy(buildings = original.buildings + farm, workers = miners + farmer)
+            for (x in -4..1) for (z in -2..3) world.loadChunk(x, z)
+            CivsWorksiteLayouts.field(farm).forEach { soil ->
+                world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData =
+                    (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
+            }
+            CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            // End a full number of rotations so discovery starts after the cached miners.
+            repeat(128 * warm.workers.size) { runtime.pulse(listOf(warm)) }
+            miners.forEach { requireNotNull(runtime.plan(warm, it)) }
+            val farmWork = requireNotNull(runtime.plan(warm, farmer))
+            farmWork.status shouldBe "working-field"
+            farmWork.cropCare shouldBe false
+            val searching = worker.copy(id = UUID.randomUUID())
+            val city = warm.copy(workers = miners + searching + farmer)
+            fun pulse() {
+                advanceTicks(5)
+                val before = world.rayTraces
+                runtime.pulse(listOf(city))
+                (world.rayTraces - before <= rayBudget) shouldBe true
+            }
+            pulse()
+            runtime.plan(city, searching) shouldBe null
+            runtime.plan(city, farmer) shouldBe farmWork
+            val budget = runtime.debug()["remainingPulseBudget"] as Map<*, *>
+            budget["rays"] shouldBe 0
+            budget["lastAdmittedWorker"] shouldBe farmer.id.toString()
+            repeat(64 * city.workers.size) { if (runtime.plan(city, searching) == null) pulse() }
+            val selected = withClue(runtime.debug(setOf(searching.id))) { requireNotNull(runtime.plan(city, searching)) }
+            runtime.validate(city, selected)
+            selected.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            CivsEquipment.plainCount(searching, "COBBLESTONE") shouldBe 32L
         }
     }
 
@@ -274,6 +336,8 @@ private fun nextMineWork(runtime: CivsWorksites, city: Settlement, worker: CivWo
 }
 
 private fun withReportedMine(
+    settings: CivsWorksiteSettings = CivsWorksiteSettings(),
+    nanoTime: () -> Long = System::nanoTime,
     action: ((Int) -> Unit, CivsWorksiteWorldFixture, CivBuilding, Settlement, CivWorker, CivsWorksites) -> Unit,
 ) {
     failOnUnsupportedMockBukkitOperation {
@@ -305,7 +369,8 @@ private fun withReportedMine(
                 world.getBlockAt(-96, 59, -51).type = Material.GRASS_BLOCK
                 for (y in 60..61) world.getBlockAt(-96, y, -51).type = Material.AIR
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false },
+                        nanoTime = nanoTime, settings = settings)
                     action({ paper.performTicks(it.toLong()) }, world, mine, city, worker, runtime)
                 }
             } finally { tasks.close() }

@@ -10,11 +10,47 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import kotlin.math.floor
 
 class CivsNavigationSearchTest : FunSpec({
+    test("prefetched exact neighbourhoods advance the graph without another native request per step") {
+        val target = CitizenPoint(3.5, 64.0, .5)
+        val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), target, 0, 256, emptyList())
+        fun capture(probe: CitizenSearchProbe): CitizenSearchCapture {
+            val blocks = buildMap {
+                for (x in probe.node.x - 1..probe.node.x + 1) for (z in -1..1) for (y in 61..67)
+                    put(CivPosition(x, y, z), CitizenTerrainBlock(true, false, false, false, false,
+                        x in 0..3 && z == 0 && y == 64, 1.0,
+                        if (y <= 63) listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()))
+            }
+            return CitizenSearchCapture(probe, blocks, citizenSearchCandidates(probe, blocks, 0, 256))
+        }
+        val requested = search.advance(emptyList()).probes
+        val prefetched = (0..2).map { x -> CitizenSearchProbe(CitizenSearchNode(x, 64.0, 0), CitizenPoint(x + .5, 64.0, .5)) }
+        val result = search.advance((requested + prefetched).map(::capture))
+        result.failure shouldBe null
+        result.probes shouldBe emptyList()
+        result.path?.last()?.point shouldBe target
+    }
+
+    test("the configured search batch limits detached frontier requests") {
+        for (batch in listOf(1, 8)) {
+            val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(90.5, 64.0, .5),
+                0, 256, emptyList(), CivsNavigationSettings(searchNodesPerBatch = batch))
+            val probe = search.advance(emptyList()).probes.single()
+            val blocks = buildMap {
+                for (x in -1..1) for (z in -1..1) for (y in 61..67)
+                    put(CivPosition(x, y, z), CitizenTerrainBlock(true, false, false, false, false, y == 64, 1.0,
+                        if (y <= 63) listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()))
+            }
+            val result = search.advance(listOf(CitizenSearchCapture(probe, blocks,
+                citizenSearchCandidates(probe, blocks, 0, 256))))
+            result.probes.size shouldBe batch
+        }
+    }
+
     test("unknown frontier terrain cannot be reported as a proven no-path") {
         for (unknown in listOf(false, true)) {
             val search = CitizenNavigationSearch(CitizenPoint(.5, 64.0, .5), CitizenPoint(2.5, 64.0, .5),
                 0, 256, emptyList())
-            val probe = search.advance(emptyList()).probes.single()
+            val probe = search.advance(emptyList()).probes.single { !it.incoming }
             val blocks = buildMap {
                 for (x in -1..1) for (z in -1..1) for (y in 62..67) {
                     val solid = y <= 63 || x != 0 || z != 0

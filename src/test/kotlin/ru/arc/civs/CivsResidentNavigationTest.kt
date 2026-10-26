@@ -28,6 +28,257 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
 class CivsResidentNavigationTest : FunSpec({
+    for (parallel in listOf(1, 9))
+    test("$parallel close reachable routes prepare within their native tick latency bound") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("close-reachable-$parallel").also(paper.server::addWorld)
+            for (x in -2..2) for (z in -2..2) world.loadChunk(x, z)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("ReachableRouteBudget$parallel")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 512, maximumNanos = 4_000_000L, nanoTime = { 0L })
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) })
+            var tick = 0L
+            var otherLaneSteps = 0
+            work.drainAvailable { tick }
+            repeat(2) { work.submit({ true }) { otherLaneSteps++; false } }
+            val targets = List(parallel) { index -> when (index % 3) {
+                0 -> Location(world, 3.5, 64.0, .5)
+                1 -> Location(world, -2.5, 64.0, .5)
+                else -> Location(world, .5, 64.0, 3.5)
+            } }
+            val routes = targets.map { target -> owner.request(world, Location(world, .5, 64.0, .5), target,
+                { it.y == 64 }, { _, _ -> true }, { CivsPaths.ORDINARY_COST }) }
+            val maximumTicks = if (parallel == 1) 10 else 20
+            try {
+                while (routes.any { it.searching } && tick < maximumTicks) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    tick++
+                    paper.performTicks(1)
+                    owner.pulse()
+                }
+                println("navigation-latency reachable parallel=$parallel operationsPerTick=512 ticks=$tick nodes=${routes.map { it.nodeCount }} blocks=${routes.map { it.capturedBlocks }}")
+                withClue("ticks=$tick states=${routes.map { listOf(it.failure, it.nodeCount, it.capturedBlocks) }}") {
+                    routes.forEachIndexed { index, route ->
+                        route.searching shouldBe false
+                        route.failure shouldBe null
+                        val target = targets[index]
+                        route.endpoint shouldBe CitizenPoint(target.x, target.y, target.z)
+                    }
+                    (otherLaneSteps > 0) shouldBe true
+                }
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+            }
+        }
+    }
+
+    for (parallel in listOf(1, 9))
+    test("a close sealed destination is rejected quickly with $parallel mixed routes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("bounded-close-routes-$parallel").also(paper.server::addWorld)
+            for (x in -6..6) for (z in -6..6) world.loadChunk(x, z)
+            // The endpoint itself has real support/headroom, but every incoming side is closed.
+            for (x in 2..4) for (z in -1..1) if (x != 3 || z != 0)
+                for (y in 64..67) world.getBlockAt(x, y, z).type = Material.STONE
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("CloseRouteBudget$parallel")))
+            val settings = CivsNavigationSettings()
+            // Keep the single sealed goal as a 512-operation stress case; the mixed traffic
+            // fixture uses the shipped shared-queue settings without relaxing its tick bound.
+            val operationsPerTick = if (parallel == 1) 512 else settings.nativeOperationsPerTick
+            val work = BudgetedTaskQueue(tasks, maximumSteps = operationsPerTick,
+                maximumNanos = (settings.nativeBudgetMillis * 1_000_000).toLong(), nanoTime = { 0L })
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) })
+            var tick = 0L
+            var otherLaneSteps = 0
+            work.drainAvailable { tick }
+            repeat(2) { work.submit({ true }) { otherLaneSteps++; false } }
+            val targets = List(parallel) { index ->
+                if (index == 0) Location(world, 3.5, 64.0, .5)
+                else Location(world, -4.5, 64.0, (index - 1) * 2.0 + .5)
+            }
+            val routes = targets.map { target -> owner.request(world,
+                Location(world, .35232563679, 64.0, .64767436321), target,
+                { it.y == 64 }, { _, _ -> true }, { 1.0 }) }
+            val completedAt = hashMapOf<CitizenPacketRoute, Long>()
+            val maximumTicks = if (parallel == 1) 10 else 20
+            try {
+                while (routes.any { it.searching } && tick < maximumTicks) {
+                    // A detached slice completes between server ticks, never inside native capture.
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    tick++
+                    paper.performTicks(1)
+                    owner.pulse()
+                    routes.filter { !it.searching }.forEach { completedAt.putIfAbsent(it, tick) }
+                }
+                println("navigation-latency sealed parallel=$parallel operationsPerTick=$operationsPerTick ticks=$tick completed=${routes.map { completedAt[it] }} nodes=${routes.map { it.nodeCount }} blocks=${routes.map { it.capturedBlocks }}")
+                withClue("ticks=$tick states=${routes.map { listOf(it.failure, it.nodeCount, it.capturedBlocks) }}") {
+                    routes.all { !it.searching } shouldBe true
+                    routes.first().failure shouldBe "no-path"
+                    routes.first().endpoint shouldBe null
+                    (routes.first().capturedBlocks < 256) shouldBe true
+                    routes.drop(1).forEachIndexed { index, route ->
+                        route.failure shouldBe null
+                        val target = targets[index + 1]
+                        route.endpoint shouldBe CitizenPoint(target.x, target.y, target.z)
+                    }
+                    completedAt.values.all { it <= maximumTicks } shouldBe true
+                    (otherLaneSteps > 0) shouldBe true
+                }
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+            }
+        }
+    }
+
+    test("close goal preflight preserves an upper step and a descending enclosed ladder") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            for (ladder in listOf(false, true)) {
+                val world = CivsWorksiteWorldFixture("goal-entry-$ladder").also(paper.server::addWorld)
+                for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+                val target = Location(world, 3.5, 64.0, .5)
+                val from = if (ladder) {
+                    for (x in 2..4) for (z in -1..1) for (y in 64..68)
+                        world.getBlockAt(x, y, z).type = Material.STONE
+                    for (y in 64..68) world.getBlockAt(3, y, 0).blockData =
+                        Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
+                    Location(world, 3.5, 67.0, .5)
+                } else {
+                    for (x in 0..2) world.getBlockAt(x, 64, 0).type = Material.STONE
+                    for (x in 0..3) for (z in listOf(-1, 1)) for (y in 64..67)
+                        world.getBlockAt(x, y, z).type = Material.STONE
+                    Location(world, .5, 65.0, .5)
+                }
+                val route = CitizenPacketRoute(world, from, target,
+                    { it.x in 0..3 && it.z == 0 && it.y in 64..68 }, { _, _ -> true }, { 1.0 })
+                route.prepare()
+                withClue("ladder=$ladder nodes=${route.nodeCount}") {
+                    route.failure shouldBe null
+                    route.endpoint shouldBe CitizenPoint(target.x, target.y, target.z)
+                }
+            }
+        }
+    }
+
+    test("a close route widens its corridor to reach the far end of a U-shaped obstruction") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("close-wide-detour").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            for (z in -1..6) for (y in 64..67) world.getBlockAt(2, y, z).type = Material.STONE
+            val start = Location(world, .5, 64.0, .5)
+            val target = Location(world, 3.5, 64.0, .5)
+            val route = CitizenPacketRoute(world, start, target,
+                { it.x in -2..5 && it.z in -1..8 && it.y == 64 }, { _, _ -> true }, { 1.0 })
+            route.prepare()
+            route.failure shouldBe null
+            var at = start
+            var usedFarOpening = false
+            repeat(240) {
+                route.move(at, 1.0) { true }?.let { next ->
+                    if (next.z >= 7.0) usedFarOpening = true
+                    at = next
+                }
+            }
+            usedFarOpening shouldBe true
+            route.finished shouldBe true
+            at.distanceSquared(target) shouldBe 0.0
+        }
+    }
+
+    for (waitingForWorker in listOf(false, true))
+    test("the preparation tick deadline retires stalled ${if (waitingForWorker) "worker" else "native"} work once") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("preparation-deadline-$waitingForWorker").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("PreparationDeadline$waitingForWorker")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) },
+                CivsNavigationSettings(closePreparationTicks = 6))
+            var tick = 0L
+            work.drainAvailable { tick }
+            val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 3.5, 64.0, .5),
+                { it.y == 64 }, { _, _ -> true }, { 1.0 })
+            try {
+                repeat(6) {
+                    if (!waitingForWorker) while (workers.isNotEmpty()) workers.removeFirst().run()
+                    tick++
+                    paper.performTicks(1)
+                    owner.pulse()
+                }
+                route.failure shouldBe "preparation-budget"
+                route.searching shouldBe false
+                route.endpoint shouldBe null
+                owner.debug()["jobs"] shouldBe 0
+                val captured = route.capturedBlocks
+                while (workers.isNotEmpty()) workers.removeFirst().run()
+                repeat(3) { tick++; paper.performTicks(1); owner.pulse() }
+                route.failure shouldBe "preparation-budget"
+                route.capturedBlocks shouldBe captured
+                owner.debug()["jobs"] shouldBe 0
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+            }
+        }
+    }
+
+    test("optional neighbour prefetch cannot discard a complete path at the capture limit") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("optional-prefetch-cap").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val route = CitizenPacketRoute(world, Location(world, .5, 64.0, .5), Location(world, 2.5, 64.0, .5),
+                { it.y == 64 }, { _, _ -> true }, { 1.0 }, settings = CivsNavigationSettings(maximumCapturedBlocks = 256))
+            route.prepare()
+            route.capturedBlocks shouldBe 256
+            route.failure shouldBe null
+            route.endpoint shouldBe CitizenPoint(2.5, 64.0, .5)
+        }
+    }
+
+    test("configured node capture and admission limits govern actual route work") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("configured-navigation-budgets").also(paper.server::addWorld)
+            for (x in -6..6) for (z in -6..6) world.loadChunk(x, z)
+            val from = Location(world, .5, 64.0, .5)
+            val to = Location(world, 90.5, 64.0, .5)
+            for ((settings, failure) in listOf(
+                CivsNavigationSettings(maximumNodes = 64) to "search-budget",
+                CivsNavigationSettings(maximumCapturedBlocks = 256) to "capture-budget",
+            )) {
+                val route = CitizenPacketRoute(world, from, to, { it.y == 64 }, { _, _ -> true }, { 1.0 }, settings = settings)
+                route.prepare()
+                route.failure shouldBe failure
+                if (failure == "search-budget") route.nodeCount shouldBe 65
+                else route.capturedBlocks shouldBe 256
+            }
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("ConfiguredNavigationAdmission")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 1, nanoTime = { 0L })
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) },
+                CivsNavigationSettings(maximumJobs = 2))
+            fun request() = owner.request(world, from, to, { it.y == 64 }, { _, _ -> true }, { 1.0 })
+            try {
+                val first = request()
+                request().searching shouldBe true
+                request().failure shouldBe "planner-busy"
+                owner.debug()["maximum_jobs"] shouldBe 2
+                first.cancel()
+                request().searching shouldBe true
+                owner.debug()["jobs"] shouldBe 2
+            } finally {
+                owner.clear()
+                work.close()
+                tasks.close()
+            }
+        }
+    }
+
     test("native capture shares one tick allowance fairly and bounded admission releases cancelled jobs") {
         MockBukkitTestRuntime.open().use { paper ->
             val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("NavigationBudget")))

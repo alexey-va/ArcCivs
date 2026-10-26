@@ -60,10 +60,10 @@ internal fun civsGeneratedSchematic(box: CivBox, origin: CivPosition, cells: Map
 
 /** Exact public columns remain walkable; native body/headroom capture still decides passage. */
 internal fun civsPublicTransit(building: CivBuilding, x: Int, z: Int): Boolean =
-    building.phase == BuildingPhase.ACTIVE && building.type in setOf(BuildingType.ROAD, BuildingType.GATE) &&
+    building.phase == BuildingPhase.ACTIVE && (building.type == BuildingType.ROAD || building.type == BuildingType.GATE) &&
         building.transit.orEmpty().any { it.x == x && it.z == z }
 
 /** Validated road/gate bounds are filled rectangles, so they are not horizontal route obstacles. */
 internal fun civsPublicTransit(building: CivBuilding, allowPlanned: Boolean = false): Boolean =
-    (allowPlanned || building.phase == BuildingPhase.ACTIVE) && building.type in setOf(BuildingType.ROAD, BuildingType.GATE) &&
+    (allowPlanned || building.phase == BuildingPhase.ACTIVE) && (building.type == BuildingType.ROAD || building.type == BuildingType.GATE) &&
         !building.transit.isNullOrEmpty()

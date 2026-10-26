@@ -8,10 +8,13 @@ import org.bukkit.Location
 import org.bukkit.HeightMap
 import org.bukkit.Material
 import org.bukkit.TreeType
+import org.bukkit.Bukkit
 import org.bukkit.event.world.StructureGrowEvent
+import org.mockbukkit.mockbukkit.scheduler.BukkitSchedulerMock
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Files
 import java.util.Base64
 import java.util.UUID
@@ -245,6 +248,122 @@ class CivsForestryTest : FunSpec({
             (third.standing !in setOf(first.standing, second.standing)) shouldBe true
             third.focus shouldBe root
             runtime.validate(city, third)
+        }
+    }
+
+    for (paid in listOf(false, true)) test("a ${if (paid) "paid" else "unpaid"} tree retries its exact batch after a ninety six second pause without repeating field discovery") {
+        failOnUnsupportedMockBukkitOperation {
+            var paused = false
+            forestryWorksite("forestry-slow-retry-$paid", paused = { paused }) { world, runtime, initial ->
+                val clock = Bukkit.getScheduler() as BukkitSchedulerMock
+                val worker = initial.workers.single()
+                val mill = initial.building(requireNotNull(worker.assignment))!!
+                val bounds = CivsWorksiteLayouts.site(mill)!!.getAsJsonObject("forester").getAsJsonObject("searchBounds")
+                val last = CivsWorksiteLayouts.vector(bounds["max"])
+                val root = CivsWorksiteLayouts.point(mill, CivPosition(last.x - 1, 1, last.z - 1))
+                forestrySmallOak(world, root)
+                var city = initial
+                fun select(limit: Int): CivWorldWork {
+                    repeat(limit) {
+                        // One admission every nine five-tick service slots matches the reported city load.
+                        clock.performTicks(45)
+                        runtime.pulse(listOf(city))
+                        runtime.plan(city, worker)?.let { return it }
+                    }
+                    error("No replacement approach within $limit admissions: ${runtime.debug(setOf(worker.id))}")
+                }
+                var first = select(3_000)
+                (Bukkit.getCurrentTick() >= 1_920) shouldBe true
+                if (paid) {
+                    val job = requireNotNull(first.forestry).job
+                    val cut = job.position(job.cells.first())
+                    world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+                    city = city.copy(forestryJobs = mapOf(mill.id.toString() to job.copy(next = 1)))
+                    runtime.invalidate(worker.id)
+                    first = select(64)
+                }
+                val original = city
+                runtime.rejectStanding(city, worker, first) shouldBe true
+                runtime.plan(city, worker) shouldBe null
+                paused = true
+                clock.performTicks(1_921)
+                repeat(4) { runtime.pulse(listOf(city)) }
+                runtime.plan(city, worker) shouldBe null
+                paused = false
+                val replacement = select(4)
+                (replacement.standing != first.standing) shouldBe true
+                replacement.copy(standing = first.standing) shouldBe first
+                runtime.validate(city, replacement)
+                city shouldBe original
+                val receipt = forestryReceipt(city, replacement, 200_000).validated()
+                val plugin = Bukkit.getPluginManager().getPlugin("ForestryCare")!!
+                CivsStorage(plugin) { emptyArray() }.use { storage ->
+                    storage.replaceCities(listOf(city))
+                    storage.reserve(city, receipt.id)
+                    storage.seal(receipt)
+                    storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                    storage.apply(receipt) shouldBe CivInventoryApplyResult.Applied
+                    storage.unlock(receipt.id)
+                }
+                shouldThrow<CivsRejection> { CivsRules.finishWorldWork(receipt.after, replacement, 200_001) }.reason shouldBe "stale-delivery"
+            }
+        }
+    }
+
+    for (forestBudget in listOf(128, 192)) test("exhausted approaches recover with forest budget $forestBudget without changing the captured tree") {
+        var yieldRetry = false
+        var nanos = 0L
+        forestryWorksite("forestry-exhausted-recovery", nanoTime = {
+            if (yieldRetry) nanos.also { nanos += 500_000L } else 0L
+        }, settings = CivsWorksiteSettings(forestWorkUnitsPerPulse = forestBudget)) { world, runtime, city ->
+            val clock = Bukkit.getScheduler() as BukkitSchedulerMock
+            val worker = city.workers.single()
+            forestrySmallOak(world, CivPosition(-15, 64, -26))
+            repeat(50_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            var current = first
+            val tried = linkedSetOf<CivPosition>()
+            var exhausted = false
+            repeat(80) {
+                if (exhausted) return@repeat
+                tried.add(current.standing) shouldBe true
+                runtime.rejectStanding(city, worker, current) shouldBe true
+                world.getBlockAt(current.standing.x, current.standing.y, current.standing.z).type = Material.STONE
+                var next: CivWorldWork? = null
+                for (pulse in 1..64) {
+                    clock.performTicks(5)
+                    val rays = world.rayTraces
+                    runtime.pulse(listOf(city))
+                    (world.rayTraces - rays <= 8) shouldBe true
+                    next = runtime.plan(city, worker)
+                    if (next != null) break
+                    val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+                    if ((entry["failedStances"] as? Map<*, *>)?.get("exhausted") == true) { exhausted = true; break }
+                }
+                if (!exhausted) {
+                    current = requireNotNull(next)
+                    current.copy(standing = first.standing) shouldBe first
+                }
+            }
+            exhausted shouldBe true
+            runtime.plan(city, worker) shouldBe null
+            repeat(4) { clock.performTicks(5); runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker) shouldBe null
+            for (dy in 0..2) world.getBlockAt(first.standing.x, first.standing.y + dy, first.standing.z).type = Material.AIR
+            yieldRetry = true
+            clock.performTicks(100)
+            runtime.pulse(listOf(city))
+            runtime.plan(city, worker) shouldBe null
+            val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            val pending = entry["pendingApproach"] as Map<*, *>
+            ((pending["checkedChanges"] as Number).toInt() in 1 until first.changes.size) shouldBe true
+            (entry["failedStances"] as Map<*, *>)["exhausted"] shouldBe false
+            repeat(64) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val recovered = requireNotNull(runtime.plan(city, worker))
+            recovered shouldBe first
+            runtime.validate(city, recovered)
+            city.forestryJobs shouldBe null
+            city.stock shouldBe Stock()
         }
     }
 
@@ -1243,6 +1362,8 @@ private fun forestryCareWork(city: Settlement): CivWorldWork {
 private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: Boolean = true,
     locked: Set<CivPosition> = emptySet(), supplies: () -> Map<String, Long> = { emptyMap() },
     paused: () -> Boolean = { false },
+    nanoTime: () -> Long = System::nanoTime,
+    settings: CivsWorksiteSettings = CivsWorksiteSettings(),
     scenario: (CivsWorksiteWorldFixture, CivsWorksites, Settlement) -> Unit) {
     MockBukkitTestRuntime.open().use { paper ->
         val world = CivsWorksiteWorldFixture(name, Material.DIRT).also(paper.server::addWorld)
@@ -1256,7 +1377,8 @@ private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: B
             }
             for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                val runtime = CivsWorksites(plugin, access, { _, _ -> supplies() }, { _, point -> point in locked }, { paused() })
+                val runtime = CivsWorksites(plugin, access, { _, _ -> supplies() }, { _, point -> point in locked }, { paused() },
+                    nanoTime = nanoTime, settings = settings)
                 scenario(world, runtime, city)
             }
         } finally { tasks.close() }

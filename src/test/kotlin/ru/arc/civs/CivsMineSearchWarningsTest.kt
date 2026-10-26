@@ -165,6 +165,17 @@ private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorld
                 val point = CivsWorksiteLayouts.point(mine, step.point)
                 world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
             }
+            // Retain real native lining at the old shaft mouths. Otherwise the
+            // migration selects an early cave repair before its second minute.
+            val lining = geometry.shaftColumns.flatMap { (x, z) ->
+                listOf(x + 1 to z, x - 1 to z, x to z + 1, x to z - 1)
+            }.toSet() - geometry.shaftColumns
+            for (step in geometry.steps) {
+                if ((step.point.x to step.point.z) !in lining) continue
+                val point = CivsWorksiteLayouts.point(mine, step.point)
+                val block = world.getBlockAt(point.x, point.y, point.z)
+                if (block.type.isAir) block.type = Material.COBBLESTONE
+            }
             val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
             for (dy in 0..5) {
                 world.getBlockAt(top.x, top.y + dy, top.z).blockData = Bukkit.createBlockData(when {
@@ -179,7 +190,10 @@ private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorld
             }
             var paused = false
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
+                // Keep a real, unfinished migration beyond two active minutes even
+                // when pure geometric candidates no longer consume native quotas.
+                val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused },
+                    settings = CivsWorksiteSettings(mineChecksPerPulse = 1, maximumForestColumnsPerPulse = 1))
                 action(paper, world, mine, city, runtime, records) { paused = it }
             }
         } finally {

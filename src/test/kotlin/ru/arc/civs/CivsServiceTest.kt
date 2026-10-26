@@ -858,6 +858,138 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("Auto field scenery uses one native validation and an ordinary save without an inventory journal") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(30, 63, 0))
+            val worker = h.city.workers.first().copy(assignment = farm.id, nextDeliveryAt = 1)
+            val village = h.city.copy(autonomy = CivAutonomy(), inventory = null,
+                buildings = listOf(h.city.buildings.first(), farm), workers = listOf(worker))
+            for (x in -1..4) for (z in -3..1) h.world.loadChunk(x, z)
+            CivsWorksiteLayouts.field(farm).forEach { soil ->
+                h.world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
+                h.world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData = Bukkit.createBlockData("minecraft:wheat[age=1]")
+            }
+            CivsWorksiteLayouts.irrigation(farm).forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
+            val crop = CivsWorksiteLayouts.field(farm).first().let { it.copy(y = it.y + 1) }
+            h.world.getBlockAt(crop.x, crop.y, crop.z).type = Material.AIR
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
+            h.start()
+            val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
+                .get(h.service) as CivsWorksites
+            repeat(16) { worksites.pulse(listOf(village)) }
+            val work = requireNotNull(worksites.plan(village, worker))
+            every { h.citizens.autonomousVisualWork(village.id, worker.id) } returns work
+            val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
+                UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
+                .also { it.isAccessible = true }
+            val pending = deliver.invoke(h.service, village.id, worker.id, farm.id, worker.completedCycles,
+                worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
+            h.saves.single().first shouldBe village.copy(revision = village.revision + 1)
+            work.changes.forEach { cell ->
+                h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.after
+            }
+            pending.isDone shouldBe false
+            verify(exactly = 1) { h.citizens.requireWorldWorkArrival(village.id, worker.id, work) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+            h.commit(); h.await(pending)
+            h.service.settlements().single() shouldBe village.copy(revision = village.revision + 1)
+            (worksites.plan(h.service.settlements().single(), worker) == work) shouldBe false
+            h.saves.size shouldBe 1
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    for (alreadySaved in listOf(false, true))
+    test("legacy Auto scenery retirement waits for disk without replaying native or city state saved=$alreadySaved") {
+        serviceScenario { h ->
+            val (fixture, work) = visualReceiptFixture("miner")
+            val before = fixture.copy(worldId = h.world.uid, owner = h.owner)
+            val receipt = autonomousVisualTransaction(before, work).validated()
+            val current = (if (alreadySaved) receipt.after else before).let {
+                it.copy(autonomy = requireNotNull(it.autonomy).copy(paused = true))
+            }
+            val cell = work.changes.single()
+            h.world.loadChunk(cell.position.x shr 4, cell.position.z shr 4)
+            val block = h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+            block.type = Material.DIAMOND_BLOCK // An obsolete scenery receipt must not undo later native edits.
+            val retirement = CompletableFuture<Boolean>()
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(receipt.id) } returns retirement
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(current))
+            val started = h.service.start()
+            h.tick()
+            started.isDone shouldBe false
+            verify(exactly = 0) { h.store.load(); h.store.save(any()) }
+            block.type shouldBe Material.DIAMOND_BLOCK
+            retirement.complete(true)
+            h.await(started) shouldBe Unit
+            h.service.ready() shouldBe true
+            h.service.settlements().single() shouldBe current
+            val overview = h.service.debugState("overview", current.id, null)
+            overview["inventory_recovery_total"] shouldBe 0
+            overview["blocked_recovery_total"] shouldBe 0
+            ((overview["cities"] as List<*>).single() as Map<*, *>)["unhealthy"] shouldBe false
+            block.type shouldBe Material.DIAMOND_BLOCK
+            h.saves shouldBe emptyList()
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()); h.citizens.requireWorldWorkArrival(any(), any(), any()) }
+        }
+    }
+
+    test("retiring legacy Auto scenery never discards an ordinary empty inventory receipt") {
+        serviceScenario { h ->
+            val (fixture, work) = visualReceiptFixture("miner")
+            val before = fixture.copy(worldId = h.world.uid)
+            val cosmetic = autonomousVisualTransaction(before, work).validated()
+            val personal = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL), workers = emptyList())
+            val ordinary = CivInventoryTransaction(UUID.randomUUID(), personal.id, personal.revision,
+                personal.copy(revision = personal.revision + 1), emptyList()).validated()
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(cosmetic, ordinary))
+            every { h.store.deleteInventoryTransaction(cosmetic.id) } returns CompletableFuture.completedFuture(true)
+            every { h.store.deleteInventoryTransaction(ordinary.id) } returns CompletableFuture.completedFuture(true)
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(personal,
+                before.copy(autonomy = requireNotNull(before.autonomy).copy(paused = true))))
+            h.start()
+            h.tickUntil("ordinary receipt still follows inventory recovery") { h.saves.isNotEmpty() }
+            h.saves.single().first shouldBe ordinary.after
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(cosmetic.id) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(ordinary.id) }
+            h.commit()
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(ordinary.id) }
+        }
+    }
+
+    test("legacy Auto scenery retirement reports real file failures before loading cities") {
+        serviceScenario { h ->
+            val (city, work) = visualReceiptFixture("miner")
+            val receipt = autonomousVisualTransaction(city, work).validated()
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(receipt.id) } returns
+                CompletableFuture.failedFuture(java.io.IOException("Cannot retire scenery journal"))
+            val started = h.service.start()
+            h.tick()
+            started.isCompletedExceptionally shouldBe true
+            h.service.ready() shouldBe false
+            h.service.unavailableReason() shouldBe "storage-unavailable"
+            verify(exactly = 0) { h.store.load(); h.store.save(any()) }
+        }
+    }
+
+    test("a forged value-bearing visual receipt is never retired as scenery") {
+        serviceScenario { h ->
+            val (city, work) = visualReceiptFixture("farmer")
+            val original = autonomousVisualTransaction(city, work)
+            val forged = original.copy(autonomousVisual = requireNotNull(original.autonomousVisual).copy(
+                work = work.copy(inputs = mapOf("WHEAT_SEEDS" to 1L))))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(forged))
+            val started = h.service.start()
+            h.tick()
+            started.isCompletedExceptionally shouldBe true
+            h.service.ready() shouldBe false
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()); h.store.load() }
+        }
+    }
+
     test("stale Auto native preflight clears its admitted work so another farmer can replan without a payout") {
         serviceScenario(nativeGeometry = true) { h ->
             val farm = spatialBuilding("medievaloak", "farmer", 1, CivPosition(30, 63, 0))
@@ -888,6 +1020,10 @@ class CivsServiceTest : FunSpec({
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { rejected.join() })?.reason shouldBe "stale-worksite"
             worksites.plan(village, worker) shouldBe null
             h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            val overview = h.service.debugState("overview", village.id, null)
+            overview["inventory_recovery_total"] shouldBe 0
+            ((overview["cities"] as List<*>).single() as Map<*, *>)["unhealthy"] shouldBe false
             h.service.settlements().single().stock shouldBe village.stock
             h.world.getBlockAt(crop.x, crop.y, crop.z).type = Material.AIR
             repeat(16) { worksites.pulse(listOf(village)) }

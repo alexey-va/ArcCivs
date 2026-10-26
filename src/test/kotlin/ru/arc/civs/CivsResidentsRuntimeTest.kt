@@ -467,8 +467,10 @@ class CivsResidentsRuntimeTest : FunSpec({
                 var busyWorkingPosition: Vector? = null
                 CivsStorage(plugin) { emptyArray() }.use { storage ->
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                        // Measure scheduler pulses deterministically; MockK/JVM wall time is not a game tick.
+                        // Advancing-clock worksite regressions separately exercise the shared 2 ms deadline.
                         val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) },
-                            storage::isWorldLocked, { paused })
+                            storage::isWorldLocked, { paused }, nanoTime = { 0L })
                         lateinit var residents: CivsCitizens
                         residents = CivsCitizens(plugin, { listOf(city) }, { cityId, workerId, _, _, _, _, at ->
                             cityId shouldBe city.id
@@ -542,7 +544,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                                         if (farmerCount == 1) (now - committedAt <= 250L) shouldBe true
                                         placeAtWork(worker) // This fixture tests observed work/receipts, not native navigation.
                                         awaitingNext.remove(workerId)
-                                    } else withClue("next known harvest must not require another complete field scan") {
+                                    } else withClue("next known harvest must not require another complete field scan: now=$now paused=$paused worker=$workerId wait=$wait state=${runtime.debug(setOf(workerId))}") {
                                         (admittedPulses < farmerCount) shouldBe true
                                         awaitingNext[workerId] = committedAt to admittedPulses
                                     }
@@ -1621,7 +1623,8 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a failed final mine approach selects another inside stance for the same block and delivers once without recovery") {
+    for (preparationFailure in listOf(false, true))
+    test("a failed final mine approach selects another stance and delivers once without recovery, preparation=$preparationFailure") {
         residentRuntime { h ->
             val first = h.prepareMineWork(CivPosition(26, 64, 0))
             val alternative = first.copy(standing = CivPosition(22, 64, 0))
@@ -1642,11 +1645,12 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.navigationNow = 2_000L
             h.owner.pulse(2_000)
             h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
-            for (tick in 1..1_000) {
+            if (preparationFailure) requireNotNull(h.routeMotion(h.workerId)).planningFailed("preparation-budget")
+            else for (tick in 1..1_000) {
                 if (h.routeFailure() != null) break
                 h.navigate(advanceMillis = 0)
             }
-            withClue(h.navigationState()) { h.routeFailure() shouldBe "no-path" }
+            withClue(h.navigationState()) { h.routeFailure() shouldBe if (preparationFailure) "preparation-budget" else "no-path" }
             actor.location.toVector() shouldBe origin.toVector()
             h.failedWorkPositions shouldBe emptyList()
             h.deliveries shouldBe 0
@@ -2472,8 +2476,13 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (received.containsAll(listOf(h.workerId, minerId))) break
             }
             withClue("received=$received ${h.owner.debug(h.city.id, null)}") {
-                yielded shouldBe true
-                (passingResumed > 0) shouldBe true
+                // A frontal meeting must yield; the neighbouring diagonal can now
+                // take a clear route directly. Both cases still require real trips,
+                // bounded steps, non-overlapping bodies and actual resource receipts.
+                if (headOn) {
+                    yielded shouldBe true
+                    (passingResumed > 0) shouldBe true
+                }
                 received.containsAll(listOf(h.workerId, minerId)) shouldBe true
             }
             (h.city.workers.first { it.id == h.workerId }.completedCycles >= 114) shouldBe true
@@ -2809,7 +2818,9 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (tick % 20 == 0) { h.owner.pulse(requireNotNull(h.navigationNow)); h.clearRecordedCalls() }
                 if (actors.all { it.location.distanceSquared(initial.getValue(it.uniqueId)) > 1.0 }) break
             }
-            actors.all { it.location.distanceSquared(initial.getValue(it.uniqueId)) > 1.0 } shouldBe true
+            withClue("endedAt=$endedAt now=${h.navigationNow} initial=$initial ${h.owner.debug(city.id, null)}") {
+                actors.all { it.location.distanceSquared(initial.getValue(it.uniqueId)) > 1.0 } shouldBe true
+            }
             actors.all { h.socialState(it.uniqueId)["visit"] == false } shouldBe true
             h.city shouldBe city
             h.deliveries shouldBe 0
@@ -4171,7 +4182,9 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val workerId: UUID) : AutoCloseable {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
     private val navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    private val navigationWork = BudgetedTaskQueue(navigationTasks, nanoTime = { 0L })
+    private val navigationSettings = CivsNavigationSettings()
+    private val navigationWork = BudgetedTaskQueue(navigationTasks, navigationSettings.nativeOperationsPerTick,
+        (navigationSettings.nativeBudgetMillis * 1_000_000).toLong(), nanoTime = { 0L })
     private val navigationWorkers = ArrayDeque<Runnable>()
     val logger get() = plugin.logger
     val world = ResidentRuntimeWorld().also(paper.server::addWorld)

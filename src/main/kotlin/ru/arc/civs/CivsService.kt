@@ -108,7 +108,7 @@ class CivsService(
     private var loading = false
     private var loadFailure: String? = null
     private var geometryGeneration = 0L
-    private val world = worldAdapter ?: CivsWorld(plugin, tasks) { cities.values.toList() }
+    private val world = worldAdapter ?: CivsWorld(plugin, tasks, navigationSettings = settings.navigation) { cities.values.toList() }
     private val roadMaintenance = CivsRoadMaintenance(world)
     private val layoutDebug = CivsLayoutDebug(plugin.dataFolder.toPath(), tasks, executor, { id ->
         store.loadPlan(id).whenComplete { _, failure ->
@@ -135,7 +135,6 @@ class CivsService(
     private val storage = (storageAdapter ?: CivsStorage(plugin)).also {
         it.beginReceiptBootstrap()
         it.validateUpkeepNative = ::validateUpkeepNative
-        it.validateAutonomousVisualNative = ::validateAutonomousVisualNative
     }
     private val inventoryRecovery = linkedMapOf<UUID, CivInventoryTransaction>()
     private val blockedRecovery = mutableSetOf<UUID>()
@@ -192,7 +191,7 @@ class CivsService(
     internal var corpseLocation: (UUID, UUID, Long) -> org.bukkit.Location? = { _, _, _ -> null }
     private val footTraffic = CivsFootTraffic(plugin) { if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList() }
     private val worksites = CivsWorksites(plugin, world, { city, id -> storage.buildingAvailable(city, id) },
-        storage::isWorldLocked, { it in busy || it in unhealthy }, { forestryRoutes[it.id]?.second.orEmpty() })
+        storage::isWorldLocked, { it in busy || it in unhealthy }, { forestryRoutes[it.id]?.second.orEmpty() }, settings = settings.worksites)
     private val chunkLoading = CivsChunkLoading(plugin, settings.maximumLoadedChunks,
         permissions = CivsChunkPermissions(plugin, clock), clock = clock).also { storage.collectedChunkLease = it::retainLoaded }
     private val testingPermissions = CivsChunkPermissions(plugin, clock, CIVS_TESTING_PERMISSION)
@@ -206,7 +205,7 @@ class CivsService(
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
         productionReady = ::productionReady, workInputsReady = ::workInputsReady,
         backgroundActive = chunkLoading::active,
-        navigationTasks = tasks, navigationWork = nativeWork,
+        navigationTasks = tasks, navigationWork = nativeWork, navigationSettings = settings.navigation,
         courierFailed = { cityId, workerId, cargo ->
             if (supply.plan(cityId, workerId)?.cargo == cargo) supply.release(cityId, workerId, failed = true)
         },
@@ -1757,9 +1756,7 @@ class CivsService(
                 citizens.autonomousVisualWork(cityId, workerId)?.let { work ->
                     rejectIf(!CivsAutonomousWorksites.supports(city, building), "stale-worksite")
                     val pending = try {
-                        citizens.requireWorldWorkArrival(cityId, workerId, work)
-                        worksites.validate(city, work)
-                        autonomousVisualMutation(city, work, at)
+                        autonomousVisualMutation(city, work)
                     } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                     return@afterCityAvailable pending.whenCompleteSync(tasks) { _, _ ->
                         worksites.invalidate(workerId)
@@ -1858,37 +1855,21 @@ class CivsService(
         return journalInventory(tx)
     }
 
-    private fun autonomousVisualMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
-        val id = UUID.randomUUID()
-        storage.reserve(city, id)
-        val tx = try {
-            citizens.requireWorldWorkArrival(city.id, work.workerId, work)
-            worksites.validate(city, work)
-            val worker = city.workers.single { it.id == work.workerId }
-            val after = CivsRules.finishAutonomousVisual(city, work)
-            val receipt = CivAutonomousVisualReceipt(worker, city.stock, requireNotNull(city.autonomy),
-                city.mineProgress, city.minePlans, work, at, city.id, city.worldId, city.owner,
-                requireNotNull(city.building(work.buildingId)))
-            CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), worldChanges = work.changes,
-                autonomousVisual = receipt).also { storage.seal(it, keepViewersOpen = true) }
-        } catch (failure: Exception) { storage.unlock(id); throw failure }
-        return journalInventory(tx)
-    }
-
-    private fun validateAutonomousVisualNative(tx: CivInventoryTransaction): CivInventoryApplyResult? {
-        val receipt = tx.autonomousVisual ?: return null
-        val city = cities[tx.cityId] ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "city-unavailable"))
-        return try {
-            rejectIf(city.revision !in tx.beforeRevision..tx.after.revision ||
-                city.building(receipt.work.buildingId) != tx.after.building(receipt.work.buildingId), "stale-worksite")
-            worksites.validateAutonomousVisualReceiptNative(receipt.before(tx.after), receipt.work)
-            null
-        } catch (failure: CivsRejection) {
-            val details = failure.values + ("reason" to failure.reason)
-            if (failure.reason in setOf("world-unloaded", "world-unavailable", "chunks-unloaded", "chunk-unloaded", "worksite-occupied"))
-                CivInventoryApplyResult.Retry(details) else CivInventoryApplyResult.Conflict(details)
+    /** Scenery has no item or economic debit. A stale cursor rediscovers the actual blocks after restart. */
+    private fun autonomousVisualMutation(city: Settlement, work: CivWorldWork): CompletableFuture<Settlement> =
+        mutate(city.id) { current ->
+            citizens.requireWorldWorkArrival(current.id, work.workerId, work)
+            val next = CivsRules.finishAutonomousVisual(current, work)
+            worksites.applyAutonomousVisual(current, work)
+            next
+        }.thenApply { saved ->
+            physics.enqueue(saved.worldId, work.changes)
+            CivsDiagnostics.event("autonomous_world_work_committed", "city" to saved.id,
+                "worker" to work.workerId, "cycle" to work.cycle, "revision" to saved.revision,
+                "status" to work.status, "blocks" to work.changes.size, "mining_step" to work.miningStep,
+                "native_outputs" to 0, "economic_credit" to false)
+            saved
         }
-    }
 
     private fun autonomousUpkeepMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
         rejectIf(!CivsRoadMaintenance.eligible(city), "stale-worksite")
@@ -3267,26 +3248,48 @@ class CivsService(
     private fun loadInventoryReceipts(): CompletableFuture<Unit> {
         storage.beginReceiptBootstrap()
         val result = tracked<Unit>()
+        fun failed(failure: Throwable) {
+            // Unknown local debits must never be mistaken for an empty journal, even if SQL is unavailable.
+            plugin.logger.log(Level.SEVERE, "ArcCivs inventory journal bootstrap failed closed; player item changes remain blocked. Repair the local receipt error before restarting the server.", failure)
+            CivsDiagnostics.event("inventory_bootstrap", "state" to "failed", "cause" to failure.javaClass.simpleName)
+            result.completeExceptionally(failure)
+        }
         store.loadInventoryTransactions().thenCombine(store.loadConsumedItems()) { transactions, consumed -> transactions to consumed }
             .whenCompleteSync(tasks) { loaded, failure ->
                 if (closed) { result.completeExceptionally(CivsRejection("not-ready")); return@whenCompleteSync }
                 runCatching {
                     if (failure != null) throw failure
                     val (receipts, consumed) = requireNotNull(loaded)
-                    require(receipts.map { it.cityId }.distinct().size == receipts.size) { "Multiple inventory receipts for one city" }
-                    inventoryRecovery.values.forEach { storage.unlock(it.id) }
-                    inventoryRecovery.clear()
-                    collectedWorldBusy.clear()
-                    blockedRecovery.clear()
-                    inventoryRecovery.putAll(receipts.associateBy { it.cityId })
-                    storage.completeReceiptBootstrap(receipts, consumed)
-                    result.complete(Unit)
-                }.onFailure {
-                    // Unknown local debits must never be mistaken for an empty journal, even if SQL is unavailable.
-                    plugin.logger.log(Level.SEVERE, "ArcCivs inventory journal bootstrap failed closed; player item changes remain blocked. Repair the local receipt error before restarting the server.", it)
-                    CivsDiagnostics.event("inventory_bootstrap", "state" to "failed", "cause" to it.javaClass.simpleName)
-                    result.completeExceptionally(it)
-                }
+                    // Only the typed, validated no-value scenery format is retired. Native blocks and the
+                    // saved city remain authoritative; neither old after-state nor its cursor is replayed.
+                    val cosmetic = receipts.filter { it.autonomousVisual != null }.onEach { it.validated() }
+                    val retained = receipts.filter { it.autonomousVisual == null }
+                    require(retained.map { it.cityId }.distinct().size == retained.size) { "Multiple inventory receipts for one city" }
+                    fun completeBootstrap() {
+                        inventoryRecovery.values.forEach { storage.unlock(it.id) }
+                        inventoryRecovery.clear()
+                        collectedWorldBusy.clear()
+                        blockedRecovery.clear()
+                        inventoryRecovery.putAll(retained.associateBy { it.cityId })
+                        storage.completeReceiptBootstrap(retained, consumed)
+                        cosmetic.forEach { tx ->
+                            CivsDiagnostics.event("autonomous_visual_journal_retired", "city" to tx.cityId,
+                                "transaction" to tx.id, "native_replay" to false, "economic_credit" to false)
+                        }
+                        result.complete(Unit)
+                    }
+                    if (cosmetic.isEmpty()) completeBootstrap()
+                    else {
+                        val retirements = cosmetic.map { store.deleteInventoryTransaction(it.id) }
+                        CompletableFuture.allOf(*retirements.toTypedArray()).whenCompleteSync(tasks) retirement@{ _, retirementFailure ->
+                            if (closed) { result.completeExceptionally(CivsRejection("not-ready")); return@retirement }
+                            runCatching {
+                                if (retirementFailure != null) throw retirementFailure
+                                completeBootstrap()
+                            }.onFailure(::failed)
+                        }
+                    }
+                }.onFailure(::failed)
         }
         return result
     }

@@ -101,11 +101,12 @@ class CivsCitizens(
     private val depositCollected: (UUID, UUID, CivPosition?) -> CompletableFuture<Settlement> = { _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
     private val immortalResidents: (UUID) -> Boolean = { false },
+    private val navigationSettings: CivsNavigationSettings = CivsNavigationSettings(),
 ) : Listener, AutoCloseable {
     private val packets: PaperPacketNpcs
     private val ownsNavigationTasks = navigationTasks == null
     private val residentTasks = navigationTasks ?: LifecycleTaskScope(BukkitTaskScheduler(plugin))
-    private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor)
+    private val navigation = CivsResidentNavigation(residentTasks, navigationWork, navigationExecutor, settings = navigationSettings)
     private val paths = CivsPaths()
     private val threats: CivsResidentThreats
     private val skins: List<CitizenSkin>
@@ -390,9 +391,10 @@ class CivsCitizens(
         }
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.logger.info("ArcCivs resident backend=packets maximum=$maxActive viewer_range=$viewerRange " +
-            "pathfinding=async-a-star path_jobs_max=${CivsResidentNavigation.MAXIMUM_JOBS} " +
-            "path_capture_budget=" + if (navigationWork != null) "shared-native-work" else
-                "${CivsResidentNavigation.SEARCH_OPERATIONS_PER_TICK}steps/${CivsResidentNavigation.SEARCH_BUDGET_NANOS / 1_000}us")
+            "pathfinding=async-a-star path_jobs_max=${navigationSettings.maximumJobs} " +
+            "path_nodes_per_batch=${navigationSettings.searchNodesPerBatch} " +
+            "path_capture_budget=${navigationSettings.nativeOperationsPerTick}steps/${navigationSettings.nativeBudgetMillis}ms " +
+            "path_capture_owner=" + if (navigationWork != null) "shared-native-work" else "resident-navigation")
     }
 
     fun pulse(nowMillis: Long) {
@@ -1463,6 +1465,10 @@ class CivsCitizens(
                 route.completion = CitizenNavigationCompletion(null)
             }
             else if (navigationTick - route.progressTick >= 40) {
+                val residentBlocked = motion.waitingForCollision && actor.collisionResident != null
+                // Let a neighbour clear the corridor before abandoning an optional walk.
+                // Cancelling first made idle residents retry from the same mutually blocked positions.
+                if (residentBlocked && (!separationAdmitted || beginResidentYield(actor))) continue
                 // Two optional walks must not wait forever for each other in a narrow passage.
                 // Give up only this leisure leg; work routes keep their existing bounded detour/wait.
                 if (motion.waitingForCollision && route.idleAnchor != null && actor.social.visit == null) {
@@ -1470,8 +1476,6 @@ class CivsCitizens(
                     actor.wander.finish(now, false)
                     continue
                 }
-                val residentBlocked = motion.waitingForCollision && actor.collisionResident != null
-                if (residentBlocked && (!separationAdmitted || beginResidentYield(actor))) continue
                 val playerBlocked = motion.waitingForCollision || route.nativeCollisionTicks > 0
                 val reason = if (residentBlocked) "resident-blocked" else if (playerBlocked) "player-blocked"
                     else if (motion.turning) "turn-loop" else "no-progress"
@@ -2681,7 +2685,7 @@ class CivsCitizens(
             route?.let { it.intermediate || it.idleAnchor != null || it.authored != work.standing || it.motion.searching } == true) return false
         if (route == null && (detail != "target-not-standable" || preflightStanding != work.standing)) return false
         val cause = route?.motion?.failure ?: route?.completion?.cancelReason ?: detail
-        if (cause !in setOf("no-path", "search-budget", "capture-budget", "movement-blocked", "path-changed",
+        if (cause !in setOf("no-path", "search-budget", "capture-budget", "preparation-budget", "movement-blocked", "path-changed",
                 "no-progress", "turn-loop", "timed_out", "stopped", "completed_outside_arrival", "target-not-standable")) return false
         val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
@@ -3486,7 +3490,7 @@ class CivsCitizens(
         val NAVIGATION_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_NAVIGATION_FAILED", maxFields = 48)
         val MINE_ROUTE_DIAGNOSTIC = StructuredDebugLine("ARCCIVS_MINE_ROUTE_BLOCKED")
         val MINE_ROUTE_RECOVERED = StructuredDebugLine("ARCCIVS_MINE_ROUTE_RECOVERED")
-        val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "planner-busy", "planner-error",
+        val PREPARATION_FAILURES = setOf("search-budget", "capture-budget", "preparation-budget", "planner-busy", "planner-error",
             "chunk-unloaded", "cancelled", "broken-path", "passage-blocked")
     }
 }

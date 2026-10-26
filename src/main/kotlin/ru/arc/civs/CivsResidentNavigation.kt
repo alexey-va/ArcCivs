@@ -28,6 +28,7 @@ internal class CitizenPacketRoute(
     private val stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean,
     private val travelCost: (org.bukkit.block.Block) -> Double,
     private val avoiding: List<BoundingBox> = emptyList(),
+    private val settings: CivsNavigationSettings = CivsNavigationSettings(),
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
                            val action: CitizenRouteAction = CitizenRouteAction.WALK) {
@@ -96,7 +97,7 @@ internal class CitizenPacketRoute(
     }
 
     fun replan(from: Location, bodies: List<BoundingBox>): CitizenPacketRoute =
-        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone))
+        CitizenPacketRoute(world, from, target, allowed, stepAllowed, travelCost, bodies.map(BoundingBox::clone), settings)
 
     private fun permits(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to) &&
         citizenSlideBody(org.bukkit.util.Vector(from.x, from.y, from.z), org.bukkit.util.Vector(to.x, to.y, to.z),
@@ -121,7 +122,7 @@ internal class CitizenPacketRoute(
     }
 
     internal fun newSearch() = CitizenNavigationSearch(origin, CitizenPoint(target.x, target.y, target.z),
-        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) })
+        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) }, settings)
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
@@ -136,6 +137,12 @@ internal class CitizenPacketRoute(
     }
     internal fun planningFailed(reason: String) { if (searching) fail(reason) }
     internal fun captureLimits() = minimumY to maximumY
+    internal fun captureBlockLimit() = settings.maximumCapturedBlocks
+    internal fun captureProbeLimit() = settings.searchNodesPerBatch
+    internal fun preparationTickLimit(): Long =
+        if (origin.distanceSquared(CitizenPoint(target.x, target.y, target.z)) <=
+            settings.closeRouteDistance * settings.closeRouteDistance) settings.closePreparationTicks.toLong()
+        else settings.preparationTicks.toLong()
 
     /** One bounded native capture. The resulting graph contains no World/Block or mutable shapes. */
     internal fun captureBlock(point: CivPosition): CitizenTerrainBlock {
