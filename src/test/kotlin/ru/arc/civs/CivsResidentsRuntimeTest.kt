@@ -1519,6 +1519,108 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    for (outdoorStart in listOf(CivPosition(20, 64, -11), CivPosition(19, 64, 9)))
+    test("an outdoor miner at $outdoorStart approaches the entrance and works only from completed supported ground") {
+        residentRuntime { h ->
+            val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(20, 70, 0), 180)
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
+            bottom shouldBe CivPosition(23, 65, 10)
+            mine.entrance shouldBe CivPosition(20, 71, 0)
+            for (x in -1..3) for (z in -2..2) h.world.loadChunk(x, z)
+            // Native outdoor footing is y64, one block below the authored bottom. A
+            // real staircase reaches the entrance; the inside steps reach its ladder.
+            for (rise in 1..7) for (x in 19..21) for (y in 64..63 + rise)
+                h.world.getBlockAt(x, y, rise - 8).type = Material.STONE
+            for (x in 19..21) for (y in 64..70) h.world.getBlockAt(x, y, 0).type = Material.STONE
+            for (z in 1..10) for (y in 64..maxOf(66, 70 - z))
+                h.world.getBlockAt(20, y, z).type = Material.STONE
+            for (x in 21..22) for (y in 64..66) h.world.getBlockAt(x, y, 10).type = Material.STONE
+            for (y in bottom.y..bottom.y + 2) {
+                h.world.getBlockAt(bottom.x, y, bottom.z).type = Material.LADDER
+                val backing = CivsWorksiteLayouts.point(mine, geometry.backing).copy(y = y)
+                h.world.getBlockAt(backing.x, y, backing.z).type = Material.COBBLESTONE
+            }
+            val first = geometry.steps.first()
+            val focus = CivsWorksiteLayouts.point(mine, first.point)
+            h.work = CivWorldWork(h.workerId, 0, mine.id, bottom,
+                listOf(CivPlanBlock(focus, "minecraft:air", requireNotNull(first.after))), inputs = mapOf("COBBLESTONE" to 1L),
+                durationMillis = 1_500, focus = focus, status = "digging-mine",
+                miningStep = 0, miningAccessStep = 0, miningPlanVersion = geometry.version)
+            h.city = h.city.copy(buildings = h.city.buildings + mine,
+                workers = h.city.workers.map { it.copy(assignment = mine.id, nextDeliveryAt = 1) },
+                minePlans = mapOf(mine.id.toString() to CivMinePlanState(geometry.version, 0)))
+            val actor = h.owner.collisionActors().single()
+            val origin = Location(h.world, outdoorStart.x + .5, outdoorStart.y.toDouble(), outdoorStart.z + .5)
+            actor.teleport(origin)
+            citizenStandable(h.world, CivPosition(origin.blockX, origin.blockY, origin.blockZ)) shouldBe true
+            citizenMineWorkRouteAllowed(mine, CitizenPoint(origin.x, origin.y, origin.z), 0) shouldBe false
+            val future = CivsWorksiteLayouts.point(mine,
+                geometry.floors.first().cells.first().copy(y = geometry.floors.first().feetY))
+            h.world.getBlockAt(future.x, future.y - 1, future.z).type = Material.STONE
+            for (y in future.y..future.y + 1) h.world.getBlockAt(future.x, y, future.z).type = Material.AIR
+            citizenStandable(h.world, future) shouldBe true
+            citizenMineWorkRouteAllowed(mine, CitizenPoint(future.x + .5, future.y.toDouble(), future.z + .5), 0) shouldBe false
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000)
+            // dy(start, work)=1 must not bypass the entrance just because the job
+            // is at the first rung rather than in an already excavated gallery.
+            h.routeTarget() shouldBe Location(h.world, 20.5, 71.0, .5)
+            requireNotNull(h.routeMotion(h.workerId)).capturePermission(
+                CitizenPoint(origin.x, origin.y, origin.z), CitizenPoint(origin.x, origin.y, origin.z + 1.0)) shouldBe true
+            var entered = false
+            var observedInsideLeg = false
+            var previousFall = 0.0
+            val requireEntranceArrival = outdoorStart.z < 0
+            for (tick in 1..2_400) {
+                val before = actor.location
+                h.navigate()
+                val after = actor.location
+                val walking = after.clone().also { if (it.y < before.y) it.y = before.y }
+                withClue("tick=$tick entered=$entered at=$after ${h.navigationState()}") {
+                    (before.distance(walking) <= .215001) shouldBe true
+                    val fall = (before.y - after.y).coerceAtLeast(0.0)
+                    (fall <= maxOf(.215, minOf(1.0, (previousFall + .08) * .98)) + .000001) shouldBe true
+                    previousFall = fall
+                    citizenPacketBodyClear(h.world, CitizenPoint(after.x, after.y, after.z), false) shouldBe true
+                }
+                if (after.distanceSquared(Location(h.world, 20.5, 71.0, .5)) <= .25) entered = true
+                if (!entered && requireEntranceArrival) h.deliveries shouldBe 0
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (entered && h.routeTarget() == Location(h.world, bottom.x + .5, bottom.y.toDouble(), bottom.z + .5)) {
+                    observedInsideLeg = true
+                    val futurePoint = CitizenPoint(future.x + .5, future.y.toDouble(), future.z + .5)
+                    citizenControlStepClear(h.city, futurePoint, futurePoint) shouldBe true
+                    requireNotNull(h.routeMotion(h.workerId)).capturePermission(
+                        futurePoint, futurePoint) shouldBe false
+                }
+                if (entered) citizenMineWorkRouteAllowed(mine, CitizenPoint(after.x, after.y, after.z), 0) shouldBe true
+                if (h.deliveries == 1) {
+                    // A nearby outdoor start may reach valid work ground before
+                    // the entrance waypoint: the existing reach contract permits it.
+                    citizenPacketSupported(h.world, CitizenPoint(after.x, after.y, after.z)) shouldBe true
+                    citizenMineWorkRouteAllowed(mine, CitizenPoint(after.x, after.y, after.z), 0) shouldBe true
+                    citizenCanReachBlock(actor, focus, CITIZEN_MINE_REACH) shouldBe true
+                    break
+                }
+            }
+            withClue("entered=$entered inside=$observedInsideLeg at=${actor.location} ${h.navigationState()}") {
+                if (requireEntranceArrival) {
+                    entered shouldBe true
+                    observedInsideLeg shouldBe true
+                }
+                h.deliveries shouldBe 1
+                h.failedWorkPositions shouldBe emptyList()
+                h.pendingDelivery.isDone shouldBe false
+                h.city.workers.single().completedCycles shouldBe 0L
+            }
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, requireNotNull(h.work))
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            citizenMineWorkRouteAllowed(mine, CitizenPoint(future.x + .5, future.y.toDouble(), future.z + .5), 0) shouldBe false
+        }
+    }
+
     test("a failed final mine approach selects another inside stance for the same block and delivers once without recovery") {
         residentRuntime { h ->
             val first = h.prepareMineWork(CivPosition(26, 64, 0))
@@ -1585,6 +1687,105 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.city.workers.single().completedCycles shouldBe 1L
             h.deliveries shouldBe 1
             h.failedWorkPositions shouldBe listOf(first)
+        }
+    }
+
+    test("a retained forestry action reselects a changed standing cell before route admission and commits once") {
+        residentRuntime { h ->
+            val previous = h.assignFarm()
+            val forester = previous.copy(type = BuildingType.FORESTER, production = "OAK_LOG")
+            val focus = CivPosition(23, 64, 0)
+            for (x in -1..2) for (z in -2..1) h.world.loadChunk(x, z)
+            val rootCode = 15 or (15 shl 5)
+            val job = CivForestryJob(UUID.randomUUID(), focus, "OAK_SAPLING", listOf(focus),
+                listOf("minecraft:oak_log[axis=y]"), listOf(rootCode or (1 shl 10), rootCode),
+                next = 1, harvestedLogs = 1)
+            h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null, stock = Stock(7, 8, 9),
+                buildings = h.city.buildings.map { if (it.id == forester.id) forester else it },
+                workers = h.city.workers.map { worker -> worker.copy(completedCycles = 1,
+                    items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                        4 -> CivResidentItem("IRON_AXE", 1)
+                        CivsEquipment.BAG -> CivResidentItem("COAL", 11)
+                        else -> null
+                    } }) }, forestryJobs = mapOf(forester.id.toString() to job)))
+            h.world.getBlockAt(focus.x, focus.y, focus.z).blockData = Bukkit.createBlockData(job.states.single())
+            val first = CivWorldWork(h.workerId, 1, forester.id, focus.copy(z = -1),
+                listOf(CivPlanBlock(focus, job.states.single(), CivsForestry.saplingState(job.sapling))),
+                durationMillis = 1_500, status = "felling-tree", focus = focus,
+                forestry = CivForestryProgress(job, 2, harvestedLogs = 1))
+            val alternative = first.copy(standing = focus.copy(x = 24))
+            // Reconcile the physical-fixture → Auto storage change before observing
+            // the work approach; that lifecycle transition may legitimately respawn.
+            h.idleReason = "searching-work"
+            h.navigationNow = 1_400L
+            h.owner.pulse(1_400)
+            h.owner.pulse(1_500)
+            val initialSpawns = h.spawns
+            h.work = first
+            citizenStandable(h.world, first.standing) shouldBe true
+            h.world.getBlockAt(first.standing.x, first.standing.y, first.standing.z).type = Material.STONE
+            citizenStandable(h.world, first.standing) shouldBe false
+            citizenStandable(h.world, alternative.standing) shouldBe true
+            val before = h.city
+            val actor = h.owner.collisionActors().single()
+            val origin = actor.location
+            h.onWorkPositionFailed = { city, worker, failed ->
+                city shouldBe before
+                worker shouldBe before.workers.single()
+                failed shouldBe first
+                h.routeIdentity() shouldBe null // The invalid endpoint fails before any native route exists.
+                h.work = alternative
+                true
+            }
+            h.navigationNow = 2_000L
+            h.owner.pulse(2_000)
+            withClue(h.navigationState()) { h.failedWorkPositions shouldBe listOf(first) }
+            h.phase() shouldBe CitizenPhase.IDLE
+            h.routeIdentity() shouldBe null
+            actor.location.toVector() shouldBe origin.toVector()
+            h.city shouldBe before
+            h.deliveries shouldBe 0
+            val selections = h.workPlans
+            h.navigationNow = 2_001L
+            h.owner.pulse(2_001)
+            (h.workPlans > selections) shouldBe true
+            h.work shouldBe alternative
+            requireNotNull(h.routeIdentity())
+            for (tick in 1..1_000) {
+                val from = actor.location
+                h.navigate()
+                (from.distance(actor.location) <= .172001) shouldBe true
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                h.failedWorkPositions shouldBe listOf(first)
+                h.city shouldBe before
+                if (h.deliveries == 1) break
+            }
+            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            (actor.location.distanceSquared(origin) > 1.0) shouldBe true
+            alternative.forestry shouldBe first.forestry
+            alternative.changes shouldBe first.changes
+            h.owner.requireWorldWorkArrival(h.city.id, h.workerId, alternative)
+            h.pendingDelivery.isDone shouldBe false
+            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
+            h.deliveries shouldBe 1
+            h.city shouldBe before
+            val after = CivsRules.finishWorldWork(before, alternative, requireNotNull(h.navigationNow) + 4_000)
+            alternative.changes.forEach { change ->
+                h.world.getBlockAt(change.position.x, change.position.y, change.position.z).blockData = Bukkit.createBlockData(change.after)
+            }
+            h.city = after
+            h.work = null
+            h.idleReason = "waiting-growth"
+            h.pendingDelivery.complete(after) shouldBe true
+            repeat(5) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 5) * 1_000) }
+            h.deliveries shouldBe 1
+            h.failedWorkPositions shouldBe listOf(first)
+            after.workers.single().completedCycles shouldBe 2L
+            after.workers.single().items shouldBe before.workers.single().items
+            after.stock shouldBe before.stock.copy(wood = before.stock.wood + CivsRules.deliveryAmount(forester))
+            after.forestryJobs shouldBe null
+            h.pendingDelivery.complete(after) shouldBe false
+            h.spawns shouldBe initialSpawns
         }
     }
 

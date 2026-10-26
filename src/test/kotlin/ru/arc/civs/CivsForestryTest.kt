@@ -150,6 +150,104 @@ class CivsForestryTest : FunSpec({
         }
     }
 
+    for (paid in listOf(false, true)) test("a grown obstruction replaces the cached forestry stance without losing the ${if (paid) "paid" else "unpaid"} tree") {
+        var paused = false
+        forestryWorksite("forestry-grown-stance-$paid", paused = { paused }) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            var city = initial
+            fun select(): CivWorldWork {
+                repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+                return requireNotNull(runtime.plan(city, worker))
+            }
+            var first = select()
+            if (paid) {
+                val original = requireNotNull(first.forestry).job
+                val cut = original.position(original.cells.first())
+                world.getBlockAt(cut.x, cut.y, cut.z).type = Material.AIR
+                val job = original.copy(next = 1)
+                city = city.copy(forestryJobs = mapOf(first.buildingId.toString() to job))
+                runtime.invalidate(worker.id)
+                first = select()
+                first.forestry!!.job shouldBe job
+            }
+            val before = city
+            val oldStanding = first.standing
+            world.getBlockAt(oldStanding.x, oldStanding.y, oldStanding.z).type = Material.OAK_LOG
+            world.getBlockAt(oldStanding.x, oldStanding.y + 1, oldStanding.z).type = Material.OAK_LOG
+            paused = true
+            repeat(20) { runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker) shouldBe first
+            paused = false
+            repeat(3_000) {
+                if (runtime.plan(city, worker)?.standing == oldStanding || runtime.plan(city, worker) == null)
+                    runtime.pulse(listOf(city))
+            }
+            val second = requireNotNull(runtime.plan(city, worker))
+            (second.standing != oldStanding) shouldBe true
+            second.focus shouldBe first.focus
+            second.inputs shouldBe first.inputs
+            if (paid) second.forestry!!.job shouldBe first.forestry!!.job
+            city shouldBe before
+            world.getBlockAt(oldStanding.x, oldStanding.y, oldStanding.z).type shouldBe Material.OAK_LOG
+            runtime.validate(city, second)
+        }
+    }
+
+    test("temporary chunk unload preserves the cached forestry stance without rejecting it") {
+        forestryWorksite("forestry-stance-chunk-unload") { world, runtime, city ->
+            val worker = city.workers.single()
+            forestrySmallOak(world, CivPosition(-15, 64, -26))
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            val chunkX = first.standing.x shr 4
+            val chunkZ = first.standing.z shr 4
+            world.unloadChunk(chunkX, chunkZ)
+            repeat(20) { runtime.pulse(listOf(city)) }
+            runtime.plan(city, worker) shouldBe first
+            world.isChunkLoaded(chunkX, chunkZ) shouldBe false
+            world.loadChunk(chunkX, chunkZ)
+            runtime.pulse(listOf(city))
+            runtime.plan(city, worker) shouldBe first
+            runtime.validate(city, first)
+            // An explicit rejection is still the first failure of this physical point.
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val next = requireNotNull(runtime.plan(city, worker))
+            (next.standing != first.standing) shouldBe true
+            next.focus shouldBe first.focus
+            city.forestryJobs shouldBe null
+            runtime.validate(city, next)
+        }
+    }
+
+    test("a rejected reachable forestry stance is not selected again while another approach is available") {
+        forestryWorksite("forestry-rejected-stance") { world, runtime, city ->
+            val worker = city.workers.single()
+            val root = CivPosition(-15, 64, -26)
+            forestrySmallOak(world, root)
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val first = requireNotNull(runtime.plan(city, worker))
+            runtime.rejectStanding(city, worker, first) shouldBe true
+            runtime.rejectStanding(city, worker, first) shouldBe false
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val second = requireNotNull(runtime.plan(city, worker))
+            (second.standing != first.standing) shouldBe true
+            second.focus shouldBe root
+            second.inputs shouldBe first.inputs
+            city.forestryJobs shouldBe null
+            runtime.validate(city, second)
+            runtime.rejectStanding(city, worker, second) shouldBe true
+            runtime.invalidate(worker.id)
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val third = requireNotNull(runtime.plan(city, worker))
+            (third.standing !in setOf(first.standing, second.standing)) shouldBe true
+            third.focus shouldBe root
+            runtime.validate(city, third)
+        }
+    }
+
     test("an unaccepted cached care is replaced when a native mature tree appears in a later scan") {
         forestryWorksite("forestry-care-preempt") { world, runtime, city ->
             val worker = city.workers.single()
@@ -1144,6 +1242,7 @@ private fun forestryCareWork(city: Settlement): CivWorldWork {
 
 private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: Boolean = true,
     locked: Set<CivPosition> = emptySet(), supplies: () -> Map<String, Long> = { emptyMap() },
+    paused: () -> Boolean = { false },
     scenario: (CivsWorksiteWorldFixture, CivsWorksites, Settlement) -> Unit) {
     MockBukkitTestRuntime.open().use { paper ->
         val world = CivsWorksiteWorldFixture(name, Material.DIRT).also(paper.server::addWorld)
@@ -1157,7 +1256,7 @@ private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: B
             }
             for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                val runtime = CivsWorksites(plugin, access, { _, _ -> supplies() }, { _, point -> point in locked })
+                val runtime = CivsWorksites(plugin, access, { _, _ -> supplies() }, { _, point -> point in locked }, { paused() })
                 scenario(world, runtime, city)
             }
         } finally { tasks.close() }

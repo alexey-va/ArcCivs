@@ -2575,7 +2575,15 @@ class CivsCitizens(
             actor.targets[target] = standing
         }
         val resolved = if (idleAnchor != null && storage == null) target else resolvedTarget(actor, target)
-        val waypoint = citizenMineWaypoint(city, world, from, resolved)
+        val mine = routeMine(actor, city).takeIf { idleAnchor == null }
+        val workMine = mine?.takeIf { actor.cycle.phase == CitizenPhase.TO_WORK && actor.plan.worldWork?.miningStep != null }
+        val minePassage = workMine?.let { building ->
+            val work = actor.plan.worldWork
+            citizenMineRoutePassage(building, work?.miningAccessStep ?: work?.miningStep ?: 0,
+                city.minePlans?.get(building.id.toString()))
+        }
+        val entrance = workMine?.let { citizenMineEntranceWaypoint(it, from.point(), resolved, requireNotNull(minePassage)) }
+        val waypoint = entrance ?: citizenMineWaypoint(city, world, from, resolved)
         val to = (waypoint ?: resolved).location(world)
         if (idleAnchor != null && !idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
@@ -2590,7 +2598,9 @@ class CivsCitizens(
         }
         if (!citizenControlClear(city, resolved) || !citizenStandable(world, resolved) ||
             idleAnchor != null && !citizenIdleTerrain(world, resolved, city.buildings)) {
-            if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing")) pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now)
+            if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing"))
+                pauseNavigation(actor, "route-unreachable", "target-not-standable", to, now,
+                    target.takeIf { waypoint == null })
             return false
         }
         val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
@@ -2598,21 +2608,15 @@ class CivsCitizens(
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
             (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))) paths.begin(city) else null
-        val mine = routeMine(actor, city).takeIf { idleAnchor == null }
-        // The outdoor approach to the upper ladder is ordinary city travel. Once inside,
-        // a work leg must use the mine's passages, including when a natural cave is open nearby.
-        val workMine = mine?.takeIf { actor.cycle.phase == CitizenPhase.TO_WORK && actor.plan.worldWork?.miningStep != null }
-        val minePassage = workMine?.let { building ->
-            val work = actor.plan.worldWork
-            citizenMineRoutePassage(building, work?.miningAccessStep ?: work?.miningStep ?: 0,
-                city.minePlans?.get(building.id.toString()))
-        }
+        // Only the outside leg to the real entrance is ordinary city travel. Internal
+        // shaft/gallery waypoints must retain the same completed-prefix restrictions.
+        val routeMine = mine.takeIf { entrance == null }
         val motion = navigation.request(world, from, to, { point ->
-            citizenRoutePointAllowed(city, allowed, point, mine) && citizenControlClear(city, point) &&
+            citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
                 (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point) &&
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
-            (minePassage == null || minePassage(second)) },
+            (entrance != null || minePassage == null || minePassage.allows(second)) },
             { ground -> trip?.cost(ground, surfaceSpeed) ?: 1.0 })
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = Route(from.point(), to, chunks, now, timeout,
@@ -2646,7 +2650,8 @@ class CivsCitizens(
         route.motion.endpoint?.let { route.path = CitizenPathSnapshot(route.motion.nodeCount, it, false) }
     }
 
-    private fun pauseNavigation(actor: Actor, status: String, detail: String, target: Location, now: Long) {
+    private fun pauseNavigation(actor: Actor, status: String, detail: String, target: Location, now: Long,
+                                preflightStanding: CivPosition? = null) {
         navigationDiagnostic(actor, detail, target, now, terminal = true)
         if (actor.route?.completion?.cancelReason == "resident-blocked") { pause(actor, status, now); return }
         if (actor.route?.let { it.nativeCollisionTicks > 0 || it.motion.waitingForCollision ||
@@ -2657,7 +2662,7 @@ class CivsCitizens(
                 (actor.route?.replanAttempts ?: 0) >= 2) pause(actor, status, now)
             return
         }
-        if (retryWorkPosition(actor, detail)) return
+        if (retryWorkPosition(actor, detail, preflightStanding)) return
         if (actor.plan.courier?.let { !it.carrying && it.cargo.sourceWorkerId != null } == true) {
             pause(actor, status, now)
             return
@@ -2666,23 +2671,25 @@ class CivsCitizens(
     }
 
     /** A failed final approach rejects this stance, leaving the same physical action to its planner. */
-    private fun retryWorkPosition(actor: Actor, detail: String): Boolean {
-        val route = actor.route ?: return false
+    private fun retryWorkPosition(actor: Actor, detail: String, preflightStanding: CivPosition? = null): Boolean {
+        val route = actor.route
         val work = actor.plan.worldWork ?: return false
-        if (!(actor.plan.type == BuildingType.QUARRY && work.miningStep != null || work.upkeep != null) ||
+        if (!(actor.plan.type == BuildingType.QUARRY && work.miningStep != null ||
+                actor.plan.type == BuildingType.FORESTER || work.upkeep != null) ||
             actor.cycle.phase != CitizenPhase.TO_WORK || actor.plan.courier != null ||
             actor.sheltering || actor.returningToWarehouse || actor.attacker != null || actor.foodSource != null ||
-            route.intermediate || route.idleAnchor != null || route.authored != work.standing || route.motion.searching) return false
-        val cause = route.motion.failure ?: route.completion?.cancelReason ?: detail
+            route?.let { it.intermediate || it.idleAnchor != null || it.authored != work.standing || it.motion.searching } == true) return false
+        if (route == null && (detail != "target-not-standable" || preflightStanding != work.standing)) return false
+        val cause = route?.motion?.failure ?: route?.completion?.cancelReason ?: detail
         if (cause !in setOf("no-path", "search-budget", "capture-budget", "movement-blocked", "path-changed",
-                "no-progress", "turn-loop", "timed_out", "stopped", "completed_outside_arrival")) return false
+                "no-progress", "turn-loop", "timed_out", "stopped", "completed_outside_arrival", "target-not-standable")) return false
         val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
         if (!workPositionFailed(city, worker, work)) return false
         CivsDiagnostics.event("citizen_work_position_rejected", "city" to city.id, "worker" to worker.id,
             "building" to work.buildingId, "cycle" to work.cycle, "mining_step" to work.miningStep,
             "focus" to citizenWorkFocus(work), "standing" to work.standing, "reason" to cause,
-            "actual" to actor.npc.location.point().coordinates(), "path_progress" to route.motion.forwardProgress)
+            "actual" to actor.npc.location.point().coordinates(), "path_progress" to (route?.motion?.forwardProgress ?: 0.0))
         cancelRoute(actor)
         actor.workHandoff = null
         actor.plan = actor.plan.copy(workplace = null, worldWork = null, idleReason = "searching-work")
@@ -3878,7 +3885,7 @@ internal fun citizenCanReachBlockPoint(world: World, eye: Location, target: CivP
     return citizenBlockTraceReady(world, eye, target) && citizenTraceBlockPoint(world, eye, target, aim)
 }
 
-private fun citizenBlockTraceReady(world: World, eye: Location, target: CivPosition): Boolean {
+internal fun citizenBlockTraceReady(world: World, eye: Location, target: CivPosition): Boolean {
     if (eye.world != world || !eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite() ||
         target.y !in world.minHeight until world.maxHeight) return false
     for (x in (minOf(eye.blockX, target.x) shr 4)..(maxOf(eye.blockX, target.x) shr 4))
@@ -4369,10 +4376,12 @@ internal fun citizenRoutePointAllowed(city: Settlement, allowed: Set<UUID>, poin
     }
 }
 
+private class CitizenMinePassage(val completed: (CitizenPoint) -> Boolean, val allows: (CitizenPoint) -> Boolean)
+
 /** Capture immutable completed prefixes once, before the async search inspects edges. */
 private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
-                                  state: CivMinePlanState?): (CitizenPoint) -> Boolean {
-    val current = CivsMinePlan.forBuilding(mine) ?: return { false }
+                                  state: CivMinePlanState?): CitizenMinePassage {
+    val current = CivsMinePlan.forBuilding(mine) ?: return CitizenMinePassage({ false }, { false })
     val bottom = CivsWorksiteLayouts.point(mine, current.bottom)
     val prefixes = buildList {
         add(current to accessStep)
@@ -4387,17 +4396,32 @@ private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
     fun legacyOpen(p: CivPosition) = legacy?.containsKey(p) == true && legacy[p].let {
         it == null || it.startsWith("minecraft:ladder[") || it == "minecraft:torch"
     }
-    return { point ->
+    val completed: (CitizenPoint) -> Boolean = { point ->
         val local = CivsMinePlan.localPoint(mine, CivPosition(kotlin.math.floor(point.x).toInt(),
             point.y.roundToInt(), kotlin.math.floor(point.z).toInt()))
-        point.y >= bottom.y - .125 || prefixes.any { (plan, prefix) -> plan.builtStanding(local, prefix) } ||
+        prefixes.any { (plan, prefix) -> plan.builtStanding(local, prefix) } ||
             legacyOpen(local) && legacyOpen(local.copy(y = local.y + 1))
     }
+    return CitizenMinePassage(completed) { point -> point.y >= bottom.y - .125 || completed(point) }
 }
 
 internal fun citizenMineWorkRouteAllowed(mine: CivBuilding, point: CitizenPoint, accessStep: Long,
                                         state: CivMinePlanState? = null): Boolean =
-    citizenMineRoutePassage(mine, accessStep, state)(point)
+    citizenMineRoutePassage(mine, accessStep, state).allows(point)
+
+/** Outside approaches enter the real building before a work leg uses its underground passages. */
+private fun citizenMineEntranceWaypoint(mine: CivBuilding, from: CitizenPoint, target: CivPosition,
+                                       passage: CitizenMinePassage): CivPosition? {
+    fun inside(point: CitizenPoint): Boolean {
+        val standing = CivPosition(kotlin.math.floor(point.x).toInt(), point.y.roundToInt(),
+            kotlin.math.floor(point.z).toInt())
+        // Future authored cells are still outside; completed legacy access counts at every height.
+        return mine.bounds.contains(standing.x, standing.y, standing.z) || passage.completed(point)
+    }
+    return mine.entrance.takeIf {
+        !citizenNearEndpoint(from, it) && !inside(from) && inside(target.point())
+    }
+}
 
 internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: CivPosition, from: CivPosition): Set<UUID> =
     civsProtectedBuildings(city).filter { building ->
