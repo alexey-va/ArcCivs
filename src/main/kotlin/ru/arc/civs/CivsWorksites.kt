@@ -1365,7 +1365,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
         // Keep one resumable column and a rolling refresh cursor. Completed coverage,
         // known roots and safe-site candidates survive receipts, inventory and cycles.
-        repeat(columnsRemaining) {
+        while (columnsRemaining > 0) {
             if (!forestBudget()) return blocked(worker, "searching-work")
             columnsRemaining--
             val column = search.column ?: (search.dirty.firstOrNull() ?: search.columns[
@@ -1382,7 +1382,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 search.column = null; search.y = null; search.surface = null
             }
             if (!world.isChunkLoaded(column.x shr 4, column.z shr 4) || CivsForestry.blockedColumn(city, column.x, column.z, paths)) {
-                nextColumn(); return@repeat
+                nextColumn(); continue
             }
             val surface = search.surface ?: world.getHighestBlockYAt(column.x, column.z, HeightMap.WORLD_SURFACE)
                 .also { search.surface = it }
@@ -1410,7 +1410,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (ground?.type?.name in CivsForestry.soils && ground?.type != Material.COARSE_DIRT && air?.type?.isAir == true)
                 search.planting += position(air)
             // Do not spend a second full sweep before using the retained candidates.
-            if (search.next == search.columns.size) return@repeat
+            if (search.next == search.columns.size && !harvestOnly) break
         }
         if (search.next < search.columns.size) return blocked(worker, "searching-work")
         if (harvestOnly) return null

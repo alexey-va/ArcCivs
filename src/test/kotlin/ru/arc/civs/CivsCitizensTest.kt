@@ -1287,7 +1287,9 @@ class CivsCitizensTest : FunSpec({
                         x + 1.0, y + if (solid) 1.0 else 0.0, z + 1.0)
                 }
             }
-            val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
+            // This fixture tests floor heights; a randomly selected barrel column is a
+            // separate geometric rejection and must not make its candidate disappear.
+            val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0)).copy(control = null)
             val worker = CivWorker(UUID.randomUUID(), "Idle", null)
             val city = city(listOf(hall), worker, null)
             for (height in listOf(64, 65, 63, 66, 62)) {

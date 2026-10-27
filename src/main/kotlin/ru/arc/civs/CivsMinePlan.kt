@@ -288,6 +288,12 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
      */
     fun builtStanding(local: CivPosition, nextStep: Long, sectionSteps: Map<String, Long> = emptyMap()): Boolean {
         if (nextStep !in 0..steps.size.toLong() || version < 5 && !containsWorkStanding(local)) return false
+        if (version >= 5 && (local.x to local.z) in openingColumns) {
+            val floor = entranceLanding?.takeIf { it.feetY == local.y } ?: floors.firstOrNull { it.feetY == local.y }
+            val railing = floor?.let { sections["${it.index}/shaft/railing"] }
+            // Cleared AIR inside the completed railing is a well, not a walking approach from the outer ladder.
+            if (railing != null && railing.all { completed(it, nextStep, sectionSteps) }) return false
+        }
         fun open(point: CivPosition): Boolean {
             val change = passageHistory[point]?.lastOrNull { completed(it.first - 1, nextStep, sectionSteps) }
             if (change != null) return change.second == null || change.second!!.startsWith("minecraft:ladder[") ||

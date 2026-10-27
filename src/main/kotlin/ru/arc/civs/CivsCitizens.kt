@@ -5127,7 +5127,12 @@ private fun citizenMineEntranceWaypoint(mine: CivBuilding, from: CitizenPoint, t
 
 internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: CivPosition, from: CivPosition): Set<UUID> =
     civsProtectedBuildings(city).filter { building ->
-        building.bounds.contains(from.x, from.y, from.z) || building.bounds.contains(target.x, target.y, target.z) ||
+        val mineDeparture = if (building.type == BuildingType.QUARRY && building.id == plan.token.assignmentId) {
+            val saved = city.minePlans?.get(building.id.toString())
+            val access = saved?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0
+            citizenMineRoutePassage(building, access, saved).completed(from.point())
+        } else false
+        building.bounds.contains(from.x, from.y, from.z) || mineDeparture || building.bounds.contains(target.x, target.y, target.z) ||
             building.control == target ||
             (target == plan.workplace || target == plan.storage) && building.id == plan.token.assignmentId
     }.mapTo(hashSetOf()) { it.id }.also { allowed ->

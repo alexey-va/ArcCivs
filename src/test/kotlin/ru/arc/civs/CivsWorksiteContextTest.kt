@@ -143,6 +143,30 @@ class CivsWorksiteContextTest : FunSpec({
         }
     }
 
+    for (units in listOf(128, 192)) test("retained planting gets a bounded action when the column quota exceeds the forest budget $units") {
+        contextWorld("forest-column-budget-$units", Material.DIRT,
+            settings = CivsWorksiteSettings(forestWorkUnitsPerPulse = units, maximumForestColumnsPerPulse = 10_000)) { world, runtime, access ->
+            val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(0, 63, 0)).copy(
+                id = java.util.UUID(0, 1001), production = "BIRCH_LOG")
+            val worker = spatialWorker(mill, "IRON_AXE").copy(items = null, inventory = null)
+            val city = spatialCity(world.uid, listOf(mill), worker).copy(
+                inventory = null, autonomy = CivAutonomy(), stock = Stock(20))
+            access(city)
+            // The initial field sweep must finish, then its retained safe site earns
+            // native validation instead of losing every pulse to a rolling re-scan.
+            repeat(300) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val work = withClue(runtime.debug(setOf(worker.id))) { requireNotNull(runtime.plan(city, worker)) }
+            work.status shouldBe "planting-tree"
+            val search = contextEntry(runtime, worker.id)["forestSearch"] as Map<*, *>
+            search["column"] shouldBe search["columns"]
+            runtime.validate(city, work)
+            // Selection alone must not mutate the field, spend supplies, or credit a cycle.
+            world.getBlockAt(work.focus!!.x, work.focus.y, work.focus.z).type shouldBe Material.AIR
+            city.stock.wood shouldBe 20L
+            worker.completedCycles shouldBe 0L
+        }
+    }
+
     test("metadata-only protection removal reopens a tree while supply and revision updates retain coverage") {
         contextWorld("forest-protection-metadata", Material.DIRT) { world, runtime, access ->
             val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(0, 63, 0)).copy(production = "OAK_LOG")
@@ -303,6 +327,7 @@ class CivsWorksiteContextTest : FunSpec({
 })
 
 private fun contextWorld(name: String, ground: Material, locked: (CivPosition) -> Boolean = { false },
+    settings: CivsWorksiteSettings = CivsWorksiteSettings(),
     scenario: (CivsWorksiteWorldFixture, CivsWorksites, (Settlement) -> Unit) -> Unit) = failOnUnsupportedMockBukkitOperation {
     MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
         val world = CivsWorksiteWorldFixture(name, ground).also(paper.server::addWorld)
@@ -312,7 +337,8 @@ private fun contextWorld(name: String, ground: Material, locked: (CivPosition) -
         try {
             for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
             CivsWorld(plugin, tasks) { cities }.use { access ->
-                val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked(point) }, nanoTime = { 0L })
+                val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, point -> locked(point) },
+                    nanoTime = { 0L }, settings = settings)
                 scenario(world, runtime) { cities = listOf(it) }
             }
         } finally { tasks.close() }

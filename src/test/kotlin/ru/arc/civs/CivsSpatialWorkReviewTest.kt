@@ -1533,8 +1533,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         world.getBlockAt(lower.x, lower.y, lower.z).type shouldBe Material.GRAVEL
                         locked = false
                         runtime.changed(world.uid, lower) // Retry only the affected frontier after protection changes.
-                        // An independent section may own an unaccepted candidate. Cancel
-                        // that candidate explicitly to isolate this original floor repair.
+                        // Retire another section's admitted candidate before explicitly
+                        // retrying this blocked floor repair.
+                        runtime.plan(city, city.workers.single())?.let { runtime.invalidate(workerId) }
                         runtime.invalidate(workerId)
                         val first = nextWork()
                         first.changes.single().position shouldBe lower
@@ -1727,8 +1728,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
 
                         for (dy in 0..2) world.getBlockAt(target.x + 1, target.y + dy, target.z).type = Material.AIR
                         for (dy in 0..2) runtime.changed(world.uid, target.copy(x = target.x + 1, y = target.y + dy))
-                        // This assertion concerns the opened ray, not preemption of a
-                        // different section's already admitted, still valid candidate.
+                        // Retire another section's admitted candidate before explicitly
+                        // retrying this blocked ray observation.
+                        runtime.plan(city, worker)?.let { runtime.invalidate(worker.id) }
                         runtime.invalidate(worker.id)
                         // A spent native time slice can defer even the reopened route.
                         yieldRecovery = true
