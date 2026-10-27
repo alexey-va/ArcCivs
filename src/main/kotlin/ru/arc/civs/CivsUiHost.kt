@@ -98,6 +98,9 @@ interface CivsUiHost {
     fun unavailableReason(): String?
     fun cityBusy(player: Player): Boolean
     fun styles(): List<String>
+    fun styles(type: BuildingType): List<String> = styles()
+    fun blueprintChoices(type: BuildingType, style: String): List<CivBlueprintChoice> = emptyList()
+    fun maximumBuildingLevel(building: CivBuilding): Int = building.type.maxLevel
     fun settlements(): List<Settlement>
     fun city(player: Player): Settlement?
     fun refreshCity(player: Player): CompletableFuture<Unit>
@@ -115,6 +118,10 @@ interface CivsUiHost {
     fun selection(player: Player): CivsSelectionView?
     fun beginFoundingSelection(player: Player, name: String, style: String): CompletableFuture<Unit>
     fun beginBuildingSelection(player: Player, type: BuildingType): CompletableFuture<Unit>
+    fun beginBuildingSelection(player: Player, type: BuildingType, style: String): CompletableFuture<Unit> =
+        beginBuildingSelection(player, type)
+    fun beginBlueprintSelection(player: Player, type: BuildingType, style: String, entryId: String): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("blueprint-unavailable"))
     fun beginPlanBoardSelection(player: Player, cityId: UUID): CompletableFuture<Unit> =
         CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun selectGround(player: Player, selectionId: UUID, target: CivsGroundTarget): CompletableFuture<Unit>
@@ -136,6 +143,8 @@ interface CivsUiHost {
     fun workerRequest(player: Player, workerId: UUID): CivsBuildingRequest? = null
     fun giveWorkerRequest(player: Player, workerId: UUID, material: String): CompletableFuture<Unit> = CompletableFuture.failedFuture(CivsRejection("resident-item-missing"))
     fun residentItems(player: Player, workerId: UUID): List<ItemStack?>
+    fun inspectResident(player: Player, cityId: UUID, workerId: UUID): Settlement = throw CivsRejection("not-authorized")
+    fun residentItems(player: Player, cityId: UUID, workerId: UUID): List<ItemStack?> = throw CivsRejection("not-authorized")
     fun transferResidentItem(player: Player, workerId: UUID, npcSlot: Int?, playerSlot: Int?, click: ClickType): CompletableFuture<Unit>
     fun corpseItems(player: Player, workerId: UUID): List<ItemStack?> = throw CivsRejection("worker-not-found")
     fun corpseItems(player: Player, cityId: UUID, workerId: UUID): List<ItemStack?> = corpseItems(player, workerId)

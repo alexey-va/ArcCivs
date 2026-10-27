@@ -49,17 +49,17 @@ internal class CivsSupplyPlanning(
             val names = requests.map(CivSupplyRequest::material).toMutableSet()
             stores.orEmpty().values.forEach { names += it.stock.keys }
             city.workers.forEach { names += CivsEquipment.materials(it).keys }
-            if (city.buildings.any { it.type == BuildingType.SAWMILL }) names += CivsCarpentry.materials
+            if (city.buildings.any { it.type in CivsCarpentry.workshops }) names += CivsCarpentry.materials
             materials = names.mapNotNull { name -> Material.getMaterial(name)?.takeIf { it.isItem && !it.isAir }?.let { name to it } }.toMap()
             return null
         }
         if (workerIndex < city.workers.size) {
             val worker = city.workers[workerIndex++]
             val building = worker.assignment?.let(city::building)
-            if (worker.cargo == null && !CivsResidents.isChild(worker) && building?.type == BuildingType.SAWMILL &&
+            if (worker.cargo == null && !CivsResidents.isChild(worker) && building?.type in CivsCarpentry.workshops && building != null &&
                 CivsRules.productionAvailable(city, building) && building.control != null) {
                 craftWorkers += CivCraftWorker(worker.id, building.id, worker.completedCycles, building.level,
-                    CivsEquipment.available(worker, emptyMap()).toMap(), CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true)
+                    CivsEquipment.available(worker, emptyMap()).toMap(), CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true, building.type)
             }
             if (worker.cargo == null && !unavailable(worker.id) && !CivsResidents.isChild(worker) && building?.type == BuildingType.WAREHOUSE &&
                 building.phase == BuildingPhase.ACTIVE && building.control != null) {

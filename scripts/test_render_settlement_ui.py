@@ -28,6 +28,20 @@ class ExportedFontTest(unittest.TestCase):
         })
         self.assertEqual(exported["content"], content)
 
+    def test_panel_spacing_aliases_preserve_width_without_accepting_bitmap_conflicts(self):
+        spacer = chr(0xFA201)
+        navy, plum = chr(0x100000), chr(0x102000)
+        exported = {"content": {"body-0": navy + spacer + plum + spacer}, "components": [
+            {"font": "arc:dialog_panel_navy", "text": navy + spacer},
+            {"font": "arc:dialog_panel_plum", "text": plum + spacer},
+        ]}
+        self.assertEqual(preview.fixture_glyphs(exported, self.registry), {
+            navy: "arc:dialog_panel_navy", plum: "arc:dialog_panel_plum", spacer: "arc:dialog_ui_preview",
+        })
+        with self.assertRaisesRegex(ValueError, "Conflicting fonts"):
+            preview.component_fonts([{"font": "arc:dialog_panel_navy", "text": navy},
+                                     {"font": "arc:dialog_panel_plum", "text": navy}])
+
     def test_conflicting_fonts_and_unknown_unmapped_glyph_fail_closed(self):
         with self.assertRaisesRegex(ValueError, "Conflicting fonts"):
             preview.component_fonts([{"font": "arc:first", "text": self.panel},
@@ -58,6 +72,9 @@ class ExportedFontTest(unittest.TestCase):
             self.assertEqual([Path(archive.filename) for archive in call.kwargs["fallback_archives"]], [client])
             with self.assertRaisesRegex(ValueError, "does not define"):
                 preview.validate_glyphs({self.icon: "arc:dialog_ui_preview"}, pack, client, core)
+            core.resolve_providers.return_value = [{"type": "space", "advances": {self.spacer: -2}}]
+            with self.assertRaisesRegex(ValueError, "different shared spacing advance"):
+                preview.validate_glyphs({self.spacer: "arc:dialog_ui_preview"}, pack, client, core)
             failure = ValueError("Unknown font: arc:missing")
             core.resolve_providers.side_effect = failure
             with self.assertRaises(ValueError) as raised:

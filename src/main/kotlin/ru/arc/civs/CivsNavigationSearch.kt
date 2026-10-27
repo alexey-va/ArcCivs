@@ -41,7 +41,8 @@ internal data class CitizenPlannedStep(val point: CitizenPoint, val action: Citi
 internal data class CitizenSearchCapture(val probe: CitizenSearchProbe,
     val blocks: Map<CivPosition, CitizenTerrainBlock>, val edges: List<CitizenSearchEdge>)
 internal data class CitizenSearchResult(val probes: List<CitizenSearchProbe>, val nodes: Int,
-    val path: List<CitizenPlannedStep>? = null, val failure: String? = null, val searchNanos: Long = 0)
+    val path: List<CitizenPlannedStep>? = null, val failure: String? = null, val searchNanos: Long = 0,
+    val continuation: Boolean = false, val blockedPositions: List<CivPosition> = emptyList())
 
 /**
  * One worker owns this A* state. A slice asks for a configured batch of small neighbourhoods; native capture
@@ -83,6 +84,7 @@ internal class CitizenNavigationSearch(
         (abs(start.x - floor(target.x).toInt()) > 1 || abs(start.z - floor(target.z).toInt()) > 1) &&
         target.x == floor(target.x) + .5 && target.z == floor(target.z) + .5 && target.y == floor(target.y)
     private val cancelled = AtomicBoolean()
+    private val blockedPositions = linkedSetOf<CivPosition>()
 
     init { open += Entry(start, 0.0, heuristic(start), serial++) }
 
@@ -91,11 +93,15 @@ internal class CitizenNavigationSearch(
     fun advance(captures: List<CitizenSearchCapture>): CitizenSearchResult {
         val began = System.nanoTime()
         fun result(probes: List<CitizenSearchProbe> = emptyList(), path: List<CitizenPlannedStep>? = null,
-                   failure: String? = null) = CitizenSearchResult(probes, visited, path, failure, System.nanoTime() - began)
+                   failure: String? = null) = CitizenSearchResult(probes, visited, path, failure, System.nanoTime() - began,
+            blockedPositions = if (failure == "no-path") blockedPositions.toList() else emptyList())
         if (cancelled.get()) return result(failure = "cancelled")
         for (capture in captures) {
             if (capture.probe.incoming) {
-                if (isolatedEndpoint(capture)) return result(failure = "no-path")
+                if (isolatedEndpoint(capture)) {
+                    rememberObstacles(capture.blocks, target.y, target.y)
+                    return result(failure = "no-path")
+                }
                 continue
             }
             neighbourhoods[capture.probe.node] = capture
@@ -125,7 +131,7 @@ internal class CitizenNavigationSearch(
                 open += entry
                 break
             }
-            if (++visited > settings.maximumNodes) return result(failure = "search-budget")
+            if (++visited > settings.maximumNodes) return finishAtBudget("search-budget")
             val node = entry.node
             if (node.x == floor(target.x).toInt() && node.z == floor(target.z).toInt() && abs(node.y - target.y) <= .5) {
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
@@ -148,17 +154,36 @@ internal class CitizenNavigationSearch(
             clipped -> "search-budget"
             else -> "no-path"
         })
+        val path = pathTo(found.node) ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
+        return result(path = path)
+    }
+
+    /** Keep useful, already validated progress when a finite search fills its memory allowance.
+     * The caller must walk this segment and continue to the original goal; it is not an arrival. */
+    fun finishAtBudget(reason: String): CitizenSearchResult {
+        if (cancelled.get()) return CitizenSearchResult(emptyList(), visited, failure = "cancelled")
+        val distance = sqrt(origin.distanceSquared(target))
+        if (distance <= settings.closeRouteDistance) return CitizenSearchResult(emptyList(), visited, failure = reason)
+        val closest = costs.keys.asSequence().filter { it != start && it in parents }
+            .filter { distance - sqrt(it.point().distanceSquared(target)) >= 2.0 }
+            .minWithOrNull(compareBy<CitizenSearchNode> { it.point().distanceSquared(target) }.thenBy { costs.getValue(it) })
+            ?: return CitizenSearchResult(emptyList(), visited, failure = reason)
+        val path = pathTo(closest) ?: return CitizenSearchResult(emptyList(), visited, failure = "broken-path")
+        return CitizenSearchResult(emptyList(), visited, path = path, continuation = true)
+    }
+
+    private fun pathTo(endpoint: CitizenSearchNode): List<CitizenPlannedStep>? {
         val reverse = ArrayDeque<CitizenPlannedStep>()
-        var node = found.node
+        var node = endpoint
         while (node != start) {
-            if (cancelled.get()) return result(failure = "cancelled")
-            val parent = parents[node] ?: return result(failure = "broken-path")
+            if (cancelled.get()) return null
+            val parent = parents[node] ?: return null
             reverse.addFirst(CitizenPlannedStep(node.point(), parent.action))
             node = parent.node
         }
         if (reverse.isEmpty()) reverse += CitizenPlannedStep(
             CitizenPoint(floor(target.x) + .5, target.y, floor(target.z) + .5), CitizenRouteAction.WALK)
-        return result(path = reverse.toList())
+        return reverse.toList()
     }
 
     /** Reuse exact captured geometry and directed policy decisions without another native handoff. */
@@ -171,8 +196,11 @@ internal class CitizenNavigationSearch(
         for (edge in capture.edges) {
             if (cancelled.get()) return "cancelled"
             val next = edge.node
-            if (!edge.permitted || !terrain.bodyClear(next.point()) ||
-                !terrain.stepClear(from, next.point(), edge.action)) continue
+            if (!edge.permitted) continue
+            if (!terrain.bodyClear(next.point()) || !terrain.stepClear(from, next.point(), edge.action)) {
+                rememberObstacles(capture.blocks, from.y, next.y)
+                continue
+            }
             val point = next.point()
             if (abs(point.x - start.point().x) > 96 || abs(point.z - start.point().z) > 96 ||
                 abs(point.y - start.y) > 96) { clipped = true; continue }
@@ -187,6 +215,17 @@ internal class CitizenNavigationSearch(
             if (widerSearch || inCorridor(point)) open += entry else deferred += entry
         }
         return null
+    }
+
+    /** A failed route refreshes only a small physical frontier, never its whole explored zone.
+     * This also discovers edits made by other plugins without a block-change event. */
+    private fun rememberObstacles(blocks: Map<CivPosition, CitizenTerrainBlock>, fromY: Double, toY: Double) {
+        for ((point, block) in blocks) {
+            if (blockedPositions.size >= 64) return
+            if (!block.loaded || block.door || point.y >= max(fromY, toY) + 1.799) continue
+            if (block.liquid && point.y + 1.0 > min(fromY, toY) + .001 ||
+                block.boxes.any { point.y + it.maxY > min(fromY, toY) + .001 }) blockedPositions += point
+        }
     }
 
     private fun inCorridor(point: CitizenPoint): Boolean =

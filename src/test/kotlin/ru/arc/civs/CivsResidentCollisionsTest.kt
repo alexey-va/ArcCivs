@@ -106,7 +106,7 @@ class CivsResidentCollisionsTest : FunSpec({
         }
     }
 
-    test("repeated contact with two trapped residents preserves player momentum and movement across ticks") {
+    test("repeated contact has one bounded counter impulse per player tick and preserves vertical momentum") {
         collisionScenario { f ->
             f.allowNudge = false
             val momentum = Vector(.13, .2, -.07)
@@ -132,13 +132,16 @@ class CivsResidentCollisionsTest : FunSpec({
                 }
                 f.playerAt = to.clone()
                 f.owner.canResidentMove(f.npc, f.npcAt, f.npcAt.clone().add(-.2, 0.0, 0.0)) shouldBe false
-                f.velocity shouldBe momentum
+                near(f.velocity.y, momentum.y)
+                near(f.velocity.z, momentum.z)
+                (f.velocity.x >= -.180001) shouldBe true
                 f.tick()
             }
-            f.velocityWrites shouldBe 0
+            (f.velocityWrites in 1..20) shouldBe true
+            near(f.velocity.x, -.18)
             f.nudgeAttempts shouldBe 120 // Two residents, three safe probes, once per tick.
             f.npcAt shouldBe Location(f.world, 0.0, 64.0, 0.0)
-            verify(exactly = 0) { f.player.velocity; f.player.teleport(any<Location>()) }
+            verify(exactly = 0) { f.player.teleport(any<Location>()) }
         }
     }
 
@@ -272,18 +275,20 @@ class CivsResidentCollisionsTest : FunSpec({
         }
     }
 
-    test("resident walking yields to a nearby player and preserves its waypoint and read-only recovery occupancy") {
+    test("walking resident nudges the player while recovery occupancy remains read only") {
         collisionScenario { f ->
             f.mode = GameMode.CREATIVE
             f.playerAt = Location(f.world, .7, 64.0, 0.0)
             val from = Location(f.world, 0.0, 64.0, 0.0)
             val to = Location(f.world, .2, 64.0, 0.0)
             f.owner.canResidentMove(f.npc, from, to) shouldBe false
-            f.velocityWrites shouldBe 0
-            f.velocity shouldBe Vector(0.0, .2, 0.0)
+            f.velocityWrites shouldBe 1
+            f.velocity shouldBe Vector(.05, .2, 0.0)
+            repeat(20) { f.owner.canResidentMove(f.npc, from, to) shouldBe false }
+            f.velocityWrites shouldBe 1
             near(f.npcAt.x, -.05)
             f.owner.canResidentMove(f.npc, f.playerAt, f.playerAt) shouldBe false
-            f.velocityWrites shouldBe 0
+            f.velocityWrites shouldBe 1
             f.mode = GameMode.SPECTATOR
             f.owner.canResidentMove(f.npc, from, to) shouldBe true
             f.mode = GameMode.SURVIVAL

@@ -207,7 +207,14 @@ open class ArcCivsPlugin : JavaPlugin() {
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)
-            service.start().whenCompleteSync(lifecycle.tasks) { _, failure ->
+            val startup = CompletableFuture<Unit>()
+            blueprints.catalogReady().whenCompleteSync(lifecycle.tasks) { _, catalogFailure ->
+                if (catalogFailure != null) startup.completeExceptionally(catalogFailure)
+                else runCatching { service.start() }.onSuccess { loaded -> loaded.whenComplete { _, failure ->
+                    if (failure == null) startup.complete(Unit) else startup.completeExceptionally(failure)
+                } }.onFailure(startup::completeExceptionally)
+            }
+            startup.whenCompleteSync(lifecycle.tasks) { _, failure ->
                 if (failure == null) {
                     lifecycle.ready("settlements" to service.settlements().size)
                     CivsDiagnostics.event("startup_ready", "server" to serverId.value, "settlements" to service.settlements().size,

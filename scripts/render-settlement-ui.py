@@ -28,7 +28,20 @@ def is_private(character: str) -> bool:
     return 0xE000 <= point <= 0xF8FF or 0xF0000 <= point <= 0xFFFFD or 0x100000 <= point <= 0x10FFFD
 
 
+SHARED_SPACING_FONTS = {
+    "arc:dialog_ui_preview", "arc:dialog_panel_navy", "arc:dialog_panel_plum",
+    "arc:dialog_panel_evergreen", "arc:dialog_panel_cocoa", "arc:dialog_panel_ornate", "arc:dialog_field_icons",
+}
+SHARED_SPACING = {chr(0xFA200 + bit): -(1 << bit) for bit in range(10)} | {
+    chr(0xFA220 + bit): 1 << bit for bit in range(10)
+}
+
+
 def bind_font(bindings: dict[str, str], character: str, font: str) -> None:
+    # These library spaces have identical advances and no pixels in every declared skin.
+    # The legacy text renderer has one font binding per codepoint; bitmap glyphs remain strict.
+    if character in SHARED_SPACING and font in SHARED_SPACING_FONTS:
+        font = "arc:dialog_ui_preview"
     if character in bindings and bindings[character] != font:
         raise ValueError(f"Conflicting fonts for U+{ord(character):04X}: {bindings[character]} and {font}")
     bindings[character] = font
@@ -82,11 +95,17 @@ def validate_glyphs(bindings: dict[str, str], resource_pack: Path, client_jar: P
         for font in sorted(set(bindings.values())):
             providers = core.resolve_providers(pack, font, fallback_archives=(client,))
             supported = set()
+            advances = {}
             for provider in providers:
                 if provider.get("type") == "space":
                     supported.update(provider.get("advances", {}))
+                    advances.update(provider.get("advances", {}))
                 elif provider.get("type") == "bitmap":
                     supported.update("".join(provider.get("chars", [])))
+            if font in SHARED_SPACING_FONTS:
+                for character in bindings.keys() & SHARED_SPACING.keys():
+                    if advances.get(character) != SHARED_SPACING[character]:
+                        raise ValueError(f"Font {font} has a different shared spacing advance for U+{ord(character):04X}")
             for character, actual_font in bindings.items():
                 if actual_font == font and character not in supported:
                     raise ValueError(f"Font {font} does not define U+{ord(character):04X}")
@@ -112,6 +131,7 @@ def main() -> None:
     parser.add_argument("--client-jar", type=Path, required=True)
     parser.add_argument("--resource-pack", type=Path, required=True)
     parser.add_argument("--asset-cache", type=Path, required=True)
+    parser.add_argument("--background-image", type=Path, help="Optional world backdrop forwarded to the native surface renderer")
     parser.add_argument("--gui-scale", type=int, default=3)
     parser.add_argument("--ops-root", type=Path, default=workspace / "ruscrafting-ops")
     parser.add_argument("--surface-renderer", type=Path,
@@ -159,10 +179,13 @@ def main() -> None:
     cache = output / ".surface-cache"
     if not cache.exists():
         cache.symlink_to(args.asset_cache.resolve(), target_is_directory=True)
-    completed = subprocess.run([sys.executable, "-B", str(args.surface_renderer), "--manifest", str(manifest_path),
-                                "--project-root", str(output), "--output", str(output / "render"),
-                                "--client-jar", str(args.client_jar), "--resource-pack", str(args.resource_pack),
-                                "--gui-scale", str(args.gui_scale)], check=False)
+    command = [sys.executable, "-B", str(args.surface_renderer), "--manifest", str(manifest_path),
+               "--project-root", str(output), "--output", str(output / "render"),
+               "--client-jar", str(args.client_jar), "--resource-pack", str(args.resource_pack),
+               "--gui-scale", str(args.gui_scale)]
+    if args.background_image:
+        command.extend(["--background-image", str(args.background_image)])
+    completed = subprocess.run(command, check=False)
     (output / "evidence.json").write_text(json.dumps({
         "guiScale": args.gui_scale, "physicalViewport": [640 * args.gui_scale, 360 * args.gui_scale],
         "resourcePackSha256": digest(args.resource_pack), "registrySha256": digest(registry_path),

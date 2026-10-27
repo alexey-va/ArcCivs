@@ -141,7 +141,7 @@ internal object CivsIndustry {
         val output = requireNotNull(work.recipe.product)
         products[output] = Math.addExact(products[output] ?: 0, work.recipe.amount)
         val updated = CivsResidents.trained(worker.copy(completedCycles = Math.addExact(cycle, 1),
-            nextDeliveryAt = Math.addExact(now, CivsResidents.workDuration(worker, CivsRules.PRODUCTION_INTERVAL))), work.building.type)
+            nextDeliveryAt = Math.addExact(now, CivsResidents.workDuration(worker, CivsRules.PRODUCTION_INTERVAL))), work.building.type, city)
         return CivsRules.validate(city.copy(stock = city.stock - work.recipe.stock,
             autonomy = city.autonomy.copy(products = products),
             workers = city.workers.map { if (it.id == workerId) updated else it }, revision = Math.addExact(city.revision, 1)))

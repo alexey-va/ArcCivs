@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "title": "ArcCivs .96 existing iron tool demand chain",
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "assumptions": [
+    "Explicit sensitivity, not runtime telemetry: 5/20/60 existing native craft completions per active blacksmith-day. One cycle stays60seconds before hunger slowdown, walking, stock and courier delays. No timers grant production without observed completion.",
+    "Pickaxe row represents one alternative tool recipe, not four simultaneous outputs. Shovel1Iron+2Sticks, Axe/Pickaxe3Iron+2Sticks, Hoe2Iron+2Sticks each produce1, exactly existing native catalog. No rates, resource quantities or prices change.",
+    "The new connection automates existing consumer hut demand, then existing courier delivery and arrival-gated equip. One spare per assigned resident/hut remains the existing desired-stock policy. Accepted recipe version and durable inventory receipts fence replay/duplicate pickup.",
+    "Item input/output rows are separate units; no coin redemption assumed. Current SELL and future contracts remain separate unchanged. Auto remains closed IRON_TOOL_KIT and does not materialize native tools or player withdrawals."
+  ],
+  "currencies": {
+    "native_iron_tools": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "iron_pickaxe_demand_chain",
+          "kind": "mint",
+          "source": "CivsProduction.inputs + native60second production interval; CivsCarpentry demand allocator",
+          "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          }
+        }
+      ]
+    },
+    "native_iron_ingots": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "iron_pickaxe_demand_chain",
+          "kind": "burn",
+          "source": "CivsProduction.inputs + native60second production interval; CivsCarpentry demand allocator",
+          "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          }
+        }
+      ]
+    },
+    "native_sticks": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "iron_pickaxe_demand_chain",
+          "kind": "burn",
+          "source": "CivsProduction.inputs + native60second production interval; CivsCarpentry demand allocator",
+          "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "2",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              5,
+              20,
+              60
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

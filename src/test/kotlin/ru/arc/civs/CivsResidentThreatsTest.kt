@@ -186,14 +186,18 @@ class CivsResidentThreatsTest : FunSpec({
             val target = CivsThreatTarget(cityId, workerId, npc)
             var protectionEnabled = true
             var contacts = 0
+            var alarms = 0
             var injuries = 0
             val threats = CivsResidentThreats(plugin, attacked = { worker, source ->
                 worker shouldBe workerId; source shouldBe monster; contacts++
-            }, mobProtected = { it shouldBe cityId; protectionEnabled }) { _, _ -> injuries++ }
+            }, mobProtected = { it shouldBe cityId; protectionEnabled }, discovered = { worker, source ->
+                worker shouldBe workerId; source shouldBe monster; alarms++
+            }) { _, _ -> injuries++ }
             try {
                 threats.pulse(listOf(target), 1_000)
                 threats.tick()
                 contacts shouldBe 0
+                alarms shouldBe 0
                 ignited shouldBe false
                 verify(exactly = 0) { monsterPathfinder.moveTo(any<Location>(), any<Double>()) }
 
@@ -201,6 +205,7 @@ class CivsResidentThreatsTest : FunSpec({
                 threats.pulse(listOf(target), 2_000)
                 threats.tick()
                 contacts shouldBe 1
+                alarms shouldBe 1
                 ignited shouldBe true
                 verify(exactly = 1) { monsterPathfinder.moveTo(any<Location>(), 1.0) }
 
@@ -209,6 +214,7 @@ class CivsResidentThreatsTest : FunSpec({
                 threats.pulse(emptyList(), 3_000)
                 repeat(20) { threats.tick() }
                 contacts shouldBe 1
+                alarms shouldBe 1
                 ignited shouldBe false
                 verify(exactly = 1) { monsterPathfinder.stopPathfinding() }
 
@@ -219,6 +225,7 @@ class CivsResidentThreatsTest : FunSpec({
                 threats.pulse(listOf(target), 5_000)
                 threats.tick()
                 contacts shouldBe 2
+                alarms shouldBe 2
                 ignited shouldBe true
 
                 // The owner must leave a real player's native aggro and explosion intact.

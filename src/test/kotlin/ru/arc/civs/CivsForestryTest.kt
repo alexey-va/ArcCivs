@@ -401,6 +401,7 @@ class CivsForestryTest : FunSpec({
             repeat(4) { clock.performTicks(5); runtime.pulse(listOf(city)) }
             runtime.plan(city, worker) shouldBe null
             for (dy in 0..2) world.getBlockAt(first.standing.x, first.standing.y + dy, first.standing.z).type = Material.AIR
+            runtime.changed(world.uid, first.standing)
             yieldRetry = true
             clock.performTicks(100)
             runtime.pulse(listOf(city))
@@ -677,7 +678,7 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    test("a known distant forester skips a failed unpaid tree after one approach instead of retrying its stances") {
+    test("a known distant forester keeps trying distinct stances at its unpaid tree before deferring it") {
         forestryWorksite("forestry-remote-too-far", nanoTime = { 0L }) { world, runtime, city ->
             val worker = city.workers.single()
             val firstRoot = CivPosition(-15, 64, -26)
@@ -690,9 +691,19 @@ class CivsForestryTest : FunSpec({
             runtime.rejectStanding(city, worker, first) shouldBe true
             repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val next = requireNotNull(runtime.plan(city, worker))
-            next.focus shouldBe laterRoot
+            next.focus shouldBe firstRoot
+            (next.standing != first.standing) shouldBe true
+            next.copy(standing = first.standing) shouldBe first
             next.remoteWork shouldBe false
-            runtime.validate(city, next)
+            runtime.rejectStanding(city, worker, next) shouldBe true
+            repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
+            val third = requireNotNull(runtime.plan(city, worker))
+            third.focus shouldBe firstRoot
+            (third.standing !in setOf(first.standing, next.standing)) shouldBe true
+            third.copy(standing = first.standing) shouldBe first
+            val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            (entry["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 0
+            runtime.validate(city, third)
             city.forestryJobs shouldBe null
         }
     }
@@ -728,11 +739,26 @@ class CivsForestryTest : FunSpec({
             runtime.validate(city, later)
             val entry = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
             (entry["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 1
+            val column = (entry["forestSearch"] as Map<*, *>)["column"]
+            val distant = laterRoot.copy(x = laterRoot.x + 2, y = 63)
+            world.getBlockAt(distant.x, distant.y, distant.z).type = Material.STONE
+            runtime.changed(world.uid, distant)
+            val unchanged = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            (unchanged["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 1
+            (unchanged["forestSearch"] as Map<*, *>)["column"] shouldBe column
+            runtime.plan(city, worker) shouldBe later
             // Restart discovery without a receipt; elapsed time must not put the bad root first again.
             runtime.invalidate(worker.id)
             runtime.invalidate(worker.id)
             clock.performTicks(1_921)
             select().focus shouldBe laterRoot
+            val reopened = onlyStanding.copy(x = onlyStanding.x + 1, y = 63)
+            world.getBlockAt(reopened.x, reopened.y, reopened.z).type = Material.DIRT
+            runtime.changed(world.uid, reopened)
+            val refreshed = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            (refreshed["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 0
+            runtime.invalidate(worker.id)
+            select().focus shouldBe firstRoot
             city.forestryJobs shouldBe null
             city.stock shouldBe Stock()
             for (cell in first.changes)
@@ -740,7 +766,7 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    test("an unpaid failed tree is retried only after the whole field and bounded pause are exhausted") {
+    test("an unpaid failed tree retains exhausted approaches until relevant geometry changes") {
         forestryWorksite("forestry-deferred-full-sweep", nanoTime = { 0L }) { world, runtime, initial ->
             val clock = Bukkit.getScheduler() as BukkitSchedulerMock
             val worker = initial.workers.single()
@@ -769,6 +795,10 @@ class CivsForestryTest : FunSpec({
             clock.performTicks(99)
             repeat(20) { runtime.pulse(listOf(city)); runtime.plan(city, worker) shouldBe null }
             clock.performTicks(1)
+            repeat(20) { runtime.pulse(listOf(city)); runtime.plan(city, worker) shouldBe null }
+            val reopened = onlyStanding.copy(x = onlyStanding.x + 1, y = 63)
+            world.getBlockAt(reopened.x, reopened.y, reopened.z).type = Material.DIRT
+            runtime.changed(world.uid, reopened)
             repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val retried = requireNotNull(runtime.plan(city, worker))
             retried.focus shouldBe root
@@ -1781,6 +1811,14 @@ class CivsForestryTest : FunSpec({
     test("an isolated overhanging leaf does not require the whole future planting crown to be empty") {
         forestryWorksite("forestry-overhanging-leaf", timber = "BIRCH", nanoTime = { 0L }) { world, runtime, city ->
             val root = CivPosition(-15, 64, -26)
+            val mill = requireNotNull(city.building(city.workers.single().assignment!!))
+            val bounds = CivsWorksiteLayouts.site(mill)!!.getAsJsonObject("forester").getAsJsonObject("searchBounds")
+            val min = CivsWorksiteLayouts.vector(bounds["min"])
+            val max = CivsWorksiteLayouts.vector(bounds["max"])
+            for (x in min.x..max.x) for (z in min.z..max.z) {
+                val point = CivsWorksiteLayouts.point(mill, CivPosition(x, 1, z))
+                if (point != root) world.getBlockAt(point.x, 63, point.z).type = Material.STONE
+            }
             world.getBlockAt(root.x + 2, root.y + 2, root.z).blockData = Bukkit.createBlockData(
                 "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
             val worker = city.workers.single()

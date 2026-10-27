@@ -46,6 +46,22 @@ class CivsSettlementPlanTest : FunSpec({
         complete.autonomy?.plan shouldBe plan
     }
 
+    test("the full planner extends shared street choices with every new reserved plot") {
+        val city = settlementPlanCity()
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city),
+            CivAutonomousAccess(), inspectRoute = searches::add) }
+        val acceptedJoins = searches.filter { it.outcome == "found" && it.from != city.buildings.single().entrance }
+        check(acceptedJoins.isNotEmpty()) { "Later plots never searched a short shared-street connector" }
+        val routePoints = plan.routes.values.flatten().toSet()
+        acceptedJoins.all { it.from in routePoints } shouldBe true
+        plan.plots.filter { it.building.type in CivsSettlementLayout.exteriorTypes }.all {
+            !CivsAutonomousGeometry.overlaps(it.envelope, CivsSettlementLayout.frame(city).core)
+        } shouldBe true
+        city.autonomy?.plan shouldBe null
+        city.stock shouldBe Stock()
+    }
+
     test("obsolete unpaid intent is ignored without rejecting existing city production or accepted work") {
         val city = settlementPlanCity()
         val plan = planWithDiagnostics { CivsSettlementPlans.prepare(city, settlementPlanTemplates(), settlementPlanSurface(city), CivAutonomousAccess()) }

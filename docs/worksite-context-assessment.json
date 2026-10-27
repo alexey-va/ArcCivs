@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "title": "ArcCivs .94 to .95: retained worksite context and throughput sensitivity",
+  "assumptions": [
+    "Sensitivity only, not telemetry. Participants [1,4,6] represent villages/owners; each modeled village has one affected L1 forester and one distinct L1 miner. Active hours are [0.25,1,4] per village-day.",
+    "Forester final-tree events per village-day are before [3,12,36] and after [6,24,72]. Plantings match final-tree counts in each state. The existing gross 4 abstract WOOD and 1 abstract WOOD normal replant kit per L1 tree remain unchanged; the repeated scenario assumes the normal funded-kit path, not the separate zero-stock initial/deferred-seed case.",
+    "Profession XP is an internal resident statistic: one per final tree and one per planting in both states; care/watering gives zero. Ordinary native forestry drops vary with the captured blocks and tool, so they have no fixed item-yield flow here and never become Auto abstract stock.",
+    "Miner production is 3 abstract STONE per completed session, unchanged. Before sessions are [0,0,0]; after [5,20,80] per village-day. These assumptions are 20 sessions/hour after recovery, below the unchanged healthy maximum of 60 sessions/hour. Section scheduling and depth/claim guards do not change that quantity or create credit for a deferred section; actual permitted native availability is not measured by this sensitivity.",
+    "A Tavern has one innkeeper role with zero new production and zero profession XP. Guest pickup transfers up to 4 existing BREAD per event; events [1,4,16] per village-day and the maximum of 4 are unchanged. The four-BREAD first-fill reserve is a one-time existing-item transfer by the existing courier, not recurring supply or mint; the hall fallback remains available.",
+    "Builder rates are unchanged: 64 credited rows per 2-second paid/Auto session. One finite 467-row project uses eight sessions and eight internal profession XP in both states. No per-day project frequency is supplied, so this finite comparison is excluded from daily flow totals.",
+    "Road repair remains 1 abstract STONE per changed column and 3 seconds per column; no event count is supplied, so no daily road-repair volume is modeled. Compact-layout exact before/after material cost has no matched full-plan baseline and is omitted rather than estimated; accepted construction and per-row prices remain unchanged.",
+    "Native lateral mine limits are spatial safety rules: narrow near-surface work, wider existing galleries only under enough natural cover, and no new mine mutation in player Lands claims. Native ore drops and the material bill depend on the permitted observed cells; no fixed ore yield, new free generator, or matched full-mine before/after material total is assumed.",
+    "Auto WOOD and STONE, native BREAD, and resident profession XP are separate units. Vault, tokens, and player XP remain zero; no currency conversion is introduced."
+  ],
+  "participants": [1, 4, 6],
+  "currencies": {
+    "abstract_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "affected_l1_forester_gross",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsForestry.kt:autoStock; CivsRules.kt:deliveryAmount",
+          "basis": "Affected L1 forester sensitivity; 4 abstract WOOD per final harvested tree is unchanged.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [3, 12, 36]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [6, 24, 72]
+          }
+        },
+        {
+          "id": "affected_l1_forester_replant_kit",
+          "kind": "burn",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsForestry.kt:autoStock; CivsWorksites.kt:forestBatch",
+          "basis": "One abstract WOOD normal seed-kit cost per matching replanting; event counts equal final trees in each state.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [3, 12, 36]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [6, 24, 72]
+          }
+        }
+      ]
+    },
+    "abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "affected_l1_miner_sessions",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:finish; explicit assumed sensitivity",
+          "basis": "3 abstract STONE per completed session, unchanged; after counts are 20 sessions/hour at the specified active hours, under the unchanged 60-session/hour healthy maximum.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "3", "unit": "major"},
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "3", "unit": "major"},
+            "events_per_player_day": [5, 20, 80]
+          }
+        }
+      ]
+    },
+    "resident_profession_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "forester_final_tree_xp",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:finishWorldWork; CivsResidents.kt:trained",
+          "basis": "One internal profession XP per completed final tree; events match forester final-tree counts.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [3, 12, 36]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [6, 24, 72]
+          }
+        },
+        {
+          "id": "forester_planting_xp",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:finishWorldWork; CivsResidents.kt:trained",
+          "basis": "One internal profession XP per completed planting; planting count matches final-tree count in each state.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [3, 12, 36]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [6, 24, 72]
+          }
+        },
+        {
+          "id": "affected_l1_miner_session_xp",
+          "kind": "item",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:finish; CivsResidents.kt:trained",
+          "basis": "One internal profession XP per completed miner session; no player XP.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "1", "unit": "major"},
+            "events_per_player_day": [5, 20, 80]
+          }
+        }
+      ]
+    },
+    "native_bread_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "tavern_guest_bread_transfer",
+          "kind": "transfer",
+          "source": "CivsRules.kt:staffedTavern; CivsService.kt:prepareResidentSupplies; existing hall BREAD fallback",
+          "basis": "Up to 4 existing BREAD transferred per guest pickup; same amount, event counts, and pickup maximum before/after.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [1, 4, 16]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [1, 4, 16]
+          }
+        },
+        {
+          "id": "tavern_one_time_first_fill",
+          "kind": "transfer",
+          "source": "CivsLogistics.kt:desiredStock; explicit assumed Tavern scenario",
+          "basis": "After-only first fill moves 4 existing BREAD by the existing courier. Zero recurring daily events; this is not a mint.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, 0, 0]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {"value": "4", "unit": "major"},
+            "events_per_player_day": [0, 0, 0]
+          }
+        }
+      ]
+    },
+    "native_forestry_items": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "vault_direct": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

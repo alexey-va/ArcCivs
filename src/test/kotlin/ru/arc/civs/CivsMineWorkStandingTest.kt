@@ -48,7 +48,7 @@ class CivsMineWorkStandingTest : FunSpec({
             work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
             work.miningStep shouldBe city.minePlans!!.getValue(mine.id.toString()).nextStep + 1
             geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
-                requireNotNull(work.miningAccessStep)) shouldBe true
+                requireNotNull(work.miningAccessStep), work.miningAccessSections.orEmpty()) shouldBe true
             (work.standing != CivPosition(-96, 60, -51)) shouldBe true
             citizenStandable(world, work.standing) shouldBe true
             runtime.validate(city, work)
@@ -71,7 +71,7 @@ class CivsMineWorkStandingTest : FunSpec({
             second.changes shouldBe first.changes
             second.inputs shouldBe first.inputs
             requireNotNull(CivsMinePlan.forBuilding(mine)).builtStanding(CivsMinePlan.localPoint(mine, second.standing),
-                requireNotNull(second.miningAccessStep)) shouldBe true
+                requireNotNull(second.miningAccessStep), second.miningAccessSections.orEmpty()) shouldBe true
             runtime.validate(city, second)
             advanceTicks(1_201)
             runtime.invalidate(worker.id)
@@ -115,7 +115,7 @@ class CivsMineWorkStandingTest : FunSpec({
             val recovered = nextMineWork(runtime, city, worker)
             recovered.remoteWork shouldBe !outside
             CivsMinePlan.forBuilding(mine)!!.builtStanding(CivsMinePlan.localPoint(mine, recovered.standing),
-                requireNotNull(recovered.miningAccessStep)) shouldBe true
+                requireNotNull(recovered.miningAccessStep), recovered.miningAccessSections.orEmpty()) shouldBe true
             recovered.changes shouldBe first.changes
             recovered.inputs shouldBe first.inputs
             recovered.miningStep shouldBe first.miningStep
@@ -208,6 +208,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans =
                         mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, prefix)))
                     for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine)
                     for (step in geometry.steps) {
                         val point = CivsWorksiteLayouts.point(mine, step.point)
                         world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
@@ -345,6 +346,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans =
                         mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, geometry.steps.size.toLong())))
                     for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine)
                     for (step in geometry.steps) {
                         val point = CivsWorksiteLayouts.point(mine, step.point)
                         world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
@@ -417,6 +419,7 @@ class CivsMineWorkStandingTest : FunSpec({
                     var city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
                         minePlans = mapOf(mine.id.toString() to CivMinePlanState(3, 83)))
                     for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine)
                     val top = CivsWorksiteLayouts.point(mine, old.bottom)
                     for (y in top.y..top.y + 3) world.getBlockAt(top.x, y, top.z).blockData =
                         Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
@@ -437,7 +440,7 @@ class CivsMineWorkStandingTest : FunSpec({
                         work.miningPlanVersion shouldBe CivsMinePlan.VERSION
                         (work.standing != reported) shouldBe true
                         current.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
-                            requireNotNull(work.miningAccessStep)) shouldBe true
+                            requireNotNull(work.miningAccessStep), work.miningAccessSections.orEmpty()) shouldBe true
                         for (y in work.standing.y..top.y) world.getBlockAt(top.x, y, top.z).type shouldBe Material.LADDER
                         runtime.validate(city, work)
                         city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(3, 83)
@@ -545,9 +548,10 @@ private fun withReportedMine(
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
                 val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
                 val prefix = geometry.steps.indexOfFirst { it.after == "minecraft:cobblestone" && !it.shaftSupport }
-                val city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
+                var city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, prefix.toLong())))
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                seedMineNaturalCover(world, mine)
                 val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
                 for (y in top.y..top.y + 3) world.getBlockAt(top.x, y, top.z).blockData =
                     Bukkit.createBlockData("minecraft:ladder[facing=south,waterlogged=false]")
@@ -557,6 +561,8 @@ private fun withReportedMine(
                         if (step.after != null) it.rotate(StructureRotation.COUNTERCLOCKWISE_90)
                     }
                 }
+                city = city.copy(minePlans = mapOf(mine.id.toString() to
+                    seedMinePaidSpine(world, mine, city.minePlans!!.getValue(mine.id.toString()))))
                 val support = CivsWorksiteLayouts.point(mine, geometry.steps[prefix].point)
                 world.getBlockAt(support.x, support.y, support.z).type = Material.AIR
                 // These real native cave cells are not proof of a built lower route.

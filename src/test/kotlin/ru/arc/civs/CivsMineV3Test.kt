@@ -151,6 +151,7 @@ class CivsMineV3Test : FunSpec({
                         oldFinal[it.point]?.let { oldStep -> !oldStep.shaftSupport && oldStep.after == "minecraft:cobblestone" } == true }
                     (index >= 0) shouldBe true
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine)
                     for (step in old.steps + plan.steps.take(index)) {
                         val p = CivsWorksiteLayouts.point(mine, step.point)
                         world.getBlockAt(p.x, p.y, p.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
@@ -158,12 +159,21 @@ class CivsMineV3Test : FunSpec({
                     val target = CivsWorksiteLayouts.point(mine, plan.steps[index].point)
                     world.getBlockAt(target.x, target.y, target.z).type = Material.STONE
                     val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
-                        .copy(minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = 281)))
+                        .copy(minePlans = mapOf(mine.id.toString() to seedMinePaidSpine(world, mine,
+                            CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = 281))))
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                        repeat(128) { runtime.pulse(listOf(city)) }
-                        runtime.plan(city, city.workers.single()) shouldBe null
-                        runtime.idleReason(city, city.workers.single()) shouldBe "worksite-obstacle"
+                        var rejectedPaidFloor = false
+                        repeat(128) {
+                            runtime.pulse(listOf(city))
+                            val entries = runtime.debug(setOf(city.workers.single().id))["entries"] as List<*>
+                            val need = (entries.single() as Map<*, *>)["need"] as? Map<*, *>
+                            if (need?.get("reason") == "legacy-cell-changed" &&
+                                need["point"] == "${target.x},${target.y},${target.z}") rejectedPaidFloor = true
+                            // Deferring this section may expose a safe lower action, never a repair of the replaced paid floor.
+                            runtime.plan(city, city.workers.single())?.changes.orEmpty().none { it.position == target } shouldBe true
+                        }
+                        rejectedPaidFloor shouldBe true
                         world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
                         city.workers.single().completedCycles shouldBe 0L
                     }
@@ -318,7 +328,8 @@ class CivsMineV3Test : FunSpec({
                     val index = plan.steps.indexOfFirst { it.after == null && it.point in oldLights && it.point !in currentLights }
                     (index >= 0) shouldBe true
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
-                    for (step in plan.steps.take(index)) {
+                    seedMineNaturalCover(world, mine)
+                    for (step in old.steps + plan.steps.take(index)) {
                         val p = CivsWorksiteLayouts.point(mine, step.point)
                         world.getBlockAt(p.x, p.y, p.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
                     }
@@ -328,20 +339,37 @@ class CivsMineV3Test : FunSpec({
                     val target = CivsWorksiteLayouts.point(mine, plan.steps[index].point)
                     world.getBlockAt(target.x, target.y, target.z).type = Material.TORCH
                     val worker = spatialWorker(mine, "IRON_PICKAXE")
-                    val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans = mapOf(mine.id.toString() to
-                        CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = old.steps.size.toLong())))
+                    var city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans = mapOf(mine.id.toString() to
+                        seedMinePaidSpine(world, mine, CivMinePlanState(CivsMinePlan.VERSION, index.toLong(),
+                            v2Step = old.steps.size.toLong()))))
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-                        repeat(256) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
-                        val work = requireNotNull(runtime.plan(city, worker))
+                        var removal: CivWorldWork? = null
+                        for (action in 0 until 64) {
+                            val currentWorker = city.workers.single()
+                            repeat(256) { if (runtime.plan(city, currentWorker) == null) runtime.pulse(listOf(city)) }
+                            val selected = requireNotNull(runtime.plan(city, currentWorker)) { runtime.debug().toString() }
+                            if (selected.changes.single().position == target) { removal = selected; break }
+                            // Legacy open rooms can need paid boundary repairs before the old torch is reachable.
+                            withClue(selected) { selected.status shouldBe "securing-mine" }
+                            runtime.validate(city, selected)
+                            val after = CivsRules.finishWorldWork(city, selected, 20_000 + action * 5_000L)
+                            selected.changes.forEach { cell ->
+                                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
+                                world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+                            }
+                            city = after
+                            runtime.invalidate(currentWorker.id, selected)
+                        }
+                        val work = requireNotNull(removal) { runtime.debug().toString() }
                         work.changes.single().position shouldBe target
                         work.changes.single().before shouldBe "minecraft:torch"
                         work.changes.single().after shouldBe "minecraft:air"
                         work.outputs shouldBe mapOf("TORCH" to 1L)
                         work.inputs shouldBe emptyMap()
                         runtime.validate(city, work)
-                        val after = CivsRules.finishWorldWork(city, work, 20_000)
-                        CivsEquipment.plainCount(after.workers.single(), "TORCH") shouldBe CivsEquipment.plainCount(worker, "TORCH") + 1
+                        val after = CivsRules.finishWorldWork(city, work, 500_000)
+                        CivsEquipment.plainCount(after.workers.single(), "TORCH") shouldBe CivsEquipment.plainCount(city.workers.single(), "TORCH") + 1
                         after.minePlans!!.getValue(mine.id.toString()).v2Step shouldBe old.steps.size.toLong()
                     }
                 } finally { tasks.close() }

@@ -110,20 +110,22 @@ class CivsWorkplaceDecorTest : FunSpec({
         civsWorkplaceTransform(0, 0).scale.x shouldBe .56f
         civsWorkplaceTransform(0, 1).scale.x shouldBe .26f
         civsWorkplaceTransform(0, 2).scale.x shouldBe .24f
-        for (type in listOf(BuildingType.HOUSE, BuildingType.PLAN_BOARD) + BuildingType.entries.filter { it.isInfrastructure }) {
+        for (type in listOf(BuildingType.PLAN_BOARD, BuildingType.DECORATION) + BuildingType.entries.filter { it.isInfrastructure }) {
             civsWorkplacePieces(type, 0) shouldBe emptyList()
             civsWorkplaceItems(type) shouldBe emptyList()
         }
-        for (type in BuildingType.entries.filter { it != BuildingType.HOUSE && it != BuildingType.PLAN_BOARD && !it.isInfrastructure }) {
+        for (type in BuildingType.entries.filter { it != BuildingType.PLAN_BOARD && it != BuildingType.DECORATION && !it.isInfrastructure }) {
             civsWorkplacePieces(type, 0).size shouldBe 7
             civsWorkplaceItems(type).distinct().size shouldBe 3
         }
+        civsWorkplaceItems(BuildingType.HOUSE) shouldBe listOf(Material.BOOK, Material.APPLE, Material.STRING)
+        civsWorkplacePieces(BuildingType.HOUSE, 0)[1].material shouldBe Material.PINK_WOOL
         civsWorkplaceItems(BuildingType.BUILDER_HUT) shouldBe listOf(Material.IRON_SHOVEL, Material.BRICK, Material.PAPER)
         // These props use the flat generated/handheld transform; SAND has a cube model.
         civsWorkplaceItems(BuildingType.CRUSHER) shouldBe listOf(Material.IRON_PICKAXE, Material.FLINT, Material.RAW_IRON)
         System.getenv("CIVS_NATIVE_PREVIEW_OUT")?.let { directory ->
             val out = Path.of(directory); Files.createDirectories(out)
-            val states = listOf(BuildingType.BUILDER_HUT, BuildingType.FARM, BuildingType.QUARRY, BuildingType.LIBRARY,
+            val states = listOf(BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.FARM, BuildingType.QUARRY, BuildingType.LIBRARY,
                 BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER).map { type ->
                 mapOf("id" to type.name.lowercase(), "pieces" to civsWorkplacePieces(type, 0).map { piece ->
                     val transform = piece.transform

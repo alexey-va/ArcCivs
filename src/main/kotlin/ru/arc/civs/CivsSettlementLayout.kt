@@ -138,6 +138,11 @@ internal object CivsSettlementLayout {
                 }
             }
         } else {
+            // The accepted street owns frontage; the ideal sketch is only a fallback for a new quarter.
+            streetFrontages(access, frame).forEach { (p, turns) ->
+                val front = rotate(CivPosition(0, 0, 1), turns)
+                choices += p.copy(x = p.x - front.x * 4, z = p.z - front.z * 4) to turns
+            }
             for (street in frame.streets) {
                 val points = streetPoints(street)
                 val dx = (street.to.x - street.from.x).compareTo(0)
@@ -152,6 +157,22 @@ internal object CivsSettlementLayout {
             }
         }
         return selectCandidates(city, current, future, access, frame, choices, reserveUnbuiltStreets = true, eligible)
+    }
+
+    /** Interior straight street segments only; exterior resource approaches never become housing frontage. */
+    private fun streetFrontages(access: CivAutonomousAccess, frame: CivSettlementFrame): List<Pair<CivPosition, Int>> {
+        val points = (access.routes.values.flatten() + access.infrastructure.filter { it.type == BuildingType.ROAD }
+            .flatMap { it.transit }).distinctBy(::key).associateBy(::key)
+        return points.values.filter { insideCore(frame, it, 6) }.flatMap { p ->
+            buildList {
+                if (key(p.x - 1, p.z) in points && key(p.x + 1, p.z) in points) {
+                    add(p to 0); add(p to 2)
+                }
+                if (key(p.x, p.z - 1) in points && key(p.x, p.z + 1) in points) {
+                    add(p to 1); add(p to 3)
+                }
+            }
+        }
     }
 
     /**
@@ -183,8 +204,18 @@ internal object CivsSettlementLayout {
             listOfNotNull(city.construction?.plannedBuilding?.takeIf { it.id != current.id }?.bounds)
         val protected = (city.buildings.filter { it.id != current.id }.flatMap(CivsAutonomousGeometry::approach) +
             access.standing(city, current.id).values).mapTo(hashSetOf(), ::key)
-        val streetCells = if (reserveUnbuiltStreets)
-            frame.streets.flatMap { CivsAutonomousTerraform.roadProfile(streetPoints(it)).values }.mapTo(hashSetOf(), ::key) else emptySet()
+        val frontages = streetFrontages(access, frame)
+        val streetCells = access.routes.values.flatMap { CivsAutonomousTerraform.roadProfile(it).values }.mapTo(hashSetOf(), ::key)
+        if (reserveUnbuiltStreets && frontages.isEmpty())
+            frame.streets.flatMap { CivsAutonomousTerraform.roadProfile(streetPoints(it)).values }.mapTo(streetCells, ::key)
+        val frontageKeys = frontages.groupBy({ it.second }, { key(it.first) }).mapValues { it.value.toHashSet() }
+        fun streetDistance(b: CivBuilding): Int? {
+            val turns = b.rotation / 90
+            val front = rotate(CivPosition(0, 0, 1), turns)
+            return (2..6).firstOrNull { distance ->
+                key(b.entrance.x + front.x * distance, b.entrance.z + front.z * distance) in frontageKeys[turns].orEmpty()
+            }
+        }
         val exterior = current.type in exteriorTypes
         fun placed(entry: CivPosition, turns: Int): CivBuilding {
             val entryOffset = rotate(current.entrance, turns)
@@ -215,9 +246,11 @@ internal object CivsSettlementLayout {
                     corners(bounds).all { insideCore(frame, it, 4) } &&
                         !CivsAutonomousGeometry.overlaps(bounds, frame.court) &&
                         (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in streetCells } }) &&
-                CivsRules.workRouteWithinReach(city, b.entrance)
-        }.sortedWith(compareBy<CivBuilding>(::score).thenBy { it.entrance.x }.thenBy { it.entrance.z }.thenBy { it.rotation })
-            .asSequence().filter(eligible).take(64).map(::CivsAutonomousCandidate).toList()
+                CivsRules.workRouteWithinReach(city, b.entrance) &&
+                (exterior || reserveUnbuiltStreets || frontages.isEmpty() || streetDistance(b) != null)
+        }.sortedWith(compareBy<CivBuilding> { if (exterior || frontages.isEmpty()) 0 else streetDistance(it) ?: 100 }
+            .thenBy(::score).thenBy { it.entrance.x }.thenBy { it.entrance.z }.thenBy { it.rotation })
+            .asSequence().filter(eligible).take(64).map { CivsAutonomousCandidate(it, !exterior && streetDistance(it) != null) }.toList()
     }
 
     /** A generated route may enter the reserved wall only through one of its explicit gates. */

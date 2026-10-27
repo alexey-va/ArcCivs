@@ -82,8 +82,13 @@ class CivsMineBoundarySealTest : FunSpec({
                     assertBoundaryStanding(world, mine, seal)
                     world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y - 1, BOUNDARY_CUT.z).type shouldBe Material.STONE
                     commit(seal)
-                    city.minePlans!!.getValue(mine.id.toString()) shouldBe
-                        CivMinePlanState(CivsMinePlan.VERSION, 216, legacyStep = 214, v3Step = 83)
+                    val saved = city.minePlans!!.getValue(mine.id.toString())
+                    saved.nextStep shouldBe 216L
+                    saved.legacyStep shouldBe 214L
+                    saved.v3Step shouldBe 83L
+                    saved.v5Step shouldBe 215L
+                    saved.sectionSteps shouldBe original.minePlans!!.getValue(mine.id.toString()).sectionSteps
+                    CivsMineProgress.valid(requireNotNull(CivsMinePlan.forBuilding(mine)), saved, mine) shouldBe true
                     CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe
                         CivsEquipment.plainCount(worker, "COBBLESTONE")
                     world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type shouldBe Material.COBBLESTONE
@@ -213,7 +218,7 @@ private fun nextBoundaryWork(runtime: CivsWorksites, city: Settlement, world: Ci
 
 private fun assertBoundaryStanding(world: CivsWorksiteWorldFixture, mine: CivBuilding, work: CivWorldWork) {
     val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
-    geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing), requireNotNull(work.miningAccessStep)) shouldBe true
+    geometry.builtStanding(CivsMinePlan.localPoint(mine, work.standing), requireNotNull(work.miningAccessStep), work.miningAccessSections.orEmpty()) shouldBe true
     citizenStandable(world, work.standing) shouldBe true
     citizenPacketBodyClear(world, CitizenPoint(work.standing.x + .5, work.standing.y.toDouble(), work.standing.z + .5), false) shouldBe true
     citizenCanReachBlock(world, Location(world, work.standing.x + .5, work.standing.y + 1.62,
@@ -232,16 +237,19 @@ private fun withMineBoundary(action: (CivsWorksiteWorldFixture, CivBuilding, Set
                 CivsWorksiteLayouts.point(mine, geometry.steps[215].point) shouldBe BOUNDARY_CUT
                 val worker = spatialWorker(mine, "IRON_PICKAXE").copy(completedCycles = 245)
                 val key = mine.id.toString()
-                val city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
+                var city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
                     center = CivPosition(-25, 64, -20), mineProgress = mapOf(key to 214L),
                     minePlans = mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, 215, legacyStep = 214, v3Step = 83))))
                 for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
+                seedMineNaturalCover(world, mine)
                 for (step in geometry.steps.take(215)) {
                     val point = CivsWorksiteLayouts.point(mine, step.point)
                     world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air").also {
                         if (step.after != null) it.rotate(StructureRotation.COUNTERCLOCKWISE_90)
                     }
                 }
+                city = CivsRules.validate(city.copy(minePlans = mapOf(key to
+                    seedMinePaidSpine(world, mine, city.minePlans!!.getValue(key)))))
                 val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
                 // Hash-pinned miner1 authored rungs: local -5..-3; air -2..-1; dirt cap 0.
                 for (dy in 0..5) {

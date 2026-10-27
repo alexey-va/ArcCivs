@@ -52,6 +52,33 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("automatic decoration keeps native blocks and container withdrawals protected from ordinary visitors") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("auto-decoration-protection")
+            val owner = paper.addPlayer("DecorationOwner")
+            val visitor = paper.addPlayer("DecorationVisitor")
+            val building = protectionBuilding(0, 2).copy(type = BuildingType.DECORATION, control = null)
+            val city = protectionCity(world.uid, owner.uniqueId, building).copy(autonomy = CivAutonomy())
+            val protection = CivsProtection({ listOf(city) })
+            paper.server.pluginManager.registerEvents(protection, paper.createSimplePlugin("DecorationProtection"))
+            val block = world.getBlockAt(1, 64, 1).apply { type = Material.BARREL }
+            paper.callEvent(BlockBreakEvent(block, visitor)).isCancelled shouldBe true
+            // Existing editor privileges are intentionally unchanged.
+            paper.callEvent(BlockBreakEvent(block, owner)).isCancelled shouldBe false
+            val holder = block.state as Container
+            val inventory = mockk<Inventory> {
+                every { getHolder(false) } returns holder
+                every { location } returns block.location
+            }
+            val view = mockk<InventoryView>(relaxed = true) {
+                every { topInventory } returns inventory
+                every { player } returns visitor
+            }
+            val click = InventoryClickEvent(view, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
+            protection.click(click)
+            click.isCancelled shouldBe true
+        }
+    }
     test("natural tree growth rejects its actual changed blocks at a current resident body") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("resident-tree-growth")

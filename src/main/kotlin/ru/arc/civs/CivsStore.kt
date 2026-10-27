@@ -170,10 +170,13 @@ class CivsStore(
             playerDebit = transaction.playerDebit?.let { it.copy(changes = it.changes.toList()) },
             residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
             worldChanges = transaction.worldChanges?.toList(),
+            mine = transaction.mine?.detached(),
+            autonomousVisual = transaction.autonomousVisual?.let { it.copy(
+                buildingBefore = snapshotBuilding(it.buildingBefore),
+                mineProgressBefore = it.mineProgressBefore?.toMap(),
+                minePlansBefore = it.minePlansBefore?.mapValues { (_, state) -> CivsMineProgress.detached(state) }) },
             collected = transaction.collected?.let { it.copy(before = it.before.toList(), ground = it.ground.toList(), containers = it.containers.toList()) },
-            resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = it.corpse.worker.copy(
-                items = it.corpse.worker.items?.toList(), skills = it.corpse.worker.skills?.toMap(),
-                inventory = it.corpse.worker.inventory?.toMap(), parentIds = it.corpse.worker.parentIds?.toSet()))) })
+            resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = snapshotWorker(it.corpse.worker))) })
         return submit {
             snapshot.validated()
             val trustedRoot = trustedRoot()
@@ -458,10 +461,14 @@ class CivsStore(
 
     private fun snapshotBuilding(building: CivBuilding) = building.copy(transit = building.transit?.toList())
 
+    private fun snapshotWorker(worker: CivWorker) = worker.copy(skills = worker.skills?.toMap(),
+        inventory = worker.inventory?.toMap(), items = worker.items?.toList(), parentIds = worker.parentIds?.toSet(),
+        life = worker.life?.let { it.copy(education = it.education?.toMap()) })
+
     private fun snapshotCity(city: Settlement): Settlement = city.copy(
-        buildings = city.buildings.map(::snapshotBuilding), workers = city.workers.map { it.copy(skills = it.skills?.toMap(),
-            inventory = it.inventory?.toMap(), items = it.items?.toList(), parentIds = it.parentIds?.toSet()) }, members = city.members.toSet(),
+        buildings = city.buildings.map(::snapshotBuilding), workers = city.workers.map(::snapshotWorker), members = city.members.toSet(),
         memberNames = city.memberNames?.toMap(), families = city.families?.toList(),
+        corpses = city.corpses?.map { it.copy(worker = snapshotWorker(it.worker)) },
         inventory = city.inventory?.let { it.copy(materials = it.materials.toMap(), containers = it.containers.toList(),
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.let(::snapshotBuilding), materials = it.materials?.toMap(),
@@ -469,7 +476,7 @@ class CivsStore(
         pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
         constructionQueue = city.constructionQueue?.toList(),
         mineProgress = city.mineProgress?.toMap(),
-        minePlans = city.minePlans?.toMap(),
+        minePlans = city.minePlans?.mapValues { (_, state) -> CivsMineProgress.detached(state) },
         research = CivsResearch.detached(city.research),
         roadRouteOverrides = city.roadRouteOverrides?.mapValues { (_, route) ->
             route.copy(originalRoute = route.originalRoute.toList(), route = route.route.toList())

@@ -33,6 +33,9 @@ internal class CivsAutonomousPlacement(
     fun search(city: Settlement, type: BuildingType, level: Int, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, type, level, buildingId))
 
+    fun decoration(city: Settlement, entryId: String, buildingId: UUID): CompletableFuture<CivAutonomousDesign> =
+        admit(Search(city, BuildingType.DECORATION, 1, buildingId, catalogEntry = entryId))
+
     fun infrastructure(city: Settlement): CompletableFuture<CivAutonomousDesign> =
         admit(Search(city, BuildingType.ROAD, 1, UUID.randomUUID(), infrastructure = true))
 
@@ -49,8 +52,14 @@ internal class CivsAutonomousPlacement(
             val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
             val templates = CivsAutonomy.profile.associateWith { type ->
                 val id = UUID.nameUUIDFromBytes("arccivs-plan-template/${city.id}/$type".toByteArray(Charsets.UTF_8))
-                val first = blueprints.prepare(city.style, type, 1, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
-                val last = if (type.maxLevel == 1) first else
+                val entry = blueprints.autonomousSource(city.style, type)
+                val first = if (entry == null) blueprints.prepare(city.style, type, 1, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
+                    else blueprints.prepareEntry(entry, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
+                val last = if (entry != null) first.thenCompose { blueprint ->
+                    val maximum = blueprints.maximumLevel(blueprint.building)
+                    if (maximum == 1) CompletableFuture.completedFuture(blueprint)
+                    else blueprints.prepareUpgrade(blueprint.building, maximum, city.worldId)
+                } else if (type.maxLevel == 1) first else
                     blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                 first.thenCombine(last) { x, y -> x.building to y.building }
             }
@@ -125,8 +134,9 @@ internal class CivsAutonomousPlacement(
     private inner class Search(val city: Settlement, val type: BuildingType, val level: Int, val buildingId: UUID,
         private val pinned: CivBlueprint? = null, private val previous: CivBuilding? = null,
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
-        private val pinnedRoute: List<CivPosition>? = null) {
+        private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null) {
         private val adopted = CivsSettlementPlans.current(city)
+        private var resolvedCatalogEntry: String? = catalogEntry
         val result = CompletableFuture<CivAutonomousDesign>()
         @Volatile var temporaryCapture = false
         @Volatile var pending: CompletableFuture<*>? = null
@@ -208,9 +218,17 @@ internal class CivsAutonomousPlacement(
                 captureSurface()
                 return
             }
-            val current = blueprints.prepare(city.style, type, level, buildingId, city.worldId,
+            resolvedCatalogEntry = catalogEntry ?: reservation?.building?.schematicId?.takeIf { it.startsWith("civs/v2/") }
+                ?: blueprints.autonomousSource(city.style, type)
+            val entry = resolvedCatalogEntry
+            val current = if (entry != null) blueprints.prepareEntry(entry, buildingId, city.worldId,
+                CivPosition(0, 0, 0), 2, 0) else blueprints.prepare(city.style, type, level, buildingId, city.worldId,
                 CivPosition(0, 0, 0), 2, 0)
-            val future = if (level == type.maxLevel) current else blueprints.prepare(city.style, type, type.maxLevel, buildingId,
+            val future = if (entry != null) current.thenCompose { blueprint ->
+                val maximum = blueprints.maximumLevel(blueprint.building)
+                if (maximum == level) CompletableFuture.completedFuture(blueprint)
+                else blueprints.prepareUpgrade(blueprint.building, maximum, city.worldId)
+            } else if (level == type.maxLevel) current else blueprints.prepare(city.style, type, type.maxLevel, buildingId,
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
             await(current.thenCombineAsync(future, { a, b -> a.building to b.building }, executor)) { pair ->
                 templates = pair
@@ -289,7 +307,8 @@ internal class CivsAutonomousPlacement(
                     else CivsSettlementLayout.frame(city).wallObstacles) + futureObstacles,
                 infrastructureFloors,
                 reservedRoute = if (reservation == null) pinnedRoute else adopted?.routes?.get(buildingId.toString())
-                    ?: throw CivsRejection("invalid-plan")) }
+                    ?: throw CivsRejection("invalid-plan"),
+                preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
             await(world.captureTerraform(city, draft, executor, previous), ::retry) { terrain ->
@@ -305,6 +324,8 @@ internal class CivsAutonomousPlacement(
                                 blueprints.prepareInfrastructure(piece, city.worldId, bytes, buildingId)
                             }
                         }
+                        resolvedCatalogEntry != null -> blueprints.prepareEntry(requireNotNull(resolvedCatalogEntry), buildingId, city.worldId,
+                            draft.building.anchor, 2, draft.building.rotation)
                         else -> blueprints.prepare(city.style, type, level, buildingId, city.worldId,
                             draft.building.anchor, 2, draft.building.rotation)
                     }
@@ -361,7 +382,7 @@ internal class CivsAutonomousPlacement(
     }
 }
 
-internal data class CivsAutonomousCandidate(val building: CivBuilding)
+internal data class CivsAutonomousCandidate(val building: CivBuilding, val streetFrontage: Boolean = false)
 
 /** Authored entrances face the centre; footprints grow outward around an open central approach. */
 internal object CivsAutonomousGeometry {
@@ -419,8 +440,10 @@ internal object CivsAutonomousGeometry {
     fun futureBounds(city: Settlement, building: CivBuilding): CivBox {
         if (building.type == BuildingType.PLAN_BOARD) return CivsPlanBoardBlueprint.futureBounds(building)
         if (building.type.isInfrastructure) return building.bounds
-        if (city.style !in CivsBlueprints.STYLES) return withField(building.bounds, building)
-        val target = building.copy(schematicId = CivsBlueprints.schematicId(city.style, building.type, building.type.maxLevel))
+        if (building.schematicId.startsWith("civs/v2/") || building.type.maxLevel == 1) return withField(building.bounds, building)
+        val style = CivsBlueprints.styleOf(building) ?: city.style
+        if (style !in CivsBlueprints.STYLES) return withField(building.bounds, building)
+        val target = building.copy(schematicId = CivsBlueprints.schematicId(style, building.type, building.type.maxLevel))
         val bounds = CivsWorksiteLayouts.site(target)?.getAsJsonObject("schematicBounds") ?: return withField(building.bounds, building)
         val a = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["min"]))
         val b = CivsWorksiteLayouts.point(target, CivsWorksiteLayouts.vector(bounds["max"]))

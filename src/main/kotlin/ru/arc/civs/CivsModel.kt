@@ -5,11 +5,11 @@ import java.util.UUID
 enum class Resource { WOOD, STONE, FOOD }
 enum class BuildingType {
     TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER, QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY,
-    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD, PLAN_BOARD, UNIVERSITY, SMELTERY, CRUSHER;
+    TAVERN, BAKERY, GUARD_TOWER, WALL, GATE, ROAD, PLAN_BOARD, UNIVERSITY, SMELTERY, CRUSHER, DECORATION;
 
     val isInfrastructure: Boolean get() = this == WALL || this == GATE || this == ROAD
     val isResidence: Boolean get() = this == HOUSE || this == TAVERN
-    val maxLevel: Int get() = if (isInfrastructure || this == PLAN_BOARD) 1 else 3
+    val maxLevel: Int get() = if (isInfrastructure || this == PLAN_BOARD || this == DECORATION) 1 else 3
 }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }
 enum class ConstructionPhase { CONSTRUCTING, READY_TO_PLACE, WAITING_MATERIALS, PLACING, PAUSED }
@@ -79,6 +79,8 @@ data class CivWorker(
     val hasCollectedItems: Boolean? = null,
     /** Earned autonomous goods waiting for a courier; never native or extractable items. */
     val pendingStock: Stock? = null,
+    /** Small observed life history; missing keeps pre-life JSON semantically unchanged. */
+    val life: CivResidentLife? = null,
 )
 
 /** A stable pair occupies one house. Progress records active minutes, never wall-clock catch-up. */
@@ -119,7 +121,7 @@ data class CivConstruction(
     val workCredit: Int? = null,
     val blocksRequired: Int? = null,
     val blocksPlaced: Int? = null,
-    /** Reachable earthwork front, then the prepared entrance until completion; null uses the authored workplace. */
+    /** Saved earthwork cursor and prepared entrance; resident construction stance is selected separately. */
     val preparationWorkplace: CivPosition? = null,
     /** Free, journaled manual foundation rows run before the builder can reach the raised entrance. */
     val automaticPreparationBatches: Int? = null,
@@ -144,7 +146,27 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     /** V3's offset-shaft ordinal remains provenance when V4 starts its own single-shaft plan. */
     val v3Step: Long? = null,
     /** Completed V4 geometry remains an escape/protection prefix after V5 starts. */
-    val v4Step: Long? = null)
+    val v4Step: Long? = null,
+    /** Exact V5 section-local prefixes outside nextStep; missing keeps old receipts unchanged. */
+    val sectionSteps: Map<String, Long>? = null,
+    /** Last real excavation, rechecked after restart before another opening. Schematic-local. */
+    val excavation: CivPosition? = null,
+    /** Outstanding paid safety blocks at future plan cuts, consumed by their actual removal. */
+    val seals: Map<String, String>? = null,
+    /** Frozen V5 linear prefix when its first sparse receipt is admitted. */
+    val v5Step: Long? = null,
+    /** Exact paid geometry from at most two lower building levels; never a current-level prefix. */
+    val levels: List<CivMineLevelWitness>? = null)
+
+/** Flat old-level proof: it deliberately cannot contain another history. */
+data class CivMineLevelWitness(val building: CivBuilding, val version: Int?, val nextStep: Long,
+    val legacyStep: Long? = null, val v2Step: Long? = null, val v3Step: Long? = null, val v4Step: Long? = null,
+    val sectionSteps: Map<String, Long>? = null, val excavation: CivPosition? = null,
+    val seals: Map<String, String>? = null, val v5Step: Long? = null, val legacyProgress: Long? = null) {
+    fun state(): CivMinePlanState? = version?.let {
+        CivMinePlanState(it, nextStep, legacyStep, v2Step, v3Step, v4Step, sectionSteps, excavation, seals, v5Step)
+    }
+}
 
 enum class CivSettlementSetting { CHUNK_LOADING, IMMORTAL_RESIDENTS, AUTO_CONSTRUCTION_MATERIALS }
 

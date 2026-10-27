@@ -28,6 +28,32 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 
 class CivsResidentNavigationTest : FunSpec({
+    test("preparation keeps its context while bounded native capture is making progress") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("retained-slow-capture").also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(paper.createSimplePlugin("RetainedCapture")))
+            val work = BudgetedTaskQueue(tasks, maximumSteps = 8, nanoTime = { 0L })
+            val workers = ArrayDeque<Runnable>()
+            val owner = CivsResidentNavigation(tasks, work, Executor { workers.addLast(it) },
+                CivsNavigationSettings(searchNodesPerBatch = 1, closePreparationTicks = 4))
+            val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 3.5, 64.0, .5),
+                { it.y == 64 && it.z == 0 && it.x in 0..3 }, { _, _ -> true }, { 1.0 })
+            var ticks = 0
+            try {
+                while (route.searching && ticks++ < 200) {
+                    while (workers.isNotEmpty()) workers.removeFirst().run()
+                    paper.performTicks(1)
+                    owner.pulse()
+                }
+                (ticks > 4) shouldBe true
+                route.searching shouldBe false
+                route.failure shouldBe null
+                route.endpoint shouldBe CitizenPoint(3.5, 64.0, .5)
+            } finally { owner.clear(); work.close(); tasks.close() }
+        }
+    }
+
     for (parallel in listOf(1, 9))
     test("$parallel close reachable routes prepare within their native tick latency bound") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
@@ -190,7 +216,7 @@ class CivsResidentNavigationTest : FunSpec({
     }
 
     for (waitingForWorker in listOf(false, true))
-    test("the preparation tick deadline retires stalled ${if (waitingForWorker) "worker" else "native"} work once") {
+    test("preparation ${if (waitingForWorker) "retires a stalled worker once" else "retains progressing native capture"}") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("preparation-deadline-$waitingForWorker").also(paper.server::addWorld)
             for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
@@ -209,6 +235,14 @@ class CivsResidentNavigationTest : FunSpec({
                     tick++
                     paper.performTicks(1)
                     owner.pulse()
+                }
+                if (!waitingForWorker) {
+                    route.failure shouldBe null
+                    route.searching shouldBe true
+                    val captured = route.capturedBlocks
+                    repeat(3) { tick++; paper.performTicks(1); owner.pulse() }
+                    (route.capturedBlocks > captured) shouldBe true
+                    return@use
                 }
                 route.failure shouldBe "preparation-budget"
                 route.searching shouldBe false
@@ -253,7 +287,15 @@ class CivsResidentNavigationTest : FunSpec({
             )) {
                 val route = CitizenPacketRoute(world, from, to, { it.y == 64 }, { _, _ -> true }, { 1.0 }, settings = settings)
                 route.prepare()
-                route.failure shouldBe failure
+                if (route.continuation) {
+                    route.failure shouldBe null
+                    val endpoint = requireNotNull(route.endpoint)
+                    (from.distance(to) - kotlin.math.sqrt(endpoint.distanceSquared(CitizenPoint(to.x, to.y, to.z))) >= 2.0) shouldBe true
+                    (endpoint != CitizenPoint(to.x, to.y, to.z)) shouldBe true
+                } else {
+                    route.failure shouldBe failure
+                    route.endpoint shouldBe null
+                }
                 if (failure == "search-budget") route.nodeCount shouldBe 65
                 else route.capturedBlocks shouldBe 256
             }

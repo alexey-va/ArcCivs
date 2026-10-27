@@ -1,0 +1,2262 @@
+{
+  "title": "ArcCivs .94 to .95: retained worksite context and throughput sensitivity",
+  "assumptions": [
+    "Sensitivity only, not telemetry. Participants [1,4,6] represent villages/owners; each modeled village has one affected L1 forester and one distinct L1 miner. Active hours are [0.25,1,4] per village-day.",
+    "Forester final-tree events per village-day are before [3,12,36] and after [6,24,72]. Plantings match final-tree counts in each state. The existing gross 4 abstract WOOD and 1 abstract WOOD normal replant kit per L1 tree remain unchanged; the repeated scenario assumes the normal funded-kit path, not the separate zero-stock initial/deferred-seed case.",
+    "Profession XP is an internal resident statistic: one per final tree and one per planting in both states; care/watering gives zero. Ordinary native forestry drops vary with the captured blocks and tool, so they have no fixed item-yield flow here and never become Auto abstract stock.",
+    "Miner production is 3 abstract STONE per completed session, unchanged. Before sessions are [0,0,0]; after [5,20,80] per village-day. These assumptions are 20 sessions/hour after recovery, below the unchanged healthy maximum of 60 sessions/hour. Section scheduling and depth/claim guards do not change that quantity or create credit for a deferred section; actual permitted native availability is not measured by this sensitivity.",
+    "A Tavern has one innkeeper role with zero new production and zero profession XP. Guest pickup transfers up to 4 existing BREAD per event; events [1,4,16] per village-day and the maximum of 4 are unchanged. The four-BREAD first-fill reserve is a one-time existing-item transfer by the existing courier, not recurring supply or mint; the hall fallback remains available.",
+    "Builder rates are unchanged: 64 credited rows per 2-second paid/Auto session. One finite 467-row project uses eight sessions and eight internal profession XP in both states. No per-day project frequency is supplied, so this finite comparison is excluded from daily flow totals.",
+    "Road repair remains 1 abstract STONE per changed column and 3 seconds per column; no event count is supplied, so no daily road-repair volume is modeled. Compact-layout exact before/after material cost has no matched full-plan baseline and is omitted rather than estimated; accepted construction and per-row prices remain unchanged.",
+    "Native lateral mine limits are spatial safety rules: narrow near-surface work, wider existing galleries only under enough natural cover, and no new mine mutation in player Lands claims. Native ore drops and the material bill depend on the permitted observed cells; no fixed ore yield, new free generator, or matched full-mine before/after material total is assumed.",
+    "Auto WOOD and STONE, native BREAD, and resident profession XP are separate units. Vault, tokens, and player XP remain zero; no currency conversion is introduced."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "abstract_wood": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "12",
+            "48",
+            "144"
+          ],
+          "burn_per_player_day": [
+            "3",
+            "12",
+            "36"
+          ],
+          "network_weekly_mint": [
+            "84",
+            "1344",
+            "6048"
+          ],
+          "network_weekly_burn": [
+            "21",
+            "336",
+            "1512"
+          ],
+          "network_weekly_net": [
+            "63",
+            "1008",
+            "4536"
+          ],
+          "player_daily_potential_net": [
+            "9",
+            "36",
+            "108"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "3",
+              "12",
+              "36"
+            ],
+            "network_weekly": [
+              "21",
+              "336",
+              "1512"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "12",
+              "48",
+              "144"
+            ],
+            "network_weekly": [
+              "84",
+              "1344",
+              "6048"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "affected_l1_forester_gross",
+            "kind": "mint",
+            "player_daily_potential": [
+              "12",
+              "48",
+              "144"
+            ],
+            "network_weekly_after_cap": [
+              "84",
+              "1344",
+              "6048"
+            ],
+            "basis": "Affected L1 forester sensitivity; 4 abstract WOOD per final harvested tree is unchanged."
+          },
+          {
+            "id": "affected_l1_forester_replant_kit",
+            "kind": "burn",
+            "player_daily_potential": [
+              "3",
+              "12",
+              "36"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "336",
+              "1512"
+            ],
+            "basis": "One abstract WOOD normal seed-kit cost per matching replanting; event counts equal final trees in each state."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "24",
+            "96",
+            "288"
+          ],
+          "burn_per_player_day": [
+            "6",
+            "24",
+            "72"
+          ],
+          "network_weekly_mint": [
+            "168",
+            "2688",
+            "12096"
+          ],
+          "network_weekly_burn": [
+            "42",
+            "672",
+            "3024"
+          ],
+          "network_weekly_net": [
+            "126",
+            "2016",
+            "9072"
+          ],
+          "player_daily_potential_net": [
+            "18",
+            "72",
+            "216"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "6",
+              "24",
+              "72"
+            ],
+            "network_weekly": [
+              "42",
+              "672",
+              "3024"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "24",
+              "96",
+              "288"
+            ],
+            "network_weekly": [
+              "168",
+              "2688",
+              "12096"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "affected_l1_forester_gross",
+            "kind": "mint",
+            "player_daily_potential": [
+              "24",
+              "96",
+              "288"
+            ],
+            "network_weekly_after_cap": [
+              "168",
+              "2688",
+              "12096"
+            ],
+            "basis": "Affected L1 forester sensitivity; 4 abstract WOOD per final harvested tree is unchanged."
+          },
+          {
+            "id": "affected_l1_forester_replant_kit",
+            "kind": "burn",
+            "player_daily_potential": [
+              "6",
+              "24",
+              "72"
+            ],
+            "network_weekly_after_cap": [
+              "42",
+              "672",
+              "3024"
+            ],
+            "basis": "One abstract WOOD normal seed-kit cost per matching replanting; event counts equal final trees in each state."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "63",
+        "1008",
+        "4536"
+      ]
+    },
+    "abstract_stone": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "affected_l1_miner_sessions",
+            "kind": "mint",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "3 abstract STONE per completed session, unchanged; after counts are 20 sessions/hour at the specified active hours, under the unchanged 60-session/hour healthy maximum."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "15",
+            "60",
+            "240"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "105",
+            "1680",
+            "10080"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "105",
+            "1680",
+            "10080"
+          ],
+          "player_daily_potential_net": [
+            "15",
+            "60",
+            "240"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "15",
+              "60",
+              "240"
+            ],
+            "network_weekly": [
+              "105",
+              "1680",
+              "10080"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "affected_l1_miner_sessions",
+            "kind": "mint",
+            "player_daily_potential": [
+              "15",
+              "60",
+              "240"
+            ],
+            "network_weekly_after_cap": [
+              "105",
+              "1680",
+              "10080"
+            ],
+            "basis": "3 abstract STONE per completed session, unchanged; after counts are 20 sessions/hour at the specified active hours, under the unchanged 60-session/hour healthy maximum."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "105",
+        "1680",
+        "10080"
+      ]
+    },
+    "resident_profession_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "6",
+              "24",
+              "72"
+            ],
+            "network_weekly": [
+              "42",
+              "672",
+              "3024"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "forester_final_tree_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "12",
+              "36"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "336",
+              "1512"
+            ],
+            "basis": "One internal profession XP per completed final tree; events match forester final-tree counts."
+          },
+          {
+            "id": "forester_planting_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "3",
+              "12",
+              "36"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "336",
+              "1512"
+            ],
+            "basis": "One internal profession XP per completed planting; planting count matches final-tree count in each state."
+          },
+          {
+            "id": "affected_l1_miner_session_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "One internal profession XP per completed miner session; no player XP."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "17",
+              "68",
+              "224"
+            ],
+            "network_weekly": [
+              "119",
+              "1904",
+              "9408"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "forester_final_tree_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "6",
+              "24",
+              "72"
+            ],
+            "network_weekly_after_cap": [
+              "42",
+              "672",
+              "3024"
+            ],
+            "basis": "One internal profession XP per completed final tree; events match forester final-tree counts."
+          },
+          {
+            "id": "forester_planting_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "6",
+              "24",
+              "72"
+            ],
+            "network_weekly_after_cap": [
+              "42",
+              "672",
+              "3024"
+            ],
+            "basis": "One internal profession XP per completed planting; planting count matches final-tree count in each state."
+          },
+          {
+            "id": "affected_l1_miner_session_xp",
+            "kind": "item",
+            "player_daily_potential": [
+              "5",
+              "20",
+              "80"
+            ],
+            "network_weekly_after_cap": [
+              "35",
+              "560",
+              "3360"
+            ],
+            "basis": "One internal profession XP per completed miner session; no player XP."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "native_bread_items": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "4",
+              "16",
+              "64"
+            ],
+            "network_weekly": [
+              "28",
+              "448",
+              "2688"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "tavern_guest_bread_transfer",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "4",
+              "16",
+              "64"
+            ],
+            "network_weekly_after_cap": [
+              "28",
+              "448",
+              "2688"
+            ],
+            "basis": "Up to 4 existing BREAD transferred per guest pickup; same amount, event counts, and pickup maximum before/after."
+          },
+          {
+            "id": "tavern_one_time_first_fill",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "After-only first fill moves 4 existing BREAD by the existing courier. Zero recurring daily events; this is not a mint."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "4",
+              "16",
+              "64"
+            ],
+            "network_weekly": [
+              "28",
+              "448",
+              "2688"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "tavern_guest_bread_transfer",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "4",
+              "16",
+              "64"
+            ],
+            "network_weekly_after_cap": [
+              "28",
+              "448",
+              "2688"
+            ],
+            "basis": "Up to 4 existing BREAD transferred per guest pickup; same amount, event counts, and pickup maximum before/after."
+          },
+          {
+            "id": "tavern_one_time_first_fill",
+            "kind": "transfer",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "After-only first fill moves 4 existing BREAD by the existing courier. Zero recurring daily events; this is not a mint."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "native_forestry_items": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "vault_direct": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "player_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prices": []
+}

@@ -15,7 +15,7 @@ import java.util.logging.LogRecord
 
 class CivsMineSearchWarningsTest : FunSpec({
     test("a slow native V4 migration scan warns once per active minute then reports actual selected work without work credit") {
-        withSlowMineSearch { paper, world, mine, city, runtime, records, _ ->
+        withSlowMineSearch { paper, world, mine, city, runtime, records, _, releaseBudget ->
             val worker = city.workers.single()
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
             val committed = city.minePlans!!.getValue(mine.id.toString()).nextStep
@@ -53,6 +53,7 @@ class CivsMineSearchWarningsTest : FunSpec({
             city.workers.single().completedCycles shouldBe 0L
             world.getBlockAt(outstanding.x, outstanding.y, outstanding.z).type shouldBe Material.STONE
 
+            releaseBudget()
             var selected: CivWorldWork? = null
             for (attempt in 0 until 10_000) {
                 pulse(0)
@@ -78,7 +79,7 @@ class CivsMineSearchWarningsTest : FunSpec({
     }
 
     test("mine search time excludes pause night material and tool waits and resets on cycle job and worker removal") {
-        withSlowMineSearch { paper, world, mine, original, runtime, records, paused ->
+        withSlowMineSearch { paper, world, mine, original, runtime, records, paused, _ ->
             var city = original
             val worker = city.workers.single()
             fun pulse(ticks: Int = 20) {
@@ -141,7 +142,7 @@ private fun mineSearchTicks(runtime: CivsWorksites, worker: UUID): Long? {
 }
 
 private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorldFixture, CivBuilding,
-    Settlement, CivsWorksites, List<LogRecord>, (Boolean) -> Unit) -> Unit) {
+    Settlement, CivsWorksites, List<LogRecord>, (Boolean) -> Unit, () -> Unit) -> Unit) {
     MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
         val world = CivsWorksiteWorldFixture("mine-slow-search").also(paper.server::addWorld)
         val plugin = paper.createSimplePlugin("MineSlowSearch")
@@ -159,22 +160,12 @@ private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorld
             val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
                 minePlans = mapOf(mine.id.toString() to CivMinePlanState(4, geometry.shaftEnd.toLong())))
             for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+            seedMineNaturalCover(world, mine)
             // A real completed V4 prefix migrates through the bounded native V5 frontier scan;
             // the durable cursor and worker receive no work credit while it catches up.
             for (step in geometry.steps.dropLast(1)) {
                 val point = CivsWorksiteLayouts.point(mine, step.point)
                 world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
-            }
-            // Retain real native lining at the old shaft mouths. Otherwise the
-            // migration selects an early cave repair before its second minute.
-            val lining = geometry.shaftColumns.flatMap { (x, z) ->
-                listOf(x + 1 to z, x - 1 to z, x to z + 1, x to z - 1)
-            }.toSet() - geometry.shaftColumns
-            for (step in geometry.steps) {
-                if ((step.point.x to step.point.z) !in lining) continue
-                val point = CivsWorksiteLayouts.point(mine, step.point)
-                val block = world.getBlockAt(point.x, point.y, point.z)
-                if (block.type.isAir) block.type = Material.COBBLESTONE
             }
             val top = CivsWorksiteLayouts.point(mine, geometry.bottom)
             for (dy in 0..5) {
@@ -189,12 +180,15 @@ private fun withSlowMineSearch(action: (MockBukkitTestRuntime, CivsWorksiteWorld
                 }
             }
             var paused = false
+            var limitedBudget = true
+            var clock = 0L
             CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                // Keep a real, unfinished migration beyond two active minutes even
-                // when pure geometric candidates no longer consume native quotas.
+                // Deterministically exhaust the shared time slice after entering the
+                // real frontier scan. No invented old lining or work credit is needed.
                 val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused },
+                    nanoTime = { if (limitedBudget) clock += 900_000; clock },
                     settings = CivsWorksiteSettings(mineChecksPerPulse = 1, maximumForestColumnsPerPulse = 1))
-                action(paper, world, mine, city, runtime, records) { paused = it }
+                action(paper, world, mine, city, runtime, records, { paused = it }, { limitedBudget = false })
             }
         } finally {
             plugin.logger.removeHandler(handler)

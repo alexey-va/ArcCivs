@@ -45,9 +45,10 @@ internal class CivsNavigationTerrain(private val maximumBlocks: Int, private val
         }
     }
 
-    fun discard(world: UUID, positions: Collection<CivPosition>) {
-        for (at in positions)
-            if (chunks[Key(world, at.x shr 4, at.z shr 4)]?.blocks?.remove(at) != null) blocks--
+    fun refreshObstacles(world: UUID, positions: List<CivPosition>) {
+        require(positions.size <= 64)
+        for (point in positions)
+            if (chunks[Key(world, point.x shr 4, point.z shr 4)]?.blocks?.remove(point) != null) blocks--
     }
 
     fun removeChunk(world: UUID, x: Int, z: Int) {

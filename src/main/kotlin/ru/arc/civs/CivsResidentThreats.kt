@@ -51,7 +51,8 @@ internal data class CivsThreatTarget(val cityId: UUID, val workerId: UUID, val n
  */
 internal class CivsResidentThreats(private val plugin: Plugin,
     private val attacked: (UUID, Monster) -> Unit = { _, _ -> },
-    private val mobProtected: (UUID) -> Boolean = { false }, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
+    private val mobProtected: (UUID) -> Boolean = { false },
+    private val discovered: (UUID, Monster) -> Unit = { _, _ -> }, private val injury: (UUID, Double) -> Unit) : Listener, AutoCloseable {
     private data class Pursuit(val monster: Monster, val worker: UUID, val cityId: UUID, var attackAfter: Long = 0,
         var routeAfter: Long = 0, var ignited: Boolean = false)
     private data class Flight(val projectile: Projectile, var previous: Location)
@@ -92,7 +93,8 @@ internal class CivsResidentThreats(private val plugin: Plugin,
                 if (pursuits.size >= 32) break
                 if (monster.isValid && !monster.isDead && monster.hasAI() && monster.type !in NEUTRAL && monster.target == null &&
                     monster.world.difficulty != Difficulty.PEACEFUL && visible(monster.eyeLocation, eye(target))) {
-                    pursuits.putIfAbsent(monster.uniqueId, Pursuit(monster, target.workerId, target.cityId))
+                    if (pursuits.putIfAbsent(monster.uniqueId, Pursuit(monster, target.workerId, target.cityId)) == null)
+                        discovered(target.workerId, monster)
                 }
             }
         }

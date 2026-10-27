@@ -21,9 +21,9 @@ data class CivCraftJob(val id: UUID, val workerId: UUID, val buildingId: UUID, v
     val constructionId: UUID? = null)
 
 internal data class CivCraftWorker(val workerId: UUID, val buildingId: UUID, val cycle: Long,
-    val level: Int, val carried: Map<String, Long>, val axe: Boolean)
+    val level: Int, val carried: Map<String, Long>, val axe: Boolean, val type: BuildingType = BuildingType.SAWMILL)
 internal data class CivCraftRecipe(val id: String, val material: String, val amount: Long,
-    val level: Int, val inputs: Map<String, Long>, val stripping: Boolean = false)
+    val level: Int, val inputs: Map<String, Long>, val stripping: Boolean = false, val workshop: BuildingType = BuildingType.SAWMILL)
 internal data class CivCraftAllocation(val jobs: Map<UUID, CivCraftJob>,
     val required: Map<UUID, Map<String, Long>>, val requests: List<CivSupplyRequest>)
 
@@ -31,6 +31,7 @@ internal data class CivCraftAllocation(val jobs: Map<UUID, CivCraftJob>,
  * 64bb6d763bed0a9f1d632ec347938594144943ed. No price, yield or speed multiplier. */
 internal object CivsCarpentry {
     const val VERSION = 1
+    val workshops = setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH)
     val woods = listOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK")
     val recipes: List<CivCraftRecipe> = buildList {
         fun recipe(id: String, material: String, amount: Long, level: Int,
@@ -68,6 +69,11 @@ internal object CivsCarpentry {
         }
         recipe("ladder", "LADDER", 3, 1, "STICK" to 7L)
         recipe("scaffolding", "SCAFFOLDING", 6, 2, "BAMBOO" to 6L, "STRING" to 1L)
+        for (tool in listOf("IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE")) {
+            val iron = when (tool) { "IRON_SHOVEL" -> 1L; "IRON_HOE" -> 2L; else -> 3L }
+            add(CivCraftRecipe("blacksmith/${tool.lowercase()}", tool, 1, 1,
+                mapOf("IRON_INGOT" to iron, "STICK" to 2L), workshop = BuildingType.BLACKSMITH))
+        }
     }
     private val byId = recipes.associateBy(CivCraftRecipe::id)
     private val byMaterial = recipes.groupBy(CivCraftRecipe::material)
@@ -93,7 +99,8 @@ internal object CivsCarpentry {
     val materials: Set<String> = recipes.flatMapTo(linkedSetOf()) { recipe ->
         recipe.inputs.keys.flatMap { group(recipe, it) } + recipe.material
     }
-    val views: List<CivCarpentryRecipeView> = recipes.distinctBy(CivCraftRecipe::material)
+    val views: List<CivCarpentryRecipeView> = views(BuildingType.SAWMILL)
+    fun views(workshop: BuildingType): List<CivCarpentryRecipeView> = recipes.filter { it.workshop == workshop }.distinctBy(CivCraftRecipe::material)
         .map { CivCarpentryRecipeView(it.material, it.amount, it.level, it.inputs, it.stripping) }
         .sortedWith(compareBy<CivCarpentryRecipeView> { it.level }.thenBy { it.material })
 
@@ -137,7 +144,7 @@ internal object CivsCarpentry {
         val recipe = recipe(job) ?: return false
         return city.pendingDeletion == null && city.inventory != null && job.workerId == worker.id &&
             worker.assignment == building.id && worker.completedCycles == job.cycle && worker.cargo == null &&
-            !CivsResidents.isChild(worker) && building.type == BuildingType.SAWMILL &&
+            !CivsResidents.isChild(worker) && building.type == recipe.workshop &&
             CivsRules.productionAvailable(city, building) && recipe.level <= building.level &&
             (!recipe.stripping || CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true) &&
             (job.constructionId == null || city.construction?.id == job.constructionId)
@@ -185,8 +192,9 @@ internal object CivsCarpentry {
         workers.values.forEach { it.carried.forEach { (material, count) -> if (material in materials) add(stock, material, count) } }
         // Inputs in a durable workshop-bound shipment still belong to their pinned batch.
         // Readiness remains a separate check of the actual barrel/resident inventory.
-        snapshot.retained.values.filter { it.carrying && snapshot.stores[it.destinationBuildingId]?.type in
-            setOf(BuildingType.WAREHOUSE, BuildingType.SAWMILL) }
+        snapshot.retained.values.filter { plan -> plan.carrying && snapshot.stores[plan.destinationBuildingId]?.type.let {
+            it == BuildingType.WAREHOUSE || it in workshops
+        } }
             .distinctBy { it.cargo.id }.forEach { add(stock, it.cargo.material, it.cargo.amount) }
         val jobs = linkedMapOf<UUID, CivCraftJob>()
         fun outputsFit(batches: Collection<CivCraftJob>): Boolean {
@@ -236,7 +244,7 @@ internal object CivsCarpentry {
             val costCache = hashMapOf<Pair<String, Long>, Long>()
             fun alternatives(material: String) = (if (only?.material == material) listOfNotNull(recipe(only))
                 else byMaterial[material].orEmpty().distinctBy { if (material in generic) material else it.id }).filter {
-                it.level <= worker.level && (!it.stripping || worker.axe)
+                it.workshop == worker.type && it.level <= worker.level && (!it.stripping || worker.axe)
             }
             fun cost(material: String, amount: Long, depth: Int = 0): Long {
                 budget(); check(depth <= 8)
@@ -308,7 +316,7 @@ internal object CivsCarpentry {
         // Revalidate retained intent against current demand before adding new output promises.
         val retained = snapshot.craftJobs.filter { (id, job) -> workers[id]?.let { worker ->
             job.workerId == id && job.buildingId == worker.buildingId && job.cycle == worker.cycle &&
-                recipe(job)?.let { it.level <= worker.level && (!it.stripping || worker.axe) } == true &&
+                recipe(job)?.let { it.workshop == worker.type && it.level <= worker.level && (!it.stripping || worker.axe) } == true &&
                 (job.constructionId == null || job.constructionId == snapshot.constructionId)
         } == true }.toSortedMap(compareBy(UUID::toString))
         for ((id, job) in retained) {

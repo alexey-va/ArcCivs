@@ -9,9 +9,9 @@ import java.util.UUID
 class CivsWorkforceTest : FunSpec({
     test("completed workplaces grow with level while an unfinished hut starts with one builder") {
         val city = workforceCity()
-        val singleWorkers = setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)
+        val singleWorkers = setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.TAVERN)
         for (type in BuildingType.entries.filterNot { it.isResidence || it.isInfrastructure ||
-                it == BuildingType.GUARD_TOWER || it == BuildingType.PLAN_BOARD || it in singleWorkers }) {
+                it == BuildingType.GUARD_TOWER || it == BuildingType.PLAN_BOARD || it == BuildingType.DECORATION || it in singleWorkers }) {
             for (level in 1..3) {
                 val building = workforceBuilding(1, type).copy(level = level)
                 CivsRules.slots(city, building) shouldBe level
@@ -22,12 +22,34 @@ class CivsWorkforceTest : FunSpec({
             CivsRules.slots(city.copy(buildings = city.buildings + building), building) shouldBe 1
             CivsRules.slots(building.copy(phase = BuildingPhase.SITE)) shouldBe 0
         }
-        for (type in listOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.WALL, BuildingType.GATE,
-            BuildingType.ROAD, BuildingType.PLAN_BOARD))
+        for (type in listOf(BuildingType.HOUSE, BuildingType.WALL, BuildingType.GATE,
+            BuildingType.ROAD, BuildingType.PLAN_BOARD, BuildingType.DECORATION))
             CivsRules.slots(city, workforceBuilding(1, type)) shouldBe 0
         for (level in 1..3) CivsRules.slots(city, workforceBuilding(1, BuildingType.GUARD_TOWER).copy(level = level)) shouldBe 1
         CivsRules.slots(workforceBuilding(2, BuildingType.BUILDER_HUT).copy(phase = BuildingPhase.SITE)) shouldBe 1
         CivsRules.slots(workforceBuilding(1, BuildingType.TOWN_HALL).copy(phase = BuildingPhase.SITE)) shouldBe 0
+    }
+
+    test("ordinary and autonomous taverns staff one innkeeper without a production reward") {
+        val base = workforceCity()
+        val tavern = workforceBuilding(20, BuildingType.TAVERN)
+        val innkeeper = base.workers.first().copy(assignment = tavern.id)
+        for (autonomous in listOf(false, true)) {
+            val city = base.copy(buildings = base.buildings + tavern, workers = listOf(innkeeper),
+                autonomy = if (autonomous) CivAutonomy() else null,
+                inventory = if (autonomous) null else base.inventory)
+            CivsRules.slots(city, tavern) shouldBe 1
+            CivsRules.profession(city, tavern) shouldBe "innkeeper"
+            CivsRules.staffedTavern(city, tavern) shouldBe true
+            CivsRules.staffedTavern(city.copy(workers = emptyList()), tavern) shouldBe false
+            CivsPopulation.houseBeds(tavern) shouldBe 4
+            CivsProduction.options(BuildingType.TAVERN) shouldBe emptyList()
+            val plan = requireNotNull(citizenPlan(city, innkeeper))
+            plan.idleReason shouldBe null
+            plan.workMillis shouldBe Long.MAX_VALUE
+            plan.autonomousWork shouldBe null
+            CivsLogistics.desiredStock(city, tavern) shouldBe mapOf("BREAD" to 4L)
+        }
     }
 
     test("normal hall scribes require an item receipt and earn only their new profession experience") {

@@ -28,7 +28,8 @@ internal class CivsResidentNavigation(
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
 ) {
     private class Job(val route: CitizenPacketRoute, val search: CitizenNavigationSearch) {
-        val startedTick = Bukkit.getCurrentTick().toLong()
+        var progressTick = Bukkit.getCurrentTick().toLong()
+        var nativeProgress = 0L
         val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
         var searching: CompletableFuture<CitizenSearchResult>? = null
         var capturing: CompletableFuture<Unit>? = null
@@ -62,7 +63,7 @@ internal class CivsResidentNavigation(
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute {
         checkOwner()
         from.world?.let { world ->
-            terrain.removeChunk(world.uid, from.blockX shr 4, from.blockZ shr 4)
+            terrain.changed(world.uid, CivPosition(from.blockX, from.blockY, from.blockZ))
             route.destination?.let { terrain.changed(world.uid, CivPosition(it.blockX, it.blockY, it.blockZ)) }
         }
         // Replacing an unfinished search releases its admission slot. A ready previous path
@@ -97,13 +98,20 @@ internal class CivsResidentNavigation(
     private fun poll() {
         for (job in jobs.values.toList()) {
             if (!job.route.searching) continue
-            if (Bukkit.getCurrentTick().toLong() - job.startedTick >= job.route.preparationTickLimit()) {
+            val tick = Bukkit.getCurrentTick().toLong()
+            val nativeProgress = job.capture?.progress ?: 0L
+            if (nativeProgress > job.nativeProgress || job.searching?.isDone == true || job.capturing?.isDone == true) {
+                job.progressTick = tick
+                job.nativeProgress = nativeProgress
+            }
+            if (tick - job.progressTick >= job.route.preparationTickLimit()) {
                 job.route.planningFailed("preparation-budget")
                 continue
             }
             try {
                 val searching = job.searching
                 if (searching != null && searching.isDone) {
+                    job.progressTick = tick
                     job.searching = null
                     val result = searching.join() // isDone above; no blocking gameplay-thread wait.
                     job.route.recordSearch(result)
@@ -113,6 +121,7 @@ internal class CivsResidentNavigation(
                         job.route.phase("capturing")
                         val cursor = CitizenNavigationCapture(job.route, result.probes, job.terrain, terrain)
                         job.capture = cursor
+                        job.nativeProgress = 0
                         job.capturing = work.submit({ !closed && tasks.isCurrent(epoch) && job.route.searching }, cursor::step)
                     }
                 }
@@ -125,7 +134,19 @@ internal class CivsResidentNavigation(
                     dispatch(job, capture.result)
                 }
             } catch (failure: RuntimeException) {
-                job.route.planningFailed(reason(failure))
+                val reason = reason(failure)
+                if (reason == "capture-budget") {
+                    job.capture = null
+                    job.capturing = null
+                    job.nativeProgress = 0
+                    job.progressTick = tick
+                    job.route.phase("searching")
+                    val search = job.search
+                    job.searching = try { CompletableFuture.supplyAsync({ search.finishAtBudget(reason) }, executor) }
+                    catch (_: RejectedExecutionException) {
+                        CompletableFuture.failedFuture(RejectedExecutionException("Navigation worker is full"))
+                    }
+                } else job.route.planningFailed(reason)
             }
         }
         retireCancelled()
@@ -148,9 +169,9 @@ internal class CivsResidentNavigation(
             job.capturing?.cancel(false)
             job.searching?.cancel(false)
             job.capture = null
-            // Retry a closed region against fresh shapes even when another plugin changed it without an event.
-            // Budget exhaustion keeps its hot geometry; it is not evidence of a blocked region.
-            if (job.route.failure == "no-path") terrain.discard(job.route.worldId, job.terrain.keys)
+            // A route or permission failure says nothing about other routes' captured shapes.
+            // Native change events, local blocked-step refresh and the bounded TTL own invalidation.
+            if (job.route.failure == "no-path") terrain.refreshObstacles(job.route.worldId, job.route.blockedPositions)
             job.terrain.clear()
             iterator.remove()
         }
@@ -223,8 +244,11 @@ internal class CitizenNavigationCapture(
     private var candidates: List<CitizenSearchEdge>? = null
     private var candidateIndex = 0
     private val admitted = mutableListOf<CitizenSearchEdge>()
+    var progress = 0L
+        private set
 
     fun step(): Boolean {
+        progress++
         if (probeIndex >= probes.size) return true
         val probe = probes[probeIndex]
         if (positions.isEmpty()) {

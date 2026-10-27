@@ -4,7 +4,7 @@ import java.util.UUID
 
 /** Personal stores are authoritative persisted items; native NPC equipment is only a view. */
 object CivsResidents {
-    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE", "BAKERY", "GUARD_TOWER", "UNIVERSITY", "SMELTERY", "CRUSHER")
+    val professions = listOf("BUILDER_HUT", "FORESTER", "QUARRY", "FARM", "TOWN_HALL", "SAWMILL", "BLACKSMITH", "STONEMASON", "LIBRARY", "WAREHOUSE", "BAKERY", "TAVERN", "GUARD_TOWER", "UNIVERSITY", "SMELTERY", "CRUSHER")
     val catalog = listOf("BREAD", "IRON_SHOVEL", "IRON_AXE", "IRON_PICKAXE", "IRON_HOE",
         "LEATHER_HELMET", "LEATHER_CHESTPLATE", "LEATHER_LEGGINGS", "LEATHER_BOOTS",
         "IRON_HELMET", "IRON_CHESTPLATE", "IRON_LEGGINGS", "IRON_BOOTS")
@@ -21,18 +21,12 @@ object CivsResidents {
         } else baseMillis
     }
 
-    /** The active city clock calls this once; only an existing plain bread in the bag can be eaten. */
-    fun activeMinute(worker: CivWorker, working: Boolean): CivWorker {
-        val hunger = (hunger(worker) - if (working && !isChild(worker)) 1 else 0).coerceAtLeast(0)
-        val items = CivsEquipment.slots(worker)
-        val bread = if (hunger <= 14 && CivsEquipment.usableCount(worker, "BREAD") > 0) (CivsEquipment.BAG until items.size).firstOrNull {
-            items[it]?.let { item -> item.material == "BREAD" && item.data == null } == true
-        } else null
-        if (bread == null) return if (worker.hunger == hunger) worker else worker.copy(hunger = hunger)
-        val consumed = items.toMutableList()
-        val item = requireNotNull(consumed[bread])
-        consumed[bread] = item.copy(amount = item.amount - 1).takeIf { it.amount > 0 }
-        return CivsEquipment.replace(worker, consumed).copy(hunger = minOf(20, hunger + 6))
+    /** One observed awake minute, including idle time. Meals require a separate actual-arrival callback. */
+    fun activeMinute(worker: CivWorker, awake: Boolean): CivWorker {
+        if (!awake) return worker
+        val life = CivsResidentLife.minute(worker)
+        val drain = if (!isChild(worker) || !life.childHungerRemainder) 1 else 0
+        return worker.copy(hunger = (hunger(worker) - drain).coerceAtLeast(0), life = life)
     }
     fun skillExperience(worker: CivWorker, profession: String): Long = worker.skills.orEmpty()[profession] ?: 0
     fun skillLevel(worker: CivWorker, profession: String): Int =
@@ -59,16 +53,22 @@ object CivsResidents {
         runCatching { CivsEquipment.supply(worker, material, false) }.isSuccess
     fun damage(worker: CivWorker, type: BuildingType?, nativeDamage: Double): Double =
         nativeDamage * if (type?.let(::tool)?.let { tool -> CivsEquipment.slots(worker).take(6).any { it?.material == tool } } == true) 0.9 else 1.0
-    fun trained(worker: CivWorker, type: BuildingType): CivWorker {
+    fun trained(worker: CivWorker, type: BuildingType, city: Settlement? = null): CivWorker {
         require(!isChild(worker))
         val profession = profession(type)
         if (profession !in professions) return worker
-        return worker.copy(skills = worker.skills.orEmpty() +
-            (profession to (skillExperience(worker, profession) + 1).coerceAtMost(40)))
+        val experience = skillExperience(worker, profession)
+        // Null life is the exact old training witness used by already accepted receipts.
+        val observedCity = city?.takeIf { worker.life != null }
+        val cap = observedCity?.let { CivsResidentLife.learningCap(it, worker) } ?: 40L
+        if (experience >= cap) return worker // A poorer home never removes historical experience.
+        val gain = if (observedCity != null && CivsResidentLife.aptitude(worker) == type) 2L else 1L
+        return worker.copy(skills = worker.skills.orEmpty() + (profession to minOf(cap, experience + gain)))
     }
     fun validated(worker: CivWorker) {
         require(health(worker).isFinite() && health(worker) > 0 && health(worker) <= maxHealth(worker))
         require(hunger(worker) in 0..20)
+        CivsResidentLife.validated(worker)
         worker.childMinutes?.let { require(it in 0 until CivsPopulation.ADULT_MINUTES) }
         worker.parentIds?.let { require(it.size == 2 && it.all { parent -> parent != null && parent != worker.id }) }
         if (isChild(worker)) {

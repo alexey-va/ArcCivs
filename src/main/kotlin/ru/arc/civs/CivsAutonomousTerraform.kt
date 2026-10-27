@@ -29,7 +29,7 @@ internal data class CivTerraformCell(val position: CivPosition, val data: String
 
 internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.toLong() and 0xffff_ffffL)
 
-internal data class CivTerraformOption(val building: CivBuilding, val effort: Long)
+internal data class CivTerraformOption(val building: CivBuilding, val effort: Long, val streetFrontage: Boolean = false)
 internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
 
@@ -78,9 +78,9 @@ internal object CivsAutonomousTerraform {
                 abs(source.x - building.entrance.x) + abs(source.z - building.entrance.z) +
                     abs(source.y - building.entrance.y) * 3
             } ?: return@mapNotNull null
-            CivTerraformOption(building, heights.sumOf { abs(it - y).toLong() } + nearest * 4L)
+            CivTerraformOption(building, heights.sumOf { abs(it - y).toLong() } + nearest * 4L, candidate.streetFrontage)
         }
-    }.sortedWith(compareBy<CivTerraformOption> { it.effort }.thenBy { it.building.entrance.x }
+    }.sortedWith(compareByDescending<CivTerraformOption> { it.streetFrontage }.thenBy { it.effort }.thenBy { it.building.entrance.x }
         .thenBy { it.building.entrance.z }.thenBy { it.building.anchor.y })
 
     fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
@@ -102,11 +102,12 @@ internal object CivsAutonomousTerraform {
                     routeObstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) }
                 } || points.zipWithNext().any { (a, b) -> abs(a.x - b.x) + abs(a.z - b.z) != 1 || abs(a.y - b.y) > 1 })
                 throw CivsRejection("autonomy-no-path")
-        } ?: sources(city, building).asSequence().mapNotNull {
+        } ?: (if (option.streetFrontage) frontageRoute(city, building, surface, access, routeObstacles, standing, preferredRoads, inspectRoute)
+        else sources(city, building).asSequence().mapNotNull {
             route(city, building, surface, routeObstacles, standing, it, preferredRoads, inspectRoute) { reason ->
                 routeFailures.merge(reason, 1, Int::plus)
             }
-        }.firstOrNull() ?: throw CivsRejection("autonomy-no-path",
+        }.firstOrNull()) ?: throw CivsRejection("autonomy-no-path",
             mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
@@ -284,6 +285,55 @@ internal object CivsAutonomousTerraform {
         return owners.mapValues { (key, point) -> CivPosition((key shr 32).toInt(), point.y - 1, key.toInt()) }
     }
 
+    /** Exact shared prefix plus a short facing connector, through the existing grade solver. */
+    private fun frontageRoute(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
+        access: CivAutonomousAccess, obstacles: List<CivBox>, standing: Map<Long, CivPosition>,
+        preferred: Set<Long>, inspect: (CivRouteSearchStats) -> Unit): List<CivPosition>? {
+        val (dx, dz) = when (building.rotation) { 90 -> -1 to 0; 180 -> 0 to -1; 270 -> 1 to 0; else -> 0 to 1 }
+        val entry = building.entrance
+        val starts = sources(city, building).toSet()
+        val joins = access.routes.values.filter { it.firstOrNull() in starts }.flatMap { saved ->
+            (1 until saved.lastIndex).mapNotNull { index ->
+                val p = saved[index]
+                val distance = (p.x - entry.x) * dx + (p.z - entry.z) * dz
+                val straightStreet = if (dx == 0) saved[index - 1].z == p.z && saved[index + 1].z == p.z
+                    else saved[index - 1].x == p.x && saved[index + 1].x == p.x
+                if (distance in 2..6 && p.x == entry.x + dx * distance && p.z == entry.z + dz * distance && straightStreet)
+                    saved.take(index + 1) else null
+            }
+        }.sortedBy { it.size }
+        fun connected(prefix: List<CivPosition>): List<CivPosition>? {
+            if (prefix.any { p -> obstacles.any { CivsAutonomousGeometry.horizontalContains(it, p) } }) return null
+            val join = prefix.last()
+            val connector = route(city, building, surface, obstacles, standing, join, preferred, inspect) ?: return null
+            if (connector.size > 9 || connector.any { p ->
+                    if (dx == 0) p.x != entry.x || p.z !in minOf(entry.z, join.z)..maxOf(entry.z, join.z)
+                    else p.z != entry.z || p.x !in minOf(entry.x, join.x)..maxOf(entry.x, join.x)
+                }) return null
+            val combined = prefix + connector.drop(1)
+            if (combined.size <= MAXIMUM_ROUTE_LENGTH && combined.map { civsTerrainKey(it.x, it.z) }.distinct().size == combined.size)
+                return combined
+            return null
+        }
+        for (prefix in joins) connected(prefix)?.let { return it }
+        // Older towns may retain paid ROAD transit without a building's approach
+        // journal. Prove a route to that street before the same short facing link.
+        if (joins.isNotEmpty()) return null
+        val road = access.infrastructure.filter { it.type == BuildingType.ROAD }.flatMap { it.transit }
+            .associateBy { civsTerrainKey(it.x, it.z) }
+        for (distance in 2..6) {
+            val join = road[civsTerrainKey(entry.x + dx * distance, entry.z + dz * distance)] ?: continue
+            if (civsTerrainKey(join.x - dz, join.z - dx) !in road ||
+                civsTerrainKey(join.x + dz, join.z + dx) !in road) continue
+            for (start in starts) {
+                val prefix = route(city, building, surface, obstacles, standing, start, preferred + road.keys,
+                    inspect, destination = join) ?: continue
+                connected(prefix)?.let { return it }
+            }
+        }
+        return null
+    }
+
     private fun sources(city: Settlement, building: CivBuilding): List<CivPosition> =
         city.buildings.filter { CivsRules.isDepot(it) || it.type == BuildingType.TOWN_HALL }
             .map { it.entrance }.distinct().sortedBy {
@@ -296,12 +346,15 @@ internal object CivsAutonomousTerraform {
     private fun route(city: Settlement, building: CivBuilding, surface: CivTerrainSurface, obstacles: List<CivBox>,
         standing: Map<Long, CivPosition>, from: CivPosition, preferredRoads: Set<Long> = emptySet(),
         inspect: (CivRouteSearchStats) -> Unit = {},
+        destination: CivPosition = building.entrance,
         rejected: (String) -> Unit = {}): List<CivPosition>? {
         val started = System.nanoTime()
         val start = Node(from.x, from.y - 1, from.z)
-        val to = building.entrance
+        val to = destination
         val target = Node(to.x, to.y - 1, to.z)
-        val goalApproach = CivsAutonomousGeometry.approach(building).map { civsTerrainKey(it.x, it.z) }.toSet()
+        val goalApproach = if (to == building.entrance)
+            CivsAutonomousGeometry.approach(building).map { civsTerrainKey(it.x, it.z) }.toSet()
+            else setOf(civsTerrainKey(to.x, to.z))
         fun distance(n: Node): Int {
             val horizontal = abs(n.x - target.x) + abs(n.z - target.z)
             val vertical = abs(n.y - target.y)

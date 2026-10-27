@@ -7,6 +7,43 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 
 class CivsAutonomyTest : FunSpec({
+    test("decorations use bounded separate slots after the complete functional town") {
+        for (automatic in listOf(false, true)) {
+            var city = autonomyCity().copy(autonomy = if (automatic) CivAutonomy() else null,
+                buildings = CivsAutonomy.completeProfile.mapIndexed { index, type ->
+                    val point = CivPosition((index % 4) * 12, 64, (index / 4) * 12)
+                    autonomyBuilding(type, phase = BuildingPhase.ACTIVE, occurrence = index).copy(anchor = point,
+                        bounds = CivBox(point.copy(x = point.x - 2, y = 62, z = point.z - 2),
+                            point.copy(x = point.x + 2, y = 68, z = point.z + 2)),
+                        entrance = point.copy(z = point.z - 3), control = point)
+                })
+            CivsRules.buildingCount(city) shouldBe CivsRules.MAX_BUILDINGS
+            fun decor(index: Int): CivBuilding {
+                val point = CivPosition(-72 + index * 8, 64, 48)
+                return CivBuilding(UUID.randomUUID(), BuildingType.DECORATION, 1, point, 0, "test/decor/$index",
+                    CivBox(point.copy(y = 63), point.copy(x = point.x + 2, y = 66, z = 50)),
+                    point.copy(z = 51), BuildingPhase.SITE, null)
+            }
+            repeat(CivsRules.decorationLimit(city)) { city = CivsRules.placeSite(city, city.owner, decor(it)) }
+            CivsRules.validate(city) shouldBe city
+            CivsRules.buildingCount(city) shouldBe 16
+            city.buildings.count { it.type == BuildingType.DECORATION } shouldBe if (automatic) 2 else 8
+            city.buildings.filter { it.type == BuildingType.DECORATION }.forEach {
+                CivsRules.slots(city, it) shouldBe 0
+                CivsProduction.options(it.type).isEmpty() shouldBe true
+            }
+            autonomyReject("building-limit") { CivsRules.placeSite(city, city.owner, decor(8)) }
+            autonomyReject("invalid-state") { CivsRules.validate(city.copy(buildings = city.buildings + decor(9))) }
+        }
+    }
+    test("a retained short catalog family does not block later automatic goals with an unavailable upgrade") {
+        val city = autonomyCity().copy(buildings = (CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
+            .mapIndexed { index, type -> autonomyBuilding(type, phase = BuildingPhase.ACTIVE, occurrence = index) })
+        CivsAutonomy.nextGoal(city)?.targetLevel shouldBe 2
+        val goal = requireNotNull(CivsAutonomy.nextGoal(city) { 1 })
+        goal.type shouldBe BuildingType.UNIVERSITY
+        goal.targetLevel shouldBe 1
+    }
     test("the infrastructure cap leaves ordinary village upgrades eligible") {
         val base = autonomyCity().copy(buildings = (CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE))
             .map { autonomyBuilding(it).copy(phase = BuildingPhase.ACTIVE) })
@@ -144,10 +181,15 @@ class CivsAutonomyTest : FunSpec({
         autonomyReject("autonomy-paused") { CivsRules.immigrate(fresh, fresh.owner, UUID.randomUUID(), "Resident", Long.MAX_VALUE) }
     }
 
-    test("active-minute meals consume one abstract food each and pause or shortage creates no items") {
+    test("active minutes never feed remotely and observed meals consume one abstract food without native items") {
         val base = autonomyImmigrants(autonomyCity())
         val hungry = base.copy(stock = Stock(food = 2), workers = base.workers.map { it.copy(hunger = 14) })
-        val fed = CivsAutonomy.activeMinute(hungry)
+        val minute = CivsAutonomy.activeMinute(hungry)
+        minute.stock shouldBe hungry.stock
+        minute.workers shouldBe hungry.workers
+        var fed = minute
+        for (worker in minute.workers.take(2))
+            fed = CivsResidentLife.finishMeal(fed, requireNotNull(CivsResidentLife.mealPlan(fed, worker)))
         fed.stock shouldBe Stock()
         fed.workers.map(CivsResidents::hunger) shouldBe listOf(20, 20, 14, 14, 14)
         fed.workers.all { it.items == null && it.inventory == null } shouldBe true
@@ -172,7 +214,7 @@ class CivsAutonomyTest : FunSpec({
         val assigned = CivsRules.autoAssign(city, city.owner, 300_000)
         assigned.workers.map { worker -> assigned.building(worker.assignment!!)!!.type } shouldBe listOf(
             BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
-            BuildingType.WAREHOUSE, BuildingType.GUARD_TOWER, BuildingType.FORESTER, BuildingType.QUARRY)
+            BuildingType.WAREHOUSE, BuildingType.TAVERN, BuildingType.GUARD_TOWER, BuildingType.FORESTER)
         CivsRules.slots(city, hall) shouldBe 0
         CivsRules.slots(city, buildings.first { it.type == BuildingType.WAREHOUSE }) shouldBe 2
         CivsRules.isBuilder(city, hall) shouldBe false

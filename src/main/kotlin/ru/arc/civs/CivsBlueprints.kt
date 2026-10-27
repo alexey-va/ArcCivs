@@ -85,6 +85,45 @@ class CivsBlueprints(
     private data class Builtin(val bytes: ByteArray, val sha256: String)
     private val builtins = mutableMapOf<String, CompletableFuture<Builtin>>()
     private var closed = false
+    @Volatile private var catalog = CivBlueprintCatalog.EMPTY
+    private val catalogLoad = CompletableFuture.supplyAsync({ CivBlueprintCatalog.load(sourceRoot) }, executor).thenApply { loaded ->
+        synchronized(this) {
+            if (closed) throw CivsRejection("not-ready")
+            catalog = loaded
+            CivsWorksiteLayouts.installCatalog(loaded.worksiteLayouts)
+        }
+        Unit
+    }
+
+    /** Boot waits for metadata only; decoded voxel snapshots still belong to Core's bounded cache. */
+    fun catalogReady(): CompletableFuture<Unit> = catalogLoad
+    fun availableStyles(type: BuildingType? = null): List<String> =
+        if (type == BuildingType.PLAN_BOARD) listOf("plan-board")
+        else if (catalog.present) catalog.styles(type) else if (type == BuildingType.DECORATION) emptyList() else STYLES
+
+    fun choices(type: BuildingType, style: String): List<CivBlueprintChoice> =
+        if (catalog.present) catalog.choices(type, style) else emptyList()
+    fun smallDecorations(style: String): List<CivBlueprintChoice> = catalog.smallDecorations(style)
+    fun autonomousSource(style: String, type: BuildingType): String? =
+        if (type == BuildingType.PLAN_BOARD || !catalog.present) null
+        else catalog.autonomous(style, type)?.id ?: throw CivsRejection("blueprint-unavailable")
+
+    fun maximumLevel(building: CivBuilding): Int = catalog.entry(building.schematicId)?.maxLevel ?: building.type.maxLevel
+
+    fun prepareEntry(entryId: String, buildingId: UUID, worldId: UUID, placement: CivPosition, facing: Int,
+        exactRotation: Int? = null): CompletableFuture<CivBlueprint> = catalogLoad.thenCompose {
+        val entry = catalog.entry(entryId) ?: throw CivsRejection("blueprint-unavailable")
+        prepareSource(entry.id, entry.type, entry.level, buildingId, worldId, placement, facing, exactRotation, null)
+    }
+
+    /** A later catalog must never choose another family's shape for an accepted building. */
+    fun prepareUpgrade(building: CivBuilding, targetLevel: Int, worldId: UUID): CompletableFuture<CivBlueprint> = catalogLoad.thenCompose {
+        val sourceId = if (building.schematicId.startsWith("civs/v2/")) {
+            catalog.upgrade(building.schematicId, targetLevel)?.id ?: throw CivsRejection("blueprint-unavailable")
+        } else schematicId(styleOf(building) ?: throw CivsRejection("invalid-style"), building.type, targetLevel)
+        prepareSource(sourceId, building.type, targetLevel, building.id, worldId, building.anchor,
+            building.rotation / 90, building.rotation, building.entrance)
+    }
 
     /** Encoded generated source only; decoded snapshots stay with the expiring caller and Core cache. */
     private fun isPlanBoard(id: String) = id in CivsPlanBoardBlueprint.versions
@@ -110,7 +149,8 @@ class CivsBlueprints(
         if (isPlanBoard(id)) planBoard(id).thenCompose {
             captured.loadVerified("builtin/plan_board/${id.substringAfterLast('/')}", it.sha256, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
         }
-        else source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
+        else catalog.entry(id)?.let { source.loadVerified(id, it.hash, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) }
+            ?: source.load(id, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES)
 
     private fun sourceBytes(id: String, snapshot: ArcSchematicSnapshot): CompletableFuture<ByteArray> =
         if (isPlanBoard(id)) planBoard(id).thenApply { it.bytes.copyOf() }
@@ -140,8 +180,12 @@ class CivsBlueprints(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
         placement: CivPosition, facing: Int, exactRotation: Int? = null,
         fixedEntrance: CivPosition? = null,
-    ): CompletableFuture<CivBlueprint> = prepareSource(schematicId(style, type, level), type, level,
-        buildingId, worldId, placement, facing, exactRotation, fixedEntrance)
+    ): CompletableFuture<CivBlueprint> = catalogLoad.thenCompose {
+        val identifier = if (type == BuildingType.PLAN_BOARD || type.isInfrastructure || !catalog.present)
+            schematicId(style, type, level)
+        else catalog.default(style, type, level)?.id ?: throw CivsRejection("blueprint-unavailable")
+        prepareSource(identifier, type, level, buildingId, worldId, placement, facing, exactRotation, fixedEntrance)
+    }
 
     internal fun preparePlanBoardRefit(board: CivBuilding, worldId: UUID): CompletableFuture<CivBlueprint> =
         prepareSource(CivsPlanBoardBlueprint.refitId(board), board.type, board.level, board.id, worldId,
@@ -162,8 +206,12 @@ class CivsBlueprints(
                         CivPosition(anchor.x + transformed.minimum.x, anchor.y + transformed.minimum.y, anchor.z + transformed.minimum.z),
                         CivPosition(anchor.x + transformed.maximum.x, anchor.y + transformed.maximum.y, anchor.z + transformed.maximum.z),
                     )
-                    val building = CivBuilding(buildingId, type, level, anchor, turns * 90, id, bounds, entrance, BuildingPhase.CONSTRUCTING, control = worldControl)
-                    val cells = worldCells(transformed, anchor)
+                    val building = CivBuilding(buildingId, type, level, anchor, turns * 90, id, bounds, entrance,
+                        BuildingPhase.CONSTRUCTING, control = worldControl.takeUnless { type == BuildingType.DECORATION })
+                    val cells = worldCells(transformed, anchor).map { cell ->
+                        if (type == BuildingType.DECORATION && cell.blockData.substringBefore('[') == "minecraft:structure_void")
+                            cell.copy(blockData = "minecraft:air") else cell
+                    }
                     rejectHazards(cells)
                     val surface = exposedCells(cells)
                     if (surface.size > 6_000) throw CivsRejection("preview-too-large")
@@ -296,7 +344,14 @@ class CivsBlueprints(
 
     companion object {
         val STYLES = listOf("nordic", "medievaloak", "caledonia")
+        fun styleOf(building: CivBuilding): String? = if (building.schematicId.startsWith("civs/v2/"))
+            building.schematicId.removePrefix("civs/v2/").substringBefore('/')
+        else STYLES.firstOrNull { building.type != BuildingType.DECORATION && building.schematicId == schematicId(it, building.type, building.level) }
         fun schematicId(style: String, type: BuildingType, level: Int): String {
+            if (type == BuildingType.PLAN_BOARD) {
+                require(level == 1)
+                return CivsPlanBoardBlueprint.SCHEMATIC_ID
+            }
             require(style in STYLES && level in 1..type.maxLevel)
             val name = when (type) {
                 BuildingType.TOWN_HALL -> "fundamentals/townhall"
@@ -317,14 +372,16 @@ class CivsBlueprints(
                 BuildingType.UNIVERSITY -> "education/university"
                 BuildingType.SMELTERY -> "craftsmanship/metallurgy/smeltery"
                 BuildingType.CRUSHER -> "craftsmanship/masonry/crusher"
+                BuildingType.DECORATION -> throw CivsRejection("blueprint-unavailable")
                 BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD ->
                     return "civs/infrastructure/$style/${type.name.lowercase()}$level"
             }
             return "civs/minecolonies/$style/$name$level"
         }
 
-        fun worldCells(snapshot: ArcSchematicSnapshot, anchor: CivPosition): List<ArcSchematicBlock> = snapshot.blocks().map { cell ->
-            cell.copy(position = ArcSchematicPoint(cell.position.x + anchor.x, cell.position.y + anchor.y, cell.position.z + anchor.z))
+        fun worldCells(snapshot: ArcSchematicSnapshot, anchor: CivPosition, decoration: Boolean = false): List<ArcSchematicBlock> = snapshot.blocks().map { cell ->
+            cell.copy(position = ArcSchematicPoint(cell.position.x + anchor.x, cell.position.y + anchor.y, cell.position.z + anchor.z),
+                blockData = if (decoration && cell.blockData.substringBefore('[') == "minecraft:structure_void") "minecraft:air" else cell.blockData)
         }
 
         /** Curated origins are outside the box; an authored control is inside, distinct from the legacy origin control. */
@@ -336,7 +393,10 @@ class CivsBlueprints(
                 if (CivPosition(marker.x + plan.building.anchor.x, marker.y + plan.building.anchor.y,
                         marker.z + plan.building.anchor.z) != plan.building.control) throw CivsRejection("invalid-plan")
             }
-            val cells = worldCells(snapshot, plan.building.anchor).filterNot { it.isBarrier ||
+            val cells = worldCells(snapshot, plan.building.anchor).map { cell ->
+                if (plan.building.type == BuildingType.DECORATION && cell.blockData.substringBefore('[') == "minecraft:structure_void")
+                    cell.copy(blockData = "minecraft:air") else cell
+            }.filterNot { it.isBarrier ||
                 CivPosition(it.position.x, it.position.y, it.position.z) == plan.building.control &&
                 it.blockData.substringBefore('[') == "minecraft:structure_void" }
             val expected = plan.blocks.associateBy { it.position }

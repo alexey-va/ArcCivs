@@ -89,7 +89,7 @@ internal object CivsAutonomousLogistics {
         if (CivsRules.capacity(city) - city.stock[resource] < cargo.amount) throw CivsRejection("storage-full")
         val updated = CivsResidents.trained(worker.copy(cargo = null,
             completedCycles = Math.addExact(worker.completedCycles, 1),
-            nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE)
+            nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE, city)
         return CivsRules.validate(city.copy(stock = city.stock.with(resource, Math.addExact(city.stock[resource], cargo.amount)),
             workers = city.workers.map { if (it.id == worker.id) updated else it }, revision = Math.addExact(city.revision, 1)))
     }

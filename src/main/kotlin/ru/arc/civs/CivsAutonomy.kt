@@ -29,12 +29,13 @@ object CivsAutonomy {
     private val industryProfile = listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
     val profile = baseProfile + industryProfile
     val completeProfile = baseProfile + List(2) { BuildingType.HOUSE } + industryProfile
-    val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD)
+    val allowedTypes = profile.toSet() + setOf(BuildingType.WALL, BuildingType.GATE, BuildingType.ROAD, BuildingType.PLAN_BOARD, BuildingType.DECORATION)
     private val upgrades = listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
         BuildingType.WAREHOUSE, BuildingType.HOUSE, BuildingType.BUILDER_HUT, BuildingType.TAVERN, BuildingType.GUARD_TOWER)
 
-    fun cost(type: BuildingType, targetLevel: Int): Stock {
+    fun cost(type: BuildingType, targetLevel: Int, materials: Map<String, Long>? = null): Stock {
         if (type !in allowedTypes || targetLevel !in 1..type.maxLevel) throw CivsRejection("invalid-building")
+        if (type == BuildingType.DECORATION) return CivsDecorationCost.cost(materials ?: throw CivsRejection("blueprint-unavailable"))
         if (type == BuildingType.TOWN_HALL && targetLevel == 1) return Stock(32, 24, 4)
         val industry = when (type) {
             BuildingType.UNIVERSITY -> Stock(48, 32, 8)
@@ -60,7 +61,7 @@ object CivsAutonomy {
         .copy(stock = CivsRules.STARTING_STOCK, inventory = null, autonomy = CivAutonomy()))
 
     /** Finish accepted sites before adding another; the hall waits for a real hut and sustainable producers. */
-    fun nextGoal(city: Settlement): CivAutonomyGoal? {
+    fun nextGoal(city: Settlement, maximumLevel: (CivBuilding) -> Int = { it.type.maxLevel }): CivAutonomyGoal? {
         if (city.autonomy?.paused != false || city.pendingDeletion != null || city.construction != null) return null
         fun goal(building: CivBuilding) = goal(city, building.type,
             if (building.phase == BuildingPhase.SITE) 1 else if (CivsPlanBoardBlueprint.needsRefit(building)) building.level
@@ -71,10 +72,10 @@ object CivsAutonomy {
         val hallReady = baseProfile.takeWhile { it != BuildingType.TOWN_HALL }.all { type ->
             city.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE }
         }
-        city.constructionQueue.orEmpty().mapNotNull(city::building).firstOrNull {
+        city.constructionQueue.orEmpty().mapNotNull(city::building).filter { it.type != BuildingType.DECORATION }.firstOrNull {
             it.type != BuildingType.TOWN_HALL || it.phase != BuildingPhase.SITE || hallReady
         }?.let { return goal(it) }
-        city.buildings.filter { it.phase == BuildingPhase.SITE && it.type != BuildingType.TOWN_HALL }
+        city.buildings.filter { it.phase == BuildingPhase.SITE && it.type !in setOf(BuildingType.TOWN_HALL, BuildingType.DECORATION) }
             .minByOrNull { profile.indexOf(it.type) }?.let { return goal(it) }
         city.buildings.firstOrNull(CivsPlanBoardBlueprint::needsRefit)?.let {
             return goal(city, BuildingType.PLAN_BOARD, it.level, it.id)
@@ -91,9 +92,9 @@ object CivsAutonomy {
         if (city.buildings.count { it.type == BuildingType.HOUSE } < 3 && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
             return goal(city, BuildingType.HOUSE, 1, null)
         val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
-        if (hall.level < 2) return goal(city, BuildingType.TOWN_HALL, 2, hall.id)
+        if (hall.level < 2 && maximumLevel(hall) >= 2) return goal(city, BuildingType.TOWN_HALL, 2, hall.id)
         for (type in upgrades) {
-            val building = city.buildings.firstOrNull { it.type == type && it.level < 2 } ?: continue
+            val building = city.buildings.firstOrNull { it.type == type && it.level < 2 && maximumLevel(it) >= 2 } ?: continue
             return goal(city, type, 2, building.id)
         }
         for (type in industryProfile) {
@@ -105,14 +106,14 @@ object CivsAutonomy {
         }
         if (CivsResearch.has(city, CivResearchId.MATERIALS)) {
             for (type in listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
-                val building = city.buildings.firstOrNull { it.type == type && it.level < 2 } ?: continue
+                val building = city.buildings.firstOrNull { it.type == type && it.level < 2 && maximumLevel(it) >= 2 } ?: continue
                 return goal(city, type, 2, building.id)
             }
         }
         if (CivsResearch.has(city, CivResearchId.ENGINEERING)) {
-            if (hall.level < 3) return goal(city, BuildingType.TOWN_HALL, 3, hall.id)
+            if (hall.level < 3 && maximumLevel(hall) >= 3) return goal(city, BuildingType.TOWN_HALL, 3, hall.id)
             for (type in listOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
-                val building = city.buildings.firstOrNull { it.type == type && it.level < 3 } ?: continue
+                val building = city.buildings.firstOrNull { it.type == type && it.level < 3 && maximumLevel(it) >= 3 } ?: continue
                 return goal(city, type, 3, building.id)
             }
         }
@@ -120,7 +121,7 @@ object CivsAutonomy {
     }
 
     /** Read-only UI projection of the next goal after the current accepted construction finishes. */
-    fun nextGoalAfterCurrent(city: Settlement): CivAutonomyGoal? {
+    fun nextGoalAfterCurrent(city: Settlement, maximumLevel: (CivBuilding) -> Int = { it.type.maxLevel }): CivAutonomyGoal? {
         val autonomy = city.autonomy ?: return null
         if (city.pendingDeletion != null) return null
         val order = city.construction
@@ -134,7 +135,7 @@ object CivsAutonomy {
                 },
                 constructionQueue = city.constructionQueue?.filterNot { it == completed.id })
         }
-        return nextGoal(projected)
+        return nextGoal(projected, maximumLevel)
     }
 
     internal fun goal(city: Settlement, type: BuildingType, level: Int, id: UUID?): CivAutonomyGoal {
@@ -176,12 +177,18 @@ object CivsAutonomy {
             it.phase == BuildingPhase.ACTIVE && it.control != null && unstaffed(it) }?.takeIf {
             city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
         }
-        val target = urgent ?: warehouse ?: missingProducer ?: industry?.takeIf(::unstaffed)
+        val tavern = city.buildings.firstOrNull { it.type == BuildingType.TAVERN &&
+            it.phase == BuildingPhase.ACTIVE && it.control != null && unstaffed(it) }?.takeIf {
+            city.workers.none { worker -> worker.assignment == null && !CivsResidents.isChild(worker) && worker.cargo == null }
+        }
+        val target = urgent ?: warehouse ?: missingProducer ?: industry?.takeIf(::unstaffed) ?: tavern
         target ?: return null
         val worker = city.workers.sortedBy { it.assignment != null }.firstOrNull { worker ->
             !CivsResidents.isChild(worker) && worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true &&
                 worker.assignment?.toString() !in city.forestryJobs.orEmpty() &&
                 !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
+                (target.type != BuildingType.TAVERN || worker.assignment == null ||
+                    city.workers.count { it.assignment == worker.assignment } > 1) &&
                 dispensable(city, worker, preserveRaw = urgent == null) && canReassign(worker.id)
         } ?: return null
         return worker.id to target.id
@@ -222,14 +229,10 @@ object CivsAutonomy {
         CivsRules.validate(city)
         val autonomy = city.autonomy ?: return city
         if (autonomy.paused || city.pendingDeletion != null) return city
-        var stock = city.stock
-        val residents = city.workers.map { worker ->
-            if (CivsResidents.hunger(worker) <= 14 && stock.food > 0) {
-                stock = stock.copy(food = stock.food - 1)
-                worker.copy(hunger = minOf(20, CivsResidents.hunger(worker) + 6))
-            } else worker
-        }
-        var next = city.copy(stock = stock, workers = residents)
+        val stock = city.stock
+        val residents = city.workers
+        // Food is debited by the observed meal receipt, including awake idle residents.
+        var next = city
         val initialAdmissionsPending = (city.immigration?.remaining ?: 0) > 0
         val room = residents.size < minOf(CivsRules.populationLimit(city), CivsRules.beds(city))
         var minutes = if (!initialAdmissionsPending && room) minOf(RECRUITMENT_MINUTES, autonomy.recruitmentMinutes + 1) else 0

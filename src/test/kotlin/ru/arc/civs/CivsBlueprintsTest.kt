@@ -133,12 +133,13 @@ class CivsBlueprintsTest : FunSpec({
 
     test("catalog selects all 153 authored levels only from the private upgrade-aligned namespace") {
         val ids = CivsBlueprints.STYLES.flatMap { style ->
-            BuildingType.entries.filterNot { it.isInfrastructure || it == BuildingType.PLAN_BOARD }
+            BuildingType.entries.filterNot { it.isInfrastructure || it in setOf(BuildingType.PLAN_BOARD, BuildingType.DECORATION) }
                 .flatMap { type -> (1..3).map { CivsBlueprints.schematicId(style, type, it) } }
         }
         ids.size shouldBe 153
         ids.toSet().size shouldBe 153
         ids.all { it.startsWith("civs/minecolonies/") } shouldBe true
+        shouldThrow<CivsRejection> { CivsBlueprints.schematicId("nordic", BuildingType.DECORATION, 1) }
         CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 1) shouldBe
             "civs/minecolonies/nordic/fundamentals/townhall1"
         CivsBlueprints.schematicId("caledonia", BuildingType.FARM, 3) shouldBe

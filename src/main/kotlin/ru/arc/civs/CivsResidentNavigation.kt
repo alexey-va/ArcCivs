@@ -82,6 +82,10 @@ internal class CitizenPacketRoute(
         private set
     var finished = false
         private set
+    var continuation = false
+        private set
+    internal var blockedPositions: List<CivPosition> = emptyList()
+        private set
     var waitingForCollision = false
         private set
     var turning = false
@@ -125,7 +129,7 @@ internal class CitizenPacketRoute(
                 directCapture = CitizenNavigationCapture(this, result.probes, directTerrain)
             } else acceptSearch(result)
         } catch (_: CitizenNavigationCaptureLimit) {
-            fail("capture-budget")
+            acceptSearch(search.finishAtBudget("capture-budget"))
         }
     }
 
@@ -176,6 +180,7 @@ internal class CitizenPacketRoute(
 
     internal fun acceptSearch(result: CitizenSearchResult) {
         if (!searching) return
+        blockedPositions = result.blockedPositions
         result.failure?.let { fail(it); return }
         val steps = result.path?.toMutableList() ?: return
         // A nudge must not introduce a needless centre-and-reverse segment. The shortcut is
@@ -192,7 +197,8 @@ internal class CitizenPacketRoute(
             previous = step.point
         }
         searching = false
-        preparationPhase = "ready"
+        continuation = result.continuation
+        preparationPhase = if (continuation) "ready-segment" else "ready"
         asyncCancellation = null
         releaseSearch()
     }

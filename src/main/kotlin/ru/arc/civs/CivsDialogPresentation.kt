@@ -27,11 +27,27 @@ internal class CivsDialogPresentation(font: String) {
         if (decoration == null) PaperDialogBody(text, width)
         else DialogTables.filledBody(listOf(listOf(text)), null, width, listOf(1))
 
-    fun summary(rows: List<Pair<Component, Component>>, width: Int = 320): PaperDialogBody =
+    fun facts(rows: List<Pair<Component, Component>>, skin: DialogTables.PanelSkin,
+        layout: DialogTables.FactsLayout = DialogTables.FactsLayout.ROWS, columns: Int = 1, width: Int = 320): PaperDialogBody =
         if (decoration == null) PaperDialogBody(Component.join(Component.newline(), rows.map { (label, value) ->
             label.append(Component.text(": ")).append(value)
         }), width)
-        else DialogTables.filledBody(rows.map { (label, value) -> listOf(label, value) }, null, width, listOf(1, 1))
+        else DialogTables.factsBody(rows, layout, DialogTables.PanelSpec(skin, width, columns, true))
+
+    fun field(icon: DialogDecoration.FieldIcon, label: Component): Component =
+        if (decoration == null) label else DialogDecoration.fieldLabel(icon, label)
+
+    fun heading(title: Component, width: Int = 320): PaperDialogBody =
+        decoration?.headingBody(title, width) ?: PaperDialogBody(title, width)
+
+    /** Related sections share native body padding while retaining each panel's measured text. */
+    fun compact(bodies: List<PaperDialogBody>): PaperDialogBody = PaperDialogBody(
+        Component.join(Component.newline(), bodies.map(PaperDialogBody::text)), bodies.maxOfOrNull(PaperDialogBody::width) ?: 320,
+    )
+
+    fun progress(label: Component, current: Int, total: Int, value: Component, width: Int = 320): PaperDialogBody =
+        decoration?.progressBody(label, current.toDouble(), total.toDouble(), value, width, 12, DialogDecoration.ProgressColor.AMBER)
+            ?: PaperDialogBody(label.append(Component.text(": ")).append(value), width)
 
     fun supplyTable(rows: List<List<Component>>, headers: List<Component>): PaperDialogBody =
         if (decoration == null) PaperDialogBody(Component.join(Component.newline(), (listOf(headers) + rows).map {

@@ -1,0 +1,141 @@
+{
+  "version": 1,
+  "title": "ArcCivs .96 closed Auto decoration material bill",
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "assumptions": [
+    "Explicit synthetic finite shape sensitivities, not telemetry: small/medium/large captured bills use12/64/256 timber units and32/128/512 other billed units. Audit day assumes two newly paid Auto decorations per village. This is not a recurring daily allowance; calculator network-week figures normalize that sensitivity over seven fresh village-days, not automatic weekly issuance.",
+    "Before generic decoration shared functional slots and was unreachable after the full16-siteAuto profile. After its exact captured bill burns1closedWOOD per vanilla timber-tag unit and1closedSTONE per other billedunit, FOOD0. A missing saved bill is rejected. An exact empty bill projects to zero; existing free-water treatment stays in the native bill, and every positive billed unit is charged.",
+    "Closed commodities do not directly withdraw as items. Non-editors cannot break protected Auto structures. Existing owner/member editor rights remain: an Auto owner can break placed native blocks and obtain their native drops, including from new decorations. This privileged construction-to-world-to-drop route already exists for Auto buildings; it is not treated as ordinary non-editor earnings or valued as zero indirect items. Manual settlements pay the exact native material bill. Native recovered drops, fortune and SELL proceeds depend on chosen source blocks and are not equated to the captured bill.",
+    "Reuse saved construction materials and capturedSHA; price validation is the same deterministic projection of savedmaterials, never current mutablecatalog. Savedcost andpayment remainacceptedreceipt terms. No change to olddecor/infrastructureorders, buildingcosts, laborinterval, materialyield, currency, SELL orfuturecontracts.",
+    "Only actual required captured material counts are charged, once per acceptedorder. Cancellation/restart uses existing durableconstructionreceipt. Auto cannot materializeFOOD/products/WOOD/STONE into withdrawable nativeinventories. Unsupported sourceassets remainrejectedwithprovenance; no bypass forfluids,protectedland orinvalidanchor.",
+    "Separate live site bounds: DECORATION changes from sharing the16functional slots (so full Auto profile permits zero) to8ordinary or2Auto decorative sites, with no jobs/beds/output. Functional16, infrastructure96 and resident48 limits remain. Total snapshot bound becomes120=16+96+8. Two Auto synthetic bills burn24/128/512WOOD and64/256/1024STONE; manual8decorations require8exactnativebills, no subsidy. Remove/rebuild still needs a fresh paid order and the existing owner authority; the site bound is not a lifetime issuance cap."
+  ],
+  "currencies": {
+    "closed_wood": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "finite_captured_decoration",
+          "kind": "burn",
+          "source": "CivsBlueprint.estimate -> acceptedCivConstruction.materials -> deterministicAutoDECORprojection",
+          "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              24,
+              128,
+              512
+            ]
+          }
+        }
+      ]
+    },
+    "closed_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "finite_captured_decoration",
+          "kind": "burn",
+          "source": "CivsBlueprint.estimate -> acceptedCivConstruction.materials -> deterministicAutoDECORprojection",
+          "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              64,
+              256,
+              1024
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "closed_food": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "native_billed_units_placed": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "privileged_authored_bill",
+          "kind": "item",
+          "source": "New paid DECORATION placement creates native world blocks under existing editor protections",
+          "basis": "Synthetic paid bill units placed, not guaranteed recovered drops or sale proceeds; only owner/editor can harvest. Two sites with44/192/768billed units each. Native multi-part blocks/drop rules are separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              88,
+              384,
+              1536
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

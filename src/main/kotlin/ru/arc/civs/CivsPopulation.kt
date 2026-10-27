@@ -34,9 +34,14 @@ object CivsPopulation {
         val houses = homes.values.filter { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
         val hall = homes.values.first { it.type == BuildingType.TOWN_HALL }
         val residents = city.workers.map { before ->
-            val fed = CivsResidents.activeMinute(before, before.id in activeWorkers)
-            fed.copy(sex = CivsResidents.sex(fed), homeId = fed.homeId?.takeIf { it in homes },
-                childMinutes = fed.childMinutes?.let { age -> (age + 1).takeIf { it < ADULT_MINUTES } })
+            val awake = before.id in activeWorkers
+            val resident = CivsResidents.activeMinute(before, awake).let { observed ->
+                if (!awake || !CivsResidents.isChild(observed)) observed
+                else if (requireNotNull(observed.childMinutes) + 1 == ADULT_MINUTES) CivsResidentLife.adult(city, observed)
+                else observed.copy(childMinutes = requireNotNull(observed.childMinutes) + 1)
+            }
+            resident.copy(sex = CivsResidents.sex(resident), homeId = resident.homeId?.takeIf { it in homes },
+                hunger = CivsResidents.hunger(resident))
         }.toMutableList()
         val families = city.families.orEmpty().toMutableList()
         val paired = families.flatMapTo(hashSetOf()) { listOf(it.firstParentId, it.secondParentId) }
@@ -65,13 +70,18 @@ object CivsPopulation {
 
         for (index in residents.indices) {
             val resident = residents[index]
-            if (resident.homeId != null) continue
-            val home = hall.takeIf { residents.count { it.homeId == hall.id } < IMMIGRANT_POPULATION }
-                ?: homes.values.firstOrNull { house ->
-                    if (!house.type.isResidence || house.phase != BuildingPhase.ACTIVE) return@firstOrNull false
-                    val spare = houseBeds(house) - residents.count { it.homeId == house.id }
-                    spare > if (families.any { it.homeId == house.id }) 1 else 0
-                }
+            // Family members keep their home. Singles in communal housing move into
+            // existing houses without waiting for an unrelated marriage to free them.
+            val communal = resident.homeId?.let(homes::get)?.type in setOf(BuildingType.TOWN_HALL, BuildingType.TAVERN)
+            if (resident.homeId != null && (!communal || CivsResidents.isChild(resident) || resident.id in paired)) continue
+            fun hasRoom(house: CivBuilding): Boolean {
+                val spare = houseBeds(house) - residents.count { it.homeId == house.id }
+                return spare > if (families.any { it.homeId == house.id }) 1 else 0
+            }
+            val home = houses.firstOrNull(::hasRoom)
+                ?: resident.homeId?.let(homes::get)
+                ?: hall.takeIf { residents.count { it.homeId == hall.id } < IMMIGRANT_POPULATION }
+                ?: homes.values.firstOrNull { it.type.isResidence && it.phase == BuildingPhase.ACTIVE && hasRoom(it) }
             if (home != null) residents[index] = resident.copy(homeId = home.id)
         }
 

@@ -131,6 +131,7 @@ internal object CivsSettlementPlans {
             val building = at(current, draft.building.anchor, draft.building.rotation, id).copy(phase = BuildingPhase.SITE)
             plots += CivSettlementPlot(building, draft.building.bounds)
             routes[id] = draft.route
+            draft.route.mapTo(preferredRoads) { civsTerrainKey(it.x, it.z) }
             projected = projected.copy(buildings = projected.buildings + draft.building.copy(phase = BuildingPhase.SITE))
         }
         val adoptedFrame = if (retained.infrastructure.isEmpty())

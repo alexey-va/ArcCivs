@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "title": "ArcCivs .96 awake-resident food upkeep",
+  "assumptions": [
+    "Explicit sensitivity, not runtime telemetry. Scenarios represent 1/4/6 villages with 5/8/12 adults present and awake for 1/2/4 active hours per village-day. Before working fractions are 0.2/0.5/1; after includes awake idle residents.",
+    "One hunger per active awake adult-minute and one existing meal per six hunger remain the steady-state ceiling of ten meals per awake hour. Initial saturation and unavailable food may reduce actual consumption. Sleeping, unrendered/inactive time and offline time are excluded from this estimate. Children lose one hunger per two observed awake minutes; a complete 40-minute childhood can consume at most three meals from initially full hunger.",
+    "Native BREAD and Auto abstract FOOD are alternative settlement modes, not two charges on one village. Each meal burns one already existing unit and restores at most six resident hunger; no food items, stock, currency or work credit are created.",
+    "A full farmer reserve may legitimately pause production until sufficient room is available; consumption is not increased artificially to keep the farmer working. Existing production quantities and capacities remain unchanged.",
+    "Finite progression extension: no currency, player XP or production-rate multiplier changes. 20 paid work cycles formerly grant 20 profession XP; matching stable aptitude grants up to40, bounded by active home cap10/20/30/40. Existing higher XP is retained. One40-active-minute childhood can gain at most10 education XP through observed mentor lessons; it transfers once at adulthood. These are finite character progression windows, not repeatable daily income. Full skill cap remains40 and maximum health28; childhood education alone can raise health20 to22 after adulthood. SELL and future contracts stay separate and unchanged.",
+    "For calculator comparison only, one finite full childhood /20 paid-cycle window is modeled per participant-day in all three columns. That is an explicit upper event sensitivity, not a claim of birth frequency; multiply by observed events after activation. Normal food and AutoFOOD rows remain alternative modes, and the finite child rows must not be added to adult rows for the same resident-minute. No new material output quantities or durable item supplies are granted."
+  ],
+  "participants": [
+    1,
+    4,
+    6
+  ],
+  "currencies": {
+    "native_bread_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "awake_resident_meals_normal_mode",
+          "kind": "burn",
+          "source": "CivsPopulation.advance; CivsResidents.activeMinute; existing native item receipts",
+          "basis": "One existing food unit per steady-state meal; village-level events include the assumed resident count.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              80,
+              480
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              50,
+              160,
+              480
+            ]
+          }
+        },
+        {
+          "id": "finite_childhood_meals",
+          "kind": "burn",
+          "source": "CivsResidentLife; observed awake childhood up to40minutes",
+          "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "abstract_food": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "awake_resident_meals_auto_mode",
+          "kind": "burn",
+          "source": "CivsPopulation.advance; CivsAutonomy.activeMinute; later observed meal receipt",
+          "basis": "Alternative Auto village sensitivity; existing closed FOOD never becomes a native item.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              80,
+              480
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              50,
+              160,
+              480
+            ]
+          }
+        },
+        {
+          "id": "finite_childhood_meals",
+          "kind": "burn",
+          "source": "CivsResidentLife; observed awake childhood up to40minutes",
+          "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "resident_profession_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "finite_progression_window",
+          "kind": "mint",
+          "source": "CivsResidentLife pure training/lesson and paid completion callers",
+          "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "20",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "40",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "resident_education_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "finite_progression_window",
+          "kind": "mint",
+          "source": "CivsResidentLife pure training/lesson and paid completion callers",
+          "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "10",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

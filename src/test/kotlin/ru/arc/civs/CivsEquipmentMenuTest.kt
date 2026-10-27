@@ -35,7 +35,7 @@ class CivsEquipmentMenuTest : FunSpec({
         nativeEquipment { h ->
             var pending = 9
             h.open(stockDetails = { if (pending > 0) listOf(Component.text("Ждёт кладовщика: Еда × $pending")) else emptyList() })
-            h.name(15) shouldBe "Ресурсы поселения"
+            h.name(15) shouldBe "Груз жителя"
             h.player.openInventory.topInventory.getItem(15)!!.type shouldBe Material.BARREL
             h.click(15).isCancelled shouldBe true
             h.click(15, ClickType.SHIFT_LEFT).isCancelled shouldBe true
@@ -48,6 +48,30 @@ class CivsEquipmentMenuTest : FunSpec({
             pending = 0
             h.paper.performTicks(20)
             h.player.openInventory.topInventory.getItem(15)!!.type shouldBe Material.GRAY_STAINED_GLASS_PANE
+        }
+    }
+
+    test("read-only resident inventory preserves native items and paging while rejecting every transfer") {
+        nativeEquipment { h ->
+            h.items[4] = ItemStack(Material.IRON_HOE)
+            h.items[6] = ItemStack(Material.APPLE, 5)
+            h.items += ItemStack(Material.BREAD, 3)
+            h.player.inventory.setItem(9, ItemStack(Material.DIAMOND))
+            h.open(readOnly = true, stockDetails = { listOf(Component.text("Ждёт кладовщика: Древесина × 13")) })
+            h.name(49) shouldBe "Личные вещи"
+            h.player.openInventory.topInventory.getItem(18) shouldBe h.items[6]
+            h.export("equipment-auto-read-only")
+            for (slot in listOf(1, 6, 15, 18, 54)) for (click in listOf(ClickType.LEFT, ClickType.RIGHT, ClickType.SHIFT_LEFT))
+                h.click(slot, click).isCancelled shouldBe true
+            h.calls shouldBe emptyList()
+            h.click(51).isCancelled shouldBe true
+            h.name(13) shouldBe "Сумка · 2/2"
+            h.player.openInventory.topInventory.getItem(18) shouldBe h.items[33]
+            h.click(18).isCancelled shouldBe true
+            h.calls shouldBe emptyList()
+            h.click(45)
+            h.paper.performTicks(2)
+            h.backs shouldBe 1
         }
     }
 
@@ -346,12 +370,13 @@ private class EquipmentHarness(val paper: MockBukkitTestRuntime) {
     var backs = 0
     var failSnapshot = false
 
-    fun open(canDeposit: Boolean = true, details: List<Component> = emptyList(), stockDetails: () -> List<Component> = { emptyList() }) = menu.open(player, "Василий", {
+    fun open(canDeposit: Boolean = true, details: List<Component> = emptyList(), stockDetails: () -> List<Component> = { emptyList() },
+        readOnly: Boolean = false) = menu.open(player, "Василий", {
         if (failSnapshot) throw CivsRejection("inventory-recovery")
         items
     }, { _, npc, slot, click -> calls += Triple(npc, slot, click); future }, { backs++ }, canDeposit = canDeposit,
         titleKey = if (canDeposit) "equipment.title" else "corpse.inventory-title",
-        backKey = if (canDeposit) "equipment.back" else "corpse.back", details = details, stockDetails = stockDetails)
+        backKey = if (canDeposit) "equipment.back" else "corpse.back", details = details, stockDetails = stockDetails, readOnly = readOnly)
 
     fun click(raw: Int, click: ClickType = ClickType.LEFT, action: InventoryAction = InventoryAction.PICKUP_ALL): InventoryClickEvent = InventoryClickEvent(
         player.openInventory, InventoryType.SlotType.CONTAINER, raw, click, action,

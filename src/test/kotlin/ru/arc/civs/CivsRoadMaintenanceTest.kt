@@ -18,17 +18,155 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
-    test("Auto2 saved hill receives both stair directions and keeps the crest grade") {
-        val ground = listOf(63, 63, 63, 64, 65, 66, 66, 66, 65, 64, 63, 63, 63)
-        val floors = ground.mapIndexed { index, y -> CivPosition(-1868, y, -2718 + index) }
-        val profile = floors.associate { civsTerrainKey(it.x, it.z) to it.y }
-        val finish = floors.associate { it.z to CivsSettlementLayout.pavement(it, profile) }
-        for (z in -2715..-2713) finish[z] shouldBe
-            "minecraft:cobblestone_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
-        for (z in -2711..-2709) finish[z] shouldBe
-            "minecraft:cobblestone_stairs[facing=north,half=bottom,shape=straight,waterlogged=false]"
-        finish[-2712] shouldBe "minecraft:cobblestone"
-        floors.map { it.y } shouldBe ground
+    test("Auto2 short saved hill is flattened once for compatible paid owners and survives exact receipt replay") {
+        val originalRoute = listOf(64, 64, 64, 65, 66, 67, 67, 67, 66, 65, 64, 64, 64)
+            .mapIndexed { z, y -> CivPosition(0, y, z) }
+        val base = upkeepCity()
+        val source = base.buildings.last().copy(type = BuildingType.HOUSE, anchor = CivPosition(0, 63, 20),
+            bounds = CivBox(CivPosition(0, 63, 20), CivPosition(5, 69, 25)), entrance = originalRoute.last(), transit = null,
+            schematicId = CivsBlueprints.schematicId(base.style, BuildingType.HOUSE, 1))
+        val otherRoute = originalRoute + (1..5).map { CivPosition(it, 64, 12) }
+        val other = source.copy(id = UUID(0, 40), type = BuildingType.FORESTER, anchor = CivPosition(30, 63, 20),
+            bounds = CivBox(CivPosition(30, 63, 20), CivPosition(35, 69, 25)), entrance = otherRoute.last(),
+            schematicId = CivsBlueprints.schematicId(base.style, BuildingType.FORESTER, 1))
+        val town = base.copy(buildings = base.buildings.dropLast(1) + source + other)
+        val plans = listOf(upkeepApproach(town, source, originalRoute), upkeepApproach(town, other, otherRoute))
+        val retained = Gson().toJson(plans)
+        val first = CivsRoadMaintenance.prepare(town, plans).targets.single { it.routeOverride != null }
+        first.routeOverride!!.route.map { it.y } shouldBe List(13) { 64 }
+        first.linkedRouteOverrides!!.keys shouldBe setOf(other.id.toString())
+        first.after shouldBe "minecraft:dirt_path"
+        val worker = town.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, CivPosition(0, 64, 2),
+            listOf(CivPlanBlock(first.floor, "minecraft:dirt", first.after)),
+            status = "repairing-road", focus = first.floor, upkeep = first)
+        val after = CivsRoadMaintenance.complete(town, work, 3_000)
+        after.stock.stone shouldBe town.stock.stone - 1
+        after.workers.single().skills shouldBe worker.skills
+        after.roadRouteOverrides!!.keys shouldBe setOf(source.id.toString(), other.id.toString())
+        val receipt = CivRoadUpkeepReceipt(worker, town.stock, work, 3_000)
+        receipt.before(after) shouldBe town
+        Gson().fromJson(Gson().toJson(receipt), CivRoadUpkeepReceipt::class.java).validated(after)
+        CivsRules.validate(Gson().fromJson(Gson().toJson(after), Settlement::class.java)) shouldBe after
+        CivAutonomousAccess.from(after, plans).routes.values.all { route -> route.all { it.y == 64 } } shouldBe true
+        Gson().toJson(plans) shouldBe retained
+        CivsRoadMaintenance.prepare(after, plans).targets.none { it.routeOverride != null } shouldBe true
+
+        // A genuine crossing and an authored road keep their paid grade, even on the same small hill.
+        val crossingRoute = (-3..5).map { CivPosition(it, 67, 6) }
+        val crossing = other.copy(entrance = crossingRoute.last())
+        val crossed = town.copy(buildings = town.buildings.dropLast(1) + crossing)
+        CivsRoadMaintenance.prepare(crossed, listOf(plans.first(), upkeepApproach(crossed, crossing, crossingRoute)))
+            .targets.none { it.routeOverride != null } shouldBe true
+        val road = base.buildings.last().copy(id = UUID(0, 41), anchor = CivPosition(0, 66, 6),
+            bounds = CivBox(CivPosition(0, 66, 6), CivPosition(0, 68, 6)), entrance = CivPosition(0, 67, 6),
+            transit = listOf(CivPosition(0, 67, 6)))
+        val withRoad = town.copy(buildings = town.buildings + road)
+        val roadPlan = CivPlacementPlan(road.id, withRoad.id, withRoad.worldId, road,
+            listOf(CivPlanBlock(road.anchor, "minecraft:stone", "minecraft:cobblestone")))
+        CivsRoadMaintenance.prepare(withRoad, plans + roadPlan).targets.none { it.routeOverride != null } shouldBe true
+
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-short-hill", collisionForData = { data ->
+                if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
+            }).also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            val oldProfile = CivsAutonomousTerraform.roadProfile(originalRoute)
+            val levels = oldProfile.mapValues { it.value.y }
+            for (floor in oldProfile.values) {
+                for (y in 64..floor.y) world.getBlockAt(floor.x, y, floor.z).type = Material.DIRT
+                world.getBlockAt(floor.x, floor.y, floor.z).blockData = Bukkit.createBlockData(CivsSettlementLayout.pavement(floor, levels))
+            }
+            var city = town.copy(worldId = world.uid)
+            val nativePlans = plans.map { it.copy(worldId = world.uid) }
+            val nativeFirst = CivsRoadMaintenance.prepare(city, nativePlans).targets.single { it.routeOverride != null }
+            val plugin = paper.createSimplePlugin("ShortHill")
+            val bounds = CivBox(CivPosition(-3, 61, -2), CivPosition(3, 70, 14))
+            fun cells() = (-3..3).flatMap { x -> (-2..14).flatMap { z -> (61..70).map { y ->
+                mapOf("position" to CivPosition(x, y, z), "data" to world.getBlockAt(x, y, z).blockData.asString)
+            } } }
+            val before = cells()
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks, { 0L }) { listOf(city) }.use { native ->
+                    for (unsafe in listOf(Material.CHEST, Material.WATER, Material.GRAVEL, Material.OAK_PLANKS)) {
+                        val p = CivPosition(1, 66, 6)
+                        val old = world.getBlockAt(p.x, p.y, p.z).blockData
+                        world.getBlockAt(p.x, p.y, p.z).type = unsafe
+                        native.captureRoadUpkeep(city, city.workers.single(), nativeFirst) shouldBe null
+                        world.getBlockAt(p.x, p.y, p.z).blockData = old
+                    }
+                    var count = 0
+                    repeat(3) {
+                        for (target in CivsRoadMaintenance.prepare(city, nativePlans).targets) {
+                            // Metadata changes invalidate the remainder of the old prepared network.
+                            if (target.routeOverride != null && city.roadRouteOverrides != null) continue
+                            val current = native.captureRoadUpkeep(city, city.workers.single(), target) ?: continue
+                            val updated = CivsRoadMaintenance.complete(city, current, 3_000L + count * 3_000L)
+                            CivRoadUpkeepReceipt(city.workers.single(), city.stock, current, 3_000L + count * 3_000L).validated(updated)
+                            current.changes.asReversed().forEach { change ->
+                                val block = world.getBlockAt(change.position.x, change.position.y, change.position.z)
+                                block.blockData = Bukkit.createBlockData(change.after)
+                            }
+                            native.validateRoadUpkeep(city, current)
+                            city = updated
+                            count++
+                            if (target.routeOverride != null) break
+                        }
+                    }
+                    (count > 1) shouldBe true
+                    city.stock.stone shouldBe town.stock.stone - count
+                    val flat = requireNotNull(city.roadRouteOverrides)[source.id.toString()]!!.route
+                    flat.all { it.y == 64 } shouldBe true
+                    for (z in 3..9) for (x in -1..1) {
+                        world.getBlockAt(x, 63, z).type shouldBe Material.DIRT_PATH
+                        (64..67).all { y -> world.getBlockAt(x, y, z).type.isAir } shouldBe true
+                    }
+                    (roadHalfStepWalk(world, flat) != null) shouldBe true
+                    (roadHalfStepWalk(world, flat.asReversed()) != null) shouldBe true
+                    System.getenv("CIVS_ROAD_PREVIEW_OUT")?.let { directory ->
+                        val out = Path.of(directory).also(Files::createDirectories)
+                        Files.writeString(out.resolve("saved-short-hill.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
+                            "kind" to "production-algorithm-offline-fixture-not-live-acceptance", "bounds" to bounds,
+                            "worldOffset" to CivPosition(-1868, 0, -2718), "originalRoute" to originalRoute, "route" to flat,
+                            "before" to before, "after" to cells(), "paidColumns" to count)))
+                    }
+                }
+            }
+        }
+    }
+
+    test("local road cuts compose against the immutable journal but reject long slopes and invented grades") {
+        val town = upkeepCity()
+        val source = town.buildings.last().copy(type = BuildingType.HOUSE, entrance = CivPosition(0, 64, 17), transit = null)
+        val original = listOf(64, 64, 65, 66, 65, 64, 64, 64, 64, 65, 66, 65, 64, 64, 64, 64, 64, 64)
+            .mapIndexed { z, y -> CivPosition(0, y, z) }
+        val first = requireNotNull(CivsRoadMaintenance.humpOverride(town, source, original))
+        val nextCity = town.copy(roadRouteOverrides = mapOf(source.id.toString() to first))
+        val next = requireNotNull(CivsRoadMaintenance.humpOverride(nextCity, source, first.route))
+        next.originalRoute shouldBe original
+        next.runs() shouldBe listOf(2..4, 9..11)
+        next.route.all { it.y == 64 } shouldBe true
+        next.validated(town, source)
+        val before = nextCity.copy(buildings = nextCity.buildings.dropLast(1) + source)
+        val floor = next.route[9].let { it.copy(y = it.y - 1) }
+        val profile = CivsAutonomousTerraform.roadProfile(next.route)
+        val neighbours = listOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1).mapNotNull { (x, z) ->
+            profile[civsTerrainKey(floor.x + x, floor.z + z)]
+        }
+        val target = CivRoadUpkeep(before.id, before.worldId, before.owner, source.id, source, floor,
+            "minecraft:dirt_path", next.route, neighbours, next, previousRouteOverrides = before.roadRouteOverrides)
+        val worker = before.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, floor.copy(x = 1, y = 64),
+            listOf(CivPlanBlock(floor, "minecraft:dirt", target.after)), status = "repairing-road", focus = floor, upkeep = target)
+        val after = CivsRoadMaintenance.complete(before, work, 3_000)
+        val receipt = CivRoadUpkeepReceipt(worker, before.stock, work, 3_000)
+        receipt.before(after) shouldBe before
+        Gson().fromJson(Gson().toJson(receipt), CivRoadUpkeepReceipt::class.java).validated(after)
+        val long = (listOf(64) + List(12) { 65 } + listOf(64, 64, 64, 64, 64)).mapIndexed { z, y -> CivPosition(0, y, z) }
+        CivsRoadMaintenance.humpOverride(town, source, long) shouldBe null
+        val slope = (0..17).map { CivPosition(0, 64 + it / 3, it) }
+        CivsRoadMaintenance.humpOverride(town, source.copy(entrance = slope.last()), slope) shouldBe null
+        shouldThrow<IllegalArgumentException> { next.copy(route = next.route.map { it.copy(y = 63) }).validated(town, source) }
     }
 
     test("legacy route paving ends at the outside entrance and excludes current and future building territory") {

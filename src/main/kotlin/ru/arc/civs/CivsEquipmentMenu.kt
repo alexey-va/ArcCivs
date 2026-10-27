@@ -43,6 +43,7 @@ class CivsEquipmentMenu(
         val canDeposit: Boolean,
         val details: List<Component>,
         val stockDetails: () -> List<Component>,
+        val readOnly: Boolean,
     ) : InventoryHolder {
         lateinit var view: Inventory
         var pending = false
@@ -77,9 +78,10 @@ class CivsEquipmentMenu(
         backKey: String = "equipment.back",
         details: List<Component> = emptyList(),
         stockDetails: () -> List<Component> = { emptyList() },
+        readOnly: Boolean = false,
     ) {
         if (closed || !player.isOnline) return
-        val session = Session(player, tasks.token(), items, transfer, back, canDeposit, details, stockDetails)
+        val session = Session(player, tasks.token(), items, transfer, back, canDeposit, details, stockDetails, readOnly)
         val title = text.render(player, titleKey, "name" to workerName)
             .color(TextColor.color(0x20252B))
         session.view = plugin.server.createInventory(session, CIVS_EQUIPMENT_SIZE, title)
@@ -120,6 +122,7 @@ class CivsEquipmentMenu(
             }
             return
         }
+        if (session.readOnly) return
         val npcSlot = civsEquipmentLogicalSlot(event.rawSlot, session.page)
         var playerSlot = if (event.clickedInventory === session.player.inventory && event.slot in 0..35) event.slot else null
         val cursor = !event.cursor.type.isAir && event.cursor.amount > 0
@@ -223,7 +226,7 @@ class CivsEquipmentMenu(
                 val logical = civsEquipmentLogicalSlot(slot, session.page) ?: continue
                 val item = values.getOrNull(logical) ?: if (logical < 6) icon(Material.GRAY_DYE, session.player,
                     "equipment.slot-${CIVS_EQUIPMENT_GEAR[logical]}",
-                    if (session.canDeposit && session.page == 0) "equipment.empty-gear" else "corpse.empty-slot") else null
+                    if (!session.readOnly && session.canDeposit && session.page == 0) "equipment.empty-gear" else "corpse.empty-slot") else null
                 if (session.view.getItem(slot) != item) session.view.setItem(slot, item?.clone())
             }
         }
@@ -234,7 +237,7 @@ class CivsEquipmentMenu(
     private fun navigation(session: Session) {
         val pages = civsEquipmentPages(session.snapshot.size)
         val bag = icon(Material.BUNDLE, session.player, "equipment.bag",
-            if (session.page == 0) "equipment.bag-help" else "equipment.overflow-help")
+            if (session.readOnly) "equipment.read-only-help" else if (session.page == 0) "equipment.bag-help" else "equipment.overflow-help")
         if (pages > 1) bag.editMeta { it.displayName(text.render(session.player, "equipment.bag-page",
             "page" to session.page + 1, "pages" to pages)) }
         if (session.view.getItem(13) != bag) session.view.setItem(13, bag)
@@ -251,15 +254,23 @@ class CivsEquipmentMenu(
     private fun status(session: Session) {
         val material = when { session.pending -> Material.CLOCK; session.feedback != null -> Material.PAPER; else -> Material.BOOK }
         val canDeposit = session.canDeposit && session.page == 0
-        val item = icon(material, session.player, if (session.pending) "equipment.pending" else if (canDeposit) "equipment.help" else "corpse.items")
+        val item = icon(material, session.player, when {
+            session.readOnly -> "equipment.read-only"
+            session.pending -> "equipment.pending"
+            canDeposit -> "equipment.help"
+            else -> "corpse.items"
+        })
         item.editMeta { meta -> meta.lore(buildList {
             add(Component.empty())
             addAll(session.details)
             if (session.details.isNotEmpty()) add(Component.empty())
-            if (canDeposit) add(text.render(session.player, "equipment.give-help"))
-            else if (session.canDeposit) add(text.render(session.player, "equipment.overflow-give-help"))
-            add(text.render(session.player, "equipment.take-help"))
-            add(text.render(session.player, "equipment.amount-help"))
+            if (session.readOnly) add(text.render(session.player, "equipment.read-only-help"))
+            else {
+                if (canDeposit) add(text.render(session.player, "equipment.give-help"))
+                else if (session.canDeposit) add(text.render(session.player, "equipment.overflow-give-help"))
+                add(text.render(session.player, "equipment.take-help"))
+                add(text.render(session.player, "equipment.amount-help"))
+            }
         }) }
         session.feedback?.let { feedback -> item.editMeta { it.displayName(feedback.decoration(TextDecoration.ITALIC, false)) } }
         if (session.view.getItem(49) != item) session.view.setItem(49, item)

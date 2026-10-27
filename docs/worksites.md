@@ -108,3 +108,84 @@ Preview crops are shown mature, on a synthetic flat terrain context; this is an
 offline spatial proposal and does not prove planting, native growth, inventory
 consumption, NPC pathfinding, server activation or ordinary client behavior.
 Keep these generated derivatives private along with the original schematics.
+
+## Retained runtime work-zone context
+
+`CivsWorksites` keeps assignment-local discovery metadata between ordinary
+receipts: farm plot classifications and its refresh cursor; forestry coverage,
+root/care/planting coordinates and a rolling column cursor; quarry geometry,
+its inspected prefix and current safety frontier. A worker cycle, supply delivery
+or successful care/planting action does not discard that zone. This is compact
+coordinate/cursor state, not a resident-owned copy of world blocks. One pending
+forestry recognition scan or admitted batch remains bounded by the existing
+2,048-cell tree limit.
+
+Native changes refresh their column and overlapping recognition/planting probe.
+Approach failures expire only when the affected root/stance neighbourhood changes;
+a change at a distant tree preserves them. Geometry/assignment changes, worker
+removal and world/chunk unload release the corresponding owner state. Repeated
+notifications for the same completed receipt are safe. Farm/forest candidate
+coordinates lie within their finite authored domain; historical rejected roots
+are capped at 128 and rejected stance positions at 512 per retained approach.
+Selected blocks, root/crown protection, supplies, support and reach are still
+validated live before the receipt changes the world.
+
+Discovery shares bounded column, tree-work, stance, ray and elapsed-time quotas
+across the service pulse. Round-robin admission requires the quota used by the
+next operation: a quarry without a column allowance does not receive a fake
+admission or overwrite its previous blockage. A quota yield preserves the exact
+column/height or stance/aim cursor and means `searching-work`. Exhausting the
+finite stance domain means `worksite-no-access`; a first rejected route does not
+exhaust all stances of its tree. `waiting-growth` is reserved for completed forest
+coverage without an eligible mature/action candidate; protected, inaccessible
+and unfunded work retain their own reasons.
+
+Planting visits candidates in a stable pseudo-random order seeded by the hut ID
+and coordinates. It does not impose a regular grid. Existing young and mature
+crown separation, authored/transit path exclusion, actual dirt-path/coarse-dirt
+surfaces and crown-sized clearance remain mandatory. Each admitted planting or
+care action stays sequential. After initial mature-tree discovery, an available
+planting action gets a turn between other completed actions, so repeated care or
+harvest does not continually restart the field before planting can occur. Costs,
+per-action duration, drop authority and final forestry credit are unchanged.
+
+Quarry safety distinguishes a read-only neighbour hazard probe from a planned
+lining/excavation mutation. A probe may observe a loaded protected neighbour to
+reject adjacent liquid; it cannot change that block. Actual shell placement and
+excavation still require city/protection ownership, building/foundation clearance
+and native receipt validation. This distinction also applies when revalidating
+the admitted receipt, avoiding a permanent pause on a harmless protected solid
+neighbour such as the reported geometry-v5 step 1818.
+
+Protection geometry is shared once per active city: city boundary, building and
+field footprint boxes (including the planned building), and path columns. A
+metadata-only addition/removal or boundary change refreshes only intersecting
+columns and negative approach/crown facts. Revision, stock and resident cycles
+are absent from that comparison.
+
+The authored domains currently contain 72–80 farm plots or 1,369–1,596 forest
+columns. Their indexes and chunk sets contain coordinate references, not native
+blocks. Forest care/mature candidates are restricted to the ten searched height
+levels of those columns; planting has one surface candidate per column.
+Historical unsuitable/unfunded/unplantable coordinate sets each retain at most
+one domain-sized allowance. The one pending crown uses the existing 2,048-cell
+limit; ordinary selected batches use at most 128 cells. Each quarry retains a
+three-number prefix, one static extent box, a bounded local safety frontier and
+one stance search. No metadata is allocated for unassigned workers; removed
+assignments and unloaded worlds/chunks release their observed context. These are
+count bounds, not measured heap-size or live tick-time claims.
+
+A failed tree observation is distinct from a structurally unsuitable tree.
+Unavailable native/protection reads and competing tree claims receive a local
+100-tick retry; at most one expired root is released per worker pulse, under the
+same native capture budgets. The retry map is capped by the column-domain size.
+The field cursor and other exclusions stay intact when a permission or operation
+lock is released without a terrain event. Observed structural failures (changed
+root, missing natural crown, trunk bounds/size or state limit) remain remembered
+until relevant geometry changes.
+
+Planting uses the same bounded local retry map when a required crown, root, soil
+or headroom observation is unavailable. The entry remembers whether to requeue
+a tree capture or a planting site; it does not allocate a second retry cache.
+Observed neighbouring crowns, native road surfaces, occupied roots and unsuitable
+soil/headroom remain structural exclusions until relevant geometry changes.

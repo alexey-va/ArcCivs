@@ -21,7 +21,9 @@ import org.bukkit.block.Block
 import org.bukkit.block.BlockFace
 import org.bukkit.block.BlockState
 import org.bukkit.block.data.Ageable
+import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.type.Gate
+import org.bukkit.block.data.type.Stairs
 import org.bukkit.entity.Entity
 import org.bukkit.entity.EntityType
 import org.bukkit.entity.Monster
@@ -58,6 +60,284 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    test("a tavern meal stays seated through navigation ticks and spends one food only after four observed seconds") {
+        residentRuntime { h ->
+            try {
+                val npc = h.prepareDiningSeat()
+                var meals = 0
+                h.owner.finishResidentMeal = { cityId, plan ->
+                    h.owner.validateResidentMeal(cityId, plan)
+                    npc.isSeated shouldBe true
+                    h.city = CivsResidentLife.finishMeal(h.city, plan)
+                    meals++
+                    CompletableFuture.completedFuture(h.city)
+                }
+                h.owner.pulse(3_000)
+                withClue(h.owner.debug(h.city.id, h.workerId)) { npc.isSeated shouldBe true }
+                val seatedAt = npc.location
+                seatedAt.y shouldBe 64.5 - .7040625
+                val origin = requireNotNull(h.owner.residentFeet(h.workerId))
+                origin shouldBe Location(h.world, 5.5, 64.0, .5)
+                repeat(60) { h.navigate() }
+                npc.isSeated shouldBe true
+                npc.location shouldBe seatedAt
+                h.owner.pulse(4_000); h.owner.pulse(5_000); h.owner.pulse(6_000)
+                meals shouldBe 0
+                h.city.stock.food shouldBe 2L
+                h.owner.pulse(7_000)
+                meals shouldBe 1
+                h.city.stock.food shouldBe 1L
+                h.owner.pulse(8_000)
+                npc.isSeated shouldBe false
+                npc.location shouldBe origin
+                h.city.workers.first { it.id == h.workerId }.life!!.meals shouldBe 1L
+                h.deliveries shouldBe 0
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
+    test("adult and child dining anchors follow the rendered hip independently of the native mount offset") {
+        residentRuntime { h ->
+            try {
+                h.prepareDiningSeat()
+                val building = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                for (scale in listOf(.5, 1.0)) {
+                    val seat = requireNotNull(citizenDiningSeat(h.world, building, CivPosition(6, 64, 0), scale) { true })
+                    seat.feet.y shouldBe 64.5 - .7040625 * scale
+                    seat.feet.y + .7040625 * scale shouldBe 64.5
+                    citizenDiningSeatClear(h.world, seat) shouldBe true
+                    citizenDiningTransitionClear(h.world, seat, Location(h.world, 1.5, 64.0, .5), scale) shouldBe false
+                }
+                h.world.getBlockAt(6, 65, 0).type = Material.STONE
+                citizenDiningSeat(h.world, building, CivPosition(6, 64, 0), 1.0) { true } shouldBe null
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
+    for (interruption in listOf("damage", "night", "night-guard", "chair-removed", "moved", "world-unloaded", "removed"))
+    test("$interruption cancels a seated meal and its retained payment proof") {
+        residentRuntime { h ->
+            try {
+                val npc = h.prepareDiningSeat(guard = interruption == "night-guard")
+                val pending = CompletableFuture<Settlement>()
+                var proof: CivResidentMeal? = null
+                h.owner.finishResidentMeal = { cityId, plan ->
+                    h.owner.validateResidentMeal(cityId, plan)
+                    proof = plan
+                    pending
+                }
+                for (now in 3_000L..7_000L step 1_000) h.owner.pulse(now)
+                npc.isSeated shouldBe true
+                val accepted = requireNotNull(proof)
+                when (interruption) {
+                    "damage" -> h.owner.damage(h.workerId, 1.0)
+                    "night", "night-guard" -> { h.world.time = 13_000; h.owner.pulse(8_000) }
+                    "chair-removed" -> { h.world.getBlockAt(6, 64, 0).type = Material.AIR; h.owner.pulse(8_000) }
+                    "moved" -> npc.teleport(Location(h.world, 8.5, 64.0, 4.5))
+                    "world-unloaded" -> h.owner.onWorldUnload(org.bukkit.event.world.WorldUnloadEvent(h.world))
+                    else -> { h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId }); h.owner.pulse(8_000) }
+                }
+                npc.isSeated shouldBe false
+                shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, accepted) }.reason shouldBe "stale-meal"
+                h.city.stock.food shouldBe 2L
+                h.city.workers.firstOrNull { it.id == h.workerId }?.hunger?.shouldBe(14)
+                h.deliveries shouldBe 0
+                pending.completeExceptionally(CivsRejection("stale-meal"))
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
+    test("a changed adjacent exit retires a fully enclosed seated actor without a distant recovery jump") {
+        residentRuntime { h ->
+            try {
+                val npc = h.prepareDiningSeat()
+                h.owner.pulse(3_000)
+                npc.isSeated shouldBe true
+                val seated = npc.location
+                h.world.getBlockAt(5, 64, 0).type = Material.STONE
+                h.world.getBlockAt(6, 66, 0).type = Material.STONE
+                h.owner.damage(h.workerId, 1.0)
+                npc.isSeated shouldBe false
+                npc.isValid shouldBe false
+                npc.location shouldBe seated
+                h.city.stock.food shouldBe 2L
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
+    test("a partly observed job returns from a meal without resetting work or earning travel time") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            val work = h.beginCare("watering")
+            h.owner.pulse(3_000)
+            val partial = h.observedWork()
+            (partial in 1 until work.durationMillis) shouldBe true
+            h.city = h.city.copy(workers = h.city.workers.map {
+                CivsEquipment.collectSupplies(it, mapOf("BREAD" to 1L)).copy(hunger = 14,
+                    life = CivResidentLife(awakeMinutes = 6))
+            })
+            h.owner.residentLifeEnabled = true
+            var meals = 0
+            h.owner.finishResidentMeal = { id, plan ->
+                h.owner.validateResidentMeal(id, plan)
+                h.observedWork() shouldBe partial
+                h.city = CivsResidentLife.finishMeal(h.city, plan)
+                meals++
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.navigationNow = 4_000
+            h.owner.pulse(4_000)
+            for (tick in 1..2_400) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                (h.observedWork() >= partial) shouldBe true
+                if (h.deliveries == 1) break
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1; h.deliveries shouldBe 1 }
+            h.phase() shouldBe CitizenPhase.DELIVERING
+            h.city.workers.single().completedCycles shouldBe 0L
+            CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 0L
+        }
+    }
+
+    test("a lesson requires four continuous observed seconds after a child leaves and returns") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            val childId = UUID.randomUUID()
+            val libraryId = UUID.randomUUID()
+            val hall = h.city.buildings.first().copy(level = 3)
+            val library = CivBuilding(libraryId, BuildingType.LIBRARY, 1, CivPosition(11, 64, 0), 0,
+                "library1", CivBox(CivPosition(9, 63, -2), CivPosition(14, 68, 2)),
+                CivPosition(11, 64, -3), BuildingPhase.ACTIVE, control = CivPosition(10, 64, 0))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            h.city = CivsRules.validate(h.city.copy(inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = listOf(hall, library), workers = h.city.workers.map { it.copy(assignment = libraryId,
+                    nextDeliveryAt = 1, homeId = hall.id, skills = mapOf("LIBRARY" to 10L)) } +
+                    CivWorker(childId, "Child", null, homeId = hall.id, childMinutes = 6,
+                        parentIds = setOf(h.workerId, UUID.randomUUID()), life = CivResidentLife(awakeMinutes = 6))))
+            var lessons = 0
+            h.owner.finishResidentLesson = { id, proof ->
+                h.owner.validateResidentLesson(id, proof)
+                h.city = CivsResidentLife.finishLesson(h.city, proof)
+                lessons++
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.owner.pulse(2_000)
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            val teacher = actors.getValue(h.workerId)
+            val child = actors.getValue(childId)
+            teacher.teleport(Location(h.world, 12.5, 64.0, .5))
+            child.teleport(Location(h.world, 13.5, 64.0, .5))
+            h.owner.residentLifeEnabled = true
+            for (now in 3_000L..5_000L step 1_000) h.owner.pulse(now)
+            lessons shouldBe 0
+            child.teleport(Location(h.world, 16.5, 64.0, .5))
+            h.owner.pulse(6_000)
+            child.teleport(Location(h.world, 13.5, 64.0, .5))
+            for (now in 7_000L..10_000L step 1_000) h.owner.pulse(now)
+            lessons shouldBe 0
+            h.owner.pulse(11_000)
+            withClue(h.owner.debug(h.city.id, childId)) { lessons shouldBe 1 }
+            h.city.workers.first { it.id == childId }.life!!.education shouldBe mapOf("LIBRARY" to 1L)
+            h.city.workers.first { it.id == childId }.skills shouldBe null
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("a discovered threat raises a city alarm civilians shelter and an assigned guard defends") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            h.owner.residentLifeEnabled = true
+            for (x in -1..1) h.world.loadChunk(x, -2)
+            val guardId = UUID.randomUUID()
+            val towerId = UUID.randomUUID()
+            val tower = CivBuilding(towerId, BuildingType.GUARD_TOWER, 1, CivPosition(10, 64, 0), 0,
+                "guardtower1", CivBox(CivPosition(9, 63, -1), CivPosition(11, 68, 1)),
+                CivPosition(10, 64, -2), BuildingPhase.ACTIVE, control = CivPosition(10, 64, 0))
+            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+            h.city = CivsRules.validate(h.city.copy(inventory = CivInventory(CivStorageMode.VIRTUAL),
+                buildings = h.city.buildings + tower,
+                workers = h.city.workers + CivWorker(guardId, "Guard", towerId, nextDeliveryAt = 1)))
+            h.owner.pulse(2_000)
+            h.owner.pulse(3_000)
+            val actors = h.owner.collisionActors().associateBy { it.uniqueId }
+            val civilian = actors.getValue(h.workerId)
+            val guard = actors.getValue(guardId)
+            civilian.teleport(Location(h.world, 4.5, 64.0, .5))
+            guard.teleport(Location(h.world, 4.5, 64.0, 1.5))
+            val monster = h.monsterAt(6.5, .5)
+            h.owner.pulse(4_000)
+            h.owner.pulse(5_000)
+            h.owner.status(h.workerId) shouldBe "workers.status.alarm-shelter"
+            h.owner.status(guardId) shouldBe "workers.status.defending"
+            verify(exactly = 0) { civilian.swingMainHand() }
+            verify(atLeast = 1) { guard.swingMainHand() }
+            verify(atLeast = 1) { monster.damage(1.0) }
+            h.owner.awakeResidentIds(h.city.id) shouldBe setOf(guardId)
+            h.deliveries shouldBe 0
+            h.city.workers.all { it.completedCycles == 0L && it.skills.isNullOrEmpty() } shouldBe true
+        }
+    }
+
+    for (automatic in listOf(false, true))
+    test("awake idle resident eats one existing meal only after real arrival and a sustained session Auto $automatic") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            h.owner.residentLifeEnabled = true
+            h.city = h.city.copy(inventory = if (automatic) null else CivInventory(CivStorageMode.VIRTUAL),
+                autonomy = if (automatic) CivAutonomy() else null, stock = if (automatic) Stock(food = 3) else Stock(),
+                workers = h.city.workers.map { it.copy(hunger = 14, life = CivResidentLife(awakeMinutes = 6),
+                    inventory = if (automatic) null else mapOf("BREAD" to 2L)) })
+            var meals = 0
+            h.owner.finishResidentMeal = { cityId, plan ->
+                h.owner.validateResidentMeal(cityId, plan)
+                h.city = CivsResidentLife.finishMeal(h.city, plan)
+                meals++
+                CompletableFuture.completedFuture(h.city)
+            }
+            h.owner.pulse(2_000)
+            h.owner.awakeResidentIds(h.city.id) shouldBe setOf(h.workerId)
+            repeat(220) { tick ->
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
+            h.city.workers.single().hunger shouldBe 20
+            h.city.workers.single().life!!.meals shouldBe 1L
+            if (automatic) h.city.stock.food shouldBe 2L
+            else CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1L
+            h.city.workers.single().completedCycles shouldBe 0L
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("night cancels an uncommitted meal and cannot consume food through an old arrival proof") {
+        residentRuntime { h ->
+            h.navigationNow = 2_000
+            h.owner.residentLifeEnabled = true
+            h.city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(food = 2),
+                workers = h.city.workers.map { it.copy(hunger = 14, life = CivResidentLife(awakeMinutes = 6)) })
+            var captured: CivResidentMeal? = null
+            val pending = CompletableFuture<Settlement>()
+            h.owner.finishResidentMeal = { cityId, plan -> h.owner.validateResidentMeal(cityId, plan); captured = plan; pending }
+            h.owner.pulse(2_000)
+            for (tick in 1..300) {
+                h.navigate()
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (captured != null) break
+            }
+            val plan = requireNotNull(captured)
+            h.world.time = 13_000
+            h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
+            h.owner.awakeResidentIds(h.city.id) shouldBe emptySet()
+            shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, plan) }.reason shouldBe "stale-meal"
+            h.city.stock.food shouldBe 2L
+            h.city.workers.single().hunger shouldBe 14
+            h.city.workers.single().completedCycles shouldBe 0L
+            pending.completeExceptionally(CivsRejection("stale-meal"))
+        }
+    }
+
     test("tree growth probes the current scaled resident body without moving it") {
         residentRuntime { h ->
             val npc = h.owner.collisionActors().single()
@@ -1110,36 +1390,77 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("an autonomous earthwork workplace changes the builder destination but still requires real arrival") {
+    test("builder exterior geometry clears a larger future terrace without widening native probes") {
+        residentRuntime { h ->
+            val target = h.city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.HOUSE,
+                entrance = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0), control = null,
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val changed = (24..36).flatMap { x -> (-6..6).map { z -> civsTerrainKey(x, z) } }.toSet()
+            val site = CivConstructionSite(UUID.randomUUID(), target, changed)
+            site.exteriorColumns.size shouldBe 16
+            site.exteriorColumns.none { civsTerrainKey(it.x, it.z) in changed } shouldBe true
+            for (x in 1..2) for (z in -1..0) h.world.loadChunk(x, z)
+            val stance = requireNotNull(citizenConstructionTarget(h.city, h.world, site))
+            (kotlin.math.abs(stance.x - target.entrance.x) + kotlin.math.abs(stance.z - target.entrance.z)) shouldBe 7
+            citizenConstructionStanding(h.city, h.world, site, stance) shouldBe true
+        }
+    }
+
+    for (autonomous in listOf(false, true))
+    test("builder walks once to a safe exterior stance across terrain rows and recovery autonomous=$autonomous") {
         residentRuntime { h ->
             val hut = h.assignFarm().copy(type = BuildingType.BUILDER_HUT, schematicId = "builder1", production = null)
             val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
                 entrance = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), anchor = CivPosition(30, 64, 0),
                 bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
-            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.PLACING,
-                Stock(), plannedBuilding = target, batches = CivConstructionBatches(2, 16), workCredit = 1)
-            h.constructionWorkplace = CivPosition(22, 64, 0)
-            for (z in -1..1) h.world.loadChunk(2, z)
-            h.city = h.city.copy(autonomy = CivAutonomy(), inventory = null,
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 4, 0, ConstructionPhase.PLACING,
+                Stock(), plannedBuilding = target, batches = CivConstructionBatches(4, 16), workCredit = 1,
+                preparationWorkplace = CivPosition(22, 64, 0))
+            h.constructionColumns = setOf(civsTerrainKey(27, 0), civsTerrainKey(33, 0))
+            for (x in -1..2) for (z in -2..1) h.world.loadChunk(x, z)
+            h.city = h.city.copy(autonomy = if (autonomous) CivAutonomy() else null,
+                inventory = if (autonomous) null else h.city.inventory,
                 buildings = listOf(h.city.buildings.first(), hut, target), construction = order)
-
+            val stance = h.constructionTarget()
+            stance shouldBe CivPosition(30, 64, -3)
+            h.navigationNow = 2_000
             h.owner.pulse(2_000)
-
             val row = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
             val plan = row["plan"] as Map<*, *>
-            plan["workplace"] shouldBe h.constructionWorkplace
-            plan["storage"] shouldBe h.city.buildings.first().entrance
+            plan["workplace"] shouldBe stance
             h.owner.constructionReady(h.city.id, order.id) shouldBe false
             (shouldThrow<CivsRejection> { h.owner.requireConstructionArrival(h.city.id, h.workerId, order.id) }).reason shouldBe
                 "route-unreachable"
             val actor = h.owner.collisionActors().single()
-            actor.teleport(Location(h.world, 22.5, 64.0, .5))
-            h.owner.pulse(3_000)
-            h.owner.pulse(5_000)
+            for (tick in 1..1_200) {
+                h.navigate()
+                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
+                if (h.owner.constructionReady(h.city.id, order.id)) break
+            }
             h.owner.constructionReady(h.city.id, order.id) shouldBe true
-            h.constructionWorkplace = CivPosition(26, 64, 0)
-            // Persistence can advance the front between resident pulses; the stale actor must not authorize it.
+            (h.steps.size > 10) shouldBe true
+            val at = actor.location.toVector()
+            val moves = h.teleports
+            for ((batch, focus) in listOf(CivPosition(23, 65, 0), CivPosition(26, 64, 0), CivPosition(30, 67, 1)).withIndex()) {
+                h.city = h.city.copy(construction = order.copy(workDone = batch + 1, preparationWorkplace = focus))
+                h.owner.constructionReady(h.city.id, order.id) shouldBe true
+                h.owner.constructionPlaced(h.city.id, order.id, focus, Material.STONE)
+                h.owner.pulseFieldWork(requireNotNull(h.navigationNow) + (batch + 1) * 250)
+                actor.location.toVector() shouldBe at
+                h.owner.constructionReady(h.city.id, order.id) shouldBe true
+            }
+            h.teleports shouldBe moves
+            h.deliveries shouldBe 0
+            h.city.workers.single().completedCycles shouldBe 0
+            (h.gestures[h.workerId]!! >= 3) shouldBe true
+            // Retiring and reconstructing the resident keeps the same deterministic site, not the latest terrain front.
+            h.viewing = false; h.owner.pulse(requireNotNull(h.navigationNow) + 2_000)
+            h.viewing = true; h.owner.pulse(requireNotNull(h.navigationNow) + 3_000)
+            val recovered = (h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>
+            (recovered["plan"] as Map<*, *>)["workplace"] shouldBe stance
             h.owner.constructionReady(h.city.id, order.id) shouldBe false
+            h.world.getBlockAt(stance.x, stance.y - 1, stance.z).type = Material.AIR
+            citizenConstructionStanding(h.city, h.world, requireNotNull(h.constructionSite()), stance) shouldBe false
         }
     }
 
@@ -1449,7 +1770,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 workers = h.city.workers.map { CivsEquipment.collectSupplies(it, mapOf("STONE" to 1L)) }))
             h.world.getBlockAt(30, 64, 0).type = Material.BARREL
             val actor = h.owner.collisionActors().single()
-            actor.teleport(Location(h.world, 29.5, 64.0, .5))
+            actor.teleport(h.constructionTarget().let { Location(h.world, it.x + .5, it.y.toDouble(), it.z + .5) })
             h.onDelivery = { token -> token.constructionId shouldBe order.id }
             h.owner.pulse(2_000)
             for (tick in 1..12) h.owner.pulseFieldWork(2_000 + tick * 250L)
@@ -1492,7 +1813,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 workers = h.city.workers.map { if (carried) CivsEquipment.collectSupplies(it, mapOf("STONE" to 1L)) else it }))
             h.world.getBlockAt(30, 64, 0).type = Material.BARREL
             val actor = h.owner.collisionActors().single()
-            val site = Location(h.world, 29.5, 64.0, .5)
+            val site = h.constructionTarget().let { Location(h.world, it.x + .5, it.y.toDouble(), it.z + .5) }
             actor.teleport(site)
             h.owner.pulse(2_000)
             h.supplyRequests shouldBe 0
@@ -4448,7 +4769,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val gestures = mutableMapOf<UUID, Int>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
-    var constructionWorkplace: CivPosition? = null
+    var constructionColumns = emptySet<Long>()
     var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
     val pendingUnload = CompletableFuture<Settlement>()
@@ -4477,9 +4798,11 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             var valid = true
             var npcScale = 1.0
             var npcPose = PacketNpcPose.STANDING
+            var seated = false
             mockk<PacketPlayerNpc>(relaxed = true) {
                 every { uniqueId } returns profile.uuid
                 every { isValid } answers { valid }
+                every { isSeated } answers { seated }
                 every { location } answers { position.clone().also { it.yaw = npcBodyYaw; it.pitch = npcPitch } }
                 every { bodyYaw } answers { npcBodyYaw }
                 every { bodyYaw = any() } answers { npcBodyYaw = firstArg() }
@@ -4501,16 +4824,25 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
                 every { scale } answers { npcScale }
                 every { scale = any() } answers { npcScale = firstArg() }
                 every { pose } answers { npcPose }
-                every { pose = any() } answers { npcPose = firstArg() }
+                every { pose = any() } answers { npcPose = firstArg(); if (npcPose != PacketNpcPose.STANDING) seated = false }
                 every { teleport(any()) } answers {
                     teleports++
+                    seated = false
                     position = firstArg<Location>().clone()
                     npcBodyYaw = position.yaw; npcPitch = position.pitch
                     Unit
                 }
+                every { sit(any()) } answers {
+                    position = firstArg<Location>().clone()
+                    npcBodyYaw = position.yaw; npcPitch = position.pitch
+                    npcPose = PacketNpcPose.STANDING
+                    seated = true
+                    Unit
+                }
+                every { stand() } answers { seated = false }
                 every { setEquipment(EquipmentSlot.HAND, any()) } answers { displayedHand = secondArg<ItemStack>().type; Unit }
                 every { swingMainHand() } answers { gestures[profile.uuid] = gestures.getOrDefault(profile.uuid, 0) + 1; Unit }
-                every { remove() } answers { valid = false; Unit }
+                every { remove() } answers { valid = false; seated = false; Unit }
             }
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
@@ -4561,13 +4893,41 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)
-            }, constructionWorkplace = { _, _ -> constructionWorkplace },
+            }, constructionSite = { _, order -> constructionSite()?.takeIf { it.orderId == order } },
             collectionAvailable = { collectionEnabled }, collectionHome = { _, _ -> collectionDestination },
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
             depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit },
             immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed })
         owner.pulse(1_000)
         owner.activeCount() shouldBe 1
+    }
+
+    fun prepareDiningSeat(guard: Boolean = false): PacketPlayerNpc {
+        navigationNow = 3_000
+        if (guard) for (x in -1..1) world.loadChunk(x, -2)
+        val tower = if (guard) CivBuilding(UUID.randomUUID(), BuildingType.GUARD_TOWER, 1, CivPosition(10, 64, 0), 0,
+            "guardtower1", CivBox(CivPosition(9, 63, -1), CivPosition(11, 68, 1)),
+            CivPosition(10, 64, -2), BuildingPhase.ACTIVE) else null
+        val tavern = CivBuilding(UUID.randomUUID(), BuildingType.TAVERN, 1, CivPosition(6, 64, 0), 0,
+            "seated-meal-fixture", CivBox(CivPosition(4, 63, -2), CivPosition(8, 68, 4)),
+            CivPosition(5, 64, -2), BuildingPhase.ACTIVE, control = CivPosition(8, 64, -1))
+        world.getBlockAt(6, 64, 0).blockData = Bukkit.createBlockData("minecraft:stone_stairs[facing=north,half=bottom,shape=straight]")
+        world.getBlockAt(6, 64, 2).blockData = Bukkit.createBlockData("minecraft:stone_stairs[facing=south,half=bottom,shape=straight]")
+        world.getBlockAt(6, 65, 1).type = Material.GREEN_WOOL
+        world.getBlockAt(8, 64, -1).type = Material.BARREL
+        CivsWorksiteLayouts.installCatalog(mapOf(tavern.schematicId to com.google.gson.JsonParser.parseString(
+            """{"tavern":{"dining":[[0,0,0]]}}""").asJsonObject))
+        city = CivsRules.validate(city.copy(autonomy = CivAutonomy(), stock = Stock(food = 2), inventory = null,
+            buildings = city.buildings + listOfNotNull(tavern, tower),
+            workers = city.workers.map { it.copy(assignment = tower?.id ?: it.assignment,
+                nextDeliveryAt = if (guard) 1 else it.nextDeliveryAt,
+                hunger = 14, life = CivResidentLife(awakeMinutes = 6)) } +
+                CivWorker(UUID.randomUUID(), "Innkeeper", tavern.id, nextDeliveryAt = 1)))
+        owner.pulse(2_000)
+        val npc = owner.collisionActors().first { it.uniqueId == workerId }
+        npc.teleport(Location(world, 5.5, 64.0, .5))
+        owner.residentLifeEnabled = true
+        return npc
     }
 
     fun autonomousTrafficTown(headOn: Boolean): Triple<CivBuilding, CivBuilding, CivBuilding> {
@@ -4631,6 +4991,10 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     fun groundAt(at: Location) = civsGroundFixture(paper, world, at, ItemStack(Material.COAL)).also(world.threatEntities::add)
 
     fun hit(amount: Double) = owner.damage(workerId, amount)
+    fun constructionSite(): CivConstructionSite? = city.construction?.let {
+        CivConstructionSite(it.id, requireNotNull(it.plannedBuilding), constructionColumns)
+    }
+    fun constructionTarget(): CivPosition = requireNotNull(citizenConstructionTarget(city, world, requireNotNull(constructionSite())))
     fun navigate(advanceMillis: Long = 50L) {
         navigationNow = navigationNow?.plus(advanceMillis)
         paper.performTicks(1)
@@ -4676,6 +5040,10 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     private fun field(target: Any, name: String): Any? = target.javaClass.getDeclaredField(name).run {
         isAccessible = true
         get(target)
+    }
+    fun observedWork(worker: UUID = workerId): Long {
+        val actor = (field(owner, "actors") as Map<*, *>)[worker]!!
+        return (field(actor, "cycle") as CitizenCycle).observedWorkMillis
     }
     fun phase(worker: UUID = workerId): CitizenPhase =
         ((owner.debug(city.id, worker)["entries"] as List<*>).single() as Map<*, *>)["phase"] as CitizenPhase
@@ -4888,6 +5256,16 @@ private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
                 }
                 type == Material.LADDER -> LADDER_SHAPE
                 type == Material.FARMLAND || type == Material.DIRT_PATH -> LOWERED_SHAPE
+                blockData is Stairs && (blockData as Stairs).half == Bisected.Half.BOTTOM &&
+                    (blockData as Stairs).shape == Stairs.Shape.STRAIGHT -> {
+                    val top = when ((blockData as Stairs).facing) {
+                        BlockFace.SOUTH -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                        BlockFace.WEST -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                        BlockFace.EAST -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                        else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                    }
+                    shape(listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), top))
+                }
                 type == Material.STONE_STAIRS -> NORTH_STAIRS_SHAPE
                 else -> FULL_SHAPE
             }

@@ -48,6 +48,32 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("a staffed tavern serves existing bread through the ordinary pickup receipt with a hall fallback") {
+        serviceScenario { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val tavern = h.city.buildings.last().copy(type = BuildingType.TAVERN, control = CivPosition(10, 63, 0))
+            val innkeeper = h.city.workers.first().copy(assignment = tavern.id, nextDeliveryAt = 1)
+            val guest = h.city.workers[1].copy(assignment = hall.id, nextDeliveryAt = 1, hunger = 10)
+            val ready = CivsRules.validate(h.city.copy(buildings = listOf(hall, tavern),
+                workers = listOf(innkeeper, guest), stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL,
+                    buildingMaterials = mapOf(hall.id.toString() to mapOf("BREAD" to 8L),
+                        tavern.id.toString() to mapOf("BREAD" to 4L)))))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            h.service.residentSupplySource(ready, guest) shouldBe tavern.id
+            h.service.residentSupplySource(ready.copy(workers = listOf(guest)), guest) shouldBe hall.id
+            val pickup = h.service.prepareResidentSupplies(ready.id, guest.id, tavern.id)
+            h.tick(); h.commit()
+            val after = pickup.join()
+            after.inventory!!.buildingStock(tavern.id) shouldBe emptyMap()
+            after.inventory!!.buildingStock(hall.id) shouldBe mapOf("BREAD" to 8L)
+            CivsEquipment.plainCount(after.workers.first { it.id == guest.id }, "BREAD") shouldBe 4L
+            after.workers.first { it.id == innkeeper.id } shouldBe innkeeper
+        }
+    }
+
     test("unfunded research journals the exact university barrel bill once before any researcher is assigned") {
         serviceScenario { h ->
             val university = h.city.buildings.last().copy(type = BuildingType.UNIVERSITY,
@@ -2112,7 +2138,8 @@ class CivsServiceTest : FunSpec({
                 sex = CivSex.MALE, homeId = hall.id, hunger = 20)
             val ready = h.city.copy(workers = listOf(worker), immigration = CivImmigration(4, Long.MAX_VALUE))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
-            every { h.citizens.workingResidentIds(ready.id) } returns setOf(worker.id)
+            every { h.citizens.workingResidentIds(ready.id) } returns emptySet()
+            every { h.citizens.awakeResidentIds(ready.id) } returns setOf(worker.id)
             val viewer = h.paper.addPlayer("ResidentObserver")
             viewer.teleport(Location(h.world, 0.0, 65.0, 0.0))
             h.start(); h.paper.performTicks(20)
@@ -3292,6 +3319,37 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("builder site loads once off-thread and reload retires an unfinished geometry request") {
+        serviceScenario { h ->
+            val city = h.incrementalPlacement(phase = ConstructionPhase.CONSTRUCTING).city
+            val order = requireNotNull(city.construction)
+            val building = requireNotNull(order.plannedBuilding)
+            val cell = CivPlanBlock(CivPosition(13, 63, 0), "minecraft:dirt", "minecraft:air")
+            val plan = CivPlacementPlan(order.id, city.id, h.world.uid, building, listOf(
+                CivPlanBlock(CivPosition(15, 64, 0), "minecraft:air", "minecraft:stone")),
+                terrain = CivTerraformPlan(CivBox(cell.position, cell.position), listOf(cell), emptyList(), 63, 1, 0))
+            val pending = CompletableFuture<CivPlacementPlan?>()
+            every { h.store.loadPlan(order.id) } returns pending
+            val lookup = CivsService::class.java.getDeclaredMethod("constructionSite", UUID::class.java, UUID::class.java)
+                .also { it.isAccessible = true }
+            fun site() = lookup.invoke(h.service, city.id, order.id) as CivConstructionSite?
+            h.start()
+            site() shouldBe null
+            site() shouldBe null
+            verify(exactly = 1) { h.store.loadPlan(order.id) }
+            every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+            h.start()
+            val current = requireNotNull(site())
+            current.changedColumns shouldBe setOf(civsTerrainKey(cell.position.x, cell.position.z))
+            pending.complete(plan.copy(terrain = null)); h.tick()
+            site() shouldBe current
+            verify(exactly = 2) { h.store.loadPlan(order.id) }
+            h.service.close()
+            site() shouldBe null
+            verify(exactly = 2) { h.store.loadPlan(order.id) }
+        }
+    }
+
     test("paced paste waits for its live builder and accepted feedback is fenced and cannot fail a paid row") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
@@ -3486,6 +3544,7 @@ class CivsServiceTest : FunSpec({
             }
             h.start()
             val confirmation = h.service.upgradeBuilding(h.player, hall.id); h.tick()
+            verify(exactly = 1) { h.blueprints.prepareUpgrade(hall, 3, h.world.uid) }
             h.service.preview(h.player) shouldBe null
             verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
             confirmation.isDone shouldBe false
@@ -3884,6 +3943,7 @@ class CivsServiceTest : FunSpec({
             }
             h.start()
             val confirmed = h.service.upgradeBuilding(h.player, building.id); h.tick()
+            verify(exactly = 1) { h.blueprints.prepareUpgrade(building, 2, h.world.uid) }
             h.service.preview(h.player) shouldBe null
             verify(exactly = 0) { h.renderer.show(any(), any(), any()) }
             h.service.upgradeBuilding(h.player, building.id).isDone shouldBe false
@@ -5662,6 +5722,21 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
             worldAdapter.capture(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5))
         }
         every { blueprints.pasteParts(any(), any(), isNull()) } answers { CompletableFuture.completedFuture(listOf(firstArg())) }
+        every { blueprints.availableStyles(any()) } answers {
+            when (firstArg<BuildingType?>()) {
+                BuildingType.PLAN_BOARD -> listOf("plan-board")
+                BuildingType.DECORATION -> emptyList()
+                else -> CivsBlueprints.STYLES
+            }
+        }
+        every { blueprints.maximumLevel(any()) } answers { firstArg<CivBuilding>().type.maxLevel }
+        every { blueprints.prepareUpgrade(any(), any(), any()) } answers {
+            val building = firstArg<CivBuilding>()
+            check(!building.schematicId.startsWith("civs/v2/")) { "Catalog upgrades need an explicit fixture" }
+            val style = CivsBlueprints.styleOf(building) ?: throw CivsRejection("invalid-style")
+            blueprints.prepare(style, building.type, arg(1), building.id, arg(2), building.anchor,
+                building.rotation / 90, building.rotation, building.entrance)
+        }
         every { citizens.closeAsync() } returns CompletableFuture.completedFuture(null)
         every { renderer.drained() } returns CompletableFuture.completedFuture(null)
         every { boundary.drained() } returns CompletableFuture.completedFuture(null)
@@ -5681,9 +5756,10 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         val ground = world.getBlockAt(0, 63, 0).also { it.type = Material.GRASS_BLOCK }
         every { player.rayTraceBlocks(12.0, FluidCollisionMode.NEVER) } returns RayTraceResult(ground.location.toVector(), ground, BlockFace.UP)
         val hall = CivBuilding(UUID.randomUUID(), BuildingType.TOWN_HALL, 2, CivPosition(0, 64, 0), 0,
-            "minecolonies/nordic/fundamentals/townhall2", CivBox(CivPosition(-2, 63, -2), CivPosition(2, 68, 2)),
+            CivsBlueprints.schematicId("nordic", BuildingType.TOWN_HALL, 2), CivBox(CivPosition(-2, 63, -2), CivPosition(2, 68, 2)),
             CivPosition(0, 64, -2), BuildingPhase.ACTIVE)
         val home = hall.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, level = 1, anchor = CivPosition(10, 64, 0),
+            schematicId = CivsBlueprints.schematicId("nordic", BuildingType.HOUSE, 1),
             bounds = CivBox(CivPosition(8, 63, -2), CivPosition(12, 68, 2)), entrance = CivPosition(10, 64, -2))
         city = CivsRules.validate(Settlement(UUID.randomUUID(), owner, "Oak Town", world.uid, CivPosition(0, 64, 0), 96,
             "nordic", Stock(96, 96, 24), listOf(hall, home), (1..4).map { CivWorker(UUID.randomUUID(), "Worker $it", null) }, createdAt = time))

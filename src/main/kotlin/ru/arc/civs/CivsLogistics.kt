@@ -97,6 +97,7 @@ object CivsLogistics {
         val workers = city.workers.count { it.assignment == building.id && it.cargo == null }
         if (workers == 0) return emptyMap()
         return (CivsProduction.inputs(city, building) + when (building.type) {
+            BuildingType.TAVERN -> mapOf("BREAD" to 4L)
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) { "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS" }) to 16L, "BONE_MEAL" to 16L, "IRON_HOE" to 1L)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L, "IRON_AXE" to 1L)
             BuildingType.QUARRY -> quarrySupplies(building) + ("IRON_PICKAXE" to 1L)
@@ -296,7 +297,7 @@ object CivsLogistics {
         reject(!cargo.inventoryBacked, "materials-migration-pending")
         val emptied = CivsEquipment.consume(worker.copy(cargo = null), cargo.material, cargo.amount.toInt())
         val updated = CivsResidents.trained(emptied.copy(completedCycles = Math.addExact(worker.completedCycles, 1),
-            nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE)
+            nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE, city)
         return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) updated else it },
             revision = Math.addExact(city.revision, 1)))
     }

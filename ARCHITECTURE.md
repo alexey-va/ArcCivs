@@ -17,8 +17,10 @@ autonomous deletion receipts in a separate table so older backends cannot consum
 a player's personal one-time founding reserve after an autonomous deletion. Do not downgrade a backend that has
 created autonomous snapshots to a version without this mode.
 
-`CivsAutonomy` chooses one paid goal from nine building types, with three
-HOUSE sites (eleven service buildings), ending at level two. It uses aggregate `Stock` and always has `inventory == null`; migration
+`CivsAutonomy` chooses one paid goal from its service and industry profile, with
+three HOUSE sites and an automatically built central plan board (sixteen sites).
+Engineering permits level three for the hall, university, smeltery and crusher;
+other profile buildings stop at level two. It uses aggregate `Stock` and always has `inventory == null`; migration
 to native item stores excludes this mode. Complete schematic details are covered
 by a one-time wood/stone/food price at `reserveBuild`. FARM and QUARRY perform
 input-free native work with visual receipts, then one observed production session
@@ -65,7 +67,7 @@ schematic store, pending control receipt, queue, builder work credit and batch
 placement journal. There is one admitted decision per city; callbacks recheck
 the current mode, goal, pause, activity and construction state. Pausing stops new
 decisions, producer receipts, active population minutes and native paste progress;
-it preserves accepted orders and their paid stock. Food and post-seed recruitment
+it preserves accepted orders and their paid stock. Observed meals and post-seed recruitment
 consume abstract food in the same durable city revision. No offline catch-up is
 performed, and ordinary health/death and global NPC/chunk limits still apply.
 
@@ -150,8 +152,9 @@ production. Disabling or losing the permission stops new issuance. Console-only
 `civs settings <city UUID> <setting> <on|off>` supports bounded operational setup;
 the service still checks the owner's testing permission when enabling a setting.
 
-ArcCore host 0.1.19 and bundled Core helpers 2.7.55 are mandatory; the shared
-API is byte-identical to the host API. ArcCore provides lifecycle/scheduling,
+ArcCore host 0.1.21 is the minimum compatible provider; bundled Core helpers are
+2.7.70. Delivery verification also checks the exact installed ArcCore 0.1.21 JAR;
+the shared API must be byte-identical to that host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
 `PacketPlayerNpc` with bundled signed skins, equipment and work-only arm swings.
@@ -167,8 +170,12 @@ inventory, not the warehouse. One bread heals six health points. The legacy supp
 action offers up to 16 bread; the native bag uses its actual slot capacity. Armor
 equips native slots; a supplied matching iron work tool reduces incoming
 damage by ten percent. Props alone confer no bonus. Residents start with 20 health;
-each new completed profession cycle earns one internal point, with ten points per
-level and a level-five cap. The highest profession level adds two maximum health
+each new completed profession cycle earns one internal point, or two for the
+resident's stable UUID-derived aptitude. Ten points form a level, up to level five.
+New observed training is capped at 10 for hall/tavern residents or 20/30/40 for
+HOUSE levels one/two/three; retained historical experience is never removed.
+Null-life receipts keep the legacy one-point/cap-40 rule until a new awake minute.
+The highest profession level adds two maximum health
 per extra level, up to 28. New cycles train the currently assigned profession;
 skill progress is persisted separately by profession and remains after reassignment.
 Old cycles grant no retroactive points. Production
@@ -199,25 +206,40 @@ refill vacancies below five residents, including before hall completion. Above
 five, opposite-sex adults form families in completed houses: 20 active city
 minutes per birth, then 40 to adulthood. Children use half-scale player NPCs,
 play and wander, and cannot take jobs. Progress never catches up offline.
-Working adults lose one hunger per active minute and consume existing bread
-from their bag; hunger at or below six doubles work time. Family, hunger and
+Awake adults, including idle residents, lose one hunger per observed minute;
+children lose one per two awake minutes. A meal requires a supported trip to a
+staffed tavern or bootstrap hall and four continuously observed seconds. It
+consumes one existing bag bread or one closed Auto FOOD and restores at most six
+hunger. The actor rechecks the exact visit on the service's durable write lane;
+unrelated city revisions do not cancel it, and duplicate callbacks cannot eat twice.
+An interrupted work detour returns to its existing target without earning travel
+time or losing already observed work. Child lessons likewise require four fresh
+seconds after interruption and grant at most ten education points before adulthood.
+Hunger at or below six doubles work time. Family, hunger and
 member-name changes use the existing city write queue, without starving behind work.
 `CivsResidentNavigation` separates terrain capture, an asynchronous A* job and
 the packet movement controller. Up to 48 pending routes share one Core bounded
 worker. The worker consumes detached numeric collision shapes and captured
 permission/cost decisions; it never calls Bukkit or route-policy callbacks.
 Small demanded neighbourhoods are captured on the owner thread through the
-service's shared `BudgetedTaskQueue` (512 operations or four milliseconds per
-tick across native work). A standalone navigation owner uses 384 operations or
-one millisecond. These are aggregate budgets between indivisible native calls,
+service's shared `BudgetedTaskQueue` (by default 10,000 operations or four milliseconds per
+tick across native work). A standalone navigation owner uses the same configured
+limits. These are aggregate budgets between indivisible native calls,
 not a promise that copying collision geometry is free. Each route admits at
 most 4096 search nodes and 32768 captured cells. Missing chunks are unavailable;
 search never loads them, and an unknown frontier cannot prove that no path exists.
 A per-job heuristic weight preserves ordinary cost ordering for trips up to
 32 blocks, then rises linearly to two at 64 blocks. This retains local road
 preferences and follows MineColonies' bounded search approach for longer trips;
-minimum-cost routes are not guaranteed there. Route-local terrain is released on completion or
-cancellation, and replanning captures fresh data. Cancellation and lifecycle
+minimum-cost routes are not guaranteed there. A node/capture limit on a long trip may
+return a validated segment that makes meaningful progress toward the original goal;
+reaching its end requests the next segment and never reports arrival or earns work credit.
+Preconstruction access proof requires a complete route and rejects such a partial segment.
+Preparation times out only without capture/search progress. Route-local terrain is released
+on completion or cancellation, while the bounded shared shape cache survives replanning.
+Known native changes refresh their local cells; an unannounced physical blockage refreshes
+at most 64 observed obstruction cells, without clearing whole chunks or policy decisions.
+Cancellation and lifecycle
 tokens fence late results; shutdown observes the owned worker's drain.
 Edges retain a 0.6-by-1.8-block body, fractional support and the existing step
 height limit. Ladder entry, climb and exit are explicit actions: the controller
@@ -261,7 +283,10 @@ requires an arrived, stationary, awake builder for the current order. Unavailabl
 builders suspend native placement without discarding durable material credit.
 Accepted native writes drive the builder's held material, gaze, swing and local
 feedback; cosmetic failures cannot invalidate an already accepted write.
-The builder remains at the worksite through native completion and durable commit.
+The builder remains at one validated exterior stance for the current order through
+native completion and durable commit. The stance excludes the building and exact future
+cut/fill columns; the current native block controls gaze and held material, not a new
+walking destination. Construction never uses safe-teleport recovery to reach that stance.
 Committed batches enqueue neighbour physics for their actual changed cells;
 Paper receives both neighbour and client-update flags so unsupported plants
 disappear on clients as well as on the server.
@@ -302,10 +327,16 @@ to the city. Empty allowed-worlds makes a backend view-only.
 
 ## Domain
 
-Eleven building types: TOWN_HALL, BUILDER_HUT, WAREHOUSE, HOUSE, FORESTER,
-QUARRY, FARM, SAWMILL, BLACKSMITH, STONEMASON, LIBRARY; levels1..3.
-The curated catalog contains99 assets across33
-style/type families. Each schematic has one `minecraft:structure_void` primary-hut
+The private v2 catalog accounts for all 14,830 source schematics from 36 styles;
+only complete, verified READY families enter the runtime pool. Functional levels
+remain 1..3; source levels 4..5 are explicit metadata, never relabelled. Separate
+DECORATION entries have maximum level1 and no jobs, beds or production. The
+[v2 catalog contract](docs/blueprint-catalog-v2.md) defines exact source/recipe
+hashes, shared maximum-level frames, paid source-terrain support, container and
+worksite proofs, dining metadata and immutable upgrade-family pinning. The legacy
+153 IDs remain available with their original bytes for accepted buildings.
+
+Legacy schematics have one `minecraft:structure_void` primary-hut
 marker inside the building; it is the physical control position, not the authored
 anchor or visual entrance. A selected block's X/Y/Z is the schematic anchor without
 an added height offset. The authored marker is transformed independently from that
@@ -680,8 +711,15 @@ Autonomous idle residents use the prepared building entrance as their roaming
 anchor, including a SITE whose authored control is not reachable yet.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
 
-Hungry residents with no personal bread fetch up to four existing bread from their
-town hall, limited by its stock and real bag capacity, before returning to their job.
+An active tavern has one innkeeper in both ordinary and Auto villages. The innkeeper
+serves guests at the tavern without a production payout or profession XP. An ordinary
+courier keeps up to four existing bread there through the same inventory-transfer receipt.
+Hungry residents with no personal bread prefer a stocked, staffed tavern, falling back to
+their town hall. They fetch up to four existing bread, limited by stock and real bag
+capacity, before returning to their job. Auto food remains the existing abstract stock.
+After an innkeeper assignment has been saved, 0.1.94's zero-slot tavern rule cannot
+validate that settlement. Replacing the JAR with 0.1.94 alone is not a compatible
+rollback of that state.
 Monster attacks interrupt work: nearby adult residents assist, while children and
 badly injured adults retreat. Combat uses actual carried weapons and native monster
 damage events; neither NPC combat nor corpse rendering grants currency or player XP.
@@ -914,6 +952,18 @@ infrastructure frame remains pinned. Adoption requires a complete perimeter, no
 rejected infrastructure pieces and
 at most 96 infrastructure pieces alongside the existing 16 ordinary sites.
 
+New civic plots first face straight segments of retained streets inside the core,
+with the entire upgrade envelope and three-block street corridor reserved. The
+frontage preference survives terrain-option sorting. A facing plot connects with
+a short graded segment (at most eight edges) to an exact existing route prefix;
+the existing bounded terrain solver and native capture remain authoritative.
+Each newly planned route becomes available to later mixed plots. The ideal street
+sketch remains a fallback where no usable frontage exists, and bounded inner-yard
+infill faces a nearby real street when one is available. Resource workplaces stay
+outside the core. Accepted buildings, routes and adopted plans never move as a
+side effect of this preference; an old city with no adopted plan has no full-plan
+infrastructure bill.
+
 The board and runtime consume this same persisted geometry. Reserved SITE
 admission and later activation retain the adopted route and upgrade envelope while
 refreshing native before-images. Infrastructure reads the adopted walls, gates and
@@ -936,6 +986,20 @@ walkable, with unpaved shoulders. Accepted ROAD/GATE rectangles are never narrow
 or repartitioned. This release does not schedule later widening. A stair's neighbour-derived
 corner shape may change during construction; revalidation ignores only that property,
 while preserving material, orientation, half, waterlogged and protection checks.
+
+An idle Auto builder can maintain an accepted approach through existing native
+column receipts: one abstract STONE and three seconds per changed column, no
+items or profession training. Besides a bounded rising-turn correction, upkeep
+can lower a straight hump of at most nine raised columns and three blocks in
+height between equal-level approaches. Every disjoint correction is validated
+against the immutable original journal. Compatible owners sharing the complete
+same-grade section receive their overrides atomically in the first receipt;
+rollback restores their exact previous overrides. Different-grade crossings,
+authored ROAD transit and building envelopes remain protected. A bounded native
+preflight checks the final cut, support, headroom and permissions; each later
+column still requires its own exact before/after receipt. Only natural ground
+and a verified old pavement state at its original road height may be cleared.
+This preflight never supplies navigation arrival, work credit or free world writes.
 
 Mine V5 adds paid timber frames, lower-level perimeter walls, rails around the central
 opening and connected galleries to the existing single ladder shaft. V2/V3/V4 plans

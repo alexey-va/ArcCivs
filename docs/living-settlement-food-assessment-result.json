@@ -1,0 +1,1950 @@
+{
+  "title": "ArcCivs .96 awake-resident food upkeep",
+  "assumptions": [
+    "Explicit sensitivity, not runtime telemetry. Scenarios represent 1/4/6 villages with 5/8/12 adults present and awake for 1/2/4 active hours per village-day. Before working fractions are 0.2/0.5/1; after includes awake idle residents.",
+    "One hunger per active awake adult-minute and one existing meal per six hunger remain the steady-state ceiling of ten meals per awake hour. Initial saturation and unavailable food may reduce actual consumption. Sleeping, unrendered/inactive time and offline time are excluded from this estimate. Children lose one hunger per two observed awake minutes; a complete 40-minute childhood can consume at most three meals from initially full hunger.",
+    "Native BREAD and Auto abstract FOOD are alternative settlement modes, not two charges on one village. Each meal burns one already existing unit and restores at most six resident hunger; no food items, stock, currency or work credit are created.",
+    "A full farmer reserve may legitimately pause production until sufficient room is available; consumption is not increased artificially to keep the farmer working. Existing production quantities and capacities remain unchanged.",
+    "Finite progression extension: no currency, player XP or production-rate multiplier changes. 20 paid work cycles formerly grant 20 profession XP; matching stable aptitude grants up to40, bounded by active home cap10/20/30/40. Existing higher XP is retained. One40-active-minute childhood can gain at most10 education XP through observed mentor lessons; it transfers once at adulthood. These are finite character progression windows, not repeatable daily income. Full skill cap remains40 and maximum health28; childhood education alone can raise health20 to22 after adulthood. SELL and future contracts stay separate and unchanged.",
+    "For calculator comparison only, one finite full childhood /20 paid-cycle window is modeled per participant-day in all three columns. That is an explicit upper event sensitivity, not a claim of birth frequency; multiply by observed events after activation. Normal food and AutoFOOD rows remain alternative modes, and the finite child rows must not be added to adult rows for the same resident-minute. No new material output quantities or durable item supplies are granted."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "native_bread_items": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "10",
+            "80",
+            "480"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "70",
+            "2240",
+            "20160"
+          ],
+          "network_weekly_net": [
+            "-70",
+            "-2240",
+            "-20160"
+          ],
+          "player_daily_potential_net": [
+            "-10",
+            "-80",
+            "-480"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "10",
+              "80",
+              "480"
+            ],
+            "network_weekly": [
+              "70",
+              "2240",
+              "20160"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "awake_resident_meals_normal_mode",
+            "kind": "burn",
+            "player_daily_potential": [
+              "10",
+              "80",
+              "480"
+            ],
+            "network_weekly_after_cap": [
+              "70",
+              "2240",
+              "20160"
+            ],
+            "basis": "One existing food unit per steady-state meal; village-level events include the assumed resident count."
+          },
+          {
+            "id": "finite_childhood_meals",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "53",
+            "163",
+            "483"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "371",
+            "4564",
+            "20286"
+          ],
+          "network_weekly_net": [
+            "-371",
+            "-4564",
+            "-20286"
+          ],
+          "player_daily_potential_net": [
+            "-53",
+            "-163",
+            "-483"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "53",
+              "163",
+              "483"
+            ],
+            "network_weekly": [
+              "371",
+              "4564",
+              "20286"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "awake_resident_meals_normal_mode",
+            "kind": "burn",
+            "player_daily_potential": [
+              "50",
+              "160",
+              "480"
+            ],
+            "network_weekly_after_cap": [
+              "350",
+              "4480",
+              "20160"
+            ],
+            "basis": "One existing food unit per steady-state meal; village-level events include the assumed resident count."
+          },
+          {
+            "id": "finite_childhood_meals",
+            "kind": "burn",
+            "player_daily_potential": [
+              "3",
+              "3",
+              "3"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "84",
+              "126"
+            ],
+            "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "-301",
+        "-2324",
+        "-126"
+      ]
+    },
+    "abstract_food": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "10",
+            "80",
+            "480"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "70",
+            "2240",
+            "20160"
+          ],
+          "network_weekly_net": [
+            "-70",
+            "-2240",
+            "-20160"
+          ],
+          "player_daily_potential_net": [
+            "-10",
+            "-80",
+            "-480"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "10",
+              "80",
+              "480"
+            ],
+            "network_weekly": [
+              "70",
+              "2240",
+              "20160"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "awake_resident_meals_auto_mode",
+            "kind": "burn",
+            "player_daily_potential": [
+              "10",
+              "80",
+              "480"
+            ],
+            "network_weekly_after_cap": [
+              "70",
+              "2240",
+              "20160"
+            ],
+            "basis": "Alternative Auto village sensitivity; existing closed FOOD never becomes a native item."
+          },
+          {
+            "id": "finite_childhood_meals",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "53",
+            "163",
+            "483"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "371",
+            "4564",
+            "20286"
+          ],
+          "network_weekly_net": [
+            "-371",
+            "-4564",
+            "-20286"
+          ],
+          "player_daily_potential_net": [
+            "-53",
+            "-163",
+            "-483"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "53",
+              "163",
+              "483"
+            ],
+            "network_weekly": [
+              "371",
+              "4564",
+              "20286"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "awake_resident_meals_auto_mode",
+            "kind": "burn",
+            "player_daily_potential": [
+              "50",
+              "160",
+              "480"
+            ],
+            "network_weekly_after_cap": [
+              "350",
+              "4480",
+              "20160"
+            ],
+            "basis": "Alternative Auto village sensitivity; existing closed FOOD never becomes a native item."
+          },
+          {
+            "id": "finite_childhood_meals",
+            "kind": "burn",
+            "player_daily_potential": [
+              "3",
+              "3",
+              "3"
+            ],
+            "network_weekly_after_cap": [
+              "21",
+              "84",
+              "126"
+            ],
+            "basis": "Alternative finite child window; one existing unit per meal, max3 meals from initial20 hunger. No offline catch-up."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "-301",
+        "-2324",
+        "-126"
+      ]
+    },
+    "vault": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "player_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "resident_profession_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "20",
+            "20",
+            "20"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "140",
+            "560",
+            "840"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "140",
+            "560",
+            "840"
+          ],
+          "player_daily_potential_net": [
+            "20",
+            "20",
+            "20"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "20",
+              "20",
+              "20"
+            ],
+            "network_weekly": [
+              "140",
+              "560",
+              "840"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_progression_window",
+            "kind": "mint",
+            "player_daily_potential": [
+              "20",
+              "20",
+              "20"
+            ],
+            "network_weekly_after_cap": [
+              "140",
+              "560",
+              "840"
+            ],
+            "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "40",
+            "40",
+            "40"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "280",
+            "1120",
+            "1680"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "280",
+            "1120",
+            "1680"
+          ],
+          "player_daily_potential_net": [
+            "40",
+            "40",
+            "40"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "40",
+              "40",
+              "40"
+            ],
+            "network_weekly": [
+              "280",
+              "1120",
+              "1680"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_progression_window",
+            "kind": "mint",
+            "player_daily_potential": [
+              "40",
+              "40",
+              "40"
+            ],
+            "network_weekly_after_cap": [
+              "280",
+              "1120",
+              "1680"
+            ],
+            "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "140",
+        "560",
+        "840"
+      ]
+    },
+    "resident_education_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_progression_window",
+            "kind": "mint",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "10",
+            "10",
+            "10"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "70",
+            "280",
+            "420"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "70",
+            "280",
+            "420"
+          ],
+          "player_daily_potential_net": [
+            "10",
+            "10",
+            "10"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "10",
+              "10",
+              "10"
+            ],
+            "network_weekly": [
+              "70",
+              "280",
+              "420"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_progression_window",
+            "kind": "mint",
+            "player_daily_potential": [
+              "10",
+              "10",
+              "10"
+            ],
+            "network_weekly_after_cap": [
+              "70",
+              "280",
+              "420"
+            ],
+            "basis": "Finite20 paid matching-work cycles OR one40minute child window, respectively; cap/clipping lowers actual totals. No playerXP."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "70",
+        "280",
+        "420"
+      ]
+    }
+  },
+  "prices": []
+}

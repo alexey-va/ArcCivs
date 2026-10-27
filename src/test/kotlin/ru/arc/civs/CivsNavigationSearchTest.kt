@@ -70,6 +70,36 @@ class CivsNavigationSearchTest : FunSpec({
         }
     }
 
+    test("a finite long search walks validated progress before continuing toward the original goal") {
+        val goal = CitizenPoint(90.5, 64.0, .5)
+        var origin = CitizenPoint(.5, 64.0, .5)
+        var segments = 0
+        do {
+            val search = CitizenNavigationSearch(origin, goal, 0, 256, emptyList(),
+                CivsNavigationSettings(maximumNodes = 64))
+            var result = search.advance(emptyList())
+            while (result.probes.isNotEmpty()) result = search.advance(result.probes.map { probe ->
+                val blocks = buildMap {
+                    for (x in probe.node.x - 1..probe.node.x + 1) for (z in -1..1) for (y in 61..67)
+                        put(CivPosition(x, y, z), CitizenTerrainBlock(true, false, false, false, false,
+                            x in 0..90 && z == 0 && y == 64, 1.0,
+                            if (y <= 63) listOf(CitizenTerrainBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0)) else emptyList()))
+                }
+                CitizenSearchCapture(probe, blocks, citizenSearchCandidates(probe, blocks, 0, 256))
+            })
+            result.failure shouldBe null
+            val endpoint = requireNotNull(result.path).last().point
+            (endpoint.x > origin.x) shouldBe true
+            result.path!!.all { it.point.y == 64.0 && it.point.z == .5 } shouldBe true
+            if (result.continuation) (goal.x - endpoint.x <= goal.x - origin.x - 2.0) shouldBe true
+            origin = endpoint
+            segments++
+            (segments <= 3) shouldBe true
+        } while (result.continuation)
+        origin shouldBe goal
+        (segments > 1) shouldBe true
+    }
+
     for (distance in listOf(32, 48, 64, 90))
     test("a $distance-block ordinary terrain route finishes within the admitted node budget") {
         val target = CitizenPoint(distance + .5, 64.0, .5)

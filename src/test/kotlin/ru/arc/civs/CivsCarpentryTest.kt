@@ -13,6 +13,29 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CivsCarpentryTest : FunSpec({
+    test("a real tool request commissions one exact blacksmith batch and in-flight goods suppress duplicates") {
+        val sawmill = carpenterSnapshot("IRON_PICKAXE", 1, mapOf("IRON_INGOT" to 3L, "STICK" to 2L))
+        craft(sawmill) shouldBe emptyMap()
+        val smith = sawmill.copy(stores = sawmill.stores + (CARPENTER to sawmill.stores.getValue(CARPENTER)
+            .copy(type = BuildingType.BLACKSMITH, outputMaterial = "IRON_SHOVEL")),
+            craftWorkers = sawmill.craftWorkers.map { it.copy(type = BuildingType.BLACKSMITH) })
+        val accepted = craft(smith)
+        val job = accepted.values.single()
+        job.recipeId shouldBe "blacksmith/iron_pickaxe"
+        job.material shouldBe "IRON_PICKAXE"
+        job.amount shouldBe 1L
+        job.inputs shouldBe mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
+        job.targetBuildingId shouldBe CONSUMER
+        // Two smiths may not both promise the same missing tool.
+        craft(smith.copy(craftWorkers = smith.craftWorkers + smith.craftWorkers.single().copy(workerId = UUID(0, 11))))
+            .size shouldBe 1
+        craft(smith.copy(craftJobs = accepted)) shouldBe accepted
+        craft(smith.copy(requests = listOf(CivSupplyRequest(CONSUMER, "IRON_PICKAXE", 1, 1)))) shouldBe emptyMap()
+        craft(smith.copy(stores = smith.stores + (CARPENTER to smith.stores.getValue(CARPENTER)
+            .copy(stock = mapOf("IRON_PICKAXE" to 1L))))) shouldBe emptyMap()
+        smith.stores.getValue(CARPENTER).stock shouldBe mapOf("IRON_INGOT" to 3L, "STICK" to 2L)
+    }
+
     test("automatic batches follow real log plank stick ladder receipts and stop at satisfied demand") {
         var input = carpenterSnapshot(stock = mapOf("OAK_LOG" to 2L))
         val products = mutableListOf<String>()
@@ -217,6 +240,34 @@ class CivsCarpentryTest : FunSpec({
         // The promised input is not a finished chest, and cannot justify a second batch.
         craft(transit.copy(craftWorkers = transit.craftWorkers + transit.craftWorkers.single()
             .copy(workerId = UUID(0, 11)))) shouldBe accepted.crafts
+    }
+
+    test("a blacksmith input shipment retains the exact tool order and suppresses a duplicate ingredient trip") {
+        val base = carpenterSnapshot("IRON_PICKAXE", 1, mapOf("STICK" to 2L))
+        val initial = base.copy(stores = base.stores +
+            (CARPENTER to base.stores.getValue(CARPENTER).copy(type = BuildingType.BLACKSMITH,
+                outputMaterial = "IRON_SHOVEL")) +
+            (WAREHOUSE to base.stores.getValue(WAREHOUSE).copy(stock = mapOf("IRON_INGOT" to 3L))),
+            craftWorkers = base.craftWorkers.map { it.copy(type = BuildingType.BLACKSMITH) },
+            couriers = listOf(CivSupplyCourier(UUID(0, 20), WAREHOUSE, 0,
+                CivPosition(10, 64, 0), mapOf("IRON_INGOT" to 64L))))
+        val accepted = allocateCivSupplies(initial)
+        val job = accepted.crafts.values.single()
+        job.material shouldBe "IRON_PICKAXE"
+        val courier = accepted.plans.entries.single()
+        val carrying = courier.value.copy(cargo = courier.value.cargo.copy(inventoryBacked = true), carrying = true)
+        carrying.cargo.material shouldBe "IRON_INGOT"
+        carrying.cargo.amount shouldBe 3L
+        val transit = initial.copy(craftJobs = accepted.crafts, couriers = emptyList(),
+            stores = initial.stores + (WAREHOUSE to initial.stores.getValue(WAREHOUSE).copy(stock = emptyMap())),
+            retained = mapOf(courier.key to carrying))
+        repeat(3) {
+            val next = allocateCivSupplies(transit)
+            next.crafts shouldBe accepted.crafts
+            next.plans.values.filterNot { it.carrying } shouldBe emptyList()
+        }
+        transit.stores.getValue(CARPENTER).stock shouldBe mapOf("STICK" to 2L)
+        transit.retained.values.single().cargo.amount shouldBe 3L
     }
 
     test("unlock tiers preserve native quantities and unfinished external ingredients stay explicit") {

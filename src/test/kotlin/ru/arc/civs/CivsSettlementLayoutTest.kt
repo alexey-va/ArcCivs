@@ -126,6 +126,100 @@ class CivsSettlementLayoutTest : FunSpec({
         }
     }
 
+    test("mixed civic plots face the retained street with short links and full upgrade clearance") {
+        var city = layoutFixtureCity().copy(autonomy = CivAutonomy())
+        val source = layoutFixtureBuilding(BuildingType.WAREHOUSE, CivPosition(40, 64, 24), 90)
+        city = city.copy(buildings = city.buildings + source)
+        val street = (0..24).map { CivPosition(0, 65, it) } + (1..40).map { CivPosition(it, 65, 24) }
+        var access = CivAutonomousAccess(mapOf(source.id to street))
+        val frame = CivsSettlementLayout.frame(city)
+        val surface = layoutSurface(city, "flat")
+        val accepted = city.buildings.toList()
+        val selected = mutableListOf<CivBuilding>()
+        val links = mutableListOf<List<CivPosition>>()
+        for (type in listOf(BuildingType.HOUSE, BuildingType.TAVERN, BuildingType.SMELTERY)) {
+            val current = layoutFixtureBuilding(type).copy(id = layoutId("frontage-$type"))
+            val future = current.copy(level = type.maxLevel, bounds = CivBox(CivPosition(-6, -2, -14), CivPosition(6, 14, -1)))
+            val choices = CivsSettlementLayout.candidates(city, current, future, access, frame)
+            check(choices.any { it.streetFrontage }) { "No real street frontage for $type" }
+            val options = CivsAutonomousTerraform.options(city, choices, surface)
+            options.first().streetFrontage shouldBe true
+            val preferred = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            val draft = options.asSequence().filter { it.streetFrontage }.mapNotNull {
+                runCatching { CivsAutonomousTerraform.draft(city, it, surface, access, frame.wallObstacles, preferredRoads = preferred) }.getOrNull()
+            }.firstOrNull() ?: error("No short facing route for $type")
+            val b = draft.building
+            val (dx, dz) = when (b.rotation) { 90 -> -1 to 0; 180 -> 0 to -1; 270 -> 1 to 0; else -> 0 to 1 }
+            val join = draft.route.indexOfLast { civsTerrainKey(it.x, it.z) in preferred }
+            val link = draft.route.drop(join)
+            (link.size in 3..7) shouldBe true
+            link.first().x shouldBe b.entrance.x + dx * (link.size - 1)
+            link.first().z shouldBe b.entrance.z + dz * (link.size - 1)
+            link.last() shouldBe b.entrance
+            draft.route.first() shouldBe city.buildings.first().entrance
+            selected.none { CivsAutonomousGeometry.overlaps(it.bounds, b.bounds, 2) } shouldBe true
+            CivsAutonomousGeometry.overlaps(b.bounds, frame.core) shouldBe true
+            (b.bounds.max.x - b.bounds.min.x >= 12 && b.bounds.max.z - b.bounds.min.z >= 12) shouldBe true
+            city = city.copy(buildings = city.buildings + b.copy(phase = BuildingPhase.ACTIVE))
+            access = access.copy(routes = access.routes + (b.id to draft.route))
+            selected += b
+            links += link
+        }
+        accepted.forEach { city.building(it.id) shouldBe it }
+        access.routes.getValue(source.id) shouldBe street
+        for (type in CivsSettlementLayout.exteriorTypes) {
+            val template = layoutFixtureBuilding(type)
+            val choices = CivsSettlementLayout.candidates(city, template, template.copy(level = 3), access, frame)
+            check(choices.isNotEmpty())
+            choices.all { !it.streetFrontage && !CivsAutonomousGeometry.overlaps(it.building.bounds, frame.core) } shouldBe true
+        }
+        System.getenv("CIVS_LAYOUT_PREVIEW_OUT")?.let { directory ->
+            val output = Path.of(directory).also { Files.createDirectories(it) }
+            Files.writeString(output.resolve("mixed-frontage.json"), Gson().toJson(mapOf(
+                "kind" to "source-backed-offline-planning-fixture", "frame" to frame, "before" to accepted,
+                "buildings" to city.buildings, "retainedRoute" to street, "routes" to access.routes.values, "shortLinks" to links)))
+        }
+    }
+
+    test("paid road frontage without an old approach journal proves its shared connection before the short link") {
+        val street = (-32..32).map { CivPosition(it, 65, 24) }
+        val piece = CivSettlementPiece(layoutId("legacy-road-only"), BuildingType.ROAD,
+            CivBox(CivPosition(-32, 64, 24), CivPosition(32, 66, 24)), street.first(),
+            street.map { CivSettlementBlock(it.copy(y = 64), "minecraft:dirt_path") }, street)
+        val city = layoutFixtureCity().let { it.copy(buildings = it.buildings +
+            CivsInfrastructure.building(piece).copy(phase = BuildingPhase.ACTIVE)) }
+        val access = CivAutonomousAccess(infrastructure = listOf(piece))
+        val frame = CivsSettlementLayout.frame(city)
+        val building = layoutFixtureBuilding(BuildingType.HOUSE, CivPosition(16, 64, 20))
+        val surface = layoutSurface(city, "flat").let { it.copy(columns = it.columns +
+            street.associate { point -> civsTerrainKey(point.x, point.z) to CivTerrainSurfaceColumn(64, false) }) }
+        CivsSettlementLayout.candidates(city, building, building, access, frame).any { it.streetFrontage } shouldBe true
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val option = CivTerraformOption(building, 0, streetFrontage = true)
+        val draft = CivsAutonomousTerraform.draft(city, option, surface, access, frame.wallObstacles,
+            inspectRoute = searches::add)
+        val join = CivPosition(16, 65, 24)
+        draft.route.first() shouldBe city.buildings.first().entrance
+        draft.route.takeLast(5) shouldBe (24 downTo 20).map { CivPosition(16, 65, it) }
+        searches.map { it.to } shouldBe listOf(join, building.entrance)
+        searches.last().from shouldBe join
+        (draft.route.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH) shouldBe true
+        draft.columns.filter { civsTerrainKey(it.x, it.z) in street.map { p -> civsTerrainKey(p.x, p.z) } }
+            .all { it.preserve && it.groundY == 64 } shouldBe true
+        access.infrastructure.single() shouldBe piece
+        access.routes shouldBe emptyMap()
+
+        val start = city.buildings.first().entrance
+        val blocked = surface.copy(columns = surface.columns + listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).associate { (dx, dz) ->
+            civsTerrainKey(start.x + dx, start.z + dz) to CivTerrainSurfaceColumn(64, true, loaded = false)
+        })
+        searches.clear()
+        (runCatching { CivsAutonomousTerraform.draft(city, option, blocked, access, frame.wallObstacles,
+            inspectRoute = searches::add) }.exceptionOrNull() as? CivsRejection)?.reason shouldBe "autonomy-no-path"
+        searches.size shouldBe 1
+        searches.single().expanded shouldBe 1
+    }
+
     test("an unstarted legacy ring fits around pinned buildings and a persisted ring never shifts") {
         val city = layoutFixtureCity()
         val house = layoutFixtureBuilding(BuildingType.HOUSE, CivPosition(-56, 64, 25))

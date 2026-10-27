@@ -160,7 +160,7 @@ object CivsResearch {
         requireState(worker.assignment == university.id && worker.cargo == null && !CivsResidents.isChild(worker) &&
             worker.completedCycles == cycle && worker.nextDeliveryAt == nextAt && now >= nextAt, "stale-delivery")
         val updated = CivsResidents.trained(worker.copy(completedCycles = Math.addExact(cycle, 1),
-            nextDeliveryAt = Math.addExact(now, CivsResidents.workDuration(worker, CivsRules.PRODUCTION_INTERVAL))), BuildingType.UNIVERSITY)
+            nextDeliveryAt = Math.addExact(now, CivsResidents.workDuration(worker, CivsRules.PRODUCTION_INTERVAL))), BuildingType.UNIVERSITY, city)
         val done = project.workDone + 1
         val research = requireNotNull(city.research).let { state ->
             if (done == project.workRequired) state.copy(completed = state.completed + project.research, project = null)

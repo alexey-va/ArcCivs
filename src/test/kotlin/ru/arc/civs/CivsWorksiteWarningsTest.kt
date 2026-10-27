@@ -32,8 +32,11 @@ class CivsWorksiteWarningsTest : FunSpec({
                 val index = geometry.steps.indexOfFirst { it.after == "minecraft:cobblestone" &&
                     oldFinal[it.point]?.let { previous -> !previous.shaftSupport && previous.after == "minecraft:cobblestone" } == true }
                 (index >= 0) shouldBe true
+                val completedSpine = geometry.sections.getValue("spine")
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
-                for (step in old.steps + geometry.steps.take(index)) {
+                // The access spine is already paid and physically complete. Without this
+                // witness V5 correctly continues its deeper access before this floor row.
+                for (step in old.steps + geometry.steps.take(index) + completedSpine.map(geometry.steps::get)) {
                     val point = CivsWorksiteLayouts.point(mine, step.point)
                     world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(step.after ?: "minecraft:air")
                 }
@@ -65,7 +68,8 @@ class CivsWorksiteWarningsTest : FunSpec({
                 val target = CivsWorksiteLayouts.point(mine, geometry.steps[index].point)
                 val worker = spatialWorker(mine, "IRON_PICKAXE")
                 var city = CivsRules.validate(spatialCity(world.uid, listOf(mine), worker).copy(
-                    minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = 281))))
+                    minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = 281,
+                        sectionSteps = mapOf("spine" to completedSpine.size.toLong())))))
                 var locked = true
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> locked })

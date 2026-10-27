@@ -60,9 +60,7 @@ class CivsNavigationTerrainTest : FunSpec({
             val work = BudgetedTaskQueue(tasks, maximumSteps = 10000, nanoTime = { 0L })
             val worker = ArrayDeque<Runnable>()
             val owner = CivsResidentNavigation(tasks, work, Executor { worker.addLast(it) })
-            fun route(allowed: (CivPosition) -> Boolean = { it.y == 64 && it.z == 0 && it.x in 0..20 }): CitizenPacketRoute {
-                val route = owner.request(world, Location(world, .5, 64.0, .5), Location(world, 20.5, 64.0, .5),
-                    allowed, { _, _ -> true }, { 1.0 })
+            fun finish(route: CitizenPacketRoute): CitizenPacketRoute {
                 repeat(60) {
                     while (worker.isNotEmpty()) worker.removeFirst().run()
                     paper.performTicks(1)
@@ -71,6 +69,9 @@ class CivsNavigationTerrainTest : FunSpec({
                 }
                 error("route did not finish: ${owner.debug()}")
             }
+            fun route(allowed: (CivPosition) -> Boolean = { it.y == 64 && it.z == 0 && it.x in 0..20 }) =
+                finish(owner.request(world, Location(world, .5, 64.0, .5), Location(world, 20.5, 64.0, .5),
+                    allowed, { _, _ -> true }, { 1.0 }))
             fun misses() = (owner.debug().getValue("terrain_cache") as Map<*, *>)["misses"]
             try {
                 route().failure shouldBe null
@@ -81,6 +82,11 @@ class CivsNavigationTerrainTest : FunSpec({
                 misses() shouldBe captured
                 route { it.y == 64 && it.z == 0 && it.x in 0..20 && it.x != 10 }.failure shouldBe "no-path"
                 val warmed = route()
+                warmed.nativeShapeReads shouldBe 0
+                val replanned = finish(owner.replan(warmed, Location(world, .5, 64.0, .5)))
+                replanned.failure shouldBe null
+                // Only the start/endpoint neighbourhoods changed, not the nine surrounding chunks.
+                (replanned.nativeShapeReads <= 90) shouldBe true
                 world.getBlockAt(10, 64, 0).type = Material.STONE
                 world.getBlockAt(10, 65, 0).type = Material.STONE
                 var at = Location(world, .5, 64.0, .5)
@@ -88,6 +94,13 @@ class CivsNavigationTerrainTest : FunSpec({
                 (at.x < 10) shouldBe true
                 owner.changed(world.uid, CivPosition(10, 64, 0))
                 route().failure shouldBe "no-path"
+                // Plugins can remove a physical blocker without firing a native event.
+                // Refresh the failed frontier, retaining the rest of the learned corridor.
+                world.getBlockAt(10, 64, 0).type = Material.AIR
+                world.getBlockAt(10, 65, 0).type = Material.AIR
+                val reopened = route()
+                reopened.failure shouldBe null
+                (reopened.nativeShapeReads <= 64) shouldBe true
             } finally { owner.clear(); work.close(); tasks.close() }
         }
     }

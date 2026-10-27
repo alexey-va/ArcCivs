@@ -146,17 +146,17 @@ class CivsPopulationTest : FunSpec({
         shouldThrow<CivsRejection> { CivsRules.validate(bad) }.reason shouldBe "invalid-state"
     }
 
-    test("only working adults drain hunger and plain carried bread is consumed exactly once") {
+    test("only observed awake minutes drain hunger and carried bread waits for an observed meal") {
         var worker = CivWorker(popId(100), "Worker", null, inventory = mapOf("BREAD" to 2L))
         repeat(5) { worker = CivsResidents.activeMinute(worker, true) }
         CivsResidents.hunger(worker) shouldBe 15
         CivsEquipment.plainCount(worker, "BREAD") shouldBe 2
         worker = CivsResidents.activeMinute(worker, true)
-        CivsResidents.hunger(worker) shouldBe 20
-        CivsEquipment.plainCount(worker, "BREAD") shouldBe 1
+        CivsResidents.hunger(worker) shouldBe 14
+        CivsEquipment.plainCount(worker, "BREAD") shouldBe 2
         repeat(6) { worker = CivsResidents.activeMinute(worker, true) }
-        CivsEquipment.plainCount(worker, "BREAD") shouldBe 0
-        repeat(14) { worker = CivsResidents.activeMinute(worker, true) }
+        CivsEquipment.plainCount(worker, "BREAD") shouldBe 2
+        repeat(2) { worker = CivsResidents.activeMinute(worker, true) }
         CivsResidents.hunger(worker) shouldBe 6
         CivsResidents.workDuration(worker, 2_000) shouldBe 4_000L
         CivsResidents.workDuration(worker.copy(hunger = 7), 2_000) shouldBe 2_000L
@@ -167,7 +167,9 @@ class CivsPopulationTest : FunSpec({
         val idle = worker.copy(hunger = 12)
         CivsResidents.activeMinute(idle, false) shouldBe idle
         val child = idle.copy(childMinutes = 0, parentIds = setOf(popId(900), popId(901)))
-        CivsResidents.activeMinute(child, true) shouldBe child
+        val firstChildMinute = CivsResidents.activeMinute(child, true)
+        CivsResidents.hunger(firstChildMinute) shouldBe 12
+        CivsResidents.hunger(CivsResidents.activeMinute(firstChildMinute, true)) shouldBe 11
 
         val slots = MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }
         slots[4] = CivResidentItem("BREAD", 1)
@@ -212,8 +214,8 @@ private class PopulationFixture(houses: Int = 2) {
         128, "test", Stock(10, 20, 30), listOf(hall) + (1..houses).map { building(1 + it, BuildingType.HOUSE, it * 10) },
         (100..104).map { CivWorker(popId(it), "Resident $it", null, sex = if (it % 2 == 0) CivSex.MALE else CivSex.FEMALE) }))
 
-    fun minute(city: Settlement, working: Set<UUID> = emptySet()): Settlement =
-        CivsPopulation.advance(city, working, { _, id, _ -> "Resident ${id.leastSignificantBits}" }, { popId(nextId++) })
+    fun minute(city: Settlement, awake: Set<UUID> = city.workers.filter(CivsResidents::isChild).mapTo(hashSetOf()) { it.id }): Settlement =
+        CivsPopulation.advance(city, awake, { _, id, _ -> "Resident ${id.leastSignificantBits}" }, { popId(nextId++) })
 
     private fun building(id: Int, type: BuildingType, x: Int) = CivBuilding(popId(id), type, 1,
         CivPosition(x, 64, 0), 0, "test", CivBox(CivPosition(x - 1, 63, -1), CivPosition(x + 1, 68, 1)),

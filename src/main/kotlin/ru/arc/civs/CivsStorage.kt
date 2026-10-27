@@ -114,7 +114,7 @@ data class CivResidentTransfer(val playerId: UUID, val workerId: UUID,
 
 data class CivStoragePlan(val inventoryAfter: CivInventory, val changes: List<CivInventorySlotChange>,
     val playerDebit: CivPlayerDebit? = null, val residentTransfer: CivResidentTransfer? = null,
-    val worldChanges: List<CivPlanBlock>? = null)
+    val worldChanges: List<CivPlanBlock>? = null, val mine: CivMineReceipt? = null)
 data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupplyResult)
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
 data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
@@ -131,6 +131,7 @@ data class CivInventoryTransaction(
     val forestry: CivForestryReceipt? = null,
     val upkeep: CivRoadUpkeepReceipt? = null,
     val autonomousVisual: CivAutonomousVisualReceipt? = null,
+    val mine: CivMineReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
@@ -138,7 +139,7 @@ data class CivInventoryTransaction(
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
             autonomousVisual != null || after.autonomy != null && residentTransfer != null)
-        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual).size <= 1)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine).size <= 1)
         collected?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -158,6 +159,11 @@ data class CivInventoryTransaction(
         }
         autonomousVisual?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
+            it.validated(after)
+        }
+        mine?.let {
+            require(after.inventory != null && after.autonomy == null && worldChanges.orEmpty() == it.work.changes &&
+                it.work.forestry == null && it.work.upkeep == null)
             it.validated(after)
         }
         residentTransfer?.validated(after)
@@ -196,6 +202,15 @@ data class CivInventoryTransaction(
         }
     }
 }
+
+/** Detached before-state and action proof cross preparation and asynchronous journal boundaries. */
+internal fun CivMineReceipt.detached(): CivMineReceipt = copy(
+    buildingBefore = buildingBefore.copy(transit = buildingBefore.transit?.toList()),
+    planBefore = planBefore?.let(CivsMineProgress::detached),
+    work = work.copy(changes = work.changes.toList(), inputs = work.inputs.toMap(), outputs = work.outputs.toMap(),
+        equipmentAfter = work.equipmentAfter?.toList(), miningSections = work.miningSections?.toMap(),
+        miningAccessSections = work.miningAccessSections?.toMap(), miningDeferredSeals = work.miningDeferredSeals?.toSet()),
+)
 
 internal fun CivInventoryTransaction.playerId(): UUID? = playerDebit?.playerId ?: residentTransfer?.playerId ?: resurrection?.playerId
 
@@ -249,6 +264,9 @@ class CivsStorage(private val plugin: Plugin,
     }
     internal var validateAutonomousVisualNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "autonomous-work-authority-unavailable"))
+    }
+    internal var validateMineNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
+        CivInventoryApplyResult.Conflict(mapOf("reason" to "mine-authority-unavailable"))
     }
     private val nativePersistenceDelegate = lazy { CivsNativePersistence(plugin) { collectedChunkLease(it) } }
     private val nativePersistence by nativePersistenceDelegate
@@ -442,6 +460,11 @@ class CivsStorage(private val plugin: Plugin,
         }
         transaction.forestry?.let { require(it.before(transaction.after) == claim.city) }
         transaction.upkeep?.let { require(it.before(transaction.after) == claim.city) }
+        transaction.mine?.let { receipt ->
+            val key = receipt.buildingBefore.id.toString()
+            require(receipt.buildingBefore == claim.city.building(receipt.buildingBefore.id) &&
+                receipt.planBefore == claim.city.minePlans?.get(key) && receipt.legacyBefore == claim.city.mineProgress?.get(key))
+        }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
         }
@@ -952,16 +975,22 @@ class CivsStorage(private val plugin: Plugin,
             mapOf(material to (craftJob?.amount ?: CivsProduction.amount(building))), emptyList())
     }
 
-    fun prepareWork(city: Settlement, buildingId: UUID, inputs: Map<String, Long>, outputs: Map<String, Long>, worldChanges: List<CivPlanBlock>): CivStoragePlan {
+    fun prepareWork(city: Settlement, buildingId: UUID, inputs: Map<String, Long>, outputs: Map<String, Long>,
+        worldChanges: List<CivPlanBlock>, work: CivWorldWork? = null): CivStoragePlan {
         checkClaim(city)
-        if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
+        val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         validateAmounts(inputs)
         validateAmounts(outputs)
+        val mine = work?.takeIf { it.miningSections != null }?.let {
+            require(it.buildingId == buildingId && it.changes == worldChanges && city.autonomy == null)
+            CivMineReceipt(building, city.minePlans?.get(buildingId.toString()),
+                city.mineProgress?.get(buildingId.toString()), it).detached()
+        }
         val inventory = requireNotNull(city.inventory)
         if (inventory.mode == CivStorageMode.VIRTUAL) {
             var after = prepareBuildingDebit(city, buildingId, inputs).inventoryAfter
             outputs.forEach { (material, amount) -> after = creditVirtual(city.copy(inventory = after), material, amount, buildingId).inventoryAfter }
-            return CivStoragePlan(after, emptyList(), worldChanges = worldChanges.toList())
+            return CivStoragePlan(after, emptyList(), worldChanges = worldChanges.toList(), mine = mine)
         }
         val sources = localSources(city, buildingId).iterator()
         val captured = mutableListOf<Snapshot>()
@@ -978,7 +1007,7 @@ class CivsStorage(private val plugin: Plugin,
         if (missing.isNotEmpty()) throw CivsRejection("materials-missing", mapOf(
             "material" to missing.firstKey(), "count" to missing.getValue(missing.firstKey()).toString()))
         outputs.forEach { (material, amount) -> reject(insert(snapshots(), material, amount) != 0L, "storage-full") }
-        return plan(inventory, captured).copy(worldChanges = worldChanges.toList())
+        return plan(inventory, captured).copy(worldChanges = worldChanges.toList(), mine = mine)
     }
 
     private fun prepareBuildingCredit(city: Settlement, buildingId: UUID, material: String, count: Long): CivStoragePlan {
@@ -1241,6 +1270,11 @@ class CivsStorage(private val plugin: Plugin,
             else -> Unit
         }
         if (transaction.autonomousVisual != null) when (val authority = validateAutonomousVisualNative(transaction)) {
+            is CivInventoryApplyResult.Retry -> return authority
+            is CivInventoryApplyResult.Conflict -> return authority
+            else -> Unit
+        }
+        if (transaction.mine != null) when (val authority = validateMineNative(transaction)) {
             is CivInventoryApplyResult.Retry -> return authority
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit

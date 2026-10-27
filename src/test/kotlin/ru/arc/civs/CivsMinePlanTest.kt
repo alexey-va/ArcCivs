@@ -86,6 +86,7 @@ class CivsMinePlanTest : FunSpec({
                         city.workers.single().completedCycles shouldBe 0L
                         world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
                         world.getBlockAt(liquid.x, liquid.y, liquid.z).type = Material.STONE
+                        runtime.changed(world.uid, liquid)
                         repeat(32) { runtime.pulse(listOf(city)) }
                         val work = requireNotNull(runtime.plan(city, city.workers.single()))
                         work.changes.single().position shouldBe target
@@ -121,6 +122,14 @@ class CivsMinePlanTest : FunSpec({
                     var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE"))
                         .copy(minePlans = mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, stepIndex.toLong())))
                     for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
+                    seedMineNaturalCover(world, mine)
+                    geometry.steps.take(stepIndex).forEachIndexed { index, step ->
+                        val point = CivsWorksiteLayouts.point(mine, step.point)
+                        world.getBlockAt(point.x, point.y, point.z).blockData = Bukkit.createBlockData(geometry.expectedAfter(index, mine.rotation))
+                    }
+                    city = city.copy(minePlans = mapOf(key to
+                        seedMinePaidSpine(world, mine, city.minePlans!!.getValue(key))))
+                    val initialState = city.minePlans
                     for (y in target.y - 1..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
                         Bukkit.createBlockData("minecraft:ladder[facing=${geometry.facing},waterlogged=false]")
                     // Open the upper lip so the real outer wall's upper face is reachable
@@ -157,7 +166,7 @@ class CivsMinePlanTest : FunSpec({
                             runtime.validate(city, excavation)
                             world.getBlockAt(wall.x, wall.y, wall.z).type = Material.LAVA
                             shouldThrow<CivsRejection> { runtime.validate(city, excavation) }.reason shouldBe "stale-worksite"
-                            city.minePlans shouldBe mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, stepIndex.toLong()))
+                            city.minePlans shouldBe initialState
                             city.workers.single().completedCycles shouldBe 0L
                             city.inventory!!.buildingStock(mine.id) shouldBe emptyMap()
                             CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe originalSupplies
@@ -240,7 +249,13 @@ class CivsMinePlanTest : FunSpec({
                             val reopened = CivsStore(directory, Executor { it.run() })
                             reopened.load().join().single().minePlans shouldBe null
                             val recovered = reopened.loadInventoryTransactions().join().single()
-                            recovered.after.minePlans shouldBe mapOf(key to CivMinePlanState(CivsMinePlan.VERSION, requireNotNull(first.miningStep), legacyStep))
+                            val recoveredState = recovered.after.minePlans!!.getValue(key)
+                            recoveredState.version shouldBe CivsMinePlan.VERSION
+                            recoveredState.nextStep shouldBe first.miningStep
+                            recoveredState.legacyStep shouldBe legacyStep
+                            recoveredState.sectionSteps shouldBe first.miningSections
+                            recoveredState.excavation shouldBe CivsMinePlan.localPoint(mine, first.changes.single().position)
+                            CivsMineProgress.valid(geometry, recoveredState, mine) shouldBe true
                             first.changes.forEach { cell -> world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before }
                             storage.seal(recovered, keepViewersOpen = true)
                             storage.reconcile(recovered) shouldBe CivInventoryApplyResult.Applied
@@ -258,7 +273,12 @@ class CivsMinePlanTest : FunSpec({
                             runtime = CivsWorksites(plugin, access, { current, building -> storage.buildingAvailable(current, building) }, { _, _ -> false })
                             val next = nextWork()
                             withClue("cutover $legacyStep cursor=${city.minePlans}, first=$first, next=$next") {
-                                (next.changes.single().position != first.changes.single().position) shouldBe true
+                                // The same excavated cell now receives its paid ladder; it is not mined twice.
+                                next.changes.single().position shouldBe first.changes.single().position
+                                next.changes.single().before shouldBe "minecraft:air"
+                                next.changes.single().after.startsWith("minecraft:ladder[") shouldBe true
+                                next.inputs shouldBe mapOf("LADDER" to 1L)
+                                next.outputs shouldBe emptyMap()
                                 (requireNotNull(next.miningStep) >= requireNotNull(first.miningStep)) shouldBe true
                             }
                             city.workers.single().completedCycles shouldBe 1L

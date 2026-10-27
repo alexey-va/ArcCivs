@@ -21,8 +21,8 @@ import kotlin.math.floor
 
 /**
  * Physical resident bodies belong to this domain, not to the packet renderer.
- * Contact makes the resident yield a small horizontal step; it never rewrites the
- * player's velocity or observed movement, even when the resident cannot move aside.
+ * Player contact makes a resident yield; an actually walking resident also gives
+ * a small native horizontal impulse. Occupancy probes never move either body.
  */
 internal class CivsResidentCollisions(
     plugin: Plugin,
@@ -32,6 +32,7 @@ internal class CivsResidentCollisions(
     private var closed = false
     private var contactTick = Int.MIN_VALUE
     private val pushedResidents = hashSetOf<UUID>()
+    private val pushedPlayers = hashSetOf<UUID>()
 
     init { plugin.server.pluginManager.registerEvents(this, plugin) }
 
@@ -72,17 +73,40 @@ internal class CivsResidentCollisions(
         if (from.x == to.x && from.y == to.y && from.z == to.z) return bodies.none(last::overlaps)
         if (citizenSlideBody(from.toVector(), to.toVector(), first.widthX / 2,
                 first.height, first.widthZ / 2, bodies) == null) return true
-        for (player in players) if (first.overlaps(player.boundingBox) || last.overlaps(player.boundingBox))
+        for (player in players) if (first.overlaps(player.boundingBox) || last.overlaps(player.boundingBox)) {
+            pushPlayer(player, npc, from, to)
             yieldResident(player.location.toVector(), npc, from.toVector().subtract(to.toVector()))
+        }
         return false
     }
 
-    private fun yieldResident(playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
+    private fun contactFrame() {
         val tick = Bukkit.getCurrentTick()
         if (contactTick != tick) {
             contactTick = tick
             pushedResidents.clear()
+            pushedPlayers.clear()
         }
+    }
+
+    private fun pushPlayer(player: Player, npc: PacketPlayerNpc, from: Location, to: Location) {
+        contactFrame()
+        if (!pushedPlayers.add(player.uniqueId)) return
+        val away = player.location.toVector().subtract(npc.location.toVector()).setY(0.0)
+        if (away.lengthSquared() < .000001) away.copy(to.toVector().subtract(from.toVector())).setY(0.0)
+        if (away.lengthSquared() < .000001) return
+        away.normalize()
+        val velocity = player.velocity
+        if (!velocity.x.isFinite() || !velocity.y.isFinite() || !velocity.z.isFinite()) return
+        // One impulse per player/tick across all owned residents. Preserve jump/fall
+        // velocity and tangential momentum; native terrain collision owns the result.
+        val speed = velocity.dot(away)
+        val impulse = minOf(.05, .18 - speed)
+        if (impulse > 0) player.velocity = velocity.add(away.multiply(impulse))
+    }
+
+    private fun yieldResident(playerAt: Vector, npc: PacketPlayerNpc, movement: Vector) {
+        contactFrame()
         val away = npc.location.toVector().subtract(playerAt).setY(0.0)
         if (away.lengthSquared() < .000001) away.copy(movement).setY(0.0)
         if (away.lengthSquared() < .000001) away.setX(1.0)
@@ -101,6 +125,7 @@ internal class CivsResidentCollisions(
         if (closed) return
         closed = true
         pushedResidents.clear()
+        pushedPlayers.clear()
         HandlerList.unregisterAll(this)
     }
 

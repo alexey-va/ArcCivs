@@ -202,14 +202,94 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
 
     private val passageHistory = steps.withIndex().groupBy({ it.value.point }, { it.index + 1 to it.value.after })
 
+    /** Scheduling views only. Every V2..V5 ordinal and block remains immutable. */
+    val sections: Map<String, List<Int>> = steps.indices.groupBy { index ->
+        val step = steps[index]
+        if (step.stage == "shaft" && step.branch == null) "spine"
+        else "${step.floor ?: 0}/${step.stage}/${step.branch ?: "access"}"
+    }
+    private val sectionAt = Array(steps.size) { "" }.also { keys ->
+        sections.forEach { (key, indices) -> indices.forEach { keys[it] = key } }
+    }
+    private val offsetAt = IntArray(steps.size).also { offsets ->
+        sections.values.forEach { indices -> indices.forEachIndexed { offset, index -> offsets[index] = offset } }
+    }
+    val plannedCuts: Set<CivPosition> = steps.filter { it.after == null }.mapTo(hashSetOf()) { it.point }
+    val cutOrdinals: Map<CivPosition, List<Int>> = steps.indices.filter { steps[it].after == null }.groupBy { steps[it].point }
+    fun pendingMutationAt(point: CivPosition, prefix: Long, saved: Map<String, Long>): Boolean =
+        passageHistory[point].orEmpty().any { !completed(it.first - 1, prefix, saved) }
+
+    val positions: Set<CivPosition> = passageHistory.keys
+    private fun prefixCount(key: String, prefix: Long): Int = sections.getValue(key).binarySearch(prefix.toInt())
+        .let { if (it >= 0) it else -it - 1 }
+
+    fun section(index: Int): String = sectionAt[index]
+    fun sectionCount(key: String, prefix: Long, saved: Map<String, Long>): Long =
+        maxOf(saved[key] ?: 0, prefixCount(key, prefix).toLong())
+    fun completed(index: Int, prefix: Long, saved: Map<String, Long>): Boolean =
+        index < prefix || offsetAt[index] < (saved[sectionAt[index]] ?: 0)
+    fun sectionValid(saved: Map<String, Long>): Boolean = saved.size <= sections.size && saved.all { (key, count) ->
+        sections[key]?.let { count in 0..it.size.toLong() } == true
+    }
+    fun normalizedProgress(prefix: Long, saved: Map<String, Long>): Pair<Long, Map<String, Long>> {
+        require(prefix in 0..steps.size.toLong() && sectionValid(saved))
+        var next = prefix
+        while (next < steps.size && completed(next.toInt(), prefix, saved)) next++
+        return next to saved.filter { (key, count) -> count > prefixCount(key, next) }
+    }
+    fun advanceSection(index: Int, saved: Map<String, Long>): Map<String, Long> =
+        saved + (sectionAt[index] to maxOf(saved[sectionAt[index]] ?: 0, offsetAt[index].toLong() + 1))
+    fun expectedAt(point: CivPosition, prefix: Long, saved: Map<String, Long>, rotation: Int = 0): String? =
+        passageHistory[point]?.lastOrNull { completed(it.first - 1, prefix, saved) }?.let {
+            if (it.second == null) null else expectedAfter(it.first - 1, rotation)
+        }
+    fun expectedAfter(index: Int, rotation: Int): String {
+        val data = steps[index].after ?: return "minecraft:air"
+        if ('[' !in data) return data
+        val directions = listOf("north", "east", "south", "west")
+        val turned = Regex("north|east|south|west").replace(data) {
+            directions[Math.floorMod(directions.indexOf(it.value) + rotation / 90, 4)]
+        }
+        return turned.substringBefore('[') + "[" + turned.substringAfter('[').removeSuffix("]")
+            .split(',').sortedBy { it.substringBefore('=') }.joinToString(",") + "]"
+    }
+
+    /** Dependency checks are pure; the actual approach still needs native support and a route. */
+    fun sectionReady(key: String, prefix: Long, saved: Map<String, Long>): Boolean {
+        fun done(name: String) = sections[name]?.let { sectionCount(name, prefix, saved) == it.size.toLong() } != false
+        if (key == "spine") return true
+        if (!done("spine")) return false
+        val first = steps[sections.getValue(key).first()]
+        val floor = first.floor ?: return false
+        val landing = if (floor == 0) "entrance" else "landing"
+        return when {
+            first.stage == "shaft" && first.branch == landing -> true
+            first.branch == "opening" -> done("$floor/shaft/$landing") &&
+                (floor == 0 || done("${floor - 1}/shaft/railing"))
+            first.stage == "shaft" && first.branch in setOf("railing", "lining", "frame") -> done("$floor/shaft/opening") &&
+                (first.branch != "railing" || floor != floors.last().index || done("$floor/shaft/bottom"))
+            first.branch == "bottom" -> done("$floor/shaft/opening")
+            first.branch == "generator" -> sections.keys.filter { it != key }.all(::done)
+            first.stage == "gallery" -> done("$floor/shaft/$landing") && when {
+                first.branch == "frame" -> sections.keys.filter { it.startsWith("$floor/gallery/") && it != key &&
+                    !it.endsWith("/generator") }.all(::done)
+                first.branch?.endsWith("-frame") == true -> done("$floor/gallery/${first.branch.removeSuffix("-frame")}")
+                first.branch?.startsWith("left-") == true -> done("$floor/gallery/left")
+                first.branch?.startsWith("right-") == true -> done("$floor/gallery/right")
+                else -> true
+            }
+            else -> false
+        }
+    }
+
     /**
      * Prefix admission, not a collision/ownership claim. In particular V3 may have a paid
      * prerequisite footing outside its ordinal; its real support is checked by the caller.
      */
-    fun builtStanding(local: CivPosition, nextStep: Long): Boolean {
+    fun builtStanding(local: CivPosition, nextStep: Long, sectionSteps: Map<String, Long> = emptyMap()): Boolean {
         if (nextStep !in 0..steps.size.toLong() || version < 5 && !containsWorkStanding(local)) return false
         fun open(point: CivPosition): Boolean {
-            val change = passageHistory[point]?.lastOrNull { it.first <= nextStep }
+            val change = passageHistory[point]?.lastOrNull { completed(it.first - 1, nextStep, sectionSteps) }
             if (change != null) return change.second == null || change.second!!.startsWith("minecraft:ladder[") ||
                 change.second == "minecraft:torch"
             return point.y in bottom.y..bottom.y + 3 && (point.x to point.z) in accessColumns &&
@@ -538,6 +618,22 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
     companion object {
         const val VERSION = 5
         private val plans = ConcurrentHashMap<String, CivsMinePlan>()
+        private data class SealLineage(val all: Set<CivPosition>, val higher: Set<CivPosition>)
+        private val sealLineages = object : LinkedHashMap<String, SealLineage>(16, .75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SealLineage>): Boolean = size > 64
+        }
+
+        private fun sealLineage(building: CivBuilding): SealLineage = sealLineages.getOrPut(building.schematicId) {
+            val higher = CivsWorksiteLayouts.mineFamily(building).filter { it.second > building.level }.flatMap { (id, level) ->
+                forBuilding(building.copy(schematicId = id, level = level))?.positions.orEmpty()
+            }.toSet()
+            SealLineage(forBuilding(building)?.positions.orEmpty() + higher, higher)
+        }
+
+        /** Static mutation coordinates only; never retain a world snapshot or unrelated paid lining. */
+        @Synchronized fun sealPositions(building: CivBuilding): Set<CivPosition> = sealLineage(building).all
+        @Synchronized fun futureSealPositions(building: CivBuilding): Set<CivPosition> = sealLineage(building).higher
+
         fun forBuilding(building: CivBuilding, version: Int = VERSION): CivsMinePlan? {
             if (version !in 2..VERSION) return null
             val key = "${building.schematicId}:$version"

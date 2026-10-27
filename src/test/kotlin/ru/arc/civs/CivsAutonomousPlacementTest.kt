@@ -411,7 +411,7 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("route proof cannot cross a wall enclosing the only entrance") {
+    test("route proof rejects a bounded partial path before a wall enclosing the only entrance") {
         spatialScenario { s ->
             val b = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(0, 64, 18), 180, 1).building
             val target = b.entrance
@@ -450,6 +450,7 @@ private class InfrastructurePlacementScenario : AutoCloseable {
     val planner = CivsAutonomousPlacement(blueprints, world, Executor(Runnable::run),
         loadAccess = { CompletableFuture.completedFuture(access) })
     init {
+        every { blueprints.autonomousSource(any(), any()) } returns null
         every { world.autonomousHeightField(any(), any(), any()) } returns CompletableFuture.completedFuture(surface)
         every { world.captureTerraform(any(), any(), any(), any()) } answers {
             drafts += arg<CivTerraformDraft>(1)
@@ -469,6 +470,7 @@ private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoClos
     var access = CompletableFuture.completedFuture(CivAutonomousAccess())
     val planner = CivsAutonomousPlacement(blueprints, worldAccess, Executor(Runnable::run), loadAccess = { access })
     init {
+        every { blueprints.autonomousSource(any(), any()) } returns null
         for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
         for (x in -40..40) for (z in -40..40) {
             world.getBlockAt(x, 63, z).type = Material.DIRT

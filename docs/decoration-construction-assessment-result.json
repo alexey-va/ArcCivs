@@ -1,0 +1,1858 @@
+{
+  "title": "ArcCivs .96 closed Auto decoration material bill",
+  "assumptions": [
+    "Explicit synthetic finite shape sensitivities, not telemetry: small/medium/large captured bills use12/64/256 timber units and32/128/512 other billed units. Audit day assumes two newly paid Auto decorations per village. This is not a recurring daily allowance; calculator network-week figures normalize that sensitivity over seven fresh village-days, not automatic weekly issuance.",
+    "Before generic decoration shared functional slots and was unreachable after the full16-siteAuto profile. After its exact captured bill burns1closedWOOD per vanilla timber-tag unit and1closedSTONE per other billedunit, FOOD0. A missing saved bill is rejected. An exact empty bill projects to zero; existing free-water treatment stays in the native bill, and every positive billed unit is charged.",
+    "Closed commodities do not directly withdraw as items. Non-editors cannot break protected Auto structures. Existing owner/member editor rights remain: an Auto owner can break placed native blocks and obtain their native drops, including from new decorations. This privileged construction-to-world-to-drop route already exists for Auto buildings; it is not treated as ordinary non-editor earnings or valued as zero indirect items. Manual settlements pay the exact native material bill. Native recovered drops, fortune and SELL proceeds depend on chosen source blocks and are not equated to the captured bill.",
+    "Reuse saved construction materials and capturedSHA; price validation is the same deterministic projection of savedmaterials, never current mutablecatalog. Savedcost andpayment remainacceptedreceipt terms. No change to olddecor/infrastructureorders, buildingcosts, laborinterval, materialyield, currency, SELL orfuturecontracts.",
+    "Only actual required captured material counts are charged, once per acceptedorder. Cancellation/restart uses existing durableconstructionreceipt. Auto cannot materializeFOOD/products/WOOD/STONE into withdrawable nativeinventories. Unsupported sourceassets remainrejectedwithprovenance; no bypass forfluids,protectedland orinvalidanchor.",
+    "Separate live site bounds: DECORATION changes from sharing the16functional slots (so full Auto profile permits zero) to8ordinary or2Auto decorative sites, with no jobs/beds/output. Functional16, infrastructure96 and resident48 limits remain. Total snapshot bound becomes120=16+96+8. Two Auto synthetic bills burn24/128/512WOOD and64/256/1024STONE; manual8decorations require8exactnativebills, no subsidy. Remove/rebuild still needs a fresh paid order and the existing owner authority; the site bound is not a lifetime issuance cap."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "closed_wood": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_captured_decoration",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "24",
+            "128",
+            "512"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "168",
+            "3584",
+            "21504"
+          ],
+          "network_weekly_net": [
+            "-168",
+            "-3584",
+            "-21504"
+          ],
+          "player_daily_potential_net": [
+            "-24",
+            "-128",
+            "-512"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "24",
+              "128",
+              "512"
+            ],
+            "network_weekly": [
+              "168",
+              "3584",
+              "21504"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_captured_decoration",
+            "kind": "burn",
+            "player_daily_potential": [
+              "24",
+              "128",
+              "512"
+            ],
+            "network_weekly_after_cap": [
+              "168",
+              "3584",
+              "21504"
+            ],
+            "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "-168",
+        "-3584",
+        "-21504"
+      ]
+    },
+    "closed_stone": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_captured_decoration",
+            "kind": "burn",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "64",
+            "256",
+            "1024"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "448",
+            "7168",
+            "43008"
+          ],
+          "network_weekly_net": [
+            "-448",
+            "-7168",
+            "-43008"
+          ],
+          "player_daily_potential_net": [
+            "-64",
+            "-256",
+            "-1024"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "64",
+              "256",
+              "1024"
+            ],
+            "network_weekly": [
+              "448",
+              "7168",
+              "43008"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "finite_captured_decoration",
+            "kind": "burn",
+            "player_daily_potential": [
+              "64",
+              "256",
+              "1024"
+            ],
+            "network_weekly_after_cap": [
+              "448",
+              "7168",
+              "43008"
+            ],
+            "basis": "Two newly paid Auto sites on the synthetic audit day; finite exact captured bills, not a production reward or recurring quota."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "-448",
+        "-7168",
+        "-43008"
+      ]
+    },
+    "vault": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "player_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "closed_food": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "native_billed_units_placed": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "privileged_authored_bill",
+            "kind": "item",
+            "player_daily_potential": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly_after_cap": [
+              "0",
+              "0",
+              "0"
+            ],
+            "basis": "Synthetic paid bill units placed, not guaranteed recovered drops or sale proceeds; only owner/editor can harvest. Two sites with44/192/768billed units each. Native multi-part blocks/drop rules are separate."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "88",
+              "384",
+              "1536"
+            ],
+            "network_weekly": [
+              "616",
+              "10752",
+              "64512"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "privileged_authored_bill",
+            "kind": "item",
+            "player_daily_potential": [
+              "88",
+              "384",
+              "1536"
+            ],
+            "network_weekly_after_cap": [
+              "616",
+              "10752",
+              "64512"
+            ],
+            "basis": "Synthetic paid bill units placed, not guaranteed recovered drops or sale proceeds; only owner/editor can harvest. Two sites with44/192/768billed units each. Native multi-part blocks/drop rules are separate."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prices": []
+}

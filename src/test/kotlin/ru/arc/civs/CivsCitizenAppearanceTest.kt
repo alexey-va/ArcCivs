@@ -101,6 +101,14 @@ class CivsCitizenAppearanceTest : FunSpec({
         citizenWorkStatus(guard.copy(idleReason = "building-unavailable"), CitizenPhase.WORKING) shouldBe null
     }
 
+    test("an innkeeper serves guests without production swings or a fake work prop") {
+        val innkeeper = appearancePlan(BuildingType.TAVERN)
+        for (phase in CitizenPhase.entries) citizenWorking(innkeeper, phase) shouldBe false
+        citizenTool(innkeeper) shouldBe null
+        citizenWorkStatus(innkeeper, CitizenPhase.WORKING) shouldBe "serving-guests"
+        citizenWorkStatus(innkeeper, CitizenPhase.TO_WORK) shouldBe null
+    }
+
     test("children use half scale and retain the same signed skin after growing up") {
         val adult = CivWorker(UUID(0, 12), "Resident", null)
         val child = adult.copy(childMinutes = 0, parentIds = setOf(UUID(0, 10), UUID(0, 11)))

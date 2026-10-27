@@ -373,8 +373,10 @@ class CivsRulesTest : FunSpec({
             city = construct(fund(city, CivsRules.cost(upgrade.type, level)), upgrade)
         }
         var nextResident = 105
-        repeat(80) {
-            city = CivsPopulation.advance(city, emptySet(), { _, id, _ -> "Resident ${id.leastSignificantBits}" },
+        // Families share a one-birth-per-minute lane; the second family's fourth
+        // turn follows on minute 81 when another resident already lives in the first home.
+        repeat(CivsPopulation.BIRTH_MINUTES * 4 + 1) {
+            city = CivsPopulation.advance(city, city.workers.mapTo(hashSetOf()) { it.id }, { _, id, _ -> "Resident ${id.leastSignificantBits}" },
                 { uuid(nextResident++) })
         }
         city.workers.size shouldBe 12

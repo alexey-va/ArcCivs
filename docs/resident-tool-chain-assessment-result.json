@@ -1,0 +1,1607 @@
+{
+  "title": "ArcCivs .96 existing iron tool demand chain",
+  "assumptions": [
+    "Explicit sensitivity, not runtime telemetry: 5/20/60 existing native craft completions per active blacksmith-day. One cycle stays60seconds before hunger slowdown, walking, stock and courier delays. No timers grant production without observed completion.",
+    "Pickaxe row represents one alternative tool recipe, not four simultaneous outputs. Shovel1Iron+2Sticks, Axe/Pickaxe3Iron+2Sticks, Hoe2Iron+2Sticks each produce1, exactly existing native catalog. No rates, resource quantities or prices change.",
+    "The new connection automates existing consumer hut demand, then existing courier delivery and arrival-gated equip. One spare per assigned resident/hut remains the existing desired-stock policy. Accepted recipe version and durable inventory receipts fence replay/duplicate pickup.",
+    "Item input/output rows are separate units; no coin redemption assumed. Current SELL and future contracts remain separate unchanged. Auto remains closed IRON_TOOL_KIT and does not materialize native tools or player withdrawals."
+  ],
+  "scenario_order": [
+    "low",
+    "base",
+    "high"
+  ],
+  "currencies": {
+    "native_iron_tools": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "5",
+            "20",
+            "60"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "35",
+            "560",
+            "2520"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "35",
+            "560",
+            "2520"
+          ],
+          "player_daily_potential_net": [
+            "5",
+            "20",
+            "60"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "5",
+              "20",
+              "60"
+            ],
+            "network_weekly": [
+              "35",
+              "560",
+              "2520"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "mint",
+            "player_daily_potential": [
+              "5",
+              "20",
+              "60"
+            ],
+            "network_weekly_after_cap": [
+              "35",
+              "560",
+              "2520"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "5",
+            "20",
+            "60"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "35",
+            "560",
+            "2520"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "35",
+            "560",
+            "2520"
+          ],
+          "player_daily_potential_net": [
+            "5",
+            "20",
+            "60"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "5",
+              "20",
+              "60"
+            ],
+            "network_weekly": [
+              "35",
+              "560",
+              "2520"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "mint",
+            "player_daily_potential": [
+              "5",
+              "20",
+              "60"
+            ],
+            "network_weekly_after_cap": [
+              "35",
+              "560",
+              "2520"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "native_iron_ingots": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "15",
+            "60",
+            "180"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "105",
+            "1680",
+            "7560"
+          ],
+          "network_weekly_net": [
+            "-105",
+            "-1680",
+            "-7560"
+          ],
+          "player_daily_potential_net": [
+            "-15",
+            "-60",
+            "-180"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "15",
+              "60",
+              "180"
+            ],
+            "network_weekly": [
+              "105",
+              "1680",
+              "7560"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "burn",
+            "player_daily_potential": [
+              "15",
+              "60",
+              "180"
+            ],
+            "network_weekly_after_cap": [
+              "105",
+              "1680",
+              "7560"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "15",
+            "60",
+            "180"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "105",
+            "1680",
+            "7560"
+          ],
+          "network_weekly_net": [
+            "-105",
+            "-1680",
+            "-7560"
+          ],
+          "player_daily_potential_net": [
+            "-15",
+            "-60",
+            "-180"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "15",
+              "60",
+              "180"
+            ],
+            "network_weekly": [
+              "105",
+              "1680",
+              "7560"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "burn",
+            "player_daily_potential": [
+              "15",
+              "60",
+              "180"
+            ],
+            "network_weekly_after_cap": [
+              "105",
+              "1680",
+              "7560"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "native_sticks": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "10",
+            "40",
+            "120"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "70",
+            "1120",
+            "5040"
+          ],
+          "network_weekly_net": [
+            "-70",
+            "-1120",
+            "-5040"
+          ],
+          "player_daily_potential_net": [
+            "-10",
+            "-40",
+            "-120"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "10",
+              "40",
+              "120"
+            ],
+            "network_weekly": [
+              "70",
+              "1120",
+              "5040"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "burn",
+            "player_daily_potential": [
+              "10",
+              "40",
+              "120"
+            ],
+            "network_weekly_after_cap": [
+              "70",
+              "1120",
+              "5040"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "10",
+            "40",
+            "120"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "70",
+            "1120",
+            "5040"
+          ],
+          "network_weekly_net": [
+            "-70",
+            "-1120",
+            "-5040"
+          ],
+          "player_daily_potential_net": [
+            "-10",
+            "-40",
+            "-120"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "10",
+              "40",
+              "120"
+            ],
+            "network_weekly": [
+              "70",
+              "1120",
+              "5040"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": [
+          {
+            "id": "iron_pickaxe_demand_chain",
+            "kind": "burn",
+            "player_daily_potential": [
+              "10",
+              "40",
+              "120"
+            ],
+            "network_weekly_after_cap": [
+              "70",
+              "1120",
+              "5040"
+            ],
+            "basis": "Same existing pickaxe recipe before/after; alternative manual selected production vs automatic per-building one-spare demand. Production time alone ceiling60cycles/hour excludes required walking, supplies, food and full stores."
+          }
+        ]
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "vault": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "tokens": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    },
+    "player_xp": {
+      "before": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "after": {
+        "totals": {
+          "mint_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "burn_per_player_day": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_mint": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_burn": [
+            "0",
+            "0",
+            "0"
+          ],
+          "network_weekly_net": [
+            "0",
+            "0",
+            "0"
+          ],
+          "player_daily_potential_net": [
+            "0",
+            "0",
+            "0"
+          ]
+        },
+        "by_kind": {
+          "burn": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "escrow": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "item": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "liability": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "mint": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "refund": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "transfer": {
+            "player_daily": [
+              "0",
+              "0",
+              "0"
+            ],
+            "network_weekly": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        },
+        "flows": []
+      },
+      "weekly_net_delta": [
+        "0",
+        "0",
+        "0"
+      ]
+    }
+  },
+  "prices": []
+}

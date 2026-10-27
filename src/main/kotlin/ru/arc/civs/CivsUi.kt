@@ -132,8 +132,11 @@ class CivsUi internal constructor(
         runtime.beginFlow(player)
         roots[player.uniqueId] = "civs.worker"
         val city = host.settlements().firstOrNull { it.id == cityId }
-        if (city == null || !city.canManage(player.uniqueId)) {
-            notice(player, "civs.worker", "workers.title", text.reason(player, "not-member")) { showEntry(player) }
+        if (city == null || !(if (city.autonomy != null) isAdmin(player) else city.canManage(player.uniqueId))) {
+            present(player, "civs.worker", "workers.detail-title", listOf(body(text.reason(player,
+                if (city?.autonomy != null) "not-authorized" else "not-member"))), emptyList(), cityId = cityId)
+        } else if (city.autonomy != null) {
+            showWorker(player, workerId, cityId = city.id)
         } else {
             val worker = city.workers.firstOrNull { it.id == workerId }
             val building = worker?.assignment?.let(city::building)
@@ -218,34 +221,106 @@ class CivsUi internal constructor(
         if (city.autonomy == null) return openBuilding(player, cityId, buildingId)
         val building = city.building(buildingId) ?: return
         val workers = city.workers.filter { it.assignment == buildingId }
-        present(player, "civs.building-inspection", "autonomy.building-title", listOfNotNull(
-            body(buildingName(player, building.type, building.level)),
-            table(buildList {
-                add(tr(player, "autonomy.village-label") to tint(text.literal(city.name), LAND))
-                add(tr(player, "label.state") to buildingStatus(player, city, building))
-                add(tr(player, "label.workers") to tint(tr(player, "common.fraction", "value" to workers.size,
-                    "limit" to CivsRules.slots(city, building)), PEOPLE))
-                CivsRules.resource(building.type)?.let { resource ->
-                    add(tr(player, "label.output") to tr(player, "autonomy.production", "amount" to CivsRules.deliveryAmount(building),
-                        "resource" to text.resource(player, resource)))
-                }
-            }),
-            if (workers.isEmpty()) null else body(Component.join(Component.newline(), workers.map {
-                tr(player, "common.detail", "label" to tint(text.literal(it.name), PEOPLE), "value" to workerStatus(player, it))
-            })),
-            body(tint(tr(player, "autonomy.shared-stock"), STOCK)),
-            DialogTables.body(listOf(Resource.entries.map { tint(text.literal(city.stock[it]), STOCK) }),
-                Resource.entries.map { text.resource(player, it) }, DialogTables.Frame.COMMON, 320, listOf(1, 1, 1)),
-            body(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help"),
-            error?.let(::body),
-        ), buildList {
+        val residents = city.workers.filter { it.homeId == buildingId }
+        val bodies = buildList {
+            if (building.type == BuildingType.TOWN_HALL) {
+                add(body(buildingName(player, building.type, building.level).append(text.literal(" · "))
+                    .append(tint(text.literal(city.name), LAND))))
+                addAll(townHallBodies(player, city))
+            } else {
+                add(body(buildingName(player, building.type, building.level)))
+                val details = presentation.facts(buildList {
+                    add(presentation.field(DialogDecoration.FieldIcon.LANDS, tr(player, "autonomy.village-label")) to tint(text.literal(city.name), LAND))
+                    add(tr(player, "label.state") to DialogDecoration.stateBadge(buildingStatus(player, city, building), DialogDecoration.StateTone.INFO))
+                    if (building.type.isResidence) {
+                        add(presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.population")) to
+                            tint(text.literal(residents.size), PEOPLE))
+                        add(tr(player, "label.beds") to text.literal(CivsPopulation.houseBeds(building)))
+                    }
+                    if (building.type != BuildingType.HOUSE && CivsRules.slots(city, building) > 0)
+                        add(tr(player, "label.workers") to tint(tr(player, "common.fraction", "value" to workers.size,
+                            "limit" to CivsRules.slots(city, building)), PEOPLE))
+                    CivsRules.resource(building.type)?.let { resource ->
+                        add(tr(player, "label.output") to tr(player, "autonomy.production", "amount" to CivsRules.deliveryAmount(building),
+                            "resource" to text.resource(player, resource)))
+                    }
+                }, if (building.type.isResidence) DialogTables.PanelSkin.COCOA else DialogTables.PanelSkin.NAVY)
+                add(details)
+                if (building.type.isResidence) add(residentRoster(player, residents, details.width))
+                if (building.type != BuildingType.HOUSE && workers.isNotEmpty()) add(body(Component.join(Component.newline(), workers.map {
+                    tr(player, "common.detail", "label" to tint(text.literal(it.name), PEOPLE), "value" to workerStatus(player, it))
+                })))
+            }
+            if (building.type == BuildingType.WAREHOUSE || building.type == BuildingType.TOWN_HALL) {
+                add(presentation.heading(tint(tr(player, "autonomy.shared-stock"), STOCK)))
+                add(sharedStock(player, city, compact = building.type == BuildingType.TOWN_HALL))
+            }
+            add(body(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help"))
+            error?.let { add(body(it)) }
+        }
+        present(player, "civs.building-inspection", "autonomy.building-title",
+            if (building.type == BuildingType.TOWN_HALL) listOf(presentation.compact(bodies)) else bodies, buildList {
+            if (building.type == BuildingType.TOWN_HALL && isAdmin(player)) {
+                add(button(player, "workers", "workers.open", PEOPLE) { showAutonomousWorkers(player, cityId) })
+                add(button(player, "buildings", "buildings.open", LAND) { showAutonomousBuildings(player, cityId) })
+            }
             if (building.type == BuildingType.UNIVERSITY)
                 add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
             if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.QUARRY))
                 add(button(player, "industry", "industry.open", STOCK) { showIndustryBuilding(player, cityId, buildingId) })
             add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) })
-            add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showBuildingInspection(player, cityId, buildingId) })
         }, reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
+    }
+
+    private fun residentRoster(player: Player, residents: List<CivWorker>, width: Int = 320): PaperDialogBody =
+        if (residents.isEmpty()) body(player, "buildings.no-residents") else presentation.paragraph(Component.join(Component.newline(),
+            listOf(tint(tr(player, "buildings.residents"), PEOPLE)) + residents.map { resident ->
+                tr(player, "common.detail", "label" to tint(text.literal(resident.name), PEOPLE),
+                    "value" to tr(player, if (CivsResidents.isChild(resident)) "workers.child" else "workers.adult"))
+            }), width)
+
+    private fun sharedStock(player: Player, city: Settlement, compact: Boolean = false): PaperDialogBody {
+        val rows = Resource.entries.map { text.resource(player, it) to tint(text.literal(city.stock[it]), STOCK) } +
+            CivIndustryProduct.entries.filter { (city.autonomy?.products?.get(it) ?: 0L) > 0 }.map {
+                industryProductName(player, it) to tint(text.literal(city.autonomy?.products?.get(it) ?: 0L), STOCK)
+            }
+        val useRows = compact || rows.size > 3
+        return presentation.facts(rows, DialogTables.PanelSkin.EVERGREEN,
+            if (useRows) DialogTables.FactsLayout.ROWS else DialogTables.FactsLayout.METRICS, if (useRows) 2 else 3)
+    }
+
+    private fun townHallBodies(player: Player, city: Settlement): List<PaperDialogBody> = buildList {
+        val status = city.autonomy?.let { if (it.paused) CivsAutonomyView("paused") else host.autonomyStatus(city.id) }
+        status?.let { add(body(DialogDecoration.stateBadge(autonomyStage(player, it),
+            if (it.stage in setOf("paused", "resources", "blocked", "unhealthy")) DialogDecoration.StateTone.ATTENTION
+            else DialogDecoration.StateTone.INFO))) }
+        add(presentation.facts(listOf(
+            presentation.field(DialogDecoration.FieldIcon.PLAYER, tr(player, "label.population")) to tint(tr(player, "common.fraction",
+                "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)), PEOPLE),
+            presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.beds")) to tint(text.literal(CivsRules.beds(city)), PEOPLE),
+            presentation.field(DialogDecoration.FieldIcon.LANDS, tr(player, "label.buildings")) to tint(text.literal(CivsRules.buildingCount(city)), LAND),
+        ), DialogTables.PanelSkin.NAVY, DialogTables.FactsLayout.METRICS, 3))
+        add(body(tr(player, "common.detail", "label" to tr(player, "label.unassigned"),
+            "value" to city.workers.count { it.assignment == null && !CivsResidents.isChild(it) })))
+        val construction = city.construction
+        if (construction == null) add(body(tr(player, "city.no-construction"))) else {
+            val planned = construction.plannedBuilding ?: city.building(construction.buildingId)
+            val label = tr(player, "common.detail", "label" to tr(player, "label.construction"),
+                "value" to (planned?.let { buildingName(player, it.type, construction.targetLevel) } ?: tr(player, "buildings.generic")))
+            if (construction.workRequired > 0) add(presentation.progress(label,
+                construction.workDone, construction.workRequired, tr(player, "common.fraction",
+                    "value" to construction.workDone, "limit" to construction.workRequired)))
+            else add(body(label))
+            construction.failure?.let { add(body(text.reason(player, it))) }
+        }
+        val goal = if (city.autonomy != null) host.nextAutonomyGoal(city.id) else null
+        nextExpansion(player, city, goal)?.let(::add)
+        if (city.autonomy == null && city.constructionQueue.orEmpty().isEmpty()) add(body(tint(nextStep(player, city), STOCK)))
+        status?.reason?.let { if (it != city.construction?.failure) add(body(text.reason(player, it))) }
+        if (goal == null && status != null && Resource.entries.any { status.missing[it] > 0 }) add(body(tr(player,
+            "autonomy.missing", "resources" to Component.join(text.literal(" · "), Resource.entries.filter { status.missing[it] > 0 }.map {
+                tr(player, "common.detail", "label" to text.resource(player, it), "value" to status.missing[it])
+            }))))
     }
 
     private fun openInspectionInventory(player: Player, cityId: UUID, buildingId: UUID) {
@@ -366,6 +441,7 @@ class CivsUi internal constructor(
             body(player, if (preview.autonomous) "autonomy.preview-help" else if (preview.movable) "preview.site-help" else "preview.upgrade-help"),
             facts(player, listOf(
                 tr(player, "label.building") to buildingName(player, preview.type, preview.level),
+                tr(player, "label.style") to text.style(player, preview.style),
                 tr(player, "label.city") to text.literal(preview.cityName),
                 tr(player, "label.control") to coordinates(player, preview.control),
                 tr(player, "label.entrance") to coordinates(player, preview.entrance),
@@ -461,7 +537,6 @@ class CivsUi internal constructor(
                 })
             }
             add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, cityId) })
-            add(button(player, "refresh", "research.refresh", NAVIGATION) { showResearch(player, cityId) })
         }, reopen = { showResearch(player, cityId) }, cityId = cityId)
     }
 
@@ -521,7 +596,6 @@ class CivsUi internal constructor(
             })
             if (!view.autonomous && canManage && view.universityId != null)
                 add(button(player, "university", "research.university-open", LAND) { showBuilding(player, view.universityId) })
-            add(button(player, "refresh", "research.refresh", NAVIGATION) { showResearchDetail(player, cityId, research) })
         }, reopen = { showResearchDetail(player, cityId, research) }, cityId = cityId)
     }
 
@@ -536,12 +610,6 @@ class CivsUi internal constructor(
         present(player, "civs.industry", "industry.title", listOfNotNull(
             body(tint(text.literal(viewedCity.name), LAND)),
             presentation.paragraph(tr(player, if (view.autonomous) "industry.auto-help" else "industry.native-help")),
-            if (view.autonomous) presentation.summary(Component.join(Component.newline(), listOf(
-                tint(tr(player, "industry.stock"), STOCK),
-                Component.join(text.literal(" · "), CivIndustryProduct.entries.map { product ->
-                    tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to (view.products[product] ?: 0L))
-                }),
-            ))) else null,
             if (view.buildings.isEmpty()) body(player, "industry.empty") else null,
             error?.let(::body),
         ), buildList {
@@ -555,7 +623,6 @@ class CivsUi internal constructor(
             }
             pages(player, current, view.buildings.size) { showIndustry(player, cityId, it) }
             add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
-            add(button(player, "refresh", "research.refresh", NAVIGATION) { showIndustry(player, cityId, current) })
         }, reopen = { showIndustry(player, cityId, current) }, cityId = cityId)
     }
 
@@ -601,7 +668,6 @@ class CivsUi internal constructor(
                 })
             }
             add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
-            add(button(player, "refresh", "research.refresh", NAVIGATION) { showIndustryBuilding(player, cityId, buildingId) })
         }, reopen = { showIndustryBuilding(player, cityId, buildingId) }, cityId = cityId)
     }
 
@@ -1033,7 +1099,9 @@ class CivsUi internal constructor(
     private fun showOffer(player: Player, type: BuildingType, error: Component? = null) {
         val city = city(player) ?: return
         val requiredResearch = CivsResearch.required(type, 1)?.takeUnless { CivsResearch.has(city, it) }
-        val eligible = CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS && requiredResearch == null
+        val room = if (type == BuildingType.DECORATION) city.buildings.count { it.type == type } < CivsRules.decorationLimit(city)
+            else CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS
+        val eligible = room && requiredResearch == null
         present(player, "civs.offer", "buildings.offer-title", listOfNotNull(
             body(buildingName(player, type, 1)), body(player, "building-purpose.${type.name.lowercase(Locale.ROOT)}"),
             if (type !in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER) &&
@@ -1041,14 +1109,82 @@ class CivsUi internal constructor(
                 body(player, "buildings.workplaces-levels") else null,
             body(player, "buildings.site-help"),
             requiredResearch?.let { body(tr(player, "research.building-required", "name" to researchName(player, it))) },
-            if (CivsRules.buildingCount(city) >= CivsRules.MAX_BUILDINGS) body(player, "reason.building-limit") else null,
+            if (!room) body(player, "reason.building-limit") else null,
             error?.let(::body),
         ), buildList {
             if (requiredResearch != null) add(button(player, "research", "research.open", PERSONAL) { showResearchDetail(player, city.id, requiredResearch) })
-            if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT, appearance = Action.FOUND) {
-                beginSelection(player, { host.beginBuildingSelection(player, type) }) { showOffer(player, type, it) }
-            })
+            if (eligible) add(button(player, "prepare", "buildings.prepare", COMMIT, appearance = Action.FOUND) { showBuildingStyles(player, type) })
         }, reopen = { showOffer(player, type) }, cityId = city.id)
+    }
+
+    private fun showBuildingStyles(player: Player, type: BuildingType, page: Int = 0, error: Component? = null) {
+        val city = city(player) ?: return
+        val styles = host.styles(type)
+        val current = page.coerceIn(0, lastPage(styles.size))
+        present(player, "civs.building-styles", "buildings.style-title", listOfNotNull(
+            body(buildingName(player, type, 1)),
+            body(player, "buildings.style-help"),
+            if (styles.isEmpty()) body(player, "buildings.styles-empty") else null,
+            error?.let(::body),
+        ), buildList {
+            styles.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, style ->
+                add(valueButton(player, "style_$index", "common.choice", text.style(player, style),
+                    if (style == city.style) LAND else WHITE) {
+                    val choices = host.blueprintChoices(type, style)
+                    if (type == BuildingType.DECORATION && choices.size > 1) showBlueprintCategories(player, style)
+                    else if (choices.size > 1) showBlueprintChoices(player, type, style)
+                    else beginSelection(player, {
+                        if (choices.size == 1) host.beginBlueprintSelection(player, type, style, choices.single().id)
+                        else host.beginBuildingSelection(player, type, style)
+                    }) { showBuildingStyles(player, type, current, it) }
+                })
+            }
+            pages(player, current, styles.size) { showBuildingStyles(player, type, it) }
+        }, reopen = { showBuildingStyles(player, type, current) }, cityId = city.id)
+    }
+
+    private fun showBlueprintCategories(player: Player, style: String) {
+        val city = city(player) ?: return
+        val categories = host.blueprintChoices(BuildingType.DECORATION, style).groupBy { it.category }.toSortedMap()
+        if (categories.size == 1) return showBlueprintChoices(player, BuildingType.DECORATION, style, category = categories.keys.single())
+        present(player, "civs.blueprint-categories", "buildings.category-title", listOf(
+            body(text.style(player, style)), body(player, "buildings.category-help")), buildList {
+            categories.entries.forEachIndexed { index, (category, entries) ->
+                add(valueButton(player, "category_$index", "common.destination", tr(player, "blueprint-category.$category"),
+                    buildingColor(BuildingType.DECORATION), tr(player, "buildings.variant-count", "count" to entries.size)) {
+                    showBlueprintChoices(player, BuildingType.DECORATION, style, category = category)
+                })
+            }
+        }, reopen = { showBlueprintCategories(player, style) }, cityId = city.id)
+    }
+
+    private fun showBlueprintChoices(player: Player, type: BuildingType, style: String, page: Int = 0,
+        error: Component? = null, category: String? = null) {
+        val city = city(player) ?: return
+        val choices = host.blueprintChoices(type, style).filter { category == null || it.category == category }
+        val current = page.coerceIn(0, lastPage(choices.size))
+        present(player, "civs.blueprint-choices", "buildings.variant-title", listOfNotNull(
+            body(Component.join(text.literal(" · "), text.building(player, type), text.style(player, style))),
+            category?.let { body(tr(player, "blueprint-category.$it")) },
+            body(player, "buildings.variant-help"), error?.let(::body),
+        ), buildList {
+            choices.drop(current * PAGE_SIZE).take(PAGE_SIZE).forEachIndexed { index, choice ->
+                val number = current * PAGE_SIZE + index + 1
+                val sized = choice.size.size == 3
+                val label = if (sized) tr(player, "buildings.variant-choice", "number" to number,
+                    "width" to choice.size[0], "depth" to choice.size[2]) else tr(player, "buildings.variant-number", "number" to number)
+                val hint = tr(player, "buildings.variant-levels", "level" to choice.maxLevel).let { levels ->
+                    if (sized) levels.append(Component.newline()).append(tr(player, "buildings.variant-size",
+                        "width" to choice.size[0], "depth" to choice.size[2], "height" to choice.size[1])) else levels
+                }
+                add(valueButton(player, "variant_$index", "common.destination", label, buildingColor(type), hint) {
+                    beginSelection(player, { host.beginBlueprintSelection(player, type, style, choice.id) }) {
+                        showBlueprintChoices(player, type, style, current, it, category)
+                    }
+                })
+            }
+            pages(player, current, choices.size) { showBlueprintChoices(player, type, style, it, category = category) }
+        }, reopen = { showBlueprintChoices(player, type, style, current, category = category) }, cityId = city.id)
     }
 
     private fun showBuilding(player: Player, buildingId: UUID, error: Component? = null) {
@@ -1064,23 +1200,33 @@ class CivsUi internal constructor(
             return
         }
         val assigned = city.workers.count { it.assignment == buildingId }
+        val residents = city.workers.filter { it.homeId == buildingId }
         val request = host.buildingRequest(player, buildingId)
         val requestTool = requestTool(request)
         val busy = host.cityBusy(player)
         val queued = queuePosition(city, buildingId) != null
-        val legacyControl = building.phase == BuildingPhase.ACTIVE && (building.control == null || building.control == building.anchor)
+        val legacyControl = building.type != BuildingType.DECORATION && building.phase == BuildingPhase.ACTIVE &&
+            (building.control == null || building.control == building.anchor)
+        val acceptedToolOrders = if (building.type == BuildingType.BLACKSMITH) runCatching { host.carpentry(player, buildingId) }
+            .getOrNull()?.orders.orEmpty() else emptyList()
         present(player, "civs.building", "buildings.detail-title", listOfNotNull(
             body(buildingName(player, building.type, building.level)),
             body(player, if (building.type == BuildingType.TOWN_HALL && CivsRules.isBuilder(city, building))
                 "buildings.legacy-builder-help" else "building-purpose.${building.type.name.lowercase(Locale.ROOT)}"),
-            facts(player, buildList {
+            presentation.facts(buildList {
                 add(tr(player, "label.level") to tint(text.literal(building.level), PERSONAL))
-                add(tr(player, "label.control") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")))
+                if (building.type != BuildingType.DECORATION)
+                    add(tr(player, "label.control") to (building.control?.let { coordinates(player, it) } ?: tr(player, "control.unset")))
                 add(tr(player, "label.state") to buildingStatus(player, city, building))
-                if (building.type.isResidence) add(tr(player, "label.beds") to text.literal(CivsPopulation.houseBeds(building)))
-                if (CivsRules.slots(city, building) > 0) add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
+                if (building.type.isResidence) {
+                    add(tr(player, "label.beds") to text.literal(CivsPopulation.houseBeds(building)))
+                    add(tr(player, "label.population") to text.literal(residents.size))
+                }
+                if (building.type != BuildingType.HOUSE && CivsRules.slots(city, building) > 0) add(tr(player, "label.workers") to tr(player, "common.fraction", "value" to assigned, "limit" to CivsRules.slots(city, building)))
                 if (building.type == BuildingType.SAWMILL) add(tr(player, "label.output") to tr(player, "carpentry.automatic"))
-                CivsProduction.material(building)?.takeIf { !CivsRules.isBuilder(city, building) && building.type != BuildingType.SAWMILL }?.let { material ->
+                if (acceptedToolOrders.isNotEmpty()) add(tr(player, "label.output") to Component.join(text.literal(" · "),
+                    acceptedToolOrders.map { it.material }.distinct().map { materialName(player, it) }))
+                CivsProduction.material(building)?.takeIf { acceptedToolOrders.isEmpty() && !CivsRules.isBuilder(city, building) && building.type != BuildingType.SAWMILL }?.let { material ->
                     if (building.type != BuildingType.QUARRY) add(tr(player, "label.output") to
                         if (building.type in setOf(BuildingType.FARM, BuildingType.FORESTER)) materialName(player, material)
                         else tr(player, "buildings.output", "amount" to CivsProduction.amount(building), "resource" to materialName(player, material)))
@@ -1088,17 +1234,19 @@ class CivsUi internal constructor(
                 city.construction?.takeIf { it.buildingId == buildingId }?.let { order ->
                     add(tr(player, "label.construction") to tr(player, "common.fraction", "value" to order.workDone, "limit" to order.workRequired))
                 }
-            }), body(player, "buildings.control-help"),
+            }, if (building.type.isResidence) DialogTables.PanelSkin.COCOA else DialogTables.PanelSkin.NAVY),
+            if (building.type.isResidence) residentRoster(player, residents) else null,
+            if (building.type != BuildingType.DECORATION) body(player, "buildings.control-help") else null,
             if (canUpgrade(city, building)) upgradeSummary(player, city, building) else null,
-            CivsResearch.required(building.type, building.level + 1)?.takeIf { building.level < building.type.maxLevel && !CivsResearch.has(city, it) }
+            CivsResearch.required(building.type, building.level + 1)?.takeIf { building.level < host.maximumBuildingLevel(building) && !CivsResearch.has(city, it) }
                 ?.let { body(tr(player, "research.upgrade-required", "name" to researchName(player, it), "level" to building.level + 1)) },
             if (legacyControl) body(player, "control.legacy-help") else null,
             if (legacyControl && city.construction?.buildingId == buildingId) body(player, "reason.construction-busy") else null,
             request?.let { body(tint(if (requestTool != null) tr(player, "workers.tool-request-$requestTool")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
             error?.let(::body),
-        ), buildList {
-            if (assigned > 0 && !busy) add(button(player, "summon", "buildings.summon", NAVIGATION) {
+        ) + if (building.type == BuildingType.TOWN_HALL) townHallBodies(player, city) else emptyList(), buildList {
+            if (building.type != BuildingType.HOUSE && assigned > 0 && !busy) add(button(player, "summon", "buildings.summon", NAVIGATION) {
                 perform(player, "civs.building", "buildings.detail-title", { host.summonWorker(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) })
             }.copy(tooltip = tr(player, "buildings.summon-help")))
@@ -1110,7 +1258,7 @@ class CivsUi internal constructor(
                         workingKey = null)
                 }, refresh = { showBuilding(player, buildingId) }))
             }
-            if (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player)) {
+            if (building.type != BuildingType.DECORATION && (city.inventory?.mode != CivStorageMode.PHYSICAL || !host.cityBusy(player))) {
                 add(button(player, "warehouse", "warehouse.open", STOCK) { openWarehouse(player, buildingId) })
             }
             if (CivsRules.isBuilder(city, building) && city.construction != null) {
@@ -1120,7 +1268,7 @@ class CivsUi internal constructor(
             }
             if (queued || CivsRules.isBuilder(city, building) && city.constructionQueue.orEmpty().isNotEmpty())
                 add(button(player, "queue", "queue.open", LAND) { showQueue(player) })
-            if (CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
+            if (building.type != BuildingType.HOUSE && CivsRules.slots(city, building) > 0) add(button(player, "workers", "buildings.workers", PEOPLE) { showBuildingWorkers(player, buildingId) })
             if (building.type == BuildingType.UNIVERSITY || CivsResearch.required(building.type, building.level + 1) != null)
                 add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
             if (building.type == BuildingType.WAREHOUSE && city.inventory != null)
@@ -1130,6 +1278,8 @@ class CivsUi internal constructor(
                 add(button(player, "production", if (building.type == BuildingType.SAWMILL) "carpentry.open" else "production.open", PERSONAL) {
                     showProduction(player, buildingId)
                 })
+            if (building.type == BuildingType.BLACKSMITH)
+                add(button(player, "tool_orders", "blacksmith.open", STOCK) { showCarpentry(player, buildingId) })
             if (canUpgrade(city, building)) add(button(player, "upgrade", "upgrades.start", COMMIT, appearance = Action.UPGRADE) {
                 perform(player, "civs.building", "buildings.detail-title", { host.upgradeBuilding(player, buildingId) },
                     success = { showBuilding(player, buildingId) }, failure = { showBuilding(player, buildingId, it) },
@@ -1420,13 +1570,19 @@ class CivsUi internal constructor(
         val inputs = CivsProduction.inputs(building)
         val available = if (inputs.isNotEmpty()) runCatching { host.localMaterials(player, buildingId) } else null
         val locked = host.cityBusy(player) || city.construction?.buildingId == buildingId
+        val toolOrders = if (building.type == BuildingType.BLACKSMITH) runCatching { host.carpentry(player, buildingId) }
+            .getOrNull()?.orders.orEmpty() else emptyList()
         present(player, "civs.production", "production.title", listOfNotNull(
-            body(buildingName(player, building.type, building.level)), body(player,
+            body(buildingName(player, building.type, building.level)), if (building.type != BuildingType.BLACKSMITH) body(player,
                 when { building.type == BuildingType.FARM && inputs.isEmpty() -> "production.field-help"
                     building.type == BuildingType.FORESTER -> "production.forest-help"
                     inputs.isEmpty() -> "production.help"
                     building.type == BuildingType.TOWN_HALL -> "production.scribe-help"
-                    else -> "production.processor-help" }),
+                    else -> "production.processor-help" }) else null,
+            if (toolOrders.isNotEmpty()) body(tr(player, "blacksmith.active-orders", "items" to
+                Component.join(text.literal(" · "), toolOrders.map { order -> tr(player, "buildings.output",
+                    "resource" to materialName(player, order.material), "amount" to order.amount) }))) else null,
+            if (building.type == BuildingType.BLACKSMITH) body(player, "blacksmith.manual-help") else null,
             if (inputs.isNotEmpty()) table(inputs.map { (material, needed) -> materialName(player, material) to
                 tr(player, "common.required", "have" to if (available?.isSuccess == true)
                     text.literal(available.getOrNull()?.get(material) ?: 0) else tr(player, "workers.stock-unknown"), "need" to needed) }) else null,
@@ -1437,6 +1593,8 @@ class CivsUi internal constructor(
             if (city.construction?.buildingId == buildingId) body(player, "reason.construction-busy") else null,
             busyBody(player), error?.let(::body),
         ), buildList {
+            if (building.type == BuildingType.BLACKSMITH)
+                add(button(player, "tool_orders", "blacksmith.open", STOCK) { showCarpentry(player, buildingId) })
             if (building.type == BuildingType.BLACKSMITH && !CivsResearch.has(city, CivResearchId.ENGINEERING))
                 add(button(player, "research", "research.open", PERSONAL) { showResearchDetail(player, city.id, CivResearchId.ENGINEERING) })
             if (!locked && (inputs.isEmpty() || options.size > 1)) options.forEachIndexed { index, material ->
@@ -1460,18 +1618,19 @@ class CivsUi internal constructor(
     private fun showCarpentry(player: Player, buildingId: UUID, page: Int = 0) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
-        if (building.type != BuildingType.SAWMILL) return showBuilding(player, buildingId)
+        if (building.type !in setOf(BuildingType.SAWMILL, BuildingType.BLACKSMITH)) return showBuilding(player, buildingId)
+        val forge = building.type == BuildingType.BLACKSMITH
         val result = runCatching { host.carpentry(player, buildingId) }
         val view = result.getOrNull()
         val orders = view?.orders.orEmpty()
         val current = page.coerceIn(0, lastPage(orders.size, CARPENTRY_PAGE_SIZE))
-        present(player, "civs.production", "carpentry.title", buildList {
+        present(player, "civs.production", if (forge) "blacksmith.title" else "carpentry.title", buildList {
             add(body(buildingName(player, building.type, building.level)))
-            add(body(player, "carpentry.help"))
+            add(body(player, if (forge) "blacksmith.help" else "carpentry.help"))
             result.exceptionOrNull()?.let { add(body(text.failure(player, it))) }
             if (view == null) add(body(player, "carpentry.unavailable"))
             else if (view.paused) add(body(tr(player, "carpentry.paused").color(STOCK)))
-            else if (orders.isEmpty()) add(body(player, if (view.planning) "carpentry.planning" else "carpentry.waiting"))
+            else if (orders.isEmpty()) add(body(player, if (view.planning) "carpentry.planning" else if (forge) "blacksmith.waiting" else "carpentry.waiting"))
             orders.drop(current * CARPENTRY_PAGE_SIZE).take(CARPENTRY_PAGE_SIZE).forEach { order ->
                 val status = if (view?.paused == true) "order-paused"
                     else if (order.status == "waiting-materials") "waiting-materials" else "crafting"
@@ -1491,7 +1650,6 @@ class CivsUi internal constructor(
             if (view != null) add(button(player, "recipes", "carpentry.recipes-open", PERSONAL) {
                 showCarpentryRecipes(player, buildingId, view.level.coerceIn(1, 3))
             })
-            add(button(player, "refresh", "carpentry.refresh") { showCarpentry(player, buildingId, current) })
             pages(player, current, orders.size, CARPENTRY_PAGE_SIZE) { showCarpentry(player, buildingId, it) }
         }, reopen = { showCarpentry(player, buildingId, current) }, cityId = city.id)
     }
@@ -1501,11 +1659,12 @@ class CivsUi internal constructor(
         val building = city.building(buildingId) ?: return showBuildings(player)
         val view = runCatching { host.carpentry(player, buildingId) }.getOrNull() ?: return showCarpentry(player, buildingId)
         val recipes = view.recipes.filter { it.level == tier }
+        val forge = building.type == BuildingType.BLACKSMITH
         val current = page.coerceIn(0, lastPage(recipes.size, CARPENTRY_PAGE_SIZE))
-        present(player, "civs.carpentry-recipes", "carpentry.recipes-title", buildList {
+        present(player, "civs.carpentry-recipes", if (forge) "blacksmith.recipes-title" else "carpentry.recipes-title", buildList {
             add(body(buildingName(player, building.type, building.level)))
             add(body(tr(player, "carpentry.tier", "level" to tier).color(PERSONAL)))
-            add(body(player, "carpentry.recipes-help"))
+            add(body(player, if (forge) "blacksmith.recipes-help" else "carpentry.recipes-help"))
             if (tier > view.level) add(body(tr(player, "carpentry.locked", "level" to tier).color(STOCK)))
             if (recipes.isEmpty()) add(body(player, "carpentry.no-recipes"))
             recipes.drop(current * CARPENTRY_PAGE_SIZE).take(CARPENTRY_PAGE_SIZE).forEach { recipe ->
@@ -1594,7 +1753,7 @@ class CivsUi internal constructor(
 
     private fun showUpgrades(player: Player, page: Int = 0) {
         val city = city(player) ?: return
-        val buildings = city.buildings.filter { it.level < it.type.maxLevel && it.phase == BuildingPhase.ACTIVE }
+        val buildings = city.buildings.filter { it.level < host.maximumBuildingLevel(it) && it.phase == BuildingPhase.ACTIVE }
         val current = page.coerceIn(0, lastPage(buildings.size))
         present(player, "civs.upgrades", "upgrades.title", listOf(body(player,
             if (buildings.isEmpty()) "upgrades.complete" else "upgrades.help")), buildList {
@@ -1610,7 +1769,7 @@ class CivsUi internal constructor(
     private fun showUpgrade(player: Player, buildingId: UUID, error: Component? = null) {
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
-        if (building.level >= building.type.maxLevel) return showBuilding(player, buildingId)
+        if (building.level >= host.maximumBuildingLevel(building)) return showBuilding(player, buildingId)
         val target = building.level + 1
         val hallRequired = building.type != BuildingType.TOWN_HALL && target > city.level()
         val queued = queuePosition(city, building.id)
@@ -1656,22 +1815,42 @@ class CivsUi internal constructor(
         }, reopen = { showWorkers(player, current) }, cityId = city.id)
     }
 
-    private fun showWorker(player: Player, workerId: UUID, error: Component? = null) {
-        val city = city(player) ?: return
-        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+    private fun showWorker(player: Player, workerId: UUID, error: Component? = null, cityId: UUID? = null) {
+        val city = residentCity(player, workerId, cityId) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId }
+            ?: return if (cityId == null) showWorkers(player) else Unit
         val building = worker.assignment?.let(city::building)
-        val request = host.workerRequest(player, workerId)
+        val child = CivsResidents.isChild(worker)
+        val needs = CivsResidentLife.needs(city, worker)
+        val home = worker.homeId?.let(city::building)?.takeIf {
+            it.phase == BuildingPhase.ACTIVE && (it.type == BuildingType.TOWN_HALL || it.type.isResidence)
+        }
+        val personal = city.autonomy == null
+        val request = if (personal) host.workerRequest(player, workerId) else null
         val toolKind = requestTool(request)
         present(player, "civs.worker", "workers.detail-title", listOfNotNull(
             body(tint(text.literal(worker.name), PEOPLE)),
             body(text.residentVitals(player, CivsResidents.health(worker), CivsResidents.maxHealth(worker), CivsResidents.hunger(worker))),
-            presentation.summary(listOfNotNull(
-                tr(player, "label.profession") to tr(player, "profession.${if (CivsResidents.isChild(worker)) "child"
+            presentation.facts(listOfNotNull(
+                tr(player, "label.profession") to tr(player, "profession.${if (child) "child"
                     else building?.let { CivsRules.profession(city, it) } ?: "unassigned"}").color(PEOPLE),
                 building?.let { tr(player, "label.workplace") to buildingName(player, it.type, it.level) },
-                tr(player, "label.state") to workerStatus(player, worker),
+                presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.home")) to
+                    (home?.let { buildingName(player, it.type, it.level) }
+                        ?: tr(player, "workers.home-unassigned")),
+                tr(player, "label.age") to tr(player, if (child) "workers.child" else "workers.adult"),
+                tr(player, "workers.aptitude") to residentAptitude(player, worker),
+                tr(player, "workers.learning-cap") to tr(player, "workers.experience", "xp" to residentLearningCap(city, worker)),
+                if (child) tr(player, "workers.education") to tr(player, "workers.education-progress",
+                    "xp" to worker.life?.education.orEmpty().values.sum(), "max" to CivsResidentLife.MAX_EDUCATION_XP) else null,
+                tr(player, "label.state") to DialogDecoration.stateBadge(workerStatus(player, worker), DialogDecoration.StateTone.INFO),
+                tr(player, "workers.happiness") to DialogDecoration.stateBadge(tr(player, "common.fraction",
+                    "value" to needs.happiness, "limit" to 100),
+                    if (needs.happiness < 50) DialogDecoration.StateTone.ATTENTION else DialogDecoration.StateTone.SUCCESS),
                 if (worker.completedCycles > 0) tr(player, "label.deliveries") to text.literal(worker.completedCycles) else null,
-            )), request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
+            ), DialogTables.PanelSkin.PLUM),
+            presentation.paragraph(tr(player, "workers.needs-summary", "causes" to residentNeedCauses(player, needs))),
+            request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
             worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to
                 (cargo.stockResource?.let { text.resource(player, it) } ?: materialName(player, cargo.material)),
@@ -1682,67 +1861,107 @@ class CivsUi internal constructor(
                 "goods" to Component.join(text.literal(" · "), Resource.entries.filter { resource -> it[resource] > 0 }.map { resource ->
                     tr(player, "logistics.stock-count", "item" to text.resource(player, resource), "amount" to it[resource])
                 }))) },
-            busyBody(player), error?.let(::body),
+            if (personal) busyBody(player) else null, error?.let(::body),
         ), buildList {
-            if (building != null && CivsRules.isBuilder(city, building) && city.construction != null)
+            if (personal && building != null && CivsRules.isBuilder(city, building) && city.construction != null)
                 add(button(player, "materials", "materials.open", COMMIT) { loadBuilderMaterials(player, building.id, workerId) })
-            if (building?.type == BuildingType.WAREHOUSE)
+            if (personal && building?.type == BuildingType.WAREHOUSE)
                 add(button(player, "logistics", "logistics.open", STOCK) { showSupplyRequests(player, building.id) })
             if (request != null) add(requestButton(player, request, "workers.supply-unavailable", "workers.supply-help", give = {
                 perform(player, "civs.worker", "workers.detail-title", { host.giveWorkerRequest(player, workerId, request.material.name) },
-                    success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) },
+                    success = { showWorker(player, workerId, cityId = cityId) }, failure = { showWorker(player, workerId, it, cityId) },
                     workingKey = null)
-            }, refresh = { showWorker(player, workerId) }))
-            add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId) })
-            add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId) })
-            if (!host.cityBusy(player) && CivsEquipment.plainCount(worker, "BREAD") > 0 &&
+            }, refresh = { showWorker(player, workerId, cityId = cityId) }))
+            add(button(player, "inventory", "workers.inventory-open", STOCK) { showWorkerInventory(player, workerId, cityId) })
+            add(button(player, "skills", "workers.skills-open", PERSONAL) { showWorkerSkills(player, workerId, cityId = cityId) })
+            if (personal && !host.cityBusy(player) && CivsEquipment.plainCount(worker, "BREAD") > 0 &&
                 CivsResidents.health(worker) < CivsResidents.maxHealth(worker)) {
                 add(button(player, "feed", "workers.feed", COMMIT, appearance = Action.CONFIRM) {
                     perform(player, "civs.worker", "workers.detail-title", { host.feedWorker(player, workerId) },
-                        success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
+                        success = { showWorker(player, workerId, cityId = cityId) }, failure = { showWorker(player, workerId, it, cityId) })
                 }.copy(tooltip = tr(player, "workers.feed-help")))
             }
-            if (!CivsResidents.isChild(worker) && !host.cityBusy(player)) add(button(player, "assign", "workers.assign", PERSONAL) { showAssignments(player, workerId) })
-            if (worker.assignment != null && !host.cityBusy(player)) add(button(player, "unassign", "workers.unassign") {
+            if (personal && !CivsResidents.isChild(worker) && !host.cityBusy(player)) add(button(player, "assign", "workers.assign", PERSONAL) { showAssignments(player, workerId) })
+            if (personal && worker.assignment != null && !host.cityBusy(player)) add(button(player, "unassign", "workers.unassign") {
                 perform(player, "civs.worker", "workers.detail-title", { host.assign(player, workerId, null) },
-                    success = { showWorker(player, workerId) }, failure = { showWorker(player, workerId, it) })
+                    success = { showWorker(player, workerId, cityId = cityId) }, failure = { showWorker(player, workerId, it, cityId) })
             })
-        }, reopen = { showWorker(player, workerId) }, cityId = city.id)
+        }, reopen = { showWorker(player, workerId, cityId = cityId) }, cityId = city.id)
     }
 
-    private fun showWorkerSkills(player: Player, workerId: UUID, page: Int = 0) {
-        val city = city(player) ?: return
-        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+    private fun residentAptitude(player: Player, worker: CivWorker): Component =
+        tr(player, "profession.${CivsRules.profession(CivsResidentLife.aptitude(worker))}").color(PERSONAL)
+
+    /** Legacy receipts retain their original training cap until observed life state exists. */
+    private fun residentLearningCap(city: Settlement, worker: CivWorker): Long =
+        if (worker.life == null) 40L else CivsResidentLife.learningCap(city, worker)
+
+    private fun residentNeedCauses(player: Player, needs: CivResidentNeeds): Component = Component.join(text.literal(" · "),
+        needs.causes.map { cause ->
+            tr(player, "workers.need.${cause.name.lowercase(Locale.ROOT)}").color(when (cause) {
+                CivResidentNeed.HUNGRY, CivResidentNeed.HOMELESS -> DANGER
+                CivResidentNeed.NEEDS_MEAL, CivResidentNeed.REST_NEEDED, CivResidentNeed.JOBLESS, CivResidentNeed.UNGUARDED -> STOCK
+                else -> COMMIT
+            })
+        })
+
+    private fun showWorkerSkills(player: Player, workerId: UUID, page: Int = 0, cityId: UUID? = null) {
+        val city = residentCity(player, workerId, cityId) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId }
+            ?: return if (cityId == null) showWorkers(player) else Unit
         val professions = CivsResidents.professions.map(BuildingType::valueOf)
+        val child = CivsResidents.isChild(worker)
+        val cap = residentLearningCap(city, worker)
         val current = page.coerceIn(0, lastPage(professions.size, SKILLS_PAGE_SIZE))
+        val introduction = presentation.compact(listOf(
+            body(text.literal(worker.name)), body(player, if (child) "workers.child-learning-help"
+                else if (worker.life != null) "workers.skills-life-help" else "workers.skills-help"),
+            facts(player, listOfNotNull(
+                tr(player, "workers.aptitude") to residentAptitude(player, worker),
+                tr(player, "workers.learning-cap") to tr(player, "workers.experience", "xp" to cap),
+                if (child) tr(player, "workers.education") to tr(player, "workers.education-progress",
+                    "xp" to worker.life?.education.orEmpty().values.sum(), "max" to CivsResidentLife.MAX_EDUCATION_XP) else null,
+            )),
+        ))
         present(player, "civs.worker-skills", "workers.skills-title", listOf(
-            body(text.literal(worker.name)), body(player, "workers.skills-help"),
+            introduction,
             table(professions.drop(current * SKILLS_PAGE_SIZE).take(SKILLS_PAGE_SIZE).map { type ->
                 val level = CivsResidents.skillLevel(worker, type.name)
-                tr(player, "profession.${CivsRules.profession(type)}") to if (level >= 5) tr(player, "workers.skill-max", "level" to level)
-                else tr(player, "workers.skill-progress", "level" to level,
-                    "xp" to CivsResidents.skillExperience(worker, type.name), "goal" to level * 10)
+                val experience = CivsResidents.skillExperience(worker, type.name)
+                tr(player, "profession.${CivsRules.profession(type)}") to when {
+                    child -> tr(player, "workers.experience", "xp" to (worker.life?.education?.get(type.name) ?: 0L))
+                    level >= 5 -> tr(player, "workers.skill-max", "level" to level)
+                    experience >= cap -> tr(player, "workers.skill-home-cap", "level" to level, "xp" to experience)
+                    else -> tr(player, "workers.skill-progress", "level" to level, "xp" to experience, "goal" to minOf(cap, level * 10L))
+                }
             }, frame = DialogTables.Frame.EPIC),
-            body(tr(player, "workers.endurance-help", "health" to residentNumber(CivsResidents.maxHealth(worker)))),
-        ), buildList { pages(player, current, professions.size, SKILLS_PAGE_SIZE) { showWorkerSkills(player, workerId, it) } },
-            reopen = { showWorkerSkills(player, workerId, current) }, cityId = city.id)
+            presentation.compact(listOf(body(player, "workers.learning-cap-help"),
+                body(tr(player, "workers.endurance-help", "health" to residentNumber(CivsResidents.maxHealth(worker)))))),
+        ), buildList { pages(player, current, professions.size, SKILLS_PAGE_SIZE) { showWorkerSkills(player, workerId, it, cityId) } },
+            reopen = { showWorkerSkills(player, workerId, current, cityId) }, cityId = city.id)
     }
 
-    private fun showWorkerInventory(player: Player, workerId: UUID) {
-        val city = city(player) ?: return
-        val worker = city.workers.firstOrNull { it.id == workerId } ?: return showWorkers(player)
+    private fun showWorkerInventory(player: Player, workerId: UUID, cityId: UUID? = null) {
+        val city = residentCity(player, workerId, cityId) ?: return
+        val worker = city.workers.firstOrNull { it.id == workerId }
+            ?: return if (cityId == null) showWorkers(player) else Unit
         visits.remove(player.uniqueId)
         roots.remove(player.uniqueId)
         runtime.close(player)
         equipment.open(player, worker.name,
-            items = { host.residentItems(player, workerId) },
-            transfer = { actor, npcSlot, playerSlot, click -> host.transferResidentItem(actor, workerId, npcSlot, playerSlot, click) },
+            items = { if (city.autonomy != null) host.residentItems(player, city.id, workerId) else host.residentItems(player, workerId) },
+            transfer = { actor, npcSlot, playerSlot, click ->
+                if (city.autonomy != null) CompletableFuture.failedFuture(CivsRejection("not-authorized"))
+                else host.transferResidentItem(actor, workerId, npcSlot, playerSlot, click)
+            },
             back = {
                 runtime.beginFlow(player)
                 roots[player.uniqueId] = "civs.worker"
-                showWorker(player, workerId)
+                showWorker(player, workerId, cityId = cityId)
             }, stockDetails = {
-                val latest = host.settlements().firstOrNull { it.id == city.id }?.workers?.firstOrNull { it.id == workerId }
+                val latest = if (city.autonomy == null) null else runCatching {
+                    host.inspectResident(player, city.id, workerId).workers.firstOrNull { it.id == workerId }
+                }.getOrNull()
                 if (latest == null || city.autonomy == null) emptyList() else buildList {
                     Resource.entries.filter { (latest.pendingStock?.get(it) ?: 0L) > 0 }.forEach { resource ->
                         add(tr(player, "logistics.pending-resource", "item" to text.resource(player, resource),
@@ -1753,7 +1972,16 @@ class CivsUi internal constructor(
                             "amount" to requireNotNull(latest.cargo).amount))
                     }
                 }
-            })
+            }, readOnly = city.autonomy != null)
+    }
+
+    private fun residentCity(player: Player, workerId: UUID, cityId: UUID?): Settlement? {
+        if (cityId == null) return city(player)
+        return try { host.inspectResident(player, cityId, workerId) } catch (failure: Exception) {
+            present(player, "civs.worker", "workers.detail-title", listOf(body(text.failure(player, failure))),
+                emptyList(), cityId = cityId)
+            null
+        }
     }
 
     private fun residentNumber(value: Double): String = String.format(Locale.ROOT, "%.2f", value).trimEnd('0').trimEnd('.')
@@ -1899,9 +2127,6 @@ class CivsUi internal constructor(
                     tr(player, "common.detail", "label" to text.resource(player, resource), "value" to status.missing[resource])
                 })), STOCK)) else null,
             presentation.paragraph(Component.join(Component.newline(), listOf(
-                Component.join(text.literal(" · "), Resource.entries.map {
-                    tr(player, "common.detail", "label" to text.resource(player, it), "value" to tint(text.literal(city.stock[it]), STOCK))
-                }),
                 tr(player, "autonomy.population", "buildings" to CivsRules.buildingCount(city), "workers" to city.workers.size,
                     "assigned" to city.workers.count { it.assignment != null }),
             ))), feedback?.let(::body),
@@ -1911,13 +2136,6 @@ class CivsUi internal constructor(
             add(button(player, "research", "research.open", PERSONAL) { showResearch(player, city.id) })
             add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, city.id) }
                 .copy(tooltip = tr(player, "autonomy.resources-help")))
-            if (host.ready() && host.foundingAllowed() && CivsRules.buildingCount(city) < CivsRules.MAX_BUILDINGS)
-                add(button(player, "plan_board", "plan-board.place", PERSONAL, appearance = Action.FOUND) {
-                    if (!isAdmin(player)) autonomyDenied(player)
-                    else beginSelection(player, { host.beginPlanBoardSelection(player, city.id) }) {
-                        showAutonomousCity(player, city.id, it)
-                    }
-                })
             if (!paused && city.construction?.phase == ConstructionPhase.PAUSED)
                 add(button(player, "retry", "admin.retry", COMMIT, appearance = Action.START) {
                     if (!isAdmin(player)) autonomyDenied(player)
@@ -1931,7 +2149,6 @@ class CivsUi internal constructor(
                     { host.setAutonomousPaused(player, city.id, !paused) },
                     success = { showAutonomousCity(player, city.id) }, failure = { showAutonomousCity(player, city.id, it) })
             }.let { if (paused) it.copy(tooltip = tr(player, "autonomy.paused-help")) else it })
-            add(button(player, "refresh", "autonomy.refresh", NAVIGATION) { showAutonomousCity(player, city.id) })
             add(button(player, "villages", "autonomy.open", PERSONAL) { showAutonomous(player) })
         }, reopen = { showAutonomousCity(player, city.id) }, cityId = city.id)
     }
@@ -1964,6 +2181,10 @@ class CivsUi internal constructor(
                     tr(player, "common.detail", "label" to tint(text.literal(worker.name), PEOPLE), "value" to workerStatus(player, worker))
                 })),
         ), buildList {
+            workers.forEachIndexed { index, worker ->
+                add(valueButton(player, "worker_$index", "common.destination", text.literal(worker.name), PEOPLE,
+                    workerStatus(player, worker)) { showWorker(player, worker.id, cityId = city.id) })
+            }
             pages(player, current, city.workers.size) { showAutonomousWorkers(player, city.id, it) }
         }, reopen = { showAutonomousWorkers(player, city.id, current) }, cityId = city.id)
     }
@@ -2098,7 +2319,7 @@ class CivsUi internal constructor(
     }
 
     private fun canUpgrade(city: Settlement, building: CivBuilding): Boolean =
-        building.level < building.type.maxLevel && building.phase == BuildingPhase.ACTIVE && queuePosition(city, building.id) == null &&
+        building.level < host.maximumBuildingLevel(building) && building.phase == BuildingPhase.ACTIVE && queuePosition(city, building.id) == null &&
             city.construction?.buildingId != building.id && (building.type == BuildingType.TOWN_HALL || building.level < city.level()) &&
             CivsResearch.required(building.type, building.level + 1).let { it == null || CivsResearch.has(city, it) }
 
@@ -2222,7 +2443,7 @@ class CivsUi internal constructor(
             columns = if (guarded.size == 1) 1 else 2,
             exitButton = if (hasParent) presentation.button(
                 button(player, "history", "common.back").copy(width = 200), Action.BACK,
-            ) else null,
+            ) else button(player, "close", "common.close").copy(width = 200, tooltip = tr(player, "common.close")),
         )
         runtime.open(player, PaperDialogNavigation.bottom(
             screen,
@@ -2330,11 +2551,11 @@ class CivsUi internal constructor(
     private fun statusColor(status: String): TextColor = when (status.substringAfterLast('.')) {
         "placement-failed", "delivery-failed", "unreachable", "route-unreachable", "lands-denied",
         "world-changed", "protected-terrain", "building-overlap", "outside-city", "protected-area",
-        "storage-unavailable", "injury-pending", "closed", "deleting" -> DANGER
+        "storage-unavailable", "injury-pending", "closed", "deleting", "alarm-shelter" -> DANGER
         "active", "working", "working-field", "watering", "fertilizing", "planting-tree", "felling-tree", "digging-mine", "building", "placing",
-        "delivering", "loading-cargo", "collecting-supplies", "guarding" -> COMMIT
-        "to-work", "moving-to-work", "moving-to-storage", "to-store", "moving-to-pickup", "carrying-cargo" -> NAVIGATION
-        "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers" -> PERSONAL
+        "delivering", "loading-cargo", "collecting-supplies", "guarding", "eating" -> COMMIT
+        "to-work", "moving-to-work", "moving-to-storage", "to-store", "moving-to-pickup", "carrying-cargo", "to-meal", "patrolling" -> NAVIGATION
+        "sleeping", "sheltering", "to-campfire", "campfire", "no-viewers", "learning" -> PERSONAL
         "playing", "wandering", "unassigned", "no-assignment", "no-construction" -> PEOPLE
         else -> STOCK
     }
@@ -2345,7 +2566,7 @@ class CivsUi internal constructor(
         BuildingType.BUILDER_HUT -> 0xFFB277
         BuildingType.FARM -> 0xB7D878
         BuildingType.FORESTER -> 0x86C79A
-        BuildingType.QUARRY -> 0xBDC4D4
+        BuildingType.QUARRY -> 0xC6DDFA
         BuildingType.WAREHOUSE -> 0x86DCF1
         BuildingType.SAWMILL -> 0xD7B486
         BuildingType.BLACKSMITH -> 0xEF9D93
@@ -2354,12 +2575,13 @@ class CivsUi internal constructor(
         BuildingType.TAVERN -> 0xE9B58E
         BuildingType.BAKERY -> 0xE5CE8F
         BuildingType.GUARD_TOWER -> 0x95B4CC
-        BuildingType.WALL, BuildingType.GATE -> 0xB8BBC4
+        BuildingType.WALL, BuildingType.GATE -> 0xD6E4F2
         BuildingType.ROAD -> 0xBDAE98
         BuildingType.PLAN_BOARD -> 0xD9BE85
         BuildingType.UNIVERSITY -> 0xD6B7F2
         BuildingType.SMELTERY -> 0xF5A46B
         BuildingType.CRUSHER -> 0xA8BDD8
+        BuildingType.DECORATION -> 0xA7D6C5
     })
 
     override fun close() {
