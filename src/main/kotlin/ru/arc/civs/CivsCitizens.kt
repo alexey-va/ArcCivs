@@ -148,7 +148,7 @@ class CivsCitizens(
     private var navigationTick = 0L
     private var navigationAt = 0L
     private var navigationCadenceMillis = 0L
-    private var courierObservedAt = 0L
+    private var residentObservedAt = 0L
     internal var residentStepAllowed: (PacketPlayerNpc, Location, Location) -> Boolean = { _, _, _ -> true }
 
     internal fun collisionActors(): Collection<PacketPlayerNpc> {
@@ -385,7 +385,10 @@ class CivsCitizens(
         val body = citizenStandingBounds(to, actor.npc.scale).expand(.15, 0.0, .15)
         if (shelterOccupied(actor).any(body::overlaps)) return false
         return actors.values.none { other -> other !== actor && other.worldId == actor.worldId && other.npc.isValid &&
-            other.route?.target?.let { body.overlaps(citizenStandingBounds(it, other.npc.scale)) } == true }
+            (other.route?.target?.let { body.overlaps(citizenStandingBounds(it, other.npc.scale)) } == true ||
+                other.mealVisit?.target?.location(other.npc.world)?.let {
+                    body.overlaps(citizenStandingBounds(it, other.npc.scale))
+                } == true) }
     }
 
     init {
@@ -418,7 +421,7 @@ class CivsCitizens(
     fun pulse(nowMillis: Long) {
         checkMainThread()
         if (closed.get()) return
-        courierObservedAt = nowMillis
+        residentObservedAt = nowMillis
         wanderBudget = 8 // Aggregate native target checks across all idle actors, not eight per NPC.
         campBudget = 2 // At most two six-place campfire admission searches for the entire owner.
         collectionBudget = 2 // Two 32-item discoveries or four-holder home checks across the whole owner.
@@ -583,6 +586,8 @@ class CivsCitizens(
     internal fun pulseFieldWork(nowMillis: Long) {
         checkMainThread()
         if (closed.get()) return
+        // Both owner cadences can submit observed resident-life and work receipts.
+        residentObservedAt = nowMillis
         drainCompletions(nowMillis)
         val cities = cityProvider().associateBy { it.id }
         val viewers = viewers()
@@ -659,7 +664,7 @@ class CivsCitizens(
                 remove(actor, "waiting")
                 return false
             }
-            releaseCourierSource(actor, courierObservedAt, nextPlan.courier?.carrying == true)
+            releaseCourierSource(actor, residentObservedAt, nextPlan.courier?.carrying == true)
             cancelRoute(actor)
             stopCamp(actor, "plan-changed")
             actor.cycle.close()
@@ -793,6 +798,11 @@ class CivsCitizens(
                         "status" to actor.combatStatus, "target" to actor.combatDestination),
                     "food" to mapOf("source" to actor.foodSource, "pickup_pending" to (actor.supplyPickup != null),
                         "retry_at" to actor.supplyRetryAt),
+                    "meal" to mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
+                        "target" to actor.mealVisit?.target, "started_at" to actor.mealVisit?.startedAt,
+                        "arrived_at" to actor.mealVisit?.arrivedAt, "observed_at" to actor.mealVisit?.observedAt,
+                        "pending" to (actor.lifePending != null && actor.mealOutcome?.first == "pending"), "retry_at" to actor.lifeRetryAt,
+                        "last_outcome" to actor.mealOutcome?.first, "last_outcome_at" to actor.mealOutcome?.second),
                     "social" to mapOf("visit" to (actor.social.visit != null), "arrived_at" to actor.social.visit?.arrivedAt,
                         "partner" to actor.social.visit?.partnerId, "seat" to actor.social.visit?.seat,
                         "conversation_at" to actor.social.visit?.conversationAt))
@@ -1006,8 +1016,8 @@ class CivsCitizens(
         return city.workers.mapNotNull { worker ->
             val source = actors[worker.id]?.takeIf { it.workerId != courierId && sourceReady(it, city, worker) &&
                 sourceOffersCargo(it, city, worker) } ?: return@mapNotNull null
-            if (source.courierRetry.exhausted && courierObservedAt >= source.courierRetryAfter) source.courierRetry = CitizenRetry()
-            if (!source.courierRetry.ready(courierObservedAt) || actors.values.any { other ->
+            if (source.courierRetry.exhausted && residentObservedAt >= source.courierRetryAfter) source.courierRetry = CitizenRetry()
+            if (!source.courierRetry.ready(residentObservedAt) || actors.values.any { other ->
                     other.workerId != courierId && other.cityId == cityId && other.plan.courier?.let {
                         !it.carrying && it.cargo.sourceWorkerId == worker.id
                     } == true && other.cycle.phase !in setOf(CitizenPhase.PAUSED, CitizenPhase.CLOSED)
@@ -1040,8 +1050,8 @@ class CivsCitizens(
             val actor = actors[worker.id]?.takeIf { sourceReady(it, city, worker) &&
                 (worker.id in retainedSources || sourceOffersCargo(it, city, worker)) }
                 ?: return@mapNotNull null
-            if (actor.courierRetry.exhausted && courierObservedAt >= actor.courierRetryAfter) actor.courierRetry = CitizenRetry()
-            if (!actor.courierRetry.ready(courierObservedAt)) return@mapNotNull null
+            if (actor.courierRetry.exhausted && residentObservedAt >= actor.courierRetryAfter) actor.courierRetry = CitizenRetry()
+            if (!actor.courierRetry.ready(residentObservedAt)) return@mapNotNull null
             val feet = actor.npc.location
             worker.id to CivPosition(feet.blockX, kotlin.math.floor(feet.y + .125).toInt(), feet.blockZ)
         }.toMap()
@@ -1792,7 +1802,7 @@ class CivsCitizens(
     private fun defend(workerId: UUID, monster: Monster) {
         val victim = actors[workerId] ?: return
         if (immortalResidents(victim.cityId)) return
-        val now = courierObservedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
+        val now = residentObservedAt.takeIf { it > 0 } ?: System.currentTimeMillis()
         if (residentLifeEnabled) alarms[victim.cityId] = ResidentAlarm(monster, now + 10_000)
         for (actor in actors.values) {
             if (actor.cityId != victim.cityId || !actor.npc.isValid || actor.npc.world != monster.world ||
@@ -2007,6 +2017,13 @@ class CivsCitizens(
         if (actor.mealVisit != null) { cancelRoute(actor); actor.mealVisit = null }
     }
 
+    private fun retryMeal(actor: Actor, now: Long, reason: String): Boolean {
+        stopMeal(actor)
+        actor.lifeRetryAt = now + 5_000
+        actor.mealOutcome = reason to now
+        return false
+    }
+
     private fun diningSeat(actor: Actor, building: CivBuilding, world: World): CitizenDiningSeat? {
         if (actors.values.count { other -> other !== actor && other.cityId == actor.cityId && other.npc.isValid &&
                 other.mealVisit?.plan?.buildingId == building.id } >= 6) return null
@@ -2078,7 +2095,12 @@ class CivsCitizens(
             ?: run { stopMeal(actor); return false }
         var building = city.building(plan.buildingId) ?: return false
         var visit = actor.mealVisit
-        if (visit?.plan?.let { it.copy(cityRevision = plan.cityRevision) != plan } != false || visit?.building != building) {
+        if (visit != null && visit.seat == null && !idleDestinationFree(actor, visit.target.location(world))) {
+            stopMeal(actor)
+            actor.mealOutcome = "target-occupied" to now
+            visit = null
+        }
+        if (visit == null || visit.plan.copy(cityRevision = plan.cityRevision) != plan || visit.building != building) {
             if (campBudget == 0) return false
             campBudget--
             val seat = if (building.type == BuildingType.TAVERN) diningSeat(actor, building, world) else null
@@ -2086,12 +2108,15 @@ class CivsCitizens(
                 // Full, obstructed and older uncurated taverns keep the existing hall meal
                 // available. A hall fallback retains its own observed arrival and receipt.
                 building = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }
-                    ?: run { actor.lifeRetryAt = now + 5_000; return false }
+                    ?: return retryMeal(actor, now, "no-meal-building")
                 plan = CivsResidentLife.mealPlan(city, worker, building.id) ?: return false
             }
-            val target = seat?.approach ?: building.control?.let { citizenStorageTarget(city, building, world) }
-                ?: building.entrance.takeIf { citizenStandable(world, it) }
-                ?: run { actor.lifeRetryAt = now + 5_000; return false }
+            val safe: (CivPosition) -> Boolean = { point -> citizenStandable(world, point) &&
+                citizenControlClear(city, point) && citizenIdleTerrain(world, point, city.buildings) &&
+                idleDestinationFree(actor, point.location(world)) }
+            val target = seat?.approach ?: building.control?.let { citizenStorageTarget(city, building, world, safe) }
+                ?: building.entrance.takeIf(safe)
+                ?: return retryMeal(actor, now, "no-free-target")
             rememberWorkDetour(actor)
             stopMeal(actor)
             cancelRoute(actor)
@@ -2103,14 +2128,15 @@ class CivsCitizens(
         actor.cycle.deferWork(now)
         if (now - session.startedAt > 60_000 || !citizenStandable(world, session.target) ||
             session.seat?.let { !citizenDiningSeatClear(world, it) } == true) {
-            stopMeal(actor); actor.lifeRetryAt = now + 5_000; return false
+            return retryMeal(actor, now, "session-unavailable")
         }
         if (session.seatedFrom == null && !arrived(actor.npc.location, session.target.location(world))) {
             session.arrivedAt = null
             if (actor.route?.let { it.completion != null || it.timedOut(now) } == true) {
-                stopMeal(actor); actor.lifeRetryAt = now + 5_000; return false
+                return retryMeal(actor, now, "route-failed")
             }
-            if (actor.route == null) startRoute(actor, world, session.target, now, idleAnchor = building.entrance)
+            if (actor.route == null && !startRoute(actor, world, session.target, now, idleAnchor = building.entrance))
+                return retryMeal(actor, now, "route-refused")
             statuses[worker.id] = "to-meal"
             return true
         }
@@ -2119,7 +2145,7 @@ class CivsCitizens(
             if (!citizenDiningStandingClear(world, from, actor.npc.scale) ||
                 !citizenDiningTransitionClear(world, session.seat, from, actor.npc.scale) ||
                 !residentStepAllowed(actor.npc, session.seat.feet, session.seat.feet)) {
-                stopMeal(actor); actor.lifeRetryAt = now + 5_000; return false
+                return retryMeal(actor, now, "seat-unavailable")
             }
             cancelRoute(actor)
             session.seatedFrom = from
@@ -2134,7 +2160,7 @@ class CivsCitizens(
         statuses[worker.id] = "eating"
         if (now >= session.gestureAt) { actor.npc.swingMainHand(); session.gestureAt = now + 1_000 }
         if (now - requireNotNull(session.arrivedAt) >= 4_000) {
-            submitResidentLife(actor) { finishResidentMeal(city.id, session.plan) }
+            submitResidentLife(actor, meal = true) { finishResidentMeal(city.id, session.plan) }
         }
         return true
     }
@@ -2143,7 +2169,7 @@ class CivsCitizens(
         checkMainThread()
         val actor = actors[plan.workerId] ?: throw CivsRejection("stale-meal")
         val visit = actor.mealVisit ?: throw CivsRejection("stale-meal")
-        val now = courierObservedAt
+        val now = residentObservedAt
         if (actor.cityId != cityId || visit.plan != plan || !lifeActorReady(actor) ||
             cityProvider().firstOrNull { it.id == cityId }?.building(plan.buildingId) != visit.building ||
             visit.arrivedAt?.let { now - it >= 4_000 } != true || now - visit.observedAt > 2_000 ||
@@ -2157,13 +2183,14 @@ class CivsCitizens(
         else citizenPacketSupported(actor.npc.world, actor.npc.location.point()) &&
             citizenPacketBodyClear(actor.npc.world, actor.npc.location.point(), false))
 
-    private fun submitResidentLife(actor: Actor, action: () -> CompletableFuture<Settlement>) {
+    private fun submitResidentLife(actor: Actor, meal: Boolean = false, action: () -> CompletableFuture<Settlement>) {
         if (actor.lifePending != null) return
         val ticket = UUID.randomUUID()
         actor.lifePending = ticket
+        if (meal) actor.mealOutcome = "pending" to residentObservedAt
         val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
         future.whenComplete { _, error -> if (!closed.get())
-            lifeCompletions.add(ResidentLifeCompletion(actor.workerId, actor.instanceId, ticket, error)) }
+            lifeCompletions.add(ResidentLifeCompletion(actor.workerId, actor.instanceId, ticket, error, meal)) }
     }
 
     private fun drainResidentLife(now: Long) {
@@ -2176,6 +2203,8 @@ class CivsCitizens(
             stopMeal(actor)
             actor.mentorVisit = null
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
+            if (completion.meal) actor.mealOutcome =
+                (if (error == null) "accepted" else (error as? CivsRejection)?.reason ?: "failed") to now
             if (error != null) {
                 actor.lifeRetryAt = now + 5_000
                 if (error !is CivsRejection) logFailure(actor, "resident-life", error)
@@ -2249,7 +2278,7 @@ class CivsCitizens(
         fun at(actor: Actor, point: CivPosition) = actor.npc.location.let { it.blockX == point.x && it.blockY == point.y && it.blockZ == point.z }
         if (child.cityId != cityId || teacher.cityId != cityId || visit.teacherId != teacher.workerId ||
             !lifeActorReady(child) || !lifeActorReady(teacher) || !at(child, proof.childPosition) || !at(teacher, proof.teacherPosition) ||
-            visit.arrivedAt?.let { courierObservedAt - it >= 4_000 } != true || courierObservedAt - visit.observedAt > 2_000 ||
+            visit.arrivedAt?.let { residentObservedAt - it >= 4_000 } != true || residentObservedAt - visit.observedAt > 2_000 ||
             !threats.visible(child.npc.location.add(0.0, child.npc.eyeHeight, 0.0), teacher.npc.location.add(0.0, teacher.npc.eyeHeight, 0.0)))
             throw CivsRejection("stale-lesson")
     }
@@ -2635,7 +2664,7 @@ class CivsCitizens(
             "actual" to actor.npc.takeIf { it.isValid }?.location?.point()?.coordinates())
         cancelRoute(actor)
         if (visit.partnerId != null) {
-            actor.wander.finish(courierObservedAt, true)
+            actor.wander.finish(residentObservedAt, true)
             actors[visit.partnerId]?.takeIf { it.social.visit?.partnerId == actor.workerId }
                 ?.let { stopCamp(it, "partner-$reason") }
         }
@@ -3912,7 +3941,7 @@ class CivsCitizens(
     }
 
     private fun remove(actor: Actor, reason: String) {
-        releaseCourierSource(actor, courierObservedAt)
+        releaseCourierSource(actor, residentObservedAt)
         actors.remove(actor.workerId)
         actor.cycle.close()
         runCatching { stopCamp(actor, reason); cancelRoute(actor) }.onFailure { logFailure(actor, "cancel", it) }
@@ -4022,6 +4051,7 @@ class CivsCitizens(
         var foodSource: UUID? = null
         var workDetour: CitizenToken? = null
         var mealVisit: ResidentMealVisit? = null
+        var mealOutcome: Pair<String, Long>? = null
         var diningSearchIndex = 0
         var mentorVisit: ResidentMentorVisit? = null
         var lifePending: UUID? = null
@@ -4087,7 +4117,7 @@ class CivsCitizens(
         val seat: CitizenDiningSeat? = null, var seatedFrom: Location? = null)
     private data class ResidentMentorVisit(val teacherId: UUID, val age: Int, val target: CivPosition, val startedAt: Long,
         var arrivedAt: Long? = null, var observedAt: Long = 0)
-    private data class ResidentLifeCompletion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val error: Throwable?)
+    private data class ResidentLifeCompletion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val error: Throwable?, val meal: Boolean)
 
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?, val pickup: Boolean = false, val visualWork: CivWorldWork? = null)

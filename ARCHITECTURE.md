@@ -225,6 +225,10 @@ staffed tavern or bootstrap hall and four continuously observed seconds. It
 consumes one existing bag bread or one closed Auto FOOD and restores at most six
 hunger. The actor rechecks the exact visit on the service's durable write lane;
 unrelated city revisions do not cancel it, and duplicate callbacks cannot eat twice.
+Both the five-tick work pulse and the twenty-tick owner pulse advance the same
+resident observation clock before updating actors. Meal admission checks existing
+body occupancy and route reservations when choosing a supported hall barrel side;
+an unadmitted route cannot leave the actor claiming to travel to food.
 An interrupted work detour returns to its existing target without earning travel
 time or losing already observed work. Child lessons likewise require four fresh
 seconds after interruption and grant at most ten education points before adulthood.

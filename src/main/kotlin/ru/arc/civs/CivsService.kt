@@ -3756,6 +3756,15 @@ class CivsService(
             mutate(cityId) { current ->
                 citizens.validateResidentMeal(cityId, meal)
                 CivsResidentLife.finishMeal(current, meal)
+            }.also { receipt ->
+                // Observability must not turn a durable success into a failed meal.
+                receipt.thenAccept { committed ->
+                    val worker = committed.workers.firstOrNull { it.id == meal.workerId }
+                    CivsDiagnostics.event("resident_meal", "city" to cityId, "worker" to meal.workerId,
+                        "building" to meal.buildingId, "source" to meal.source, "outcome" to "accepted",
+                        "meals_before" to meal.mealsBefore, "meals_after" to worker?.life?.meals,
+                        "hunger_after" to worker?.let(CivsResidents::hunger), "revision" to committed.revision)
+                }
             }
         }
 
