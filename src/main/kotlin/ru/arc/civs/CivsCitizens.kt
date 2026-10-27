@@ -42,6 +42,8 @@ import ru.arc.paper.npc.PacketNpcPose
 import ru.arc.paper.npc.PacketNpcInteraction
 import ru.arc.paper.npc.PacketPlayerNpc
 import ru.arc.paper.npc.PaperPacketNpcs
+import ru.arc.paper.api.ArcSceneBounds
+import ru.arc.paper.api.ArcSceneEntityInfo
 import java.util.Random
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -1299,18 +1301,43 @@ class CivsCitizens(
             if (!actor.npc.isValid) return@mapNotNull null
             val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: return@mapNotNull null
             val resident = city.workers.firstOrNull { it.id == actor.workerId } ?: return@mapNotNull null
-            val entity = actor.npc
-            val at = entity.location
-            val type = if (resident.cargo != null) BuildingType.WAREHOUSE else
-                resident.assignment?.let(city::building)?.let { CivsRules.effectiveWorkType(city, it) }
-            CivsNpcHologramSnapshot(resident.id, at.world!!.uid, at.x, at.y, at.z, resident.name,
-                "workers.status.${statuses[resident.id] ?: "waiting"}", CivsResidents.health(resident), CivsResidents.maxHealth(resident),
-                actor = entity, profession = if (CivsResidents.isChild(resident)) "child" else type?.let(CivsRules::profession) ?: "unassigned",
-                courierCart = citizenCourierCart(actor.plan, actor.cycle.phase, actor.sheltering),
-                cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
-                yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
-                child = CivsResidents.isChild(resident))
+            hologramSnapshot(actor, city, resident)
         }
+    }
+
+    /** Explicit public opt-in: at most 48 live carriers, requested IDs only; no planning or world reads. */
+    fun sceneEntityInformation(text: CivsText, bounds: ArcSceneBounds, entityIds: Set<String>, limit: Int): List<ArcSceneEntityInfo> {
+        checkMainThread()
+        require(limit in 1..64 && entityIds.size <= 64)
+        if (closed.get() || entityIds.isEmpty()) return emptyList()
+        val cities = cityProvider().associateBy { it.id }
+        val result = ArrayList<ArcSceneEntityInfo>(minOf(limit, actors.size))
+        for (actor in actors.values) {
+            val npc = actor.npc
+            if (!npc.isValid || !npc.isVisibleByDefault || "packet-npc:${npc.uniqueId}" !in entityIds) continue
+            val city = cities[actor.cityId] ?: continue
+            if (city.pendingDeletion != null || city.worldId != bounds.worldId) continue
+            val resident = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
+            val at = npc.location
+            if (!bounds.contains(npc.world.uid, at.x, at.y, at.z)) continue
+            civsSceneEntityInfo(text, bounds, entityIds, hologramSnapshot(actor, city, resident), city)?.let(result::add)
+            if (result.size == limit) break
+        }
+        return result
+    }
+
+    private fun hologramSnapshot(actor: Actor, city: Settlement, resident: CivWorker): CivsNpcHologramSnapshot {
+        val entity = actor.npc
+        val at = entity.location
+        val type = if (resident.cargo != null) BuildingType.WAREHOUSE else
+            resident.assignment?.let(city::building)?.let { CivsRules.effectiveWorkType(city, it) }
+        return CivsNpcHologramSnapshot(resident.id, at.world!!.uid, at.x, at.y, at.z, resident.name,
+            "workers.status.${statuses[resident.id] ?: "waiting"}", CivsResidents.health(resident), CivsResidents.maxHealth(resident),
+            actor = entity, profession = if (CivsResidents.isChild(resident)) "child" else type?.let(CivsRules::profession) ?: "unassigned",
+            courierCart = citizenCourierCart(actor.plan, actor.cycle.phase, actor.sheltering),
+            cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
+            yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
+            child = CivsResidents.isChild(resident))
     }
 
     /** Only a successful canonical reload resolves an injury with an unknown commit outcome. */

@@ -29,6 +29,7 @@ FORBIDDEN_CLASS_PREFIXES = (
     "ru/arc/paper/packet/PaperVisualPacketRuntime",
     "ru/arc/paper/runtime/PaperNativeCleanupServiceProvider",
     "ru/arc/paper/scene/PaperSceneObservationServiceProvider",
+    "ru/arc/paper/scene/PaperSceneEntityInfoServiceProvider",
 )
 
 # Inspect the actual feature and the Core preview transport it constructs. Other

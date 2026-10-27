@@ -152,8 +152,8 @@ production. Disabling or losing the permission stops new issuance. Console-only
 `civs settings <city UUID> <setting> <on|off>` supports bounded operational setup;
 the service still checks the owner's testing permission when enabling a setting.
 
-ArcCore host 0.1.22 is the minimum compatible provider; bundled Core helpers are
-2.7.71. Delivery verification also checks the exact installed ArcCore 0.1.22 JAR;
+ArcCore host 0.1.23 is the minimum compatible provider; bundled Core helpers are
+2.7.72. Delivery verification also checks the exact installed ArcCore 0.1.23 JAR;
 the shared API must be byte-identical to that host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
@@ -165,6 +165,12 @@ actors explicitly opt into ArcCore's passive public scene observations.
 The lifecycle publishes at most 32 current settlement anchors (name, world UUID,
 center and radius); pending deletions are omitted. Observers receive appearance
 and visible equipment only, with no stock, membership or private inventory.
+The separate public entity-information source accepts only requested, in-bounds,
+live default-visible resident IDs (`packet-npc:<profile UUID>`). It exports the
+current nameplate profession/status, settlement, existing home/workplace and
+health/hunger as detached Russian plain text. Corpses, cargo, stock, inventories,
+owners and members are omitted. Queries use bounded current memory only, without
+world loading, planning or IO; lifecycle close unregisters the source callback.
 Resident nameplates and courier parcels attach to the same packet actor through an admitted per-viewer
 carrier lease. Skins are stable per worker UUID; no profile network lookup occurs.
 Successful construction callbacks and the bounded CivsWorld terraforming/repair

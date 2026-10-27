@@ -12,6 +12,7 @@ import ru.arc.logging.LoggingConfigSource
 import ru.arc.logging.paper.PaperLoggingPlatform
 import ru.arc.paper.api.ArcSchematicService
 import ru.arc.paper.api.ArcSceneObservationService
+import ru.arc.paper.api.ArcSceneEntityInfoService
 import ru.arc.paper.runtime.PaperPluginRuntime
 import ru.arc.paper.sql.PaperSqlServices
 import ru.arc.paper.network.BungeeBackendTransfer
@@ -172,6 +173,12 @@ open class ArcCivsPlugin : JavaPlugin() {
                     lifecycle.own(AutoCloseable {
                         nativeDrains += runCatching { citizens.closeAsync() }
                             .getOrElse { CompletableFuture.failedFuture<Void>(it) }
+                    })
+                    val entityInfo = requireNotNull(server.servicesManager.load(ArcSceneEntityInfoService::class.java)) {
+                        "ArcCore scene entity info service is not available"
+                    }
+                    lifecycle.own(entityInfo.registerSource(this, "civs-residents") { bounds, entityIds, limit ->
+                        citizens.sceneEntityInformation(text, bounds, entityIds, limit)
                     })
                 })
             lifecycle.own(AutoCloseable {
