@@ -1155,6 +1155,83 @@ class CivsServiceTest : FunSpec({
         }
     }
 
+    test("admin manual founding accepts its chosen site instead of automatic natural terrain admission") {
+        serviceScenario(empty = true) { h ->
+            h.sitePreview()
+            every { h.worldAdapter.captureAutonomousSite(any(), any(), any(), any(), any(), any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-terrain"))
+            h.start()
+            h.service.beginAutonomousSelection(h.player, "Chosen Village", "nordic").join()
+            h.await(h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0))))
+            val confirmed = h.service.confirmPreview(h.player)
+            h.tick()
+            confirmed.isCompletedExceptionally shouldBe false
+            h.saves.single().first.name shouldBe "Chosen Village"
+            h.commit(); h.commit(); h.await(confirmed)
+            h.service.settlements().single().name shouldBe "Chosen Village"
+            verify(exactly = 1) { h.store.savePlan(match { it.adminPlacement }) }
+            verify(exactly = 0) { h.worldAdapter.captureAutonomousSite(any(), any(), any(), any(), any(), any()) }
+        }
+    }
+
+    for (autonomous in listOf(false, true))
+    test("admin manual founding rechecks revoked permission after plan persistence autonomous=$autonomous") {
+        serviceScenario(empty = true) { h ->
+            h.sitePreview()
+            val planSaved = CompletableFuture<CivPlacementPlan>()
+            var captured: CivPlacementPlan? = null
+            every { h.store.savePlan(any()) } answers { captured = firstArg(); planSaved }
+            h.start()
+            if (autonomous) h.service.beginAutonomousSelection(h.player, "Chosen Village", "nordic").join()
+            else h.service.beginFoundingSelection(h.player, "Chosen Village", "nordic").join()
+            h.await(h.service.selectGround(h.player, h.service.selection(h.player)!!.id,
+                CivsGroundTarget(h.world.uid, CivPosition(0, 63, 0))))
+            val confirmed = h.service.confirmPreview(h.player)
+            h.tick()
+            requireNotNull(captured).adminPlacement shouldBe true
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            planSaved.complete(requireNotNull(captured)); h.tick()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { confirmed.join() })?.reason shouldBe "not-authorized"
+            h.saves shouldBe emptyList()
+            h.service.settlements() shouldBe emptyList()
+        }
+    }
+
+    test("admin manual founding intent survives a waiting autonomous site with no foundation at construction admission") {
+        serviceScenario { h ->
+            val queued = h.queuedUpgrade()
+            val site = queued.city.buildings.last()
+            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = null,
+                stock = h.city.stock, constructionQueue = emptyList())
+            val target = site.copy(phase = BuildingPhase.CONSTRUCTING)
+            val design = queued.design.copy(id = site.id, building = target, terrain = null, adminPlacement = true)
+            val captured = design.copy(id = UUID.randomUUID())
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.loadPlan(site.id) } returns CompletableFuture.completedFuture(design)
+            every { h.store.loadSchematic(site.id) } returns CompletableFuture.completedFuture(byteArrayOf(2))
+            every { h.blueprints.recover(design) } returns CompletableFuture.completedFuture(mockk<ArcSchematicSnapshot> {
+                every { blocks() } returns listOf(ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false))
+            })
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), true) } returns
+                CompletableFuture.completedFuture(captured)
+            h.world.loadChunk(site.control!!.x shr 4, site.control.z shr 4)
+            h.world.getBlockAt(site.control.x, site.control.y, site.control.z).type = Material.BARREL
+            h.start()
+            val activate = CivsService::class.java.getDeclaredMethod("activateBuilding", Settlement::class.java,
+                CivBuilding::class.java, Player::class.java).also { it.isAccessible = true }
+            val started = activate.invoke(h.service, city, site, null) as CompletableFuture<*>
+            h.tick()
+            started.isCompletedExceptionally shouldBe false
+            verify(exactly = 1) { h.worldAdapter.captureManualFoundation(city.id, city.owner, city.worldId,
+                target, any(), any(), site, false, true) }
+            verify(exactly = 0) { h.worldAdapter.autonomousHeightField(any(), any(), any()) }
+            h.saves.single().first.construction!!.id shouldBe captured.id
+            h.commit(); h.commit(); h.await(started)
+            verify(exactly = 1) { h.store.savePlan(match { it.id == captured.id && it.adminPlacement }) }
+        }
+    }
+
     test("admin can start autonomous placement while retaining a personal town and cannot bypass revoked admin permission") {
         serviceScenario { h ->
             h.start()
@@ -3668,7 +3745,7 @@ class CivsServiceTest : FunSpec({
             val block = h.world.getBlockAt(point.x, point.y, point.z)
             val capture = CompletableFuture<CivPlacementPlan>()
             var cityId: UUID? = null
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers { cityId = firstArg(); capture }
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), true) } answers { cityId = firstArg(); capture }
             every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
             every { h.store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             val confirming = h.service.confirmPreview(h.player)
@@ -3692,7 +3769,7 @@ class CivsServiceTest : FunSpec({
             val blueprint = h.previewBlueprint()
             every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), true) } answers {
                 CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), h.world.uid, blueprint.building, emptyList()))
             }
             every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
@@ -4990,7 +5067,7 @@ class CivsServiceTest : FunSpec({
             val hall = h.city.buildings.first().copy(level = 1, phase = BuildingPhase.CONSTRUCTING, control = control)
             val blueprint = CivBlueprint(hall, h.world.uid, snapshot, emptyList(), emptyList(), byteArrayOf(1))
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
-            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
+            every { h.worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), true) } answers {
                 CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), h.world.uid, hall, emptyList()))
             }
             every { h.store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
@@ -5722,10 +5799,10 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
 
     init {
         every { worldAdapter.canModify(any(), any(), any()) } returns true
-        every { worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any()) } returns
+        every { worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
             CompletableFuture.completedFuture(null)
-        every { worldAdapter.captureSite(any(), any(), any(), any(), any(), any()) } answers {
-            worldAdapter.capture(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5))
+        every { worldAdapter.captureSite(any(), any(), any(), any(), any(), any(), isNull(), any()) } answers {
+            worldAdapter.capture(firstArg(), arg(1), arg(2), arg(3), arg(4), arg(5), arg(6), arg(7))
         }
         every { blueprints.pasteParts(any(), any(), isNull()) } answers { CompletableFuture.completedFuture(listOf(firstArg())) }
         every { blueprints.availableStyles(any()) } answers {
@@ -5849,8 +5926,9 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
     fun sitePreview(blueprint: CivBlueprint = previewBlueprint()): CivBlueprint {
         every { blueprint.snapshot.fileSha256 } returns "a".repeat(64)
         every { blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns CompletableFuture.completedFuture(blueprint)
-        every { worldAdapter.capture(any(), any(), any(), any(), any(), any()) } answers {
-            CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), world.uid, blueprint.building, emptyList()))
+        every { worldAdapter.capture(any(), any(), any(), any(), any(), any(), any(), any()) } answers {
+            CompletableFuture.completedFuture(CivPlacementPlan(UUID.randomUUID(), firstArg(), world.uid, blueprint.building,
+                emptyList(), adminPlacement = arg(7)))
         }
         every { store.saveSchematic(any(), any()) } returns CompletableFuture.completedFuture(Unit)
         every { store.savePlan(any()) } answers { CompletableFuture.completedFuture(firstArg()) }

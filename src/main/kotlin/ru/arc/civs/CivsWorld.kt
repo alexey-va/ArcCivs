@@ -59,17 +59,19 @@ class CivsWorld(
     fun capture(
         cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, previous: CivBuilding?, terrain: CivTerraformPlan? = null,
+        adminPlacement: Boolean = false,
     ): CompletableFuture<CivPlacementPlan> = admit {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain)
+        Capture(cityId, owner, worldId, building, cells.toList(), previous, terrain = terrain, adminPlacement = adminPlacement)
     }
 
     /** A new site reserves its marker before the one-time control barrel is installed. */
     fun captureSite(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, previous: CivBuilding?,
-        terrain: CivTerraformPlan? = null): CompletableFuture<CivPlacementPlan> = admit {
+        terrain: CivTerraformPlan? = null, adminPlacement: Boolean = false): CompletableFuture<CivPlacementPlan> = admit {
         requireCivs(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS, "invalid-plan")
-        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true, terrain = terrain)
+        Capture(cityId, owner, worldId, building, cells.toList(), previous, allowControlPlacement = true,
+            terrain = terrain, adminPlacement = adminPlacement)
     }
 
     /** Automatic admission never treats the creator's edit permission as permission to clear buildings. */
@@ -94,9 +96,21 @@ class CivsWorld(
     /** Manual sites receive the same journaled earthworks without requiring an existing graded road. */
     internal fun captureManualFoundation(cityId: UUID, owner: UUID, worldId: UUID, building: CivBuilding,
         cells: List<ArcSchematicBlock>, executor: Executor,
-        previous: CivBuilding? = null, autonomous: Boolean = false): CompletableFuture<CivTerraformPlan?> = admit {
-        requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
-        ManualFoundationCapture(cityId, owner, worldId, building, cells.size, executor, previous, autonomous)
+        previous: CivBuilding? = null, autonomous: Boolean = false,
+        adminPlacement: Boolean = false): CompletableFuture<CivTerraformPlan?> {
+        val capture = admit {
+            requireCivs(cells.size.toLong() == civsBoxVolume(building.bounds), "invalid-plan")
+            ManualFoundationCapture(cityId, owner, worldId, building, cells.size, executor, previous, autonomous)
+        }
+        if (!adminPlacement) return capture
+        val result = capture.exceptionally { failure ->
+            // Optional earthworks must not relocate or refuse an explicitly selected administrator site.
+            if (CivsDiagnostics.rejection(failure)?.reason !in
+                setOf("autonomy-terrain", "autonomy-foundation", "autonomy-search-budget")) throw failure
+            null
+        }
+        result.whenComplete { _, _ -> if (result.isCancelled) capture.cancel(false) }
+        return result
     }
 
     internal fun autonomousSurface(city: Settlement, envelope: CivBuilding): CompletableFuture<Int> = admit {
@@ -1322,6 +1336,7 @@ class CivsWorld(
         private val allowControlPlacement: Boolean = false,
         private var strictAutonomous: Boolean = false,
         terrain: CivTerraformPlan? = null,
+        private val adminPlacement: Boolean = false,
     ) : Scan<CivPlacementPlan>(cityId, owner, worldId, building) {
         private val blocks = ArrayList<CivPlanBlock>()
         private val terraform = terrain?.copy(blocks = terrain.blocks.toList(), route = terrain.route.toList())
@@ -1343,6 +1358,9 @@ class CivsWorld(
         }
 
         override fun checkControl(block: Block) {
+            if (adminPlacement && previous?.control != building.control &&
+                (block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false)
+                rejectAt("container-not-empty", block)
             // Only an already accepted building owns this marker; an unrelated barrel is terrain.
             if (strictAutonomous && (previous == null || previous.control != building.control))
                 checkControlTerrain(block)
@@ -1359,7 +1377,7 @@ class CivsWorld(
         }
 
         override fun validateIdentity(city: Settlement?) {
-            if (city?.autonomy != null) strictAutonomous = true
+            if (city?.autonomy != null && !adminPlacement) strictAutonomous = true
             requireCivs(city?.building(building.id) == previous, "invalid-building")
             if (previous != null) requireCivs(previous.id == building.id && previous.type == building.type &&
                 previous.entrance == building.entrance && previous.rotation == building.rotation &&
@@ -1393,7 +1411,7 @@ class CivsWorld(
                 checkPreservedControl()
                 requireCivs(blocks.isNotEmpty(), "invalid-plan")
                 finish(CivPlacementPlan(UUID.randomUUID(), cityId, worldId, building, blocks.toList(),
-                    terrain = terraform?.copy(blocks = terrainBlocks.toList())))
+                    terrain = terraform?.copy(blocks = terrainBlocks.toList()), adminPlacement = adminPlacement))
                 return
             }
             val cell = cells[index++]

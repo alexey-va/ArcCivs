@@ -1416,6 +1416,133 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("admin manual founding accepts crafted terrain and keeps that policy when its autonomous site starts construction") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 65, 0)
+            val building = worldBuilding(CivBox(CivPosition(0, 64, 0), CivPosition(0, 70, 0)))
+                .copy(control = marker)
+            val cells = worldSchematicCells(building).map { if (it.position.y == marker.y)
+                worldCell(0, marker.y, "minecraft:structure_void") else it }
+            s.world.getBlockAt(0, 65, 0).type = Material.OAK_PLANKS
+            s.world.getBlockAt(0, 67, 0).type = Material.STONE_BRICKS
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val foundation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run), autonomous = true, adminPlacement = true)
+            s.scheduler.tick()
+            completed(foundation) shouldBe null
+            val first = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, adminPlacement = true)
+            s.scheduler.tick()
+            val confirmed = completed(first)
+            confirmed.adminPlacement shouldBe true
+            confirmed.building.anchor shouldBe building.anchor
+            confirmed.blocks.first { it.position.y == 67 }.before shouldBe "minecraft:stone_bricks"
+            s.world.getBlockAt(0, 67, 0).type shouldBe Material.STONE_BRICKS
+            s.world.getBlockAt(0, 65, 0).type = Material.BARREL
+            val site = building.copy(phase = BuildingPhase.SITE)
+            val city = worldCity(s.world.uid, site).copy(id = cityId, owner = owner, autonomy = CivAutonomy())
+            s.cities += city
+            val fresh = s.subject.capture(cityId, owner, s.world.uid, building, cells, site, adminPlacement = confirmed.adminPlacement)
+            s.scheduler.tick()
+            val plan = completed(fresh)
+            plan.adminPlacement shouldBe true
+            plan.blocks.first { it.position.y == 67 }.before shouldBe "minecraft:stone_bricks"
+            s.cities[0] = city.copy(buildings = listOf(building))
+            val unchanged = s.subject.revalidate(plan, owner)
+            s.scheduler.tick()
+            completed(unchanged) shouldBe Unit
+            s.cities[0] = city
+            val automatic = s.subject.capture(cityId, owner, s.world.uid, building, cells, site)
+            s.scheduler.tick()
+            failureReason(automatic) shouldBe "autonomy-terrain"
+        }
+    }
+
+    test("admin manual founding preserves a filled foreign control barrel while an accepted city keeps its contents") {
+        worldScenario(collisionWorld = true) { s ->
+            val marker = CivPosition(0, 64, 0)
+            val building = worldBuilding(CivBox(marker, marker.copy(y = 65))).copy(control = marker)
+            s.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val inventory = (s.world.getBlockAt(0, 64, 0).state as Barrel).inventory
+            inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val cells = listOf(worldCell(0, 64, "minecraft:structure_void"), worldCell(0, 65, "minecraft:air"))
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val foreign = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, adminPlacement = true)
+            s.scheduler.tick()
+            failureReason(foreign) shouldBe "container-not-empty"
+            val site = building.copy(phase = BuildingPhase.SITE)
+            s.cities += worldCity(s.world.uid, site).copy(id = cityId, owner = owner, autonomy = CivAutonomy())
+            val accepted = s.subject.capture(cityId, owner, s.world.uid, building, cells, site, adminPlacement = true)
+            s.scheduler.tick()
+            completed(accepted).adminPlacement shouldBe true
+            inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
+    test("admin manual founding accepts an unsupported water column without mutating its terrain") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(0, 105, 0)))
+                .copy(anchor = CivPosition(0, 104, 0), entrance = CivPosition(-1, 105, 0))
+            s.world.getBlockAt(0, 70, 0).type = Material.WATER
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val cells = worldSchematicCells(building)
+            val foundation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run), autonomous = true, adminPlacement = true)
+            s.scheduler.tick()
+            completed(foundation) shouldBe null
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, adminPlacement = true)
+            s.scheduler.tick()
+            completed(capture).building.anchor shouldBe building.anchor
+            s.world.getBlockAt(0, 70, 0).type shouldBe Material.WATER
+            s.world.getBlockAt(0, 100, 0).type shouldBe Material.AIR
+        }
+    }
+
+    test("admin manual founding still journals and actually fills a simple unsupported footprint with dirt") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(CivBox(CivPosition(0, 66, 0), CivPosition(0, 70, 0)))
+                .copy(anchor = CivPosition(0, 68, 0), entrance = CivPosition(-1, 69, 0))
+            val cityId = UUID.randomUUID()
+            val owner = UUID.randomUUID()
+            val cells = worldSchematicCells(building)
+            val foundation = s.subject.captureManualFoundation(cityId, owner, s.world.uid, building, cells,
+                java.util.concurrent.Executor(Runnable::run), autonomous = true, adminPlacement = true)
+            s.scheduler.tick()
+            val terrain = requireNotNull(completed(foundation))
+            terrain.fillCount shouldBe 10
+            terrain.blocks.all { it.before == "minecraft:air" && it.after == "minecraft:dirt" } shouldBe true
+            val capture = s.subject.captureSite(cityId, owner, s.world.uid, building, cells, null, terrain, adminPlacement = true)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            val city = worldTerraformCity(s, plan)
+            s.cities[0] = city.copy(construction = city.construction!!.copy(automaticPreparationBatches = 1))
+            val apply = s.subject.applyTerraform(plan, city.owner, terrain.blocks, 0, { true }, {})
+            repeat(20) { if (!apply.isDone) s.scheduler.tick() }
+            completed(apply) shouldBe Unit
+            for (x in -1..0) for (y in 64..68) s.world.getBlockAt(x, y, 0).type shouldBe Material.DIRT
+            s.world.getBlockAt(0, 63, 0).type shouldBe Material.STONE
+        }
+    }
+
+    for (obstacle in listOf(Material.BEDROCK, Material.CHEST))
+    test("admin manual founding retains native protection for $obstacle") {
+        worldScenario(collisionWorld = true) { s ->
+            val building = worldBuilding(worldBox(0, 0))
+            s.world.getBlockAt(0, 64, 0).type = obstacle
+            if (obstacle == Material.CHEST)
+                (s.world.getBlockAt(0, 64, 0).state as Chest).inventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val capture = s.subject.captureSite(UUID.randomUUID(), UUID.randomUUID(), s.world.uid, building,
+                worldCells(building), null, adminPlacement = true)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "protected-terrain"
+            s.world.getBlockAt(0, 64, 0).type shouldBe obstacle
+            if (obstacle == Material.CHEST)
+                (s.world.getBlockAt(0, 64, 0).state as Chest).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+
     test("manual foundations fill every footprint and entrance column beyond twenty four blocks with dirt") {
         worldScenario(collisionWorld = true) { s ->
             val building = worldBuilding(CivBox(CivPosition(0, 100, 0), CivPosition(1, 105, 0)))

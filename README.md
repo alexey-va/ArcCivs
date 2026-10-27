@@ -347,7 +347,7 @@
 
 1. Соберите JAR: `./gradlew test integrationTest shadowJar` и проверьте его вместе с точным
    ArcCore JAR: `python3 scripts/verify-jar.py`. Установите зависимости и
-   `build/libs/ArcCivs-0.1.99.jar` в `plugins` по принятой процедуре сервера.
+   `build/libs/ArcCivs-0.1.100.jar` в `plugins` по принятой процедуре сервера.
    `integrationTest` использует одноразовый MySQL 8.0.46 через Core Testcontainers;
    для него нужен Docker. Рабочая база в тестах не используется.
 2. Подготовьте закрытый каталог под `schematics-root`. Прежние **153** схемы с

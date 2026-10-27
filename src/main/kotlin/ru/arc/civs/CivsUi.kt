@@ -224,9 +224,8 @@ class CivsUi internal constructor(
         val residents = city.workers.filter { it.homeId == buildingId }
         val bodies = buildList {
             if (building.type == BuildingType.TOWN_HALL) {
-                add(body(buildingName(player, building.type, building.level).append(text.literal(" · "))
-                    .append(tint(text.literal(city.name), LAND))))
-                addAll(townHallBodies(player, city))
+                addAll(townHallBodies(player, city, buildingName(player, building.type, building.level)
+                    .append(text.literal(" · ")).append(tint(text.literal(city.name), LAND))))
             } else {
                 add(body(buildingName(player, building.type, building.level)))
                 val details = presentation.facts(buildList {
@@ -252,10 +251,13 @@ class CivsUi internal constructor(
                 })))
             }
             if (building.type == BuildingType.WAREHOUSE || building.type == BuildingType.TOWN_HALL) {
+                if (building.type == BuildingType.TOWN_HALL) add(body(Component.empty()))
                 add(presentation.heading(tint(tr(player, "autonomy.shared-stock"), STOCK)))
+                add(body(Component.empty()))
                 add(sharedStock(player, city, compact = building.type == BuildingType.TOWN_HALL))
             }
-            add(body(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help"))
+            val barrelHelp = tr(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help")
+            if (building.type != BuildingType.TOWN_HALL) add(body(barrelHelp))
             error?.let { add(body(it)) }
         }
         present(player, "civs.building-inspection", "autonomy.building-title",
@@ -268,7 +270,8 @@ class CivsUi internal constructor(
                 add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
             if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.QUARRY))
                 add(button(player, "industry", "industry.open", STOCK) { showIndustryBuilding(player, cityId, buildingId) })
-            add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) })
+            add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) }
+                .copy(tooltip = tr(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help")))
         }, reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
     }
 
@@ -289,32 +292,35 @@ class CivsUi internal constructor(
             if (useRows) DialogTables.FactsLayout.ROWS else DialogTables.FactsLayout.METRICS, if (useRows) 2 else 3)
     }
 
-    private fun townHallBodies(player: Player, city: Settlement): List<PaperDialogBody> = buildList {
+    private fun townHallBodies(player: Player, city: Settlement, heading: Component? = null): List<PaperDialogBody> = buildList {
         val status = city.autonomy?.let { if (it.paused) CivsAutonomyView("paused") else host.autonomyStatus(city.id) }
-        status?.let { add(body(DialogDecoration.stateBadge(autonomyStage(player, it),
+        val construction = city.construction
+        val header = listOfNotNull(heading, status?.let { DialogDecoration.stateBadge(autonomyStage(player, it),
             if (it.stage in setOf("paused", "resources", "blocked", "unhealthy")) DialogDecoration.StateTone.ATTENTION
-            else DialogDecoration.StateTone.INFO))) }
+            else DialogDecoration.StateTone.INFO) },
+            tr(player, "common.detail", "label" to tr(player, "label.unassigned"),
+                "value" to city.workers.count { it.assignment == null && !CivsResidents.isChild(it) }),
+            if (construction == null) tr(player, "city.no-construction") else null,
+        )
+        add(presentation.panel(Component.join(Component.newline(), header), DialogTables.PanelSkin.NAVY))
         add(presentation.facts(listOf(
             presentation.field(DialogDecoration.FieldIcon.PLAYER, tr(player, "label.population")) to tint(tr(player, "common.fraction",
                 "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)), PEOPLE),
             presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.beds")) to tint(text.literal(CivsRules.beds(city)), PEOPLE),
             presentation.field(DialogDecoration.FieldIcon.LANDS, tr(player, "label.buildings")) to tint(text.literal(CivsRules.buildingCount(city)), LAND),
         ), DialogTables.PanelSkin.NAVY, DialogTables.FactsLayout.METRICS, 3))
-        add(body(tr(player, "common.detail", "label" to tr(player, "label.unassigned"),
-            "value" to city.workers.count { it.assignment == null && !CivsResidents.isChild(it) })))
-        val construction = city.construction
-        if (construction == null) add(body(tr(player, "city.no-construction"))) else {
+        if (construction != null) {
             val planned = construction.plannedBuilding ?: city.building(construction.buildingId)
             val label = tr(player, "common.detail", "label" to tr(player, "label.construction"),
                 "value" to (planned?.let { buildingName(player, it.type, construction.targetLevel) } ?: tr(player, "buildings.generic")))
             if (construction.workRequired > 0) add(presentation.progress(label,
                 construction.workDone, construction.workRequired, tr(player, "common.fraction",
                     "value" to construction.workDone, "limit" to construction.workRequired)))
-            else add(body(label))
-            construction.failure?.let { add(body(text.reason(player, it))) }
+            else add(presentation.panel(label, DialogTables.PanelSkin.NAVY))
+            construction.failure?.let { add(presentation.panel(text.reason(player, it), DialogTables.PanelSkin.COCOA)) }
         }
         val goal = if (city.autonomy != null) host.nextAutonomyGoal(city.id) else null
-        nextExpansion(player, city, goal)?.let(::add)
+        nextExpansion(player, city, goal)?.let { add(body(Component.empty())); add(it) }
         if (city.autonomy == null && city.constructionQueue.orEmpty().isEmpty()) add(body(tint(nextStep(player, city), STOCK)))
         status?.reason?.let { if (it != city.construction?.failure) add(body(text.reason(player, it))) }
         if (goal == null && status != null && Resource.entries.any { status.missing[it] > 0 }) add(body(tr(player,
@@ -1835,7 +1841,7 @@ class CivsUi internal constructor(
                 tr(player, "label.profession") to tr(player, "profession.${if (child) "child"
                     else building?.let { CivsRules.profession(city, it) } ?: "unassigned"}").color(PEOPLE),
                 building?.let { tr(player, "label.workplace") to buildingName(player, it.type, it.level) },
-                presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.home")) to
+                tr(player, "label.home") to
                     (home?.let { buildingName(player, it.type, it.level) }
                         ?: tr(player, "workers.home-unassigned")),
                 tr(player, "label.age") to tr(player, if (child) "workers.child" else "workers.adult"),
@@ -1844,12 +1850,9 @@ class CivsUi internal constructor(
                 if (child) tr(player, "workers.education") to tr(player, "workers.education-progress",
                     "xp" to worker.life?.education.orEmpty().values.sum(), "max" to CivsResidentLife.MAX_EDUCATION_XP) else null,
                 tr(player, "label.state") to DialogDecoration.stateBadge(workerStatus(player, worker), DialogDecoration.StateTone.INFO),
-                tr(player, "workers.happiness") to DialogDecoration.stateBadge(tr(player, "common.fraction",
-                    "value" to needs.happiness, "limit" to 100),
-                    if (needs.happiness < 50) DialogDecoration.StateTone.ATTENTION else DialogDecoration.StateTone.SUCCESS),
-                if (worker.completedCycles > 0) tr(player, "label.deliveries") to text.literal(worker.completedCycles) else null,
+                tr(player, "workers.happiness") to residentMood(player, needs.happiness),
             ), DialogTables.PanelSkin.PLUM),
-            presentation.paragraph(tr(player, "workers.needs-summary", "causes" to residentNeedCauses(player, needs))),
+            residentNeeds(player, needs),
             request?.let { body(tint(if (toolKind != null) tr(player, "workers.tool-request-$toolKind")
                 else tr(player, "buildings.request", "item" to materialName(player, it.material.name), "amount" to it.amount), STOCK)) },
             worker.cargo?.let { cargo -> body(tr(player, "logistics.cargo", "item" to
@@ -1896,14 +1899,20 @@ class CivsUi internal constructor(
     private fun residentLearningCap(city: Settlement, worker: CivWorker): Long =
         if (worker.life == null) 40L else CivsResidentLife.learningCap(city, worker)
 
-    private fun residentNeedCauses(player: Player, needs: CivResidentNeeds): Component = Component.join(text.literal(" · "),
-        needs.causes.map { cause ->
-            tr(player, "workers.need.${cause.name.lowercase(Locale.ROOT)}").color(when (cause) {
-                CivResidentNeed.HUNGRY, CivResidentNeed.HOMELESS -> DANGER
-                CivResidentNeed.NEEDS_MEAL, CivResidentNeed.REST_NEEDED, CivResidentNeed.JOBLESS, CivResidentNeed.UNGUARDED -> STOCK
-                else -> COMMIT
-            })
-        })
+    private fun residentMood(player: Player, happiness: Int): Component = when {
+        happiness < 50 -> tint(tr(player, "workers.mood.sad"), DANGER)
+        happiness < 70 -> tint(tr(player, "workers.mood.calm"), NAVIGATION)
+        else -> tint(tr(player, "workers.mood.happy"), COMMIT)
+    }
+
+    private fun residentNeeds(player: Player, needs: CivResidentNeeds): PaperDialogBody {
+        val (positive, negative) = needs.causes.partition { it in setOf(CivResidentNeed.FED, CivResidentNeed.HOUSED,
+            CivResidentNeed.RESTED, CivResidentNeed.OCCUPIED, CivResidentNeed.FAMILY, CivResidentNeed.GUARDED) }
+        fun cause(value: CivResidentNeed): Component = tint(tr(player, "workers.need.${value.name.lowercase(Locale.ROOT)}"),
+            if (value in positive) COMMIT else if (value in setOf(CivResidentNeed.HUNGRY, CivResidentNeed.HOMELESS)) DANGER else STOCK)
+        return presentation.lists(listOf(tint(tr(player, "workers.needs-positive"), COMMIT) to positive.map(::cause),
+            tint(tr(player, "workers.needs-negative"), STOCK) to negative.map(::cause)), DialogTables.PanelSkin.NAVY)
+    }
 
     private fun showWorkerSkills(player: Player, workerId: UUID, page: Int = 0, cityId: UUID? = null) {
         val city = residentCity(player, workerId, cityId) ?: return
@@ -2287,7 +2296,7 @@ class CivsUi internal constructor(
                     tr(player, "common.detail", "label" to text.resource(player, resource), "value" to goal.missing[resource])
                 }))
         }
-        return presentation.callout(Component.join(Component.newline(), lines))
+        return presentation.panel(Component.join(Component.newline(), lines), DialogTables.PanelSkin.EVERGREEN)
     }
 
     private fun workerStatus(player: Player, worker: CivWorker): Component {

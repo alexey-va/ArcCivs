@@ -307,9 +307,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val building = place.second
             if (mineBounds[building.id]?.contains(point.x, point.y, point.z) == true)
                 mineExecutions[building.id]?.let { execution ->
+                    // Reopen deferred sections without preempting an admitted safe branch.
                     execution.retryAt.clear()
-                    execution.selected = null
-                    execution.cursor = 0
                 }
             farmScans[workerId]?.let { scan ->
                 scan.columns[point.x to point.z]?.let { scan.dirty += it }

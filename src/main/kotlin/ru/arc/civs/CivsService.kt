@@ -453,6 +453,11 @@ class CivsService(
                 "cities" to selected.map { city -> mapOf("city" to city.id, "name" to city.name, "owner" to city.owner,
                     "world" to city.worldId, "revision" to city.revision, "workers" to city.workers.size,
                     "buildings" to city.buildings.size, "busy" to (city.id in busy), "unhealthy" to (city.id in unhealthy),
+                    "building_catalog_truncated" to (city.buildings.size > 32),
+                    "building_catalog" to city.buildings.take(32).map { building -> mapOf(
+                        "id" to building.id, "type" to building.type, "phase" to building.phase, "level" to building.level,
+                        "assigned_adults" to city.workers.filter { it.assignment == building.id && !CivsResidents.isChild(it) }.map { it.id },
+                        "serving_tavern" to CivsRules.staffedTavern(city, building)) },
                     "inventory_recovery" to inventoryRecovery.values.count { it.cityId == city.id },
                     "deletion_pending" to (city.pendingDeletion != null),
                     "pending_controls" to city.pendingControls.orEmpty().take(8).map { mapOf("building" to it.buildingId, "position" to it.position) }) })
@@ -958,16 +963,17 @@ class CivsService(
         val result = tracked<Unit>()
         val captureOwner = previousCity?.owner ?: player.uniqueId
         val previous = previousCity?.building(blueprint.building.id)
+        val adminPlacement = previousCity == null && player.hasPermission("arccivs.admin")
         val capture = if (preview.upgrading && !queuedUpgrade) world.capture(cityId, captureOwner, blueprint.worldId,
             blueprint.building, blueprint.cells, previous)
         else if (queuedUpgrade) world.captureSite(cityId, captureOwner, blueprint.worldId,
             blueprint.building, blueprint.cells, previous)
         else world.captureManualFoundation(cityId, captureOwner, blueprint.worldId, blueprint.building,
-            blueprint.cells, executor, previous, autonomous = preview.autonomous).thenCompose { terrain ->
-            if (preview.autonomous) world.captureAutonomousSite(cityId, captureOwner, blueprint.worldId,
+            blueprint.cells, executor, previous, autonomous = preview.autonomous, adminPlacement = adminPlacement).thenCompose { terrain ->
+            if (preview.autonomous && !adminPlacement) world.captureAutonomousSite(cityId, captureOwner, blueprint.worldId,
                 blueprint.building, blueprint.cells, terrain)
             else world.captureSite(cityId, captureOwner, blueprint.worldId, blueprint.building,
-                blueprint.cells, previous, terrain)
+                blueprint.cells, previous, terrain, adminPlacement = adminPlacement)
         }
         capture.whenCompleteSync(tasks) { captured, captureFailure ->
             if (captureFailure != null) return@whenCompleteSync finishReservation(cityId, player.uniqueId, result, captureFailure)
@@ -977,7 +983,8 @@ class CivsService(
                 val placementCity = previousCity?.let {
                     managedPlacement(player, it.id, blueprint.building.type).also { current -> rejectIf(current != it, "stale-city") }
                 }
-                val capturedPlan = requireNotNull(captured).copy(capturedSha256 = blueprint.snapshot.fileSha256)
+                val capturedPlan = requireNotNull(captured).copy(capturedSha256 = blueprint.snapshot.fileSha256,
+                    adminPlacement = adminPlacement)
                 if (preview.upgrading && !queuedUpgrade) {
                     startOrder(player.uniqueId, cities.getValue(cityId), capturedPlan, blueprint.sourceBytes).whenCompleteSync(tasks) { _, failure ->
                         if (failure == null) cancelPreview(player.uniqueId)
@@ -992,7 +999,7 @@ class CivsService(
                     val placed = if (queuedUpgrade) CivsRules.enqueue(cities.getValue(cityId), player.uniqueId, blueprint.building.id)
                     else if (previousCity == null) {
                         checkSettlementSpace(blueprint.worldId, cityCenter, player.uniqueId)
-                        requireFounderAfterCapture(player, preview.autonomous)
+                        requireFounderAfterCapture(player, preview.autonomous, adminPlacement)
                         CivsMembership.remember((if (preview.autonomous) CivsAutonomy::found else CivsRules::found).invoke(cityId, player.uniqueId, preview.cityName, blueprint.worldId,
                             cityCenter, settings.radius, preview.style, blueprint.building, now()), mapOf(player.uniqueId to player.name))
                     } else if (placementCity?.autonomy != null) {
@@ -1008,7 +1015,7 @@ class CivsService(
                             rejectIf(!player.isOnline || previews[player.uniqueId] !== preview, "preview-expired")
                             requireReady(player)
                             near(player, blueprint.worldId, blueprint.building.entrance)
-                            if (placementCity == null) requireFounderAfterCapture(player, preview.autonomous)
+                            if (placementCity == null) requireFounderAfterCapture(player, preview.autonomous, adminPlacement)
                             else rejectIf(managedPlacement(player, cityId, blueprint.building.type) != placementCity, "stale-city")
                             store.save(next)
                         }.thenCompose { it }
@@ -1055,8 +1062,8 @@ class CivsService(
         return result
     }
 
-    private fun requireFounderAfterCapture(player: Player, autonomous: Boolean = false) {
-        rejectIf(autonomous && !player.hasPermission("arccivs.admin"), "not-authorized")
+    private fun requireFounderAfterCapture(player: Player, autonomous: Boolean = false, adminPlacement: Boolean = false) {
+        rejectIf((autonomous || adminPlacement) && !player.hasPermission("arccivs.admin"), "not-authorized")
         rejectIf(!autonomous && (city(player) != null || remoteCity(player) != null), "already-member")
     }
 
@@ -1326,15 +1333,15 @@ class CivsService(
                     if (cellsFailure != null) return@cellsReady finishReservation(city.id, actor, result, cellsFailure)
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
                     val terrain = if (building.phase == BuildingPhase.SITE &&
-                        (city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
+                        (sitePlan.adminPlacement || city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
                         world.captureManualFoundation(city.id, city.owner, city.worldId, target,
-                            requireNotNull(cells), executor, building)
+                            requireNotNull(cells), executor, building, adminPlacement = sitePlan.adminPlacement)
                     else if (city.autonomy != null && building.phase == BuildingPhase.SITE)
                         autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
                             requireNotNull(cells), emptyList(), bytes)).thenApply { it.terrain }
                     else CompletableFuture.completedFuture(sitePlan.terrain)
                     terrain.thenCompose { preparation -> world.capture(city.id, city.owner, city.worldId,
-                        target, requireNotNull(cells), building, preparation) }
+                        target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement) }
                         .whenCompleteSync(tasks) capturedReady@ { captured, captureFailure ->
                             if (captureFailure != null) return@capturedReady finishReservation(city.id, actor, result, captureFailure)
                             runCatching {

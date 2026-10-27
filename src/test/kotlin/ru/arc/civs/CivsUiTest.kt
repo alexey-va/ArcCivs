@@ -238,11 +238,13 @@ class CivsUiTest : FunSpec({
                 every { h.host.workerStatus(worker.id) } returns "workers.status.$status"
                 h.ui.openWorker(h.player, base.id, worker.id)
                 h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills", "assign", "unassign")
-                val labels = if (locale == "ru") listOf("Профессия", "Место работы", "Состояние", "Завершено заданий")
-                    else listOf("Profession", "Workplace", "Status", "Completed jobs")
+                val labels = if (locale == "ru") listOf("Профессия", "Место работы", "Состояние", "Настроение")
+                    else listOf("Profession", "Workplace", "Status", "Happiness")
                 val facts = plainText(h.screen.body[2].text).replace(Regex("\\p{Co}"), "").replace(Regex("\\s+"), " ")
                 labels.forEach { facts shouldContain it }
-                facts shouldContain "453"
+                facts.contains(if (locale == "ru") "Завершено заданий" else "Completed jobs") shouldBe false
+                facts.contains("453") shouldBe false
+                plainText(h.screen.body[2].text).codePoints().anyMatch { it in 0x10A000..0x10A009 } shouldBe false
                 val expectedVitals = CivsText.fromYaml(civsLocaleSource()).residentVitals(h.player, 20.0, 28.0, 0)
                 h.screen.body[1].text shouldBe expectedVitals
                 h.screen.body.count { plainText(it.text).codePoints().anyMatch { point -> point in 0x102000..0x103FFF } } shouldBe
@@ -281,11 +283,24 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, village.id, resident.id)
             profileText() shouldContain aptitude
             profileText() shouldContain if (russian) "30 опыта" else "30 XP"
-            profileText() shouldContain "45 / 100"
+            profileText() shouldContain if (russian) "Грустный" else "Sad"
+            profileText().contains("45 / 100") shouldBe false
             for (key in listOf("hungry", "housed", "rest_needed", "occupied", "family", "guarded"))
                 profileText() shouldContain plainText(labels.render("workers.need.$key", language))
+            if (font.isEmpty()) plainText(h.screen.body[3].text) shouldContain "\n\n"
+            val needRows = if (font.isEmpty()) plainText(h.screen.body[3].text).lineSequence()
+                .filter(String::isNotBlank).map { it.split(" · ") }.toList() else logisticsTableCells(h.screen)
+            needRows.first() shouldBe listOf(if (russian) "Радует" else "Positive", if (russian) "Беспокоит" else "Concerns")
+            needRows.drop(1).map { it[0] }.filter(String::isNotBlank) shouldBe listOf("housed", "occupied", "family", "guarded")
+                .map { plainText(labels.render("workers.need.$it", language)) }
+            needRows.drop(1).map { it[1] }.filter(String::isNotBlank) shouldBe listOf("hungry", "rest_needed")
+                .map { plainText(labels.render("workers.need.$it", language)) }
             h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills")
             export("adult-dense")
+            village = village.copy(workers = village.workers.map { if (it.id == resident.id) it.copy(hunger = 12) else it })
+            h.ui.openWorker(h.player, village.id, resident.id)
+            profileText() shouldContain if (russian) "Спокойный" else "Calm"
+            export("adult-calm")
             h.click("skills")
             profileText() shouldContain if (russian) "30 опыта · предел дома" else "30 XP · home limit"
             export("adult-skills")
@@ -298,6 +313,7 @@ class CivsUiTest : FunSpec({
             h.ui.openWorker(h.player, village.id, resident.id)
             profileText() shouldContain aptitude
             profileText() shouldContain if (russian) "5 / 10 опыта" else "5 / 10 XP"
+            profileText() shouldContain if (russian) "Довольный" else "Happy"
             profileText() shouldContain if (russian) "Учится у взрослого" else "Learning from an adult"
             for (key in listOf("fed", "rested")) profileText() shouldContain plainText(labels.render("workers.need.$key", language))
             h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills")
@@ -319,6 +335,37 @@ class CivsUiTest : FunSpec({
             profileText() shouldContain aptitude
             h.screen.buttons.map { it.id.value } shouldBe listOf("inventory", "skills")
             export("legacy")
+            if (russian && font.isNotEmpty()) {
+                val builder = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+                val roman = resident.copy(name = "Роман", sex = CivSex.MALE, assignment = builder.id,
+                    hunger = 17, health = 20.0, completedCycles = 859, skills = mapOf("BUILDER_HUT" to 40L),
+                    pendingStock = null, life = CivResidentLife(awakeMinutes = 50, lastRestMinute = 1))
+                val workplaces = listOf(BuildingType.FORESTER, BuildingType.FARM, BuildingType.QUARRY, BuildingType.WAREHOUSE)
+                    .map { type -> base.buildings.first { it.type == type }.id }
+                val neighbours = workplaces.mapIndexed { index, workplace -> partner.copy(id = if (index == 0) partner.id else UUID.randomUUID(),
+                    name = "Сосед ${index + 1}", assignment = workplace, homeId = if (index == 0) home.id else null) }
+                village = base.copy(name = "Auto2", stock = Stock(216, 3, 288),
+                    buildings = base.buildings.filter { it.type in CivsAutonomy.baseProfile }.map {
+                        if (it.id == home.id) it.copy(level = 1) else it
+                    } + home.copy(id = UUID.randomUUID(), level = 1), workers = listOf(roman) + neighbours,
+                    families = listOf(CivFamily(roman.id, partner.id, home.id, 0)))
+                every { h.host.workerStatus(roman.id) } returns "workers.status.placing"
+                h.ui.openWorker(h.player, village.id, roman.id)
+                profileText() shouldContain "Довольный"
+                profileText() shouldContain "20 опыта"
+                export("roman")
+                val hall = village.buildings.first { it.type == BuildingType.TOWN_HALL }
+                every { h.host.inspectBuilding(h.player, village.id, hall.id) } answers { village }
+                every { h.host.autonomyStatus(village.id) } returns CivsAutonomyView("resources")
+                every { h.host.nextAutonomyGoal(village.id) } returns CivAutonomyGoal(BuildingType.HOUSE, 1, null,
+                    CivsAutonomy.cost(BuildingType.HOUSE, 1), Stock(0, 9))
+                h.ui.openBuildingInspection(h.player, village.id, hall.id)
+                h.body() shouldContain "Auto2"
+                h.body() shouldContain "Нет активной стройки"
+                h.body() shouldContain "Следующая цель"
+                plainText(h.screen.buttons.single { it.id.value == "inventory" }.tooltip) shouldContain "можно брать и класть"
+                export("auto2-hall")
+            }
             val statuses = if (russian) mapOf("to-meal" to "Идёт поесть", "eating" to "Ест", "learning" to "Учится у взрослого",
                 "patrolling" to "Обходит деревню", "alarm-shelter" to "Укрывается от опасности")
             else mapOf("to-meal" to "Going for a meal", "eating" to "Eating", "learning" to "Learning from an adult",
@@ -4028,8 +4075,8 @@ private fun logisticsTableCells(screen: PaperDialogScreen): List<List<String>> {
         return component.children().firstNotNullOfOrNull(::panel)
     }
     val framed = screen.body.firstNotNullOfOrNull { panel(it.text) }
-    if (framed != null) return framed.children().drop(1).filter { it.children().size == 5 }.map { line ->
-        listOf(line.children()[1], line.children()[3]).map {
+    if (framed != null) return framed.children().drop(1).filter { it.children().size in listOf(5, 9) }.map { line ->
+        listOf(line.children()[1], line.children()[if (line.children().size == 9) 5 else 3]).map {
             plainText(it).replace(Regex("\\p{Co}"), "").trim()
         }
     }

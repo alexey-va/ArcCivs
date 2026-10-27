@@ -257,4 +257,6 @@ data class CivPlacementPlan(
     val blocks: List<CivPlanBlock>,
     val capturedSha256: String? = null,
     val terrain: CivTerraformPlan? = null,
+    /** Explicit administrator founding keeps its selected point when the waiting site is recaptured. */
+    val adminPlacement: Boolean = false,
 )

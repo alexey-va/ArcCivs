@@ -102,6 +102,12 @@ Lands denial remain hard boundaries. An unsupported deep void or disconnected
 protected region can still refuse a candidate. New sites and upgrade expansion
 cells reject non-natural blocks; filled containers remain protected inside an
 owned upgrade footprint too.
+An explicitly selected new town-hall site placed by a current administrator
+persists `adminPlacement` in its captured plan. Its optional journaled foundation
+attempt may fall back to the selected terrain as-is; confirmation and later
+construction recapture do not apply automatic natural-terrain heuristics to that
+intent. Source integrity, native bounds, Lands and existing container contents
+remain checked, and administrator permission is rechecked before founding commits.
 Final schematic capture uses the same natural-ground whitelist below its anchor,
 including sand and gravel exposed beneath the prepared terrace; it does not permit
 those materials above the site's ground limit or bypass liquids and tile entities.

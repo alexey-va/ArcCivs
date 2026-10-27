@@ -39,6 +39,21 @@ class CivsStoreTest : FreeSpec({
         reopened.deletePlan(plan.id).join() shouldBe false
     }
 
+    "administrator placement intent roundtrips while legacy plans keep automatic terrain protection" {
+        val plan = placementPlan(settlement()).copy(adminPlacement = true)
+        CivsStore(root, directExecutor).use { store ->
+            store.savePlan(plan).join()
+            store.loadPlan(plan.id).join() shouldBe plan
+        }
+        val path = root.resolve("plans/${plan.id}.json")
+        val document = com.google.gson.JsonParser.parseString(Files.readString(path)).asJsonObject
+        document.getAsJsonObject("plan").remove("adminPlacement")
+        Files.writeString(path, Gson().toJson(document))
+        CivsStore(root, directExecutor).use { store ->
+            store.loadPlan(plan.id).join() shouldBe plan.copy(adminPlacement = false)
+        }
+    }
+
     "manual foundation journal roundtrips and rejects blocks outside its footprint" {
         val city = settlement()
         val initial = placementPlan(city)

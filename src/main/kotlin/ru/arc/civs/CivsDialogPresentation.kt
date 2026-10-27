@@ -2,6 +2,7 @@ package ru.arc.civs
 
 import net.kyori.adventure.key.Key
 import net.kyori.adventure.text.Component
+import net.kyori.adventure.text.format.TextDecoration
 import ru.arc.paper.menu.DialogDecoration
 import ru.arc.paper.menu.DialogTables
 import ru.arc.paper.menu.DialogTextLayout
@@ -27,6 +28,29 @@ internal class CivsDialogPresentation(font: String) {
         if (decoration == null) PaperDialogBody(text, width)
         else DialogTables.filledBody(listOf(listOf(text)), null, width, listOf(1))
 
+    fun panel(text: Component, skin: DialogTables.PanelSkin, width: Int = 320): PaperDialogBody =
+        table(listOf(listOf(text)), null, listOf(1), skin, width)
+
+    fun table(rows: List<List<Component>>, headers: List<Component>?, columnWeights: List<Int>,
+        skin: DialogTables.PanelSkin, width: Int = 320): PaperDialogBody =
+        if (decoration == null) PaperDialogBody(Component.join(Component.newline(), (listOfNotNull(headers) + rows).map {
+            if (it.all { cell -> cell == Component.empty() }) Component.empty()
+            else Component.join(Component.text(" · ", CivsText.BODY), it)
+        }), width)
+        else DialogTables.filledBody(rows, headers, width, columnWeights, skin)
+
+    fun lists(columns: List<Pair<Component, List<Component>>>, skin: DialogTables.PanelSkin, width: Int = 320): PaperDialogBody {
+        val count = columns.maxOf { it.second.size }
+        val headings = columns.map { it.first.color(CivsText.BODY).decorate(TextDecoration.BOLD) }
+        if (decoration == null) return table(listOf(List(columns.size) { Component.empty() }) + List(count) { row -> columns.map {
+            it.second.getOrNull(row) ?: Component.empty()
+        } }, headings, List(columns.size) { 1 }, skin, width)
+        val facts = columns.flatMapIndexed { column, (_, items) ->
+            listOf(headings[column], Component.empty()) + List(count) { items.getOrNull(it) ?: Component.empty() }
+        }.map { it to Component.empty() }
+        return DialogTables.factsBody(facts, DialogTables.FactsLayout.ROWS, DialogTables.PanelSpec(skin, width, columns.size, false))
+    }
+
     fun facts(rows: List<Pair<Component, Component>>, skin: DialogTables.PanelSkin,
         layout: DialogTables.FactsLayout = DialogTables.FactsLayout.ROWS, columns: Int = 1, width: Int = 320): PaperDialogBody =
         if (decoration == null) PaperDialogBody(Component.join(Component.newline(), rows.map { (label, value) ->
@@ -50,10 +74,7 @@ internal class CivsDialogPresentation(font: String) {
             ?: PaperDialogBody(label.append(Component.text(": ")).append(value), width)
 
     fun supplyTable(rows: List<List<Component>>, headers: List<Component>): PaperDialogBody =
-        if (decoration == null) PaperDialogBody(Component.join(Component.newline(), (listOf(headers) + rows).map {
-            Component.join(Component.text(" · ", CivsText.BODY), it)
-        }), 320)
-        else DialogTables.filledBody(rows, headers, 320, listOf(5, 2), DialogTables.PanelSkin.NAVY)
+        table(rows, headers, listOf(5, 2), DialogTables.PanelSkin.NAVY)
 
     fun divider(width: Int = 320): PaperDialogBody? = decoration?.let { PaperDialogBody(it.divider(width, rule), width) }
 

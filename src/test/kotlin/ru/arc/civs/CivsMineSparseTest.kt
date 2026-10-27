@@ -1,5 +1,6 @@
 package ru.arc.civs
 
+import io.kotest.assertions.withClue
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
@@ -97,7 +98,7 @@ class CivsMineSparseTest : FunSpec({
                 val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(0, 70, 0), 180)
                 val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
                 val old = 1818L
-                val city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
+                var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, old)))
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 fun set(point: CivPosition, state: String) {
@@ -112,6 +113,8 @@ class CivsMineSparseTest : FunSpec({
                         if (dy <= 2) "minecraft:ladder[facing=${geometry.facing},waterlogged=false]" else "minecraft:air")
                     set(geometry.backing.copy(y = geometry.backing.y + dy), "minecraft:cobblestone")
                 }
+                city = city.copy(minePlans = mapOf(mine.id.toString() to
+                    seedMinePaidSpine(world, mine, city.minePlans!!.getValue(mine.id.toString()))))
                 val shallow = CivsWorksiteLayouts.point(mine, geometry.steps[old.toInt()].point)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
@@ -126,6 +129,31 @@ class CivsMineSparseTest : FunSpec({
                     after.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe old
                     after.minePlans!!.getValue(mine.id.toString()).sectionSteps!!.isNotEmpty() shouldBe true
                     after.workers.single().completedCycles shouldBe city.workers.single().completedCycles + 1
+                    val section = geometry.section(requireNotNull(work.miningOrdinal))
+                    (section != "spine") shouldBe true
+                    work.changes.forEach { cell ->
+                        world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData = Bukkit.createBlockData(cell.after)
+                    }
+                    runtime.invalidate(city.workers.single().id, work)
+                    city = after
+                    var continued: CivWorldWork? = null
+                    for (pulse in 0 until 512) {
+                        runtime.pulse(listOf(city))
+                        continued = runtime.plan(city, city.workers.single())
+                        if (continued != null) break
+                        withClue(runtime.debug()) {
+                            runtime.idleReason(city, city.workers.single()) shouldBe "searching-work"
+                        }
+                    }
+                    val next = withClue(runtime.debug()) { requireNotNull(continued) }
+                    geometry.section(requireNotNull(next.miningOrdinal)) shouldBe section
+                    (requireNotNull(next.miningOrdinal) > requireNotNull(work.miningOrdinal)) shouldBe true
+                    runtime.validate(city, next)
+                    val advanced = CivsRules.finishWorldWork(city, next, 102_000)
+                    advanced.minePlans!!.getValue(mine.id.toString()).nextStep shouldBe old
+                    (geometry.sectionCount(section, old, advanced.minePlans!!.getValue(mine.id.toString()).sectionSteps.orEmpty()) >
+                        geometry.sectionCount(section, old, after.minePlans!!.getValue(mine.id.toString()).sectionSteps.orEmpty())) shouldBe true
+                    advanced.workers.single().completedCycles shouldBe city.workers.single().completedCycles + 1
                 }
             } finally { tasks.close() }
         }
