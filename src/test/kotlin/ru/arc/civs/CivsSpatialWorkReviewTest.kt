@@ -1698,11 +1698,15 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 plugin.logger.addHandler(handler)
                 try {
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        var yieldRecovery = false
+                        var recoveryNanos = 0L
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = {
+                            if (yieldRecovery) recoveryNanos.also { recoveryNanos += 2_000_000L } else recoveryNanos
+                        })
                         runtime.pulse(listOf(city))
                         runtime.plan(city, worker) shouldBe null
                         runtime.idleReason(city, worker) shouldBe "searching-work"
-                        // Standing checks or the time budget can yield before the first reachable ray sample.
+                        // Standing checks can yield before the first reachable ray sample.
                         (world.rayTraces in 0..8) shouldBe true
                         messages.none { "worksite_blocked" in it } shouldBe true
                         var pulses = 1
@@ -1726,8 +1730,26 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         // This assertion concerns the opened ray, not preemption of a
                         // different section's already admitted, still valid candidate.
                         runtime.invalidate(worker.id)
+                        // A spent native time slice can defer even the reopened route.
+                        yieldRecovery = true
+                        val raysBeforeRecovery = world.rayTraces
+                        val recoveriesBeforeYield = messages.count { "worksite_recovered" in it }
                         runtime.pulse(listOf(city))
-                        val recovered = requireNotNull(runtime.plan(city, worker))
+                        runtime.plan(city, worker) shouldBe null
+                        runtime.idleReason(city, worker) shouldBe "searching-work"
+                        world.rayTraces shouldBe raysBeforeRecovery
+                        messages.count { "worksite_recovered" in it } shouldBe recoveriesBeforeYield
+                        yieldRecovery = false
+                        var recoveryPulses = 0
+                        while (runtime.plan(city, worker) == null && recoveryPulses++ < 32) {
+                            withClue(runtime.debug(setOf(worker.id))) {
+                                runtime.idleReason(city, worker) shouldBe "searching-work"
+                            }
+                            val before = world.rayTraces
+                            runtime.pulse(listOf(city))
+                            (world.rayTraces - before <= 8) shouldBe true
+                        }
+                        val recovered = withClue(runtime.debug(setOf(worker.id))) { requireNotNull(runtime.plan(city, worker)) }
                         recovered.focus shouldBe target
                         geometry.builtStanding(CivsMinePlan.localPoint(mine, recovered.standing), step.toLong()) shouldBe true
                         messages.count { "worksite_recovered" in it } shouldBe 1
