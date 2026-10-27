@@ -1113,6 +1113,9 @@ class CivsServiceTest : FunSpec({
             h.start()
             val worksites = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }
                 .get(h.service) as CivsWorksites
+            // This receipt scenario is independent of host/MockK speed, like the native-application fixture above.
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }
+                .set(worksites, { 0L })
             repeat(16) { worksites.pulse(listOf(village)) }
             val work = requireNotNull(worksites.plan(village, worker))
             every { h.citizens.autonomousVisualWork(village.id, worker.id) } returns work
@@ -1637,6 +1640,9 @@ class CivsServiceTest : FunSpec({
             every { h.citizens.requireStorageArrival(any(), any(), any()) } throws CivsRejection("stale-delivery")
             h.start()
             val runtime = CivsService::class.java.getDeclaredField("worksites").also { it.isAccessible = true }.get(h.service) as CivsWorksites
+            // Arrival and journal ordering use deterministic planning; pulse budgets have separate coverage.
+            CivsWorksites::class.java.getDeclaredField("nanoTime").also { it.isAccessible = true }
+                .set(runtime, { 0L })
             repeat(32) { if (runtime.plan(h.service.city(h.player)!!, worker) == null) h.paper.performTicks(5) }
             val work = requireNotNull(runtime.plan(h.service.city(h.player)!!, worker))
             work.status shouldBe "watering"
