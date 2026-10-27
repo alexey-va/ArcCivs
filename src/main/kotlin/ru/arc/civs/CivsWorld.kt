@@ -26,6 +26,7 @@ import org.bukkit.block.data.type.Chest as ChestData
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.api.ArcSchematicBlock
+import ru.arc.paper.api.ArcSceneObservationService
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
@@ -439,6 +440,22 @@ class CivsWorld(
         val sound = data.soundGroup
         target.playSound(at, sound.placeSound, SoundCategory.BLOCKS, (sound.volume * 0.4f).coerceAtMost(0.6f), sound.pitch)
         target.spawnParticle(Particle.BLOCK, at, 4, 0.20, 0.18, 0.20, 0.02, data)
+    }
+
+    /** One cheap hint per accepted Core write, including air and paired construction cells. */
+    internal fun constructionChunkChanged(worldId: UUID, cell: ArcSchematicBlock) {
+        check(Bukkit.isPrimaryThread()) { "Civs construction observation requires the server thread" }
+        sceneChunkChanged(worldId, cell.position.x shr 4, cell.position.z shr 4)
+    }
+
+    /** Native success precedes the optional passive hint; no observer can authorize a write. */
+    private fun writeObservedBlock(block: Block, after: BlockData) {
+        block.setBlockData(after, false)
+        sceneChunkChanged(block.world.uid, block.x shr 4, block.z shr 4)
+    }
+
+    private fun sceneChunkChanged(worldId: UUID, chunkX: Int, chunkZ: Int) {
+        plugin.server.servicesManager.load(ArcSceneObservationService::class.java)?.chunkChanged(worldId, chunkX, chunkZ)
     }
 
     override fun close() {
@@ -1222,7 +1239,7 @@ class CivsWorld(
             // Both halves pass their native guards in the same step before either empty block changes.
             blocks.indices.forEach { i ->
                 if (blocks[i].blockData.asString == targets[i].asString) count("unchanged", 1)
-                else { blocks[i].setBlockData(targets[i], false); count("changed", 1) }
+                else { writeObservedBlock(blocks[i], targets[i]); count("changed", 1) }
             }
         }
 
@@ -1292,7 +1309,7 @@ class CivsWorld(
                 !canModify(owner, block, after.material)) { count("denied"); return }
             validateContext()
             // Exact inverse only: no breakNaturally, item transfer, physics or builder receipt.
-            block.setBlockData(after, false)
+            writeObservedBlock(block, after)
             accessRepairChangedTick = tickSequence
             count("changed")
             if (index == repairs.size) finish(counts.toMap())
@@ -1460,7 +1477,7 @@ class CivsWorld(
             if (!applied && !matchesTerraformBefore(cell.before, block.blockData)) rejectAt("world-changed", block)
             if (!applied) {
                 // No breakNaturally, inventory transfer or physics: earthwork never drops items.
-                block.setBlockData(after, false)
+                writeObservedBlock(block, after)
                 changed++
                 blockedTick = tickSequence
             } else unchanged++

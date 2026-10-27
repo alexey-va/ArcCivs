@@ -152,17 +152,24 @@ production. Disabling or losing the permission stops new issuance. Console-only
 `civs settings <city UUID> <setting> <on|off>` supports bounded operational setup;
 the service still checks the owner's testing permission when enabling a setting.
 
-ArcCore host 0.1.21 is the minimum compatible provider; bundled Core helpers are
-2.7.70. Delivery verification also checks the exact installed ArcCore 0.1.21 JAR;
+ArcCore host 0.1.22 is the minimum compatible provider; bundled Core helpers are
+2.7.71. Delivery verification also checks the exact installed ArcCore 0.1.22 JAR;
 the shared API must be byte-identical to that host API. ArcCore provides lifecycle/scheduling,
 SQL, atomic files, localized text, native dialogs/tables, packet displays and the host-owned asynchronous
 schematic service. Human residents use Core's `PaperPacketNpcs` and
 `PacketPlayerNpc` with bundled signed skins, equipment and work-only arm swings.
 No resident Bukkit entity, native inventory or hitbox is registered. Core owns
 profile/spawn/metadata packets, viewer/chunk lifecycle and validated interactions;
-ArcCivs owns authoritative positions, paths, work and health. Resident nameplates
-and courier parcels attach to the same packet actor through an admitted per-viewer
+ArcCivs owns authoritative positions, paths, work and health. Resident and corpse
+actors explicitly opt into ArcCore's passive public scene observations.
+The lifecycle publishes at most 32 current settlement anchors (name, world UUID,
+center and radius); pending deletions are omitted. Observers receive appearance
+and visible equipment only, with no stock, membership or private inventory.
+Resident nameplates and courier parcels attach to the same packet actor through an admitted per-viewer
 carrier lease. Skins are stable per worker UUID; no profile network lookup occurs.
+Successful construction callbacks and the bounded CivsWorld terraforming/repair
+writes publish passive changed-chunk hints. Other native changes remain covered
+by the observer's periodic refresh; no observation authorizes or repeats a write.
 Work props never enter city storage. Supplied personal tools, armor, food and consumables are recorded separately in the city snapshot. Residents expose a native
 inventory menu backed by 33 saved slots: six equipment slots and 27 bag slots. Quick transfers preserve
 item metadata and use the same inventory journal; returned items go to the player's

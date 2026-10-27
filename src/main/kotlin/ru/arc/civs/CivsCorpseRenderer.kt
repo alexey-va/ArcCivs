@@ -107,6 +107,7 @@ class CivsCorpseRenderer internal constructor(
     private val pulseTask = tasks.runTimer(epoch, 1, 5, ::pulse)
 
     init {
+        npcs.enableSceneObservation()
         plugin.server.pluginManager.registerEvents(this, plugin)
         npcs.onInteract = { player, npc, action ->
             // Core has already fenced this packet generation. Attacks on a corpse have no gameplay effect.
@@ -185,6 +186,7 @@ class CivsCorpseRenderer internal constructor(
             shown.items = items
         }
         shown.value = value
+        shown.npc.sceneLabel = value.corpse.worker.name
         controls.apply(id.scene, controlFrame(id, geometry))
         return false
     }

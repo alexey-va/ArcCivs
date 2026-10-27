@@ -62,6 +62,10 @@ loader behavior.
 
 Storage failure and native-retirement failure are separate diagnostics. The
 combined readiness barrier still waits for both stages to settle.
+The lifecycle also closes the public settlement-location source before the
+service and retires the resident/corpse packet owners' observation leases with
+those owners. A fresh generation registers fresh sources; no saved-city state
+or inventory is exposed through the appearance bridge.
 The previously observed full-server-stop cancellation came from ArcCore's native
 cleanup provider closing, and alone does not establish a SQL failure. City
 history remains best-effort logging; its stage confirms writer termination,

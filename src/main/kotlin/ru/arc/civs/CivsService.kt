@@ -4558,6 +4558,7 @@ class CivsService(
     }
 
     private fun constructionPlaced(cityId: UUID, orderId: UUID, access: PlacementAccess, cell: ArcSchematicBlock) {
+        world.constructionChunkChanged(access.plan.worldId, cell)
         if (!ready() || placementAccess[cityId] !== access || access.repairing ||
             cities[cityId]?.construction?.id != orderId) return
         val point = CivPosition(cell.position.x, cell.position.y, cell.position.z)

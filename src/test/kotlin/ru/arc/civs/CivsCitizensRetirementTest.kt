@@ -28,6 +28,7 @@ class CivsCitizensRetirementTest : FunSpec({
             second.join()
             owner.close()
             verify(exactly = 1) { packets.closeAsync() }
+            verify(exactly = 1) { packets.enableSceneObservation() }
             verify { packets.onInteract = null }
         }
     }

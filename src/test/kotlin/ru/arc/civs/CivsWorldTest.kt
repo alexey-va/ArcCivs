@@ -3,8 +3,10 @@ package ru.arc.civs
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import io.mockk.verify
 import org.bukkit.Axis
 import org.bukkit.Bukkit
 import org.bukkit.Material
@@ -18,6 +20,8 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.TestTaskScheduler
 import ru.arc.paper.api.ArcSchematicBlock
 import ru.arc.paper.api.ArcSchematicPoint
+import ru.arc.paper.api.ArcSceneObservationService
+import org.bukkit.plugin.ServicePriority
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
@@ -1159,6 +1163,29 @@ class CivsWorldTest : FunSpec({
             replayed shouldBe cells
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
             s.world.getBlockAt(1, 64, 0).type shouldBe Material.STONE
+        }
+    }
+
+    test("one successful native terrain write emits one optional chunk hint and unchanged replay emits none") {
+        worldScenario { s ->
+            val observations = mockk<ArcSceneObservationService>(relaxed = true)
+            s.paper.server.servicesManager.register(ArcSceneObservationService::class.java, observations,
+                s.paper.createSimplePlugin("ArcCore"), ServicePriority.Normal)
+            val cell = CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt")
+            val plan = worldTerraformPlan(s, listOf(cell))
+            val city = worldTerraformCity(s, plan)
+            val applied = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            completed(applied) shouldBe Unit
+            s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
+            verify(exactly = 1) { observations.chunkChanged(s.world.uid, 0, 0) }
+            val replay = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+            s.scheduler.tick()
+            completed(replay) shouldBe Unit
+            verify(exactly = 1) { observations.chunkChanged(s.world.uid, 0, 0) }
+            s.subject.constructionChunkChanged(s.world.uid,
+                ArcSchematicBlock(ArcSchematicPoint(-1, 64, 32), "minecraft:air", true, false))
+            verify(exactly = 1) { observations.chunkChanged(s.world.uid, -1, 2) }
         }
     }
 

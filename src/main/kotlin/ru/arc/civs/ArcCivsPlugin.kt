@@ -11,6 +11,7 @@ import ru.arc.logging.ArcLogging
 import ru.arc.logging.LoggingConfigSource
 import ru.arc.logging.paper.PaperLoggingPlatform
 import ru.arc.paper.api.ArcSchematicService
+import ru.arc.paper.api.ArcSceneObservationService
 import ru.arc.paper.runtime.PaperPluginRuntime
 import ru.arc.paper.sql.PaperSqlServices
 import ru.arc.paper.network.BungeeBackendTransfer
@@ -177,6 +178,12 @@ open class ArcCivsPlugin : JavaPlugin() {
                 val failure = runCatching { service.close() }.exceptionOrNull()
                 nativeDrains += service.drained()
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
+            })
+            val observations = requireNotNull(server.servicesManager.load(ArcSceneObservationService::class.java)) {
+                "ArcCore scene observation service is not available"
+            }
+            lifecycle.own(observations.registerLocationSource(this, "civs-settlements") { limit ->
+                if (service.ready()) civsSceneLocations(service.settlements(), limit) else emptyList()
             })
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks, text))
             service.ui = ui

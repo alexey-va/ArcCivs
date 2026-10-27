@@ -41,6 +41,7 @@ import java.util.concurrent.CompletionException
 class CivsCorpseRendererTest : FunSpec({
     test("saved corpse keeps resident appearance and native equipment then reflects exact looted slots") {
         withCorpses { f ->
+            verify(exactly = 1) { f.packetNpcs.enableSceneObservation() }
             val custom = ItemStack(Material.IRON_PICKAXE).apply {
                 editMeta { it.displayName(Component.text("Старая кирка")) }
             }

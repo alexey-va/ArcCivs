@@ -391,6 +391,7 @@ class CivsCitizens(
         checkMainThread()
         skins = loadCitizenSkins()
         packets = packetOwner ?: PaperPacketNpcs(plugin, "civs-residents")
+        packets.enableSceneObservation()
         threats = CivsResidentThreats(plugin, attacked = ::defend, mobProtected = immortalResidents,
             discovered = { worker, monster -> if (residentLifeEnabled) defend(worker, monster) }, injury = ::damage)
         packets.onInteract = { player, npc, action ->
@@ -3639,6 +3640,7 @@ class CivsCitizens(
     }
 
     private fun syncResident(npc: PacketPlayerNpc, worker: CivWorker, plan: CitizenPlan) {
+        npc.sceneLabel = worker.name
         val actor = actors[worker.id]
         npc.scale = citizenScale(worker)
         val items = CivsEquipment.slots(worker).let { slots ->
