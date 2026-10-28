@@ -28,7 +28,7 @@ jobs:
         uses: alexey-va/arc-core/.github/actions/verify-consumer@88e264532923ba07990e438846fff4889b6f2d3f
       - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
       - name: Unit and disposable MySQL tests, production JAR
-        run: ./gradlew --no-daemon --build-cache --continue test integrationTest shadowJar
+        run: ./gradlew --no-daemon --build-cache --continue -PcivsTestForks=2 test integrationTest shadowJar
       - name: Retain unit and integration test reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

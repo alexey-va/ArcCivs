@@ -44,11 +44,13 @@ dependencies {
     testImplementation("com.github.retrooper:packetevents-spigot:2.12.1") { exclude(group = "io.netty") }
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
+val requestedTestForks = providers.gradleProperty("civsTestForks").orElse("1").get().toInt()
+require(requestedTestForks in 1..2) { "civsTestForks must be 1 or 2" }
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
     maxHeapSize = "2g"
     jvmArgs("-Djdk.attach.allowAttachSelf=true", "-XX:+EnableDynamicAgentLoading")
-    maxParallelForks = 1
+    maxParallelForks = requestedTestForks
     // MockBukkit/MockK retain JVM state; isolate suites without increasing the heap.
     forkEvery = 1
 }

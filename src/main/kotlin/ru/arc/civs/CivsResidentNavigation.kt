@@ -191,6 +191,21 @@ internal class CitizenPacketRoute(
             val next = steps[1].point
             if (next.y == origin.y && permits(origin, next) && citizenPacketStepClear(world, origin, next, true)) steps.removeAt(0)
         }
+        // Detached paths omit their root. An offset pose can need its own cell centre
+        // before crossing an open panel, or before opening rotates a closed panel.
+        val centre = CitizenPoint(floor(origin.x) + .5, origin.y, floor(origin.z) + .5)
+        val first = steps.firstOrNull()?.takeIf { it.action == CitizenRouteAction.WALK && it.point.y == origin.y }
+        if (first != null && origin.distanceSquared(centre) > .000001) {
+            val cell = CivPosition(floor(first.point.x).toInt(), floor(first.point.y).toInt(), floor(first.point.z).toInt())
+            val opening = cell.y in minimumY until maximumY && citizenChunkReady(world, cell.x shr 4, cell.z shr 4) &&
+                citizenRouteOpenable(world.getBlockAt(cell.x, cell.y, cell.z).blockData)?.isOpen == false
+            if ((opening || !citizenPacketStepClear(world, origin, first.point, false)) &&
+                allowed(CivPosition(floor(centre.x).toInt(), floor(centre.y).toInt(), floor(centre.z).toInt())) &&
+                citizenPacketSupported(world, centre) && permits(origin, centre) && permits(centre, first.point) &&
+                citizenPacketStepClear(world, origin, centre, false) &&
+                citizenPacketStepClear(world, centre, first.point, opening))
+                steps.add(0, CitizenPlannedStep(centre, CitizenRouteAction.WALK))
+        }
         var previous = origin
         for (step in steps) {
             path.addLast(Waypoint(previous, step.point, action = step.action))

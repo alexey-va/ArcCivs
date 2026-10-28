@@ -10,6 +10,7 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsNavigationSearchTest' \
   --tests 'ru.arc.civs.CivsNavigationTerrainTest' \
   --tests 'ru.arc.civs.CivsResidentNavigationTest' \
+  --tests 'ru.arc.civs.CivsOpenDoorCornerRegressionTest' \
   --tests 'ru.arc.civs.CivsResidentWorkReachTest' \
   --tests 'ru.arc.civs.CivsResidentCollisionsTest' \
   --tests 'ru.arc.civs.CivsResidentJourneyNavigationTest' \
@@ -28,6 +29,12 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
 `CivsResidentsRuntimeTest` also covers meal interruptions and resident job
 recovery, so it is included for the full journey/runtime pass.
 
+The door-corner regression pins the observed fractional starting offset and
+native open-door collision panel. It checks actual packet movement for open,
+closed, and mirrored door approaches, plus centered controls. A required
+same-height first-cell center is retained without changing clear direct routes,
+door-opening behavior, collision tolerances, or search budgets.
+
 The tavern cases cover temporary staffing by an idle builder, recovery for
 accepted construction or its queue head, approaching guests and pending meal
 receipts, and keeping the last producers at work regardless of worker order.
@@ -39,6 +46,10 @@ The paused-field regression uses the existing monotonic clock seam to expire
 the 2 ms slice after 16 cells, retain its cursor and unused read quotas, and
 resume at the exact next target. Semantic one-pulse assertions use a fixed
 clock; production time and read budgets remain unchanged.
+
+Local test runs use one JVM at a time by default. CI selects
+`-PcivsTestForks=2`, bounded to one or two independent test JVMs. Each class
+still gets a fresh fork, and each fork keeps the existing 2 GB heap limit.
 
 ## Portable Auto2 planning and worksite suites
 
