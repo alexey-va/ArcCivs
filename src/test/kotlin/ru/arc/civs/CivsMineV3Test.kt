@@ -162,7 +162,9 @@ class CivsMineV3Test : FunSpec({
                         .copy(minePlans = mapOf(mine.id.toString() to seedMinePaidSpine(world, mine,
                             CivMinePlanState(CivsMinePlan.VERSION, index.toLong(), v2Step = 281))))
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        // Legacy-cell validation must not depend on the test host's native-slice timing.
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false },
+                            nanoTime = { 0L })
                         var rejectedPaidFloor = false
                         repeat(128) {
                             runtime.pulse(listOf(city))

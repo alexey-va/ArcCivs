@@ -4113,6 +4113,9 @@ private fun autonomousSettlement(player: Player, name: String): Settlement {
 }
 
 private fun settlement(player: Player): Settlement {
+    // Aptitude uses UUID.hashCode(); pin the trait while keeping each fixture's IDs unique.
+    val workerSeed = UUID.randomUUID().mostSignificantBits
+    fun workerId(index: Long) = UUID(workerSeed, workerSeed xor index)
     fun building(type: BuildingType, x: Int, level: Int = 1) = CivBuilding(UUID.randomUUID(), type, level,
         CivPosition(x, 64, 0), 0, "medieval-oak/${type.name.lowercase()}",
         CivBox(CivPosition(x, 64, 0), CivPosition(x + 4, 70, 4)), CivPosition(x + 2, 64, -1), BuildingPhase.ACTIVE, control = CivPosition(x + 2, 65, 2))
@@ -4122,9 +4125,9 @@ private fun settlement(player: Player): Settlement {
     val forest = building(BuildingType.FORESTER, 20)
     return Settlement(UUID.randomUUID(), player.uniqueId, "Oak Town", player.world.uid, CivPosition(0, 64, 0), 64,
         "medieval-oak", Stock(), listOf(hall, house, builder, forest),
-        listOf(CivWorker(UUID.randomUUID(), "Builder", builder.id, nextDeliveryAt = 10_000),
-            CivWorker(UUID.randomUUID(), "Resident A", null), CivWorker(UUID.randomUUID(), "Resident B", null),
-            CivWorker(UUID.randomUUID(), "Forester", null)), inventory = CivInventory.starting(Stock(96, 96, 24)))
+        listOf(CivWorker(workerId(0), "Builder", builder.id, nextDeliveryAt = 10_000),
+            CivWorker(workerId(1), "Resident A", null), CivWorker(workerId(2), "Resident B", null),
+            CivWorker(workerId(3), "Forester", null)), inventory = CivInventory.starting(Stock(96, 96, 24)))
 }
 
 /** Opt-in source export for the shared native dialog renderer; no UI behavior is mirrored here. */
