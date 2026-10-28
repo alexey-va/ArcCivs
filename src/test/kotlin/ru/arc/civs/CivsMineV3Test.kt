@@ -345,7 +345,8 @@ class CivsMineV3Test : FunSpec({
                         seedMinePaidSpine(world, mine, CivMinePlanState(CivsMinePlan.VERSION, index.toLong(),
                             v2Step = old.steps.size.toLong()))))
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        // This semantic oracle has separate bounded-yield coverage; host speed must not expire its slice.
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                         var removal: CivWorldWork? = null
                         for (action in 0 until 64) {
                             val currentWorker = city.workers.single()

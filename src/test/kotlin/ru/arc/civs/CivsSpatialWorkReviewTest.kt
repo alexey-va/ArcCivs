@@ -148,7 +148,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     // already contained cobblestone here and is not its preimage.
                     world.getBlockAt(-94, 62, -49).type = Material.AIR
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                        // This semantic oracle has separate bounded-yield coverage; host speed must not expire its slice.
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                         repeat(64) { runtime.pulse(listOf(city)) }
                         val work = requireNotNull(runtime.plan(city, worker))
                         work.status shouldBe "digging-mine"
@@ -1058,7 +1059,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 for (x in -3..3) for (z in -3..2) world.loadChunk(x, z)
                 val stock = mutableMapOf<String, Long>()
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false })
+                    // This semantic oracle has separate bounded-yield coverage; host speed must not expire its slice.
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false }, nanoTime = { 0L })
                     runtime.pulse(listOf(city))
                     runtime.plan(city, city.workers.single()) shouldBe null
                     runtime.idleReason(city, city.workers.single()) shouldBe "waiting-ladder"
