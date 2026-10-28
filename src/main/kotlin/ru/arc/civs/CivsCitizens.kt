@@ -11,9 +11,6 @@ import org.bukkit.Sound
 import org.bukkit.SoundCategory
 import org.bukkit.Tag
 import org.bukkit.World
-import org.bukkit.block.data.Bisected
-import org.bukkit.block.data.type.Door
-import org.bukkit.block.data.type.Gate
 import org.bukkit.entity.Player
 import org.bukkit.entity.Monster
 import org.bukkit.event.EventHandler
@@ -126,9 +123,15 @@ class CivsCitizens(
     private val alarms = mutableMapOf<UUID, ResidentAlarm>()
     private var actors = linkedMapOf<UUID, Actor>()
     private var statuses = mutableMapOf<UUID, String>()
-    private var spawnRetries = mutableMapOf<UUID, Pair<CitizenPlan, CitizenRetry>>()
-    private val admissions = mutableMapOf<UUID, CitizenAdmission>()
-    private val admissionOrigins = mutableMapOf<UUID, Pair<UUID, CivPosition>>()
+    private val admission = CivsCitizenAdmissions(::activeAt) { worldId, body ->
+        actors.values.any { actor ->
+            actor.npc.isValid && actor.worldId == worldId &&
+                (citizenStandingBounds(actor.npc.location, actor.npc.scale).overlaps(body) ||
+                    actor.route?.target?.let { citizenStandingBounds(it, actor.npc.scale).overlaps(body) } == true ||
+                    actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
+                    actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
+        }
+    }
     private val constructionWorkplaces = mutableMapOf<UUID, CivPosition>()
     @Volatile private var completions = ConcurrentLinkedQueue<Completion>()
     private val closed = AtomicBoolean()
@@ -493,9 +496,7 @@ class CivsCitizens(
         val workers = cities.values.flatMap { city -> city.workers.map { it.id to (city to it) } }.toMap()
         voices.retain(workers.keys)
         statuses.keys.retainAll(workers.keys)
-        spawnRetries.keys.retainAll(workers.keys)
-        admissions.keys.retainAll(workers.keys - actors.keys)
-        admissionOrigins.keys.retainAll(workers.keys - actors.keys)
+        admission.retain(workers.keys, actors.keys)
         val viewers = viewers()
 
         for (actor in actors.values.toList()) {
@@ -540,15 +541,15 @@ class CivsCitizens(
 
         var budget = citizenSpawnBudget(0, maxActive)
         workers.values.filter { it.second.id !in actors && it.second.id in pendingHarm }.forEach { (city, worker) ->
-            recordAdmission(city, worker, null, null, "injury-pending", nowMillis)
+            admission.record(city, worker, null, null, "injury-pending", nowMillis)
         }
         val candidates = workers.values.filter { it.second.id !in actors && it.second.id !in pendingHarm }
             .map { (city, worker) -> Triple(city, worker, plan(city, worker)) }
             .sortedByDescending { (city, worker, plan) -> plan != null &&
-                citizenHasViewer(city.worldId, admissionOrigin(city, worker.id, plan).point(), viewers, viewerRange) }
+                citizenHasViewer(city.worldId, admission.origin(city, worker.id, plan).point(), viewers, viewerRange) }
         for ((city, worker, plan) in candidates) {
             val workerId = worker.id
-            val origin = plan?.let { admissionOrigin(city, workerId, it) }
+            val origin = plan?.let { admission.origin(city, workerId, it) }
             val visible = origin != null && citizenHasViewer(city.worldId, origin.point(), viewers, viewerRange)
             val world = plugin.server.getWorld(city.worldId)
             val reason = when {
@@ -560,19 +561,18 @@ class CivsCitizens(
             }
             if (reason != null) {
                 statuses[workerId] = reason
-                if (reason == "sleeping") spawnRetries.remove(workerId)
-                recordAdmission(city, worker, plan, world, reason, nowMillis)
+                if (reason == "sleeping") admission.sleeping(workerId)
+                admission.record(city, worker, plan, world, reason, nowMillis)
                 continue
             }
             if (budget == 0) {
                 statuses[workerId] = "waiting"
-                recordAdmission(city, worker, plan, world, "spawn-budget", nowMillis)
+                admission.record(city, worker, plan, world, "spawn-budget", nowMillis)
                 continue
             }
-            val retry = spawnRetries[workerId]?.takeIf { it.first == plan }?.second
-                ?: CitizenRetry(exhaustedCooldownMillis = 60_000)
+            val retry = admission.retry(workerId, plan)
             if (!retry.ready(nowMillis)) {
-                recordAdmission(city, worker, plan, world, "spawn-retry-cooldown", nowMillis, retry)
+                admission.record(city, worker, plan, world, "spawn-retry-cooldown", nowMillis, retry)
                 continue
             }
             if (actors.size >= maxActive && visible) actors.values.firstOrNull { actor ->
@@ -582,21 +582,20 @@ class CivsCitizens(
             }?.let { remove(it, "capacity") }
             if (actors.size >= maxActive) {
                 statuses[workerId] = "capacity"
-                recordAdmission(city, worker, plan, world, "capacity", nowMillis, retry)
+                admission.record(city, worker, plan, world, "capacity", nowMillis, retry)
                 continue
             }
             budget-- // Failed spawns consume the same per-pulse budget as successful spawns.
             var npc: PacketPlayerNpc? = null
             try {
                 requireNotNull(plan)
-                val search = spawnPoint(city, requireNotNull(world), requireNotNull(origin),
+                val search = admission.spawnPoint(city, requireNotNull(world), requireNotNull(origin),
                     city.workers.indexOf(worker), viewers, nowMillis)
                 val point = search.point?.location(world)
                 if (point == null) {
-                    retry.fail(nowMillis)
-                    spawnRetries[workerId] = plan to retry
+                    admission.failed(workerId, plan, retry, nowMillis)
                     statuses[workerId] = "route-unreachable"
-                    recordAdmission(city, worker, plan, world, "no-safe-spawn", nowMillis, retry, search)
+                    admission.record(city, worker, plan, world, "no-safe-spawn", nowMillis, retry, search)
                     if (retry.attempts == 1 || retry.attempts == 3) CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id, CivsDiagnostics.line(
                         "citizen_spawn_blocked", "city" to city.id, "worker" to workerId, "origin" to origin,
                         "attempt" to retry.attempts, "retry_at" to retry.nextAttemptAt,
@@ -611,9 +610,7 @@ class CivsCitizens(
                 val actor = Actor(city.id, workerId, city.worldId, npc, plan)
                 actors[workerId] = actor
                 syncResident(npc, worker, plan)
-                spawnRetries.remove(workerId)
-                admissions.remove(workerId)
-                admissionOrigins.remove(workerId)
+                admission.accepted(workerId)
                 update(actor, city, world, nowMillis)
                 if (actors[workerId] === actor) CivsDiagnostics.event("citizen_spawn", "city" to city.id,
                     "worker" to workerId, "type" to "PACKET_PLAYER",
@@ -622,10 +619,9 @@ class CivsCitizens(
                 actors.remove(workerId)?.cycle?.close()
                 runCatching { npc?.remove() }.onFailure { CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
                     "ArcCivs failed to remove rejected NPC city=${city.id} worker=$workerId", it) }
-                retry.fail(nowMillis)
-                spawnRetries[workerId] = requireNotNull(plan) to retry
+                admission.failed(workerId, plan, retry, nowMillis)
                 statuses[workerId] = "unavailable"
-                recordAdmission(city, worker, plan, world, "spawn-failed", nowMillis, retry)
+                admission.record(city, worker, plan, world, "spawn-failed", nowMillis, retry)
                 if (retry.attempts == 1 || retry.exhausted) CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
                     "ArcCivs NPC spawn failed city=${city.id} worker=$workerId attempt=${retry.attempts}", error)
             }
@@ -794,22 +790,11 @@ class CivsCitizens(
     internal fun debug(cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         checkMainThread()
         val selected = actors.values.filter { (cityId == null || it.cityId == cityId) && (workerId == null || it.workerId == workerId) }
-        val absent = admissions.values.filter { (cityId == null || it.cityId == cityId) && (workerId == null || it.workerId == workerId) }
         val now = navigationClock()
         return linkedMapOf("closed" to closed.get(), "maximum_active" to maxActive, "viewer_range" to viewerRange,
             "navigation_tick" to navigationTick,
             "cadence_ms" to navigationCadenceMillis, "planner_global" to navigation.debug(),
-            "admission" to mapOf("source" to "last-resident-pulse", "total" to absent.size,
-                "truncated" to (absent.size > 8), "entries" to absent.take(8).map { admission -> mapOf(
-                    "city" to admission.cityId, "worker" to admission.workerId, "reason" to admission.reason,
-                    "observed_at_ms" to admission.at, "origin" to admission.plan?.spawnOrigin,
-                    "origin_chunk" to admission.chunk, "required_load_level" to Chunk.LoadLevel.ENTITY_TICKING,
-                    "retry_attempts" to admission.retry?.attempts, "retry_exhausted" to admission.retry?.exhausted,
-                    "next_retry_at_ms" to admission.retry?.nextAttemptAt,
-                    "spawn" to admission.spawn?.let { search -> mapOf("observed_at_ms" to search.at,
-                        "candidate_limit" to CITIZEN_SPAWN_CANDIDATE_LIMIT, "inspected" to search.inspected,
-                        "rejections" to search.rejections, "sample_limit" to CITIZEN_SPAWN_SAMPLE_LIMIT,
-                        "truncated" to (search.inspected > search.samples.size), "samples" to search.samples) }) }),
+            "admission" to admission.debug(cityId, workerId),
             "total" to selected.size, "truncated" to (selected.size > 8), "entries" to selected.take(8).map { actor ->
                 val valid = actor.npc.isValid
                 val position = if (valid) actor.npc.location else null
@@ -907,9 +892,6 @@ class CivsCitizens(
             actor.collectionCycle == null && actor.terrainObstructedAt == null
     }
 
-    private fun admissionOrigin(city: Settlement, workerId: UUID, plan: CitizenPlan): CivPosition =
-        admissionOrigins[workerId]?.takeIf { it.first == city.id }?.second ?: plan.spawnOrigin
-
     /** A committed resurrection may prefer its body site; normal admission still proves safe loaded feet. */
     internal fun requestAdmissionAt(cityId: UUID, workerId: UUID, location: Location) {
         checkMainThread()
@@ -918,8 +900,7 @@ class CivsCitizens(
             it.pendingDeletion == null && it.workers.any { worker -> worker.id == workerId } } ?: return
         if (!location.x.isFinite() || !location.y.isFinite() || !location.z.isFinite() ||
             !city.contains(location.blockX, location.blockZ)) return
-        admissionOrigins[workerId] = cityId to CivPosition(location.blockX, location.blockY, location.blockZ)
-        spawnRetries.remove(workerId)
+        admission.requestAt(cityId, workerId, CivPosition(location.blockX, location.blockY, location.blockZ))
     }
 
     /** The UI owns management/reach checks. Moving an existing actor never completes work or a receipt. */
@@ -3878,55 +3859,6 @@ class CivsCitizens(
         }
     }
 
-    private fun recordAdmission(city: Settlement, worker: CivWorker, plan: CitizenPlan?, world: World?,
-                                reason: String, at: Long, retry: CitizenRetry? = null, spawn: CitizenSpawnSearch? = null) {
-        val previous = admissions[worker.id]?.takeIf { it.plan == plan }
-        val origin = plan?.spawnOrigin
-        val level = if (world == null || origin == null) null else citizenChunkLoadLevel(world, origin.x shr 4, origin.z shr 4)
-        admissions[worker.id] = CitizenAdmission(city.id, worker.id, plan, reason, at,
-            origin?.let { mapOf("world" to city.worldId, "x" to (it.x shr 4), "z" to (it.z shr 4),
-                "loaded" to (level != null), "load_level" to level) },
-            retry ?: spawnRetries[worker.id]?.takeIf { it.first == plan }?.second, spawn ?: previous?.spawn)
-    }
-
-    private fun spawnPoint(city: Settlement, world: World, storage: CivPosition, ordinal: Int,
-                           viewers: List<CitizenViewer>, at: Long): CitizenSpawnSearch {
-        val samples = mutableListOf<CitizenSpawnSample>()
-        val rejections = linkedMapOf<String, Int>()
-        var inspected = 0
-        // Two admissions per pulse give at most 234 candidate checks across all cities.
-        for (point in citizenSpawnCandidates(storage, ordinal)) {
-            inspected++
-            val location = point.location(world)
-            val reason = when {
-                !city.contains(point.x, point.z) -> "outside-city"
-                !citizenControlClear(city, point) -> "control-obstructed"
-                !citizenStandable(world, point) -> "not-standable"
-                !activeAt(city.id, world.uid, point.point(), viewers) -> "sleeping"
-                else -> {
-                    val body = citizenStandingBounds(location, 1.0)
-                    if (actors.values.any { actor ->
-                        actor.npc.isValid && actor.worldId == world.uid &&
-                            (citizenStandingBounds(actor.npc.location, actor.npc.scale).overlaps(body) ||
-                                actor.route?.target?.let { citizenStandingBounds(it, actor.npc.scale).overlaps(body) } == true ||
-                                actor.sleepPose?.takeIf { actor.sleeping }?.bounds?.overlaps(body) == true ||
-                                actor.shelterPose?.takeIf { actor.sheltering }?.bounds?.overlaps(body) == true)
-                    }) "occupied" else null
-                }
-            }
-            if (samples.size < CITIZEN_SPAWN_SAMPLE_LIMIT || reason == null) {
-                val level = citizenChunkLoadLevel(world, point.x shr 4, point.z shr 4)
-                val blocks = if (level != null && point.y > world.minHeight && point.y + 1 < world.maxHeight)
-                    listOf(-1, 0, 1).map { world.getBlockAt(point.x, point.y + it, point.z).type.name } else null
-                val sample = CitizenSpawnSample(point, reason ?: "accepted", level, blocks?.get(0), blocks?.get(1), blocks?.get(2))
-                if (samples.size == CITIZEN_SPAWN_SAMPLE_LIMIT) samples[samples.lastIndex] = sample else samples += sample
-            }
-            if (reason == null) return CitizenSpawnSearch(point, at, inspected, rejections, samples)
-            rejections[reason] = (rejections[reason] ?: 0) + 1
-        }
-        return CitizenSpawnSearch(null, at, inspected, rejections, samples)
-    }
-
     private fun arrived(from: Location, to: Location): Boolean {
         if (from.world != to.world || abs(from.y - to.y) > 0.5) return false
         val offset = to.toVector().subtract(from.toVector())
@@ -4074,9 +4006,7 @@ class CivsCitizens(
         lifeCompletions.clear()
         collectedCompletions.clear()
         pendingHarm.clear()
-        spawnRetries.clear()
-        admissions.clear()
-        admissionOrigins.clear()
+        admission.clear()
         constructionWorkplaces.clear()
         statuses.clear()
         val packetRetirement = try { packets.closeAsync() }
@@ -4322,7 +4252,6 @@ internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<
 internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
 
 internal const val CITIZEN_SPAWN_CANDIDATE_LIMIT = 13 * 9
-private const val CITIZEN_SPAWN_SAMPLE_LIMIT = 16
 
 /** Preserve the nearest floor first, then inspect only four blocks above and below it. */
 internal fun citizenSpawnCandidates(origin: CivPosition, ordinal: Int): Sequence<CivPosition> = sequence {
@@ -4367,12 +4296,6 @@ internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
     val shipmentId: UUID? = null, val craftJobId: UUID? = null,
     val researchProjectId: UUID? = null, val industryRecipe: String? = null)
-private data class CitizenAdmission(val cityId: UUID, val workerId: UUID, val plan: CitizenPlan?, val reason: String,
-    val at: Long, val chunk: Map<String, Any?>?, val retry: CitizenRetry?, val spawn: CitizenSpawnSearch?)
-private data class CitizenSpawnSample(val point: CivPosition, val reason: String, val loadLevel: Chunk.LoadLevel?,
-    val support: String?, val feet: String?, val head: String?)
-private data class CitizenSpawnSearch(val point: CivPosition?, val at: Long, val inspected: Int,
-    val rejections: Map<String, Int>, val samples: List<CitizenSpawnSample>)
 internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false,
@@ -4528,290 +4451,6 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         reason, builder || city.inventory != null || collecting,
         autonomousWork = assigned?.takeIf { autonomous && reason == null && it.type != BuildingType.FORESTER &&
             (CivsRules.resource(it.type) != null || industry != null || it.type == BuildingType.UNIVERSITY) }, industryWork = industry)
-}
-
-internal fun citizenControlBuilding(city: Settlement, point: CivPosition): CivBuilding? =
-    civsProtectedBuildings(city).firstOrNull { it.control == point }
-
-/** A control is furniture, including for the worker whose route enters that building. */
-internal fun citizenControlClear(city: Settlement, feet: CivPosition): Boolean =
-    civsProtectedBuildings(city).none { building -> building.control?.let {
-        feet.x == it.x && feet.z == it.z && feet.y.toLong() in it.y.toLong()..(it.y.toLong() + 1)
-    } == true }
-
-/** Include the native player's width so a diagonal corner cannot turn a barrel into a shortcut. */
-internal fun citizenControlStepClear(city: Settlement, from: CitizenPoint, to: CitizenPoint): Boolean {
-    val origin = Vector(from.x, from.y, from.z)
-    val destination = Vector(to.x, to.y, to.z)
-    val delta = destination.clone().subtract(origin)
-    val distance = delta.length()
-    return civsProtectedBuildings(city).none { building ->
-        val p = building.control ?: return@none false
-        val obstacle = BoundingBox(p.x - 0.3, p.y - 1.8, p.z - 0.3, p.x + 1.3, p.y + 1.01, p.z + 1.3)
-        obstacle.contains(destination) || !obstacle.contains(origin) && distance > 0 &&
-            obstacle.rayTrace(origin, delta.clone().normalize(), distance) != null
-    }
-}
-
-/** One real barrel, twelve supported side cells; never its top or another building's interior. */
-internal fun citizenStorageTarget(city: Settlement, own: CivBuilding, world: World,
-    safe: (CivPosition) -> Boolean = { citizenStandable(world, it) }): CivPosition? {
-    val control = own.control ?: return null
-    if (world.uid != city.worldId || !citizenStorageReady(world, control)) return null
-    for (dy in listOf(0, 1, -1)) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
-        val coordinates = listOf(control.x.toLong() + dx, control.y.toLong() + dy, control.z.toLong() + dz)
-        if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) continue
-        val point = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
-        if (city.contains(point.x, point.z) &&
-            city.buildings.none { it.id != own.id && it.bounds.contains(point.x, point.y, point.z) } &&
-            city.construction?.plannedBuilding?.takeIf { it.id != own.id }?.bounds?.contains(point.x, point.y, point.z) != true &&
-            citizenControlClear(city, point) && safe(point)) return point
-    }
-    return null
-}
-
-internal fun citizenCollectionIdle(plan: CitizenPlan, phase: CitizenPhase): Boolean = plan.courier == null &&
-    phase !in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP) &&
-    plan.idleReason in setOf("unassigned", "waiting-orders", "waiting-growth", "no-construction", "building-unavailable")
-
-/** A route ends beside the real container; the final native ray remains authoritative at deposit time. */
-internal fun citizenCollectedHomeTarget(city: Settlement, home: CivBuilding, world: World, target: CivPosition): CivPosition? {
-    if (!citizenChunkReady(world, target.x shr 4, target.z shr 4)) return null
-    val levels = listOf(home.entrance.y, target.y, target.y - 1, target.y + 1, target.y - 2, target.y - 3).distinct()
-    for (y in levels) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
-        val point = target.copy(x = target.x + dx, y = y, z = target.z + dz)
-        if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point) &&
-            city.buildings.none { it.id != home.id && it.bounds.contains(point.x, point.y, point.z) } &&
-            citizenCanReachBlock(world, point.location(world).add(0.0, 1.5, 0.0), target, 3.0)) return point
-    }
-    return null
-}
-
-internal fun citizenCollectedItemTarget(city: Settlement, world: World, item: Location): CivPosition? {
-    for (dy in listOf(0, 1, -1)) for ((dx, dz) in listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
-        val point = CivPosition(item.blockX + dx, item.blockY + dy, item.blockZ + dz)
-        if (city.contains(point.x, point.z) && citizenControlClear(city, point) && citizenStandable(world, point)) return point
-    }
-    return null
-}
-
-internal fun citizenAtStorage(world: World, from: CitizenPoint, control: CivPosition): Boolean {
-    if (!citizenStorageReady(world, control)) return false
-    val dx = from.x - (control.x + 0.5)
-    val dz = from.z - (control.z + 0.5)
-    return abs(from.y - control.y) <= 1.5 && dx * dx + dz * dz <= 1.75 * 1.75 &&
-        (kotlin.math.floor(from.x).toInt() != control.x || kotlin.math.floor(from.z).toInt() != control.z)
-}
-
-/** Batched actions keep one actual reachable focus (for example the trunk's lowest cut). */
-internal fun citizenWorkFocus(work: CivWorldWork): CivPosition? {
-    // A prepaid tree keeps its reachable root until the final batch, while earlier batches clear its crown.
-    work.forestry?.let { progress ->
-        val job = progress.job
-        if (work.focus == job.root && job.root in job.roots && progress.next > job.next &&
-            job.cells.takeLast(job.roots.size).any { job.position(it) == job.root }) return job.root
-    }
-    return (work.focus ?: work.changes.minByOrNull { it.position.point().distanceSquared(work.standing.point()) }?.position)
-        ?.takeIf { focus -> work.changes.any { it.position == focus } || work.cropCare && work.focus == focus &&
-            work.changes.all { it.position == focus.copy(y = focus.y - 1) } }
-}
-
-/** A short eye-to-block ray is the authority for work and storage access; no chunk is loaded. */
-internal fun citizenCanReachBlock(npc: PacketPlayerNpc, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH): Boolean =
-    npc.isValid && citizenCanReachBlock(npc.world, npc.location.clone().add(0.0, npc.eyeHeight, 0.0), target, reach)
-
-internal const val CITIZEN_BLOCK_REACH = 3.0
-internal const val CITIZEN_MINE_REACH = 4.5
-internal const val CITIZEN_REMOTE_WORK_REACH = 12.0
-internal fun citizenWorkReach(type: BuildingType?, work: CivWorldWork? = null): Double =
-    if (work?.remoteWork == true && type in CivsWorksites.TYPES) CITIZEN_REMOTE_WORK_REACH
-    else if (type == BuildingType.QUARRY) CITIZEN_MINE_REACH else CITIZEN_BLOCK_REACH
-
-/** Planning uses the same ray contract as the observed actor and its durable receipt. */
-internal fun citizenCanReachBlock(world: World, eye: Location, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH): Boolean =
-    citizenReachableBlockPoint(world, eye, target, reach) != null
-
-/** A block's centre can be hidden while one of its faces remains visible, notably below a ladder. */
-internal fun citizenBlockAimPoints(eye: Location, target: CivPosition): List<Location> {
-    if (!eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite()) return emptyList()
-    val x0 = target.x + .001; val x1 = target.x + .999
-    val y0 = target.y + .001; val y1 = target.y + .999
-    val z0 = target.z + .001; val z1 = target.z + .999
-    val x = eye.x.coerceIn(x0, x1)
-    val y = eye.y.coerceIn(y0, y1)
-    val z = eye.z.coerceIn(z0, z1)
-    return listOf(Location(eye.world, target.x + .5, target.y + .5, target.z + .5),
-        Location(eye.world, x, y0, z), Location(eye.world, x, y1, z),
-        Location(eye.world, x0, y, z), Location(eye.world, x1, y, z),
-        Location(eye.world, x, y, z0), Location(eye.world, x, y, z1)).distinct()
-}
-
-internal fun citizenReachableBlockPoint(world: World, eye: Location, target: CivPosition, reach: Double = CITIZEN_BLOCK_REACH,
-    work: CivWorldWork? = null): Location? {
-    if (eye.world != world || !eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite() ||
-        target.y !in world.minHeight until world.maxHeight) return null
-    val points = citizenBlockAimPoints(eye, target).filter { eye.distanceSquared(it) <= reach * reach }
-    if (points.isEmpty() || !citizenBlockTraceReady(world, eye, target)) return null
-    return points.firstOrNull { citizenTraceBlockPoint(world, eye, target, it, work) }
-}
-
-/** A single bounded sample; Worksites keeps its own cursor and shared eight-ray pulse budget. */
-internal fun citizenCanReachBlockPoint(world: World, eye: Location, target: CivPosition, aim: Location,
-    reach: Double = CITIZEN_BLOCK_REACH, work: CivWorldWork? = null): Boolean {
-    if (aim.world != world || !aim.x.isFinite() || !aim.y.isFinite() || !aim.z.isFinite() ||
-        aim.x < target.x || aim.x >= target.x + 1.0 || aim.y < target.y || aim.y >= target.y + 1.0 ||
-        aim.z < target.z || aim.z >= target.z + 1.0 || eye.world != world ||
-        eye.distanceSquared(aim) > reach * reach) return false
-    return citizenBlockTraceReady(world, eye, target) && citizenTraceBlockPoint(world, eye, target, aim, work)
-}
-
-internal fun citizenBlockTraceReady(world: World, eye: Location, target: CivPosition): Boolean {
-    if (eye.world != world || !eye.x.isFinite() || !eye.y.isFinite() || !eye.z.isFinite() ||
-        target.y !in world.minHeight until world.maxHeight) return false
-    for (x in (minOf(eye.blockX, target.x) shr 4)..(maxOf(eye.blockX, target.x) shr 4))
-        for (z in (minOf(eye.blockZ, target.z) shr 4)..(maxOf(eye.blockZ, target.z) shr 4))
-            if (!world.isChunkLoaded(x, z)) return false
-    return true
-}
-
-private fun citizenTraceBlockPoint(world: World, eye: Location, target: CivPosition, aim: Location,
-    work: CivWorldWork? = null): Boolean {
-    val delta = aim.toVector().subtract(eye.toVector())
-    val distance = delta.length()
-    if (distance < .001) return true
-    delta.multiply(1.0 / distance)
-    val job = work?.takeIf { it.remoteWork && distance <= CITIZEN_REMOTE_WORK_REACH }?.forestry?.job
-    var travelled = 0.0
-    // A twelve-block ray crosses fewer than 32 voxels. Natural foliage may obscure the
-    // remote animation, including a neighbouring crown; this never authorizes changing those leaves.
-    repeat(if (job == null) 1 else 32) {
-        val start = eye.clone().add(delta.clone().multiply(travelled))
-        val hit = world.rayTraceBlocks(start, delta, distance - travelled, FluidCollisionMode.ALWAYS, true) ?: return true
-        val block = hit.hitBlock ?: return false
-        if (block.x == target.x && block.y == target.y && block.z == target.z) return true
-        if (job == null) return false
-        val leaves = block.blockData as? org.bukkit.block.data.type.Leaves
-        if (leaves == null || leaves.isPersistent ||
-            (leaves as? org.bukkit.block.data.Waterlogged)?.isWaterlogged == true) return false
-        val exits = listOf(Triple(eye.x, delta.x, block.x), Triple(eye.y, delta.y, block.y), Triple(eye.z, delta.z, block.z))
-            .mapNotNull { (origin, direction, cell) -> when {
-                direction > .0000001 -> (cell + 1.0 - origin) / direction
-                direction < -.0000001 -> (cell.toDouble() - origin) / direction
-                else -> null
-            } }.filter { it >= travelled }
-        travelled = (exits.minOrNull() ?: return false) + .00001
-        if (travelled >= distance) return true
-    }
-    return false
-}
-
-private fun citizenStorageReady(world: World, control: CivPosition): Boolean =
-    world.isChunkLoaded(control.x shr 4, control.z shr 4) &&
-        world.getBlockAt(control.x, control.y, control.z).type == org.bukkit.Material.BARREL
-
-internal fun citizenLookDirection(eye: Location, focus: Location): Pair<Float, Float> = eye.clone().let {
-    it.direction = focus.toVector().subtract(eye.toVector())
-    it.yaw to it.pitch
-}
-
-internal fun citizenWorkingTravel(plan: CitizenPlan, phase: CitizenPhase, sheltering: Boolean): Boolean =
-    plan.idleReason in listOf(null, "placing") && !sheltering &&
-        phase in setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING)
-
-/** A cart belongs to an observed shipment, never to the resident's profession or idle wandering. */
-internal fun citizenCourierCart(plan: CitizenPlan, phase: CitizenPhase, sheltering: Boolean): Boolean =
-    plan.courier != null && plan.idleReason == null && !sheltering && phase in setOf(
-        CitizenPhase.TO_WORK, CitizenPhase.WORKING, CitizenPhase.PICKUP_READY, CitizenPhase.PICKING_UP,
-        CitizenPhase.RETURNING, CitizenPhase.READY, CitizenPhase.DELIVERING)
-
-internal fun citizenDoorPair(world: World, point: CivPosition): Pair<org.bukkit.block.Block, org.bukkit.block.Block>? {
-    if (point.y !in world.minHeight until world.maxHeight || !world.isChunkLoaded(point.x shr 4, point.z shr 4)) return null
-    val data = world.getBlockAt(point.x, point.y, point.z).blockData as? Door ?: return null
-    val y = point.y - if (data.half == Bisected.Half.TOP) 1 else 0
-    if (y < world.minHeight || y + 1 >= world.maxHeight) return null
-    val lower = world.getBlockAt(point.x, y, point.z)
-    val upper = world.getBlockAt(point.x, y + 1, point.z)
-    val bottom = lower.blockData as? Door ?: return null
-    val top = upper.blockData as? Door ?: return null
-    if (lower.type != upper.type || bottom.half != Bisected.Half.BOTTOM || top.half != Bisected.Half.TOP ||
-        bottom.facing != top.facing || bottom.hinge != top.hinge) return null
-    return lower to upper
-}
-
-internal fun citizenDoorAllowed(city: Settlement, allowed: Set<UUID>, point: CivPosition): Boolean =
-    city.pendingDeletion == null && citizenRouteCellAllowed(city, allowed, point.x, point.z)
-
-/** A gate can overlap feet one block above its base; it has no upper half like a door. */
-internal fun citizenOpenRouteDoors(city: Settlement, allowed: Set<UUID>, at: Location, destination: Location,
-    blocked: (UUID, CivPosition) -> Boolean): Boolean {
-    check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
-    val world = destination.world ?: return false
-    if (world.uid != city.worldId || at.world?.uid != world.uid ||
-        !world.isChunkLoaded(destination.blockX shr 4, destination.blockZ shr 4)) return false
-    val body = BoundingBox(destination.x - .299, destination.y + .001, destination.z - .299,
-        destination.x + .299, destination.y + 1.799, destination.z + .299)
-    return (-1..1).all { dy ->
-        val point = CivPosition(destination.blockX, destination.blockY + dy, destination.blockZ)
-        if (dy == -1) {
-            if (point.y !in world.minHeight until world.maxHeight) return@all true
-            val block = world.getBlockAt(point.x, point.y, point.z)
-            if (block.blockData !is Gate || block.collisionShape.boundingBoxes.none {
-                    body.overlaps(it.clone().shift(point.x.toDouble(), point.y.toDouble(), point.z.toDouble()))
-                }) return@all true
-        }
-        citizenOpenRouteDoor(city, allowed, at, point, blocked)
-    }
-}
-
-/** Open only a nearby path door or gate; foreign footprints and rejected native events stay intact. */
-internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Location, point: CivPosition,
-    blocked: (UUID, CivPosition) -> Boolean): Boolean {
-    check(Bukkit.isPrimaryThread()) { "Resident passages require the server thread" }
-    val world = at.world ?: return false
-    if (world.uid != city.worldId || point.y !in world.minHeight until world.maxHeight ||
-        !world.isChunkLoaded(point.x shr 4, point.z shr 4)) return false
-    if (citizenRouteOpenable(world.getBlockAt(point.x, point.y, point.z).blockData) == null) return true
-    fun passage() = if (!world.isChunkLoaded(point.x shr 4, point.z shr 4)) null else when (world.getBlockAt(point.x, point.y, point.z).blockData) {
-        is Door -> citizenDoorPair(world, point)?.toList()
-        is Gate -> listOf(world.getBlockAt(point.x, point.y, point.z))
-        else -> null
-    }
-    val blocks = passage() ?: return false
-    val materials = blocks.map { it.type }
-    val lower = blocks.first()
-    if (blocks.any { block ->
-            val p = CivPosition(block.x, block.y, block.z)
-            !citizenDoorAllowed(city, allowed, p) || blocked(world.uid, p)
-        }) return false
-    if (blocks.all { citizenRouteOpenable(it.blockData)?.isOpen == true }) return true
-    if (at.distanceSquared(Location(world, lower.x + 0.5, lower.y.toDouble(), lower.z + 0.5)) > 2.5 * 2.5) return false
-    val event = CivsResidentOpenDoorEvent(city.id, lower)
-    Bukkit.getPluginManager().callEvent(event)
-    if (event.isCancelled) return false
-    // A native event listener may replace a block; never open its replacement or restore captured data.
-    val current = passage() ?: return false
-    if (current.map { it.type } != materials || current.any { blocked(world.uid, CivPosition(it.x, it.y, it.z)) }) return false
-    for (block in current) {
-        val state = citizenRouteOpenable(block.blockData) ?: return false
-        if (!state.isOpen) block.setBlockData(state.also { it.isOpen = true }, false)
-    }
-    return true
-}
-
-/** Exact entrance first, then at most 26 neighboring loaded, supported feet positions; never inside a building. */
-internal fun citizenRecoveryTarget(city: Settlement, target: CivPosition, safe: (CivPosition) -> Boolean): CivPosition? {
-    val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1, 1 to -1, -1 to -1)
-    for (dy in listOf(0, 1, -1)) for ((dx, dz) in offsets) {
-        val x = target.x.toLong() + dx
-        val y = target.y.toLong() + dy
-        val z = target.z.toLong() + dz
-        if (x !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() || y !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() ||
-            z !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) continue
-        val point = CivPosition(x.toInt(), y.toInt(), z.toInt())
-        if (city.contains(point.x, point.z) && city.buildings.none { it.bounds.contains(point.x, point.y, point.z) } &&
-            city.construction?.plannedBuilding?.bounds?.contains(point.x, point.y, point.z) != true && safe(point)) return point
-    }
-    return null
 }
 
 private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
@@ -4972,336 +4611,18 @@ internal fun citizenStandable(world: World, point: CivPosition): Boolean {
         support.minZ <= point.z + 0.2 && support.maxZ >= point.z + 0.8
 }
 
-internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, PICKUP_READY, PICKING_UP, RETURNING, READY, DELIVERING, PAUSED, CLOSED }
-
-private const val CITIZEN_DELIVERY_RETRY_DELAY_MILLIS = 5_000L
-
-/** Only observed work counts. Producers return cargo to storage; builders finish the session at their worksite. */
-internal class CitizenCycle(val token: CitizenToken, private val workMillis: Long, private val completeAtWorkplace: Boolean = false,
-    private val pickupAtWorkplace: Boolean = false, carrying: Boolean = false, private val directToWork: Boolean = false,
-    private val visualSubaction: Boolean = false, private val pendingStockDelivery: Boolean = false) {
-    var phase = CitizenPhase.IDLE
-        private set
-    var reason: String? = null
-        private set
-    private var workedMillis = 0L
-    private var observedAt = 0L
-    private var ticket: UUID? = null
-    private var resumePhase = CitizenPhase.TO_STORAGE
-    private var deliveryRetryAt: Long? = null
-    private val retries = CitizenRetry()
-    private var hasCargo = carrying
-    val failedAttempts: Int get() = retries.attempts
-    val observedWorkMillis: Long get() = workedMillis
-
-    fun returnWithObservedWork() {
-        check(phase == CitizenPhase.IDLE)
-        phase = CitizenPhase.RETURNING
-    }
-
-    private fun travelStart(): CitizenPhase = when {
-        pendingStockDelivery -> CitizenPhase.RETURNING
-        pickupAtWorkplace && hasCargo -> CitizenPhase.RETURNING
-        pickupAtWorkplace || directToWork -> CitizenPhase.TO_WORK
-        else -> CitizenPhase.TO_STORAGE
-    }
-    fun start() { if (phase == CitizenPhase.IDLE) phase = travelStart() }
-    fun arrive(now: Long) {
-        phase = when (phase) {
-            CitizenPhase.TO_STORAGE -> CitizenPhase.TO_WORK
-            CitizenPhase.TO_WORK -> CitizenPhase.WORKING.also { workedMillis = 0; observedAt = now }
-            CitizenPhase.WORKING -> CitizenPhase.WORKING.also { observedAt = now } // Recovery cannot count the known interval away from work.
-            CitizenPhase.RETURNING -> CitizenPhase.READY
-            else -> phase
-        }
-    }
-    fun work(now: Long) {
-        if (phase != CitizenPhase.WORKING) return
-        val delta = now - observedAt
-        observedAt = now
-        if (delta in 0..2_500) workedMillis += delta
-        if (workedMillis >= workMillis) phase = when {
-            pickupAtWorkplace -> CitizenPhase.PICKUP_READY
-            completeAtWorkplace -> CitizenPhase.READY
-            else -> CitizenPhase.RETURNING
-        }
-    }
-    fun deferWork(now: Long) { if (phase == CitizenPhase.WORKING) observedAt = now }
-    fun beginPickup(): UUID? {
-        if (phase != CitizenPhase.PICKUP_READY) return null
-        phase = CitizenPhase.PICKING_UP
-        return UUID.randomUUID().also { ticket = it }
-    }
-    fun acceptsPickup(candidate: UUID): Boolean = phase == CitizenPhase.PICKING_UP && ticket == candidate
-    fun pickedUp() {
-        if (phase != CitizenPhase.PICKING_UP) return
-        hasCargo = true
-        ticket = null
-        phase = CitizenPhase.RETURNING
-    }
-    fun failPickup(reason: String?, now: Long) {
-        if (phase != CitizenPhase.PICKING_UP) return
-        retryTransfer(reason, now, CitizenPhase.PICKUP_READY)
-    }
-    fun beginDelivery(now: Long): UUID? {
-        if (phase != CitizenPhase.READY || !pickupAtWorkplace && !visualSubaction && !pendingStockDelivery && now < token.nextDeliveryAt) return null
-        phase = CitizenPhase.DELIVERING
-        return UUID.randomUUID().also { ticket = it }
-    }
-    fun acceptsCompletion(candidate: UUID): Boolean = phase == CitizenPhase.DELIVERING && ticket == candidate
-    fun failDelivery(reason: String?, now: Long) {
-        if (phase != CitizenPhase.DELIVERING) return
-        retryTransfer(reason, now, CitizenPhase.READY)
-    }
-    private fun retryTransfer(reason: String?, now: Long, readyPhase: CitizenPhase) {
-        val retryStatus = when (reason) {
-            "city-busy", "construction-credit-full" -> "waiting"
-            "storage-busy" -> "storage-busy"
-            "materials-missing" -> "waiting-inputs"
-            "storage-full" -> if (pickupAtWorkplace) "storage-full" else null
-            "control-missing", "storage-unavailable", "building-not-found" -> if (pickupAtWorkplace) "storage-unavailable" else null
-            else -> null
-        }
-        if (retryStatus == null) {
-            pause(if (reason == "storage-full") "storage-full" else "delivery-failed", now, true)
-            resumePhase = readyPhase
-            return
-        }
-        // A completed observed trip remains valid while supplies or another durable commit are pending.
-        this.reason = retryStatus
-        resumePhase = readyPhase
-        ticket = null
-        deliveryRetryAt = now + CITIZEN_DELIVERY_RETRY_DELAY_MILLIS
-        phase = CitizenPhase.PAUSED
-    }
-    fun pause(reason: String, now: Long, retainWork: Boolean) {
-        if (phase == CitizenPhase.CLOSED) return
-        this.reason = reason
-        resumePhase = if (retainWork) CitizenPhase.READY else travelStart()
-        ticket = null
-        deliveryRetryAt = null
-        retries.fail(now)
-        if (reason == "route-unreachable" && retries.exhausted) deliveryRetryAt = now + 15_000L
-        phase = CitizenPhase.PAUSED
-    }
-    fun retry(now: Long) {
-        if (phase == CitizenPhase.PAUSED && (deliveryRetryAt?.let { now >= it } ?: retries.ready(now))) resume()
-    }
-    fun resume() {
-        if (phase != CitizenPhase.PAUSED) return
-        phase = resumePhase
-        reason = null
-        deliveryRetryAt = null
-    }
-    fun resumeAfterWander() {
-        if (phase != CitizenPhase.PAUSED) return
-        resume()
-        if (phase == CitizenPhase.READY) phase = CitizenPhase.RETURNING
-    }
-    fun close() { phase = CitizenPhase.CLOSED; ticket = null; deliveryRetryAt = null }
-    fun status(): String = when (phase) {
-        CitizenPhase.RETURNING -> when {
-            pickupAtWorkplace -> "carrying-cargo"
-            completeAtWorkplace -> "moving-to-work"
-            else -> "moving-to-storage"
-        }
-        CitizenPhase.TO_STORAGE -> "moving-to-storage"
-        CitizenPhase.TO_WORK -> if (pickupAtWorkplace) "moving-to-pickup" else "moving-to-work"
-        CitizenPhase.WORKING -> "working"
-        CitizenPhase.PICKUP_READY -> "waiting"
-        CitizenPhase.PICKING_UP -> "loading-cargo"
-        CitizenPhase.READY -> "waiting"
-        CitizenPhase.DELIVERING -> "delivering"
-        CitizenPhase.PAUSED -> reason ?: "unavailable"
-        CitizenPhase.CLOSED -> "waiting"
-        CitizenPhase.IDLE -> "waiting"
-    }
-}
-
-internal class CitizenRetry(private val exhaustedCooldownMillis: Long? = null) {
-    var attempts = 0
-        private set
-    private var retryAt = 0L
-    val exhausted: Boolean get() = attempts >= 3
-    val nextAttemptAt: Long? get() = retryAt.takeIf { !exhausted || exhaustedCooldownMillis != null }
-    fun ready(now: Long): Boolean = nextAttemptAt?.let { now >= it } == true
-    fun fail(now: Long) {
-        attempts++
-        retryAt = now + if (exhausted && exhaustedCooldownMillis != null) exhaustedCooldownMillis
-            else if (attempts == 1) 5_000 else 15_000
-    }
-}
-
-/** Server-thread only. The false overload and load-level getter never load or retain a chunk on Paper. */
-internal fun citizenChunkReady(world: World, x: Int, z: Int): Boolean =
-    citizenChunkLoadLevel(world, x, z) == Chunk.LoadLevel.ENTITY_TICKING
-
-internal fun citizenChunkLoadLevel(world: World, x: Int, z: Int): Chunk.LoadLevel? =
-    if (world.isChunkLoaded(x, z)) world.getChunkAt(x, z, false).loadLevel else null
-
 private fun CitizenPlan.chunksReady(world: World): Boolean = if (courier?.cargo?.sourceWorkerId != null)
     citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
 else workplace?.let {
     CitizenChunks.between(storage.x, storage.z, it.x, it.z).ready(world)
 } ?: citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
 
-internal data class CitizenChunks(val minX: Int, val maxX: Int, val minZ: Int, val maxZ: Int) {
-    fun contains(x: Int, z: Int) = x in minX..maxX && z in minZ..maxZ
-    // The one-chunk search margin only needs loaded terrain; movement needs entity ticking.
-    fun ready(world: World): Boolean = (minX..maxX).all { x -> (minZ..maxZ).all { z ->
-        if (x == minX || x == maxX || z == minZ || z == maxZ) world.isChunkLoaded(x, z)
-        else citizenChunkReady(world, x, z)
-    } }
-    companion object {
-        fun between(x1: Int, z1: Int, x2: Int, z2: Int) = CitizenChunks(
-            (minOf(x1, x2) shr 4) - 1, (maxOf(x1, x2) shr 4) + 1,
-            (minOf(z1, z2) shr 4) - 1, (maxOf(z1, z2) shr 4) + 1)
-    }
-}
-
-private fun CivPosition.location(world: World) = Location(world, x + 0.5, y.toDouble(), z + 0.5)
-private fun CivPosition.point() = CitizenPoint(x + 0.5, y.toDouble(), z + 0.5)
-private fun Location.point() = CitizenPoint(x, y, z)
 private fun CitizenPoint.coordinates() = "$x,$y,$z"
 private fun CivPosition.inChunk(x: Int, z: Int) = this.x shr 4 == x && this.z shr 4 == z
 
-
-/** Horizontal footprints stay off transit routes, except the departure and actual destination buildings. */
-internal fun citizenRouteCellAllowed(city: Settlement, allowed: Set<UUID>, x: Int, z: Int): Boolean =
-    city.contains(x, z) && civsProtectedBuildings(city).none { it.id !in allowed && !civsPublicTransit(it, x, z) &&
-        (x in it.bounds.min.x..it.bounds.max.x && z in it.bounds.min.z..it.bounds.max.z || CivsWorksiteLayouts.isField(it, x, z)) }
-
-/** Only an observed mine leg may pass below another building, with headroom below its foundation. */
-internal fun citizenRoutePointAllowed(city: Settlement, allowed: Set<UUID>, point: CivPosition, mine: CivBuilding? = null): Boolean {
-    val bottom = mine?.takeIf { it.type == BuildingType.QUARRY }?.let { building ->
-        CivsMinePlan.forBuilding(building)?.bottom?.let { CivsWorksiteLayouts.point(building, it) }
-    }
-    return city.contains(point.x, point.z) && civsProtectedBuildings(city).none { building ->
-        building.id !in allowed && !civsPublicTransit(building, point.x, point.z) &&
-            (point.x in building.bounds.min.x..building.bounds.max.x && point.z in building.bounds.min.z..building.bounds.max.z ||
-                CivsWorksiteLayouts.isField(building, point.x, point.z)) &&
-            (bottom == null || point.y >= bottom.y || !CivsMinePlan.belowFoundation(building, point.y, headroom = 1))
-    }
-}
-
-private class CitizenMinePassage(val completed: (CitizenPoint) -> Boolean, val allows: (CitizenPoint) -> Boolean)
-
-/** Capture immutable completed prefixes once, before the async search inspects edges. */
-private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
-                                  state: CivMinePlanState?, accessSections: Map<String, Long>? = null): CitizenMinePassage {
-    val current = CivsMinePlan.forBuilding(mine) ?: return CitizenMinePassage({ false }, { false })
-    val bottom = CivsWorksiteLayouts.point(mine, current.bottom)
-    val sections = (accessSections ?: state?.takeIf { it.version == current.version }?.sectionSteps).orEmpty().toMap()
-    val v5 = CivsMineProgress.v5State(state)
-    val prefixes = buildList {
-        add(current to accessStep)
-        val v4 = if (state?.version == 4) state.nextStep else state?.v4Step
-        if (v4 != null && v4 > 0) CivsMinePlan.forBuilding(mine, 4)?.let { add(it to v4) }
-        val v3 = if (state?.version == 3) state.nextStep else state?.v3Step
-        if (v3 != null && v3 > 0) CivsMinePlan.forBuilding(mine, 3)?.let { add(it to v3) }
-        val v2 = if (state?.version == 2) state.nextStep else state?.v2Step
-        if (v2 != null && v2 > 0) CivsMinePlan.forBuilding(mine, 2)?.let { add(it to v2) }
-        if (v5 != null && current.version != 5) CivsMinePlan.forBuilding(mine, 5)?.let { add(it to v5.nextStep) }
-    }
-    val legacy = state?.legacyStep?.takeIf { it > 0 }?.let(current::legacyCompleted)
-    fun legacyOpen(p: CivPosition) = legacy?.containsKey(p) == true && legacy[p].let {
-        it == null || it.startsWith("minecraft:ladder[") || it == "minecraft:torch"
-    }
-    val completed: (CitizenPoint) -> Boolean = { point ->
-        val local = CivsMinePlan.localPoint(mine, CivPosition(kotlin.math.floor(point.x).toInt(),
-            point.y.roundToInt(), kotlin.math.floor(point.z).toInt()))
-        prefixes.any { (plan, prefix) -> plan.builtStanding(local, prefix,
-            if (plan.version == current.version) sections else if (plan.version == 5) v5?.sectionSteps.orEmpty() else emptyMap()) } ||
-            legacyOpen(local) && legacyOpen(local.copy(y = local.y + 1)) ||
-            CivsMineProgress.priorStanding(mine, state, CivPosition(kotlin.math.floor(point.x).toInt(),
-                point.y.roundToInt(), kotlin.math.floor(point.z).toInt()))
-    }
-    return CitizenMinePassage(completed) { point -> point.y >= bottom.y - .125 || completed(point) }
-}
-
-internal fun citizenMineWorkRouteAllowed(mine: CivBuilding, point: CitizenPoint, accessStep: Long,
-                                        state: CivMinePlanState? = null, accessSections: Map<String, Long>? = null): Boolean =
-    citizenMineRoutePassage(mine, accessStep, state, accessSections).allows(point)
-
-/** Outside approaches enter the real building before a work leg uses its underground passages. */
-private fun citizenMineEntranceWaypoint(mine: CivBuilding, from: CitizenPoint, target: CivPosition,
-                                       passage: CitizenMinePassage): CivPosition? {
-    fun inside(point: CitizenPoint): Boolean {
-        val standing = CivPosition(kotlin.math.floor(point.x).toInt(), point.y.roundToInt(),
-            kotlin.math.floor(point.z).toInt())
-        // Future authored cells are still outside; completed legacy access counts at every height.
-        return mine.bounds.contains(standing.x, standing.y, standing.z) || passage.completed(point)
-    }
-    return mine.entrance.takeIf {
-        !citizenNearEndpoint(from, it) && !inside(from) && inside(target.point())
-    }
-}
-
-internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: CivPosition, from: CivPosition): Set<UUID> =
-    civsProtectedBuildings(city).filter { building ->
-        val mineDeparture = if (building.type == BuildingType.QUARRY && building.id == plan.token.assignmentId) {
-            val saved = city.minePlans?.get(building.id.toString())
-            val access = saved?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0
-            citizenMineRoutePassage(building, access, saved).completed(from.point())
-        } else false
-        building.bounds.contains(from.x, from.y, from.z) || mineDeparture || building.bounds.contains(target.x, target.y, target.z) ||
-            building.control == target ||
-            (target == plan.workplace || target == plan.storage) && building.id == plan.token.assignmentId
-    }.mapTo(hashSetOf()) { it.id }.also { allowed ->
-        plan.courier?.cargo?.takeIf { it.sourceWorkerId != null }?.let { allowed += it.sourceBuildingId }
-    }
-
-/** Authored shafts split underground travel and the return outside into actual entrance, climb and gallery legs. */
-internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location, target: CivPosition): CivPosition? {
-    for (mine in city.buildings.filter { it.type == BuildingType.QUARRY }) {
-        val geometry = CivsMinePlan.forBuilding(mine) ?: continue
-        val bottom = CivsWorksiteLayouts.point(mine, geometry.bottom)
-        val state = city.minePlans?.get(mine.id.toString())
-        val access = state?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0
-        fun local(x: Int, y: Int, z: Int) = CivsMinePlan.localPoint(mine, CivPosition(x, y, z))
-        fun inMine(x: Int, y: Int, z: Int): Boolean = y < bottom.y &&
-            (geometry.containsWorkStanding(local(x, y, z)) ||
-                citizenMineWorkRouteAllowed(mine, CitizenPoint(x + .5, y.toDouble(), z + .5), access, state))
-        val fromBelow = inMine(from.blockX, from.blockY, from.blockZ)
-        val targetBelow = inMine(target.x, target.y, target.z)
-        val leaving = (fromBelow || mine.bounds.contains(from.blockX, from.blockY, from.blockZ)) &&
-            !targetBelow && !mine.bounds.contains(target.x, target.y, target.z)
-        // Equal-height outdoor storage can still require a climb out of the mine.
-        // After reaching the shaft bottom, finish the authored stairs at the real entrance.
-        if (!leaving && (abs(from.y - target.y) <= 1.01 || !fromBelow && !targetBelow)) continue
-        val onShaft = from.blockX == bottom.x && from.blockZ == bottom.z
-        // A migrated resident must be able to leave its retained V3 ladder before
-        // ordinary V4 receipts remodel that old access. Never route into future V3 cells.
-        val oldPrefix = if (state?.version == 3) state.nextStep else state?.v3Step ?: 0
-        val old = CivsMinePlan.forBuilding(mine, 3)?.takeIf { oldPrefix > 0 &&
-            it.builtStanding(local(from.blockX, from.y.roundToInt(), from.blockZ), oldPrefix) &&
-            !geometry.builtStanding(local(from.blockX, from.y.roundToInt(), from.blockZ), access) }
-        val waypoint = if (old != null && !onShaft) {
-            val oldLower = CivsWorksiteLayouts.point(mine, old.extensionLadder)
-            val transfer = bottom.copy(y = mine.anchor.y + old.transferFeetY)
-            when {
-                from.y < transfer.y - .5 && (from.blockX != oldLower.x || from.blockZ != oldLower.z) ->
-                    oldLower.copy(y = from.blockY)
-                from.y < transfer.y - .5 -> oldLower
-                else -> transfer
-            }
-        } else when {
-            leaving && from.y >= bottom.y - .5 -> mine.entrance
-            from.y > bottom.y + .5 -> bottom
-            !onShaft -> bottom.copy(y = from.blockY)
-            leaving -> bottom
-            target.y >= bottom.y -> bottom
-            else -> bottom.copy(y = target.y)
-        }
-        if (waypoint == target || citizenNearEndpoint(from.point(), waypoint)) continue
-        if (citizenStandable(world, waypoint) && citizenPacketBodyClear(world, waypoint.point(), false)) return waypoint
-    }
-    return null
-}
-
 internal data class CitizenSleepPose(val position: Location, val bounds: org.bukkit.util.BoundingBox)
 
-private fun citizenStandingBounds(feet: Location, scale: Double): BoundingBox = BoundingBox(
+internal fun citizenStandingBounds(feet: Location, scale: Double): BoundingBox = BoundingBox(
     feet.x - .3 * scale, feet.y, feet.z - .3 * scale,
     feet.x + .3 * scale, feet.y + 1.8 * scale, feet.z + .3 * scale)
 

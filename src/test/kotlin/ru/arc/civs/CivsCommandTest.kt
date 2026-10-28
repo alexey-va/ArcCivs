@@ -36,7 +36,7 @@ class CivsCommandTest : FunSpec({
         }
         captures shouldBe 0
         CivsCommand.completions(true, true, arrayOf("debug-terrain"), console = false) shouldBe emptyList()
-        CivsCommand.completions(true, true, arrayOf("debug-terrain"), console = true) shouldBe listOf("debug-terrain-at")
+        CivsCommand.completions(true, true, arrayOf("debug-terrain"), console = true) shouldBe listOf("debug-terrain-at", "debug-terrain-file-at")
     }
 
     test("terrain-at rejects malformed arguments and a stopped runtime before calling the native callback") {

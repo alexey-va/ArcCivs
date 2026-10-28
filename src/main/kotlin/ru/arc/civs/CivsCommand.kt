@@ -9,7 +9,9 @@ import org.bukkit.command.TabCompleter
 import org.bukkit.entity.Player
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.whenCompleteSync
+import java.nio.file.Path
 import java.util.UUID
+import java.util.concurrent.CompletableFuture
 
 /** The command is a small router; every mutation is re-authorized by the service. */
 class CivsCommand(
@@ -30,6 +32,8 @@ class CivsCommand(
     private val hotloadStatus: () -> Map<String, Any?> = { mapOf("state" to "active") },
     private val debugTerrainAt: (UUID, UUID, CivPosition) -> Map<String, Any?> = { _, _, _ ->
         mapOf("error" to "terrain-capture-unavailable") },
+    private val saveTerrainCapture: (() -> Map<String, Any?>) -> CompletableFuture<Path> = {
+        CompletableFuture.failedFuture(CivsRejection("terrain-file-unavailable")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() == "hotload") {
@@ -43,7 +47,8 @@ class CivsCommand(
             sender.sendMessage(hotloadLine(receipt))
             return true
         }
-        if (args.firstOrNull() == "debug-terrain-at") {
+        if (args.firstOrNull() in setOf("debug-terrain-at", "debug-terrain-file-at")) {
+            val toFile = args.firstOrNull() == "debug-terrain-file-at"
             val city = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             val worker = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             val coordinates = args.drop(3).map { it.toIntOrNull() }
@@ -55,6 +60,16 @@ class CivsCommand(
                 coordinates.any { it == null } -> "invalid-terrain-position"
                 hotloadStatus()["state"] != "active" -> "not-ready"
                 else -> null
+            }
+            if (toFile) {
+                if (error != null) sender.sendMessage(terrainFileLine(failure = CivsRejection(error)))
+                else runCatching {
+                    saveTerrainCapture { debugTerrainAt(requireNotNull(city), requireNotNull(worker), CivPosition(
+                        requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2]))) }
+                }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { path, failure ->
+                    sender.sendMessage(terrainFileLine(path, failure))
+                }
+                return true
             }
             val receipt = if (error != null) mapOf("error" to error) else runCatching {
                 debugTerrainAt(requireNotNull(city), requireNotNull(worker), CivPosition(
@@ -203,8 +218,14 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
+
+        private fun terrainFileLine(path: Path? = null, failure: Throwable? = null): String =
+            "ARCCIVS_TERRAIN_FILE " + Gson().toJson(if (failure == null && path != null)
+                mapOf("schema" to 1, "state" to "saved", "path" to path.toString())
+            else mapOf("schema" to 1, "state" to "failed", "error" to
+                (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "terrain-file-write-failed")))
 
         private fun hotloadLine(receipt: Map<String, Any?>): String = "ARCCIVS_HOTLOAD " + Gson().toJson(receipt)
 

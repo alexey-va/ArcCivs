@@ -314,3 +314,41 @@ space continue to fail explicitly. The current V6 clock starts at its supplied
 native capture's timestamp; the original V5 control retains its public capture
 timestamp. Separate capture epochs remain recorded; the composed fixture is not
 an atomic world snapshot.
+
+## Portable terrain resources
+
+Small, synthetic or otherwise publishable terrain fixtures belong under
+`src/test/resources/scenarios/`. `RecordedNativeMap.fromResourceRle(path, sha256)`
+loads a pinned JSON resource and can seed `CivsWorksiteWorldFixture` or supply
+collision information to a strict captured-world fixture. The existing version 1
+resources remain supported. New resources should use version 2; the minimal
+example is `scenarios/terrain-fixture-v2-example.json`.
+
+The file contains `version: 2`, `order: "y,z,x"`, inclusive `bounds` with
+`min` and `max` positions, a human-readable `provenance` object, a `palette`,
+and `runs`. Each palette entry contains exact `block_data` and may include
+`collision` boxes in block-local coordinates. The optional boolean
+`unknown_opaque_identity` marks a solid shape whose actual material was hidden
+by capture occlusion; an observed stone block must leave that flag unset.
+`runs` is a flat list of `[length, palette index]` pairs, with x varying fastest,
+then z, then y. Index `-1` means the cell was not observed at all. Runs must
+cover the entire bounds exactly and the loader limits fixtures to two million
+cells. Unknown cells are omitted from `states`; do not use `seed()` alone to
+claim they are empty because its destination fixture may have a default block.
+Strict replays must reject missing observations instead of inventing terrain.
+
+Keep private player or settlement data outside Git; a local capture can be read
+with `RecordedNativeMap.fromFile(path, sha256)`. Record capture time and source,
+and do not combine separate observations as though they were an atomic snapshot.
+
+Convert one or more native capture JSON files into this resource format with:
+
+```sh
+python3 scripts/terrain_capture_to_fixture.py /private/tmp/capture-1.json /private/tmp/capture-2.json \
+  --output /private/tmp/terrain-fixture.json
+shasum -a 256 /private/tmp/terrain-fixture.json
+```
+
+The converter leaves unobserved cells unknown and rejects conflicting overlap,
+conflicting collision shapes for the same state, and failed captures. Review the
+source, coordinates and contents before copying a fixture into test resources.

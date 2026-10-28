@@ -354,11 +354,19 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
     companion object {
         fun fromResourceRle(path: String, sha256: String): RecordedNativeMap {
             val encoded = JsonParser.parseString(pinnedScenarioResource(path, sha256)).asJsonObject
-            check(encoded["version"].asInt == 1 && encoded["order"].asString == "y,z,x")
+            val version = encoded["version"].asInt
+            check(version in 1..2 && encoded["order"].asString == "y,z,x")
             val bounds = com.google.gson.Gson().fromJson(encoded["bounds"], CivBox::class.java)
-            val width = bounds.max.x - bounds.min.x + 1
-            val depth = bounds.max.z - bounds.min.z + 1
-            val height = bounds.max.y - bounds.min.y + 1
+            fun extent(min: Int, max: Int): Int {
+                val value = max.toLong() - min.toLong() + 1
+                check(value in 1..2_000_000) { "Invalid terrain fixture bounds" }
+                return value.toInt()
+            }
+            val width = extent(bounds.min.x, bounds.max.x)
+            val depth = extent(bounds.min.z, bounds.max.z)
+            val height = extent(bounds.min.y, bounds.max.y)
+            val volume = width.toLong() * depth * height
+            check(volume <= 2_000_000) { "Terrain fixture is too large" }
             val runs = encoded.getAsJsonArray("runs")
             val palette = encoded.getAsJsonArray("palette")
             val voxels = com.google.gson.JsonArray()
@@ -366,17 +374,19 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
             check(runs.size() % 2 == 0)
             for (run in 0 until runs.size() step 2) {
                 val count = runs[run].asInt; val value = runs[run + 1].asInt
-                check(count > 0 && value in 0 until palette.size() && index.toLong() + count <= width.toLong() * depth * height)
+                check(count > 0 && (value in 0 until palette.size() || version == 2 && value == -1) && index.toLong() + count <= volume)
                 repeat(count) {
-                    voxels.add(com.google.gson.JsonArray().also { cell ->
+                    if (value >= 0) voxels.add(com.google.gson.JsonArray().also { cell ->
                         cell.add(index % width); cell.add(index / (width * depth)); cell.add(index / width % depth)
                         cell.add(value); cell.add(true)
-                        cell.add(palette[value].asJsonObject["block_data"].asString == "minecraft:stone")
+                        val shape = palette[value].asJsonObject
+                        cell.add(if (version == 1) shape["block_data"].asString == "minecraft:stone"
+                            else shape["unknown_opaque_identity"]?.asBoolean ?: false)
                     })
                     index++
                 }
             }
-            check(index.toLong() == width.toLong() * depth * height)
+            check(index.toLong() == volume)
             val fixture = com.google.gson.JsonObject()
             fixture.add("bounds", encoded["bounds"]); fixture.add("palette", palette); fixture.add("voxels", voxels)
             return RecordedNativeMap(fixture)

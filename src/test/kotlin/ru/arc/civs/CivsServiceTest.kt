@@ -809,25 +809,23 @@ class CivsServiceTest : FunSpec({
             every { h.worldAdapter.repairAutonomousAccess(city, any()) } answers { repair }
             h.start()
             h.paper.addPlayer("AccessOwner").teleport(Location(h.world, 0.5, 65.0, 0.5))
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutonomousAccessRepair").also { it.isAccessible = true }
-            val ready = CivsService::class.java.getDeclaredMethod("autonomousAccessReady", Settlement::class.java)
-                .also { it.isAccessible = true }
-            pulse.invoke(h.service); h.tick()
-            ready.invoke(h.service, city) shouldBe false
+            val development = autonomousDevelopment(h.service)
+            development.pulseAccessRepair(); h.tick()
+            development.accessReady(city) shouldBe false
             verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(city, listOf(
                 CivAutonomousAccessRepair(older.id, offender.id, older.entrance,
                     write.copy(before = write.after, after = write.before)))) }
             h.saves shouldBe emptyList()
             repair.complete(mapOf("changed" to 0, "unchanged" to 0, "conflicts" to 0, "denied" to 1)); h.tick()
-            ready.invoke(h.service, city) shouldBe false
-            pulse.invoke(h.service)
+            development.accessReady(city) shouldBe false
+            development.pulseAccessRepair()
             verify(exactly = 1) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
             repair = CompletableFuture()
             h.time += 30_001
-            pulse.invoke(h.service); h.tick()
+            development.pulseAccessRepair(); h.tick()
             repair.complete(mapOf("changed" to 1, "unchanged" to 0, "conflicts" to 0, "denied" to 0)); h.tick()
-            ready.invoke(h.service, city) shouldBe true
-            pulse.invoke(h.service); h.tick()
+            development.accessReady(city) shouldBe true
+            development.pulseAccessRepair(); h.tick()
             verify(exactly = 2) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
             h.service.settlements().single().stock shouldBe Stock()
             h.saves shouldBe emptyList()
@@ -853,15 +851,14 @@ class CivsServiceTest : FunSpec({
                 every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
                 h.start()
                 h.paper.addPlayer("GrowthObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
-                val repair = CivsService::class.java.getDeclaredMethod("pulseAutonomousAccessRepair").also { it.isAccessible = true }
-                val pulse = CivsService::class.java.getDeclaredMethod("pulseAutonomy").also { it.isAccessible = true }
-                repair.invoke(h.service); h.tick()
+                val development = autonomousDevelopment(h.service)
+                development.pulseAccessRepair(); h.tick()
                 h.time += 5_001
-                pulse.invoke(h.service); h.tick()
+                development.pulse(); h.tick()
                 verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
                 verify(exactly = 0) { anyConstructed<CivsAutonomousPlacement>().search(any(), any(), any(), any()) }
                 h.time += 30_001
-                pulse.invoke(h.service); h.tick()
+                development.pulse(); h.tick()
                 verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().plan(any()) }
                 verify(exactly = 1) { anyConstructed<CivsAutonomousPlacement>().search(any(), BuildingType.BUILDER_HUT, 1, any()) }
                 val after = h.service.settlements().single()
@@ -3432,9 +3429,8 @@ class CivsServiceTest : FunSpec({
                 terrain = CivTerraformPlan(CivBox(cell.position, cell.position), listOf(cell), emptyList(), 63, 1, 0))
             val pending = CompletableFuture<CivPlacementPlan?>()
             every { h.store.loadPlan(order.id) } returns pending
-            val lookup = CivsService::class.java.getDeclaredMethod("constructionSite", UUID::class.java, UUID::class.java)
-                .also { it.isAccessible = true }
-            fun site() = lookup.invoke(h.service, city.id, order.id) as CivConstructionSite?
+            val construction = constructionRuntime(h.service)
+            fun site() = construction.site(city.id, order.id)
             h.start()
             site() shouldBe null
             site() shouldBe null
@@ -5668,6 +5664,14 @@ class CivsServiceTest : FunSpec({
         }
     }
 })
+
+private fun autonomousDevelopment(service: CivsService): CivsAutonomousDevelopment =
+    CivsService::class.java.getDeclaredField("autonomousDevelopment").also { it.isAccessible = true }
+        .get(service) as CivsAutonomousDevelopment
+
+private fun constructionRuntime(service: CivsService): CivsConstructionRuntime =
+    CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }
+        .get(service) as CivsConstructionRuntime
 
 private class ServiceRoadUpkeep(private val h: ServiceScenario) {
     private val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT)
