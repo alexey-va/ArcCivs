@@ -147,7 +147,7 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     val v3Step: Long? = null,
     /** Completed V4 geometry remains an escape/protection prefix after V5 starts. */
     val v4Step: Long? = null,
-    /** Exact V5 section-local prefixes outside nextStep; missing keeps old receipts unchanged. */
+    /** Exact V5/V6 section-local prefixes outside nextStep; missing keeps old receipts unchanged. */
     val sectionSteps: Map<String, Long>? = null,
     /** Last real excavation, rechecked after restart before another opening. Schematic-local. */
     val excavation: CivPosition? = null,
@@ -156,15 +156,22 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     /** Frozen V5 linear prefix when its first sparse receipt is admitted. */
     val v5Step: Long? = null,
     /** Exact paid geometry from at most two lower building levels; never a current-level prefix. */
-    val levels: List<CivMineLevelWitness>? = null)
+    val levels: List<CivMineLevelWitness>? = null,
+    /** Exact same-level V5 authority, frozen only by the first real V6 receipt. */
+    val v5Proof: CivMineV5Proof? = null)
 
-/** Flat old-level proof: it deliberately cannot contain another history. */
+/** One bounded predecessor, never a recursive plan history or another building level. */
+data class CivMineV5Proof(val nextStep: Long, val sectionSteps: Map<String, Long>? = null,
+    val excavation: CivPosition? = null, val seals: Map<String, String>? = null)
+
+/** Nonrecursive old-level proof, including at most one flat V5 version witness. */
 data class CivMineLevelWitness(val building: CivBuilding, val version: Int?, val nextStep: Long,
     val legacyStep: Long? = null, val v2Step: Long? = null, val v3Step: Long? = null, val v4Step: Long? = null,
     val sectionSteps: Map<String, Long>? = null, val excavation: CivPosition? = null,
-    val seals: Map<String, String>? = null, val v5Step: Long? = null, val legacyProgress: Long? = null) {
+    val seals: Map<String, String>? = null, val v5Step: Long? = null, val legacyProgress: Long? = null,
+    val v5Proof: CivMineV5Proof? = null) {
     fun state(): CivMinePlanState? = version?.let {
-        CivMinePlanState(it, nextStep, legacyStep, v2Step, v3Step, v4Step, sectionSteps, excavation, seals, v5Step)
+        CivMinePlanState(it, nextStep, legacyStep, v2Step, v3Step, v4Step, sectionSteps, excavation, seals, v5Step, v5Proof = v5Proof)
     }
 }
 

@@ -3,9 +3,9 @@ plugins {
     id("com.gradleup.shadow") version "9.3.0"
 }
 group = "ru.ruscrafting"
-version = "0.1.101"
+version = "0.1.102"
 description = "Persistent player settlements and working citizens for RusCrafting"
-val arcCorePluginVersion = "0.1.23"
+val arcCorePluginVersion = "0.1.25"
 java { toolchain.languageVersion.set(JavaLanguageVersion.of(25)) }
 kotlin { jvmToolchain(25) }
 val integrationTestSourceSet = sourceSets.create("integrationTest") {

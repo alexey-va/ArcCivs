@@ -86,7 +86,8 @@ class CivsMineBoundarySealTest : FunSpec({
                     saved.nextStep shouldBe 216L
                     saved.legacyStep shouldBe 214L
                     saved.v3Step shouldBe 83L
-                    saved.v5Step shouldBe 215L
+                    saved.v5Step shouldBe null
+                    saved.v5Proof shouldBe null
                     saved.sectionSteps shouldBe original.minePlans!!.getValue(mine.id.toString()).sectionSteps
                     CivsMineProgress.valid(requireNotNull(CivsMinePlan.forBuilding(mine)), saved, mine) shouldBe true
                     CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE") shouldBe

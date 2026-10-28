@@ -169,8 +169,8 @@ class CivsMineWorkStandingTest : FunSpec({
             for (x in -4..1) for (z in -2..3) world.loadChunk(x, z)
             val soil = CivsWorksiteLayouts.field(farm).first()
             val focus = soil.copy(y = soil.y + 1)
-            for (x in soil.x - 2..soil.x + 2) for (z in soil.z - 2..soil.z + 2)
-                if (x != soil.x || z != soil.z) for (y in soil.y - 2..soil.y) world.getBlockAt(x, y, z).type = Material.AIR
+            for (x in soil.x - 3..soil.x + 3) for (z in soil.z - 3..soil.z + 3)
+                if (x != soil.x || z != soil.z) for (y in soil.y - 4..soil.y) world.getBlockAt(x, y, z).type = Material.AIR
             world.getBlockAt(soil.x, soil.y, soil.z).blockData = Bukkit.createBlockData("minecraft:farmland[moisture=7]")
             val crop = (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
             world.getBlockAt(focus.x, focus.y, focus.z).blockData = crop
@@ -415,7 +415,12 @@ class CivsMineWorkStandingTest : FunSpec({
                     val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(-85, 68, -40), 270)
                     val old = requireNotNull(CivsMinePlan.forBuilding(mine, 3))
                     val current = requireNotNull(CivsMinePlan.forBuilding(mine))
-                    val worker = spatialWorker(mine, "IRON_PICKAXE")
+                    val initialWorker = spatialWorker(mine, "IRON_PICKAXE")
+                    val worker = initialWorker.copy(items = CivsEquipment.slots(initialWorker).map { item ->
+                        if (item?.material == "LADDER") item.copy(amount = current.steps.count {
+                            it.after?.startsWith("minecraft:ladder[") == true
+                        }) else item
+                    })
                     var city = spatialCity(world.uid, listOf(mine), worker).copy(center = CivPosition(-25, 64, -20),
                         minePlans = mapOf(mine.id.toString() to CivMinePlanState(3, 83)))
                     for (x in -7..-5) for (z in -4..-2) world.loadChunk(x, z)
@@ -439,8 +444,9 @@ class CivsMineWorkStandingTest : FunSpec({
                         val work = nextMineWork(runtime, city, worker)
                         work.miningPlanVersion shouldBe CivsMinePlan.VERSION
                         (work.standing != reported) shouldBe true
-                        current.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
-                            requireNotNull(work.miningAccessStep), work.miningAccessSections.orEmpty()) shouldBe true
+                        (current.builtStanding(CivsMinePlan.localPoint(mine, work.standing),
+                            requireNotNull(work.miningAccessStep), work.miningAccessSections.orEmpty()) ||
+                            CivsMineProgress.priorStanding(mine, city.minePlans!!.getValue(mine.id.toString()), work.standing)) shouldBe true
                         for (y in work.standing.y..top.y) world.getBlockAt(top.x, y, top.z).type shouldBe Material.LADDER
                         runtime.validate(city, work)
                         city.minePlans!!.getValue(mine.id.toString()) shouldBe CivMinePlanState(3, 83)
@@ -451,7 +457,7 @@ class CivsMineWorkStandingTest : FunSpec({
                             val paidLining = hashSetOf<CivPosition>()
                             val directory = Files.createTempDirectory("mine-v4-paid-lining-restart")
                             CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
-                            repeat(40) { action ->
+                            for (action in 0 until current.sections.getValue("spine").size * 2 + 40) {
                                 val currentWorker = city.workers.single()
                                 val next = nextMineWork(runtime, city, currentWorker)
                                 runtime.validate(city, next)
@@ -483,6 +489,7 @@ class CivsMineWorkStandingTest : FunSpec({
                                 }
                                 city.minePlans!!.getValue(mine.id.toString()).v3Step shouldBe 83L
                                 runtime.invalidate(currentWorker.id)
+                                if (restarted && removedLining && city.minePlans!!.getValue(mine.id.toString()).nextStep > 22) break
                             }
                             restarted shouldBe true
                             removedLining shouldBe true

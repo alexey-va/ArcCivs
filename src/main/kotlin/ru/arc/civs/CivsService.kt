@@ -362,6 +362,16 @@ class CivsService(
             }
     }
 
+    internal fun debugTerrainAt(cityId: UUID, workerId: UUID, origin: CivPosition): Map<String, Any?> {
+        check(Bukkit.isPrimaryThread())
+        val header = mapOf("source" to "fresh-native-command", "city" to cityId, "worker" to workerId,
+            "focus_origin" to "operator-request", "capture_center" to origin)
+        if (closed || !ready()) return header + ("error" to "not-ready")
+        val city = cities[cityId] ?: return header + ("error" to "city-not-found")
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: return header + ("error" to "worker-not-found")
+        return CivsTerrainDebug.capture(city, worker, citizens.residentFeet(workerId), worksites.plan(city, worker), now(), origin)
+    }
+
     /** Cached snapshots by default; explicit terrain alone captures a bounded loaded native neighbourhood. */
     fun debugState(system: String, cityId: UUID?, workerId: UUID?): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())

@@ -3,8 +3,9 @@ package ru.arc.civs
 import com.google.gson.JsonObject
 import java.util.concurrent.ConcurrentHashMap
 
-/** Versioned, schematic-local geometry. V2/V3/V4 orders stay pinned for saved receipts. */
-internal class CivsMinePlan private constructor(layout: JsonObject, val version: Int, private val timber: String) {
+/** Versioned, schematic-local geometry. V2 through V5 orders stay pinned for saved receipts. */
+internal class CivsMinePlan private constructor(private val layout: JsonObject, val version: Int,
+    private val timber: String, private val schematicId: String) {
     data class Step(val point: CivPosition, val after: String?, val stage: String,
         val floor: Int? = null, val branch: String? = null, val shaftSupport: Boolean = false,
         /** Already built predecessor; native support, reach and route checks remain mandatory. */
@@ -44,7 +45,8 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
     val floors = when (version) {
         2 -> oldFloors
         3 -> alignedFloors(oldFloors.size + 2)
-        else -> networkFloors(oldFloors.size + 2)
+        4, 5 -> networkFloors(oldFloors.size + 2)
+        else -> networkFloors(oldFloors.size + 5)
     }
     /** Entry vestibule is two high, below the untouched authored ceiling. */
     val entranceLanding = if (version >= 4) Floor(0, transferFeetY,
@@ -621,24 +623,28 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
     fun ladderForBacking(local: CivPosition): CivPosition =
         (if (local.x == extensionBacking.x && local.z == extensionBacking.z) extensionLadder else bottom).copy(y = local.y)
 
+    /** Resolve the same blueprint's frozen authority without reconstructing its geometry per receipt. */
+    fun forVersion(version: Int): CivsMinePlan? = if (version !in 2..VERSION) null else
+        plans.computeIfAbsent("$schematicId:$version") { CivsMinePlan(layout, version, timber, schematicId) }
+
     companion object {
-        const val VERSION = 5
+        const val VERSION = 6
         private val plans = ConcurrentHashMap<String, CivsMinePlan>()
         private data class SealLineage(val all: Set<CivPosition>, val higher: Set<CivPosition>)
         private val sealLineages = object : LinkedHashMap<String, SealLineage>(16, .75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, SealLineage>): Boolean = size > 64
         }
 
-        private fun sealLineage(building: CivBuilding): SealLineage = sealLineages.getOrPut(building.schematicId) {
+        private fun sealLineage(building: CivBuilding, version: Int): SealLineage = sealLineages.getOrPut("${building.schematicId}:$version") {
             val higher = CivsWorksiteLayouts.mineFamily(building).filter { it.second > building.level }.flatMap { (id, level) ->
-                forBuilding(building.copy(schematicId = id, level = level))?.positions.orEmpty()
+                forBuilding(building.copy(schematicId = id, level = level), version)?.positions.orEmpty()
             }.toSet()
-            SealLineage(forBuilding(building)?.positions.orEmpty() + higher, higher)
+            SealLineage(forBuilding(building, version)?.positions.orEmpty() + higher, higher)
         }
 
         /** Static mutation coordinates only; never retain a world snapshot or unrelated paid lining. */
-        @Synchronized fun sealPositions(building: CivBuilding): Set<CivPosition> = sealLineage(building).all
-        @Synchronized fun futureSealPositions(building: CivBuilding): Set<CivPosition> = sealLineage(building).higher
+        @Synchronized fun sealPositions(building: CivBuilding, version: Int = VERSION): Set<CivPosition> = sealLineage(building, version).all
+        @Synchronized fun futureSealPositions(building: CivBuilding, version: Int = VERSION): Set<CivPosition> = sealLineage(building, version).higher
 
         fun forBuilding(building: CivBuilding, version: Int = VERSION): CivsMinePlan? {
             if (version !in 2..VERSION) return null
@@ -650,7 +656,7 @@ internal class CivsMinePlan private constructor(layout: JsonObject, val version:
                 "/caledonia/" in building.schematicId -> "dark_oak"
                 else -> "oak"
             }
-            return plans.computeIfAbsent(key) { CivsMinePlan(layout, version, timber) }
+            return plans.computeIfAbsent(key) { CivsMinePlan(layout, version, timber, building.schematicId) }
         }
 
         fun shaftContains(building: CivBuilding, world: CivPosition): Boolean {

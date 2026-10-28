@@ -10,21 +10,41 @@ internal object CivsTerrainDebug {
     private data class PaletteEntry(val blockData: String, val boxes: List<CitizenTerrainBox>,
         val climbable: Boolean, val hot: Boolean, val liquid: Boolean, val door: Boolean)
 
-    fun capture(city: Settlement, worker: CivWorker, actual: Location?, work: CivWorldWork?, now: Long): Map<String, Any?> {
+    fun requestedBounds(city: Settlement, origin: CivPosition, minimumY: Int, maximumY: Int): CivBox {
+        val low = listOf(origin.x.toLong() - 4, origin.y.toLong() - 5, origin.z.toLong() - 4)
+        val high = listOf(origin.x.toLong() + 4, origin.y.toLong() + 5, origin.z.toLong() + 4)
+        if ((low + high).any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() })
+            throw CivsRejection("capture-bounds-overflow")
+        if (low[1] < minimumY || high[1] >= maximumY) throw CivsRejection("capture-bounds-outside-world")
+        val min = CivPosition(low[0].toInt(), low[1].toInt(), low[2].toInt())
+        val max = CivPosition(high[0].toInt(), high[1].toInt(), high[2].toInt())
+        if (listOf(min.x, max.x).any { x -> listOf(min.z, max.z).any { z -> !city.contains(x, z) } })
+            throw CivsRejection("capture-outside-city")
+        return CivBox(min, max)
+    }
+
+    fun capture(city: Settlement, worker: CivWorker, actual: Location?, work: CivWorldWork?, now: Long,
+        origin: CivPosition? = null): Map<String, Any?> {
         check(Bukkit.isPrimaryThread())
         val started = System.nanoTime()
         val header = linkedMapOf<String, Any?>("source" to "fresh-native-command", "city" to city.id,
             "worker" to worker.id, "building" to worker.assignment, "captured_at_ms" to now,
             "actual" to actual?.let { listOf(it.x, it.y, it.z) })
+        if (origin != null) {
+            header["focus_origin"] = "operator-request"
+            header["capture_center"] = origin
+            if (city.workers.none { it.id == worker.id }) return header + ("error" to "worker-not-found")
+        }
         val world = actual?.world ?: Bukkit.getWorld(city.worldId) ?: return header + ("error" to "world-unloaded")
         if (world.uid != city.worldId) return header + ("error" to "resident-world-mismatch")
         if (actual != null && (!actual.x.isFinite() || !actual.y.isFinite() || !actual.z.isFinite()))
             return header + ("error" to "invalid-resident-position")
-        val planned = if (actual == null) citizenPlan(city, worker)?.spawnOrigin else null
+        val planned = if (actual == null && origin == null) citizenPlan(city, worker)?.spawnOrigin else null
         val home = worker.homeId?.let(city::building)?.let { it.control ?: it.entrance }
         val depot = city.buildings.firstOrNull(CivsRules::isDepot)?.let { it.control ?: it.entrance }
-        val center = actual?.let { CivPosition(it.blockX, it.blockY, it.blockZ) } ?: planned ?: home ?: depot ?: city.center
+        val center = origin ?: actual?.let { CivPosition(it.blockX, it.blockY, it.blockZ) } ?: planned ?: home ?: depot ?: city.center
         header["focus_origin"] = when {
+            origin != null -> "operator-request"
             actual != null -> "resident-feet"
             planned != null -> "planned-spawn"
             home != null -> "home"
@@ -32,13 +52,28 @@ internal object CivsTerrainDebug {
             else -> "settlement-center"
         }
         header["capture_center"] = center
-        if (center.y !in world.minHeight until world.maxHeight)
+        if (origin == null && center.y !in world.minHeight until world.maxHeight)
             return header + ("error" to if (actual == null) "capture-origin-outside-world" else "resident-outside-world")
-        val min = CivPosition(center.x - 4, (center.y - 5).coerceAtLeast(world.minHeight), center.z - 4)
-        val max = CivPosition(center.x + 4, (center.y + 5).coerceAtMost(world.maxHeight - 1), center.z + 4)
+        val bounds = if (origin == null) CivBox(
+            CivPosition(center.x - 4, (center.y - 5).coerceAtLeast(world.minHeight), center.z - 4),
+            CivPosition(center.x + 4, (center.y + 5).coerceAtMost(world.maxHeight - 1), center.z + 4))
+        else try { requestedBounds(city, origin, world.minHeight, world.maxHeight) }
+            catch (failure: CivsRejection) { return header + ("error" to failure.reason) }
+        val min = bounds.min
+        val max = bounds.max
         val palette = linkedMapOf<PaletteEntry, Int>()
         val voxels = ArrayList<List<Any?>>(891)
         val chunks = linkedMapOf<Pair<Int, Int>, Chunk.LoadLevel?>()
+        if (origin != null) {
+            for (x in (min.x shr 4)..(max.x shr 4)) for (z in (min.z shr 4)..(max.z shr 4))
+                chunks[x to z] = citizenChunkLoadLevel(world, x, z)
+            if (chunks.values.any { it != Chunk.LoadLevel.ENTITY_TICKING }) return header + mapOf(
+                "error" to "chunks-unloaded", "world" to world.uid,
+                "required_load_level" to Chunk.LoadLevel.ENTITY_TICKING,
+                "bounds" to mapOf("min" to min, "max" to max),
+                "chunks" to chunks.map { (key, level) -> mapOf("x" to key.first, "z" to key.second,
+                    "loaded" to (level != null), "load_level" to level) })
+        }
         var unavailable = 0
         for (x in min.x..max.x) for (z in min.z..max.z) {
             val key = (x shr 4) to (z shr 4)

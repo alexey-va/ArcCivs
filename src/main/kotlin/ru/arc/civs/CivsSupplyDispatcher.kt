@@ -35,7 +35,8 @@ internal data class CivSupplySnapshot(val cityId: UUID, val inputKey: Any,
     val constructionTargets: Map<UUID, UUID> = emptyMap(),
     val craftWorkers: List<CivCraftWorker> = emptyList(), val craftJobs: Map<UUID, CivCraftJob> = emptyMap(),
     val craftEpoch: UUID = UUID.randomUUID(), val constructionId: UUID? = null,
-    val stockTargets: Map<UUID, Map<String, Long>> = emptyMap(), val autonomousStock: Boolean = false) {
+    val stockTargets: Map<UUID, Map<String, Long>> = emptyMap(), val autonomousStock: Boolean = false,
+    val maximumTransferDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE) {
     internal fun detached() = copy(inputKey = Unit,
         stores = stores.mapValues { (_, value) -> value.copy(stock = value.stock.toMap(), desiredStock = value.desiredStock.toMap(),
             capacity = value.capacity.copy(partialRoom = value.capacity.partialRoom.toMap())) },
@@ -394,6 +395,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     lastAssigned: Map<UUID, Long> = emptyMap(), blockedWorkers: Set<UUID> = emptySet(),
     blockedTrips: Set<CivSupplyTrip> = emptySet(), now: Long = 0, cancelled: AtomicBoolean = AtomicBoolean()): CivSupplyAllocation {
     require(snapshot.inputKey === Unit) { "Owner validation metadata must not enter the allocator" }
+    require(snapshot.maximumTransferDistance in 1..CivsLogistics.MAX_TRANSFER_DISTANCE)
     if (snapshot.couriers.size > 48 || snapshot.workerSources.size > 48) throw CivSupplyBudget()
     val crafts = CivsCarpentry.allocate(snapshot, cancelled)
     val stores = snapshot.stores.mapValues { (id, store) -> store.copy(desiredStock = store.desiredStock + crafts.required[id].orEmpty()) }
@@ -491,7 +493,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                   key: CivSupplyTask, producer: CivSupplyWorkerSource? = null) {
             checkBudget()
             val from = producer?.meeting ?: source.control
-            if (source.id == target.id || distance(from, target.control) > CivsRules.MAX_WORK_ROUTE_DISTANCE) return
+            if (source.id == target.id || distance(from, target.control) > snapshot.maximumTransferDistance) return
             if (producer != null && (producer.workerId in busySources || producer.workerId == courier.workerId)) return
             seen += key
             val amount = minOf(CivsLogistics.MAX_CARGO, quantity, courier.bagRoom[material] ?: 0,

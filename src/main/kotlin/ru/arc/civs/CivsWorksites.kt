@@ -146,7 +146,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         var selected: String? = null, var cursor: Int = 0, var ordinal: Int = 0, var checkedExcavation: Boolean = false,
         val retryAt: MutableMap<String, Long> = hashMapOf(), var lastDenial: Need? = null,
         var lastDeniedSection: String? = null,
-        var unsealedExcavation: CivPosition? = null)
+        var unsealedExcavation: CivPosition? = null,
+        val legacyBlocks: Map<CivPosition, String?> = emptyMap())
     private val mineExecutions = hashMapOf<UUID, MineExecution>()
     private val mineCovers = hashMapOf<UUID, CivMineCover>()
     private data class MineSafetyScan(val building: CivBuilding, val target: CivPosition, val progress: Long,
@@ -850,6 +851,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         requireCivs(plan(city, worker) == work, "stale-worksite")
         val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
         requireCivs(building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id, "invalid-assignment")
+        requireCivs(building.type != BuildingType.QUARRY || work.miningStep == null && work.miningPlanVersion == null ||
+            work.miningPlanVersion == CivsMinePlan.VERSION, "stale-worksite")
         requireCivs(work.autonomousVisual == CivsAutonomousWorksites.supports(city, building), "stale-worksite")
         if (work.autonomousVisual) CivsAutonomousWorksites.validate(city, work)
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
@@ -1678,9 +1681,13 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val state = city.minePlans?.get(building.id.toString())
         fun owned(mine: CivBuilding, proof: CivMinePlanState?, legacyProgress: Long?, at: CivPosition): Boolean {
             if (proof?.seals?.get(CivsMineProgress.key(at)) == data) return true
-            val current = CivsMinePlan.forBuilding(mine)
-            if (proof?.version == CivsMinePlan.VERSION && current?.expectedAt(at, proof.nextStep,
+            val current = CivsMinePlan.forBuilding(mine, proof?.version ?: CivsMinePlan.VERSION)
+            if (proof != null && current?.expectedAt(at, proof.nextStep,
                     proof.sectionSteps.orEmpty(), mine.rotation) == data) return true
+            CivsMineProgress.v5State(proof)?.let { old ->
+                if (old.seals?.get(CivsMineProgress.key(at)) == data || CivsMinePlan.forBuilding(mine, 5)?.expectedAt(
+                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation) == data) return true
+            }
             val legacy = current?.legacyCompleted(legacyProgress ?: 0L)?.get(at)
             if (legacy != null && Bukkit.createBlockData(legacy).also { value ->
                 value.rotate(when (Math.floorMod(mine.rotation / 90, 4)) {
@@ -1706,14 +1713,14 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     /** Same pending-mutation authority at selection, admission, saved receipt and recovery. */
     private fun mineMutationAllowed(city: Settlement, building: CivBuilding, world: World, cell: CivPlanBlock,
         ordinal: Int, worker: CivWorker? = null, budgeted: Boolean = false, generator: Boolean = false,
-        sealing: Boolean = false): Boolean? {
+        sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION): Boolean? {
         fun denied(reason: String): Boolean {
             if (worker == null) throw CivsRejection(reason)
             blocked(worker, "worksite-protected", point = cell.position, reason = reason,
                 blockMaterial = Bukkit.createBlockData(cell.before).material.name)
             return false
         }
-        val plan = CivsMinePlan.forBuilding(building) ?: return denied("mine-layout-missing")
+        val plan = CivsMinePlan.forBuilding(building, planVersion) ?: return denied("mine-layout-missing")
         if (ordinal !in plan.steps.indices) return denied("mine-progress-invalid")
         val point = cell.position
         if (!world.isChunkLoaded(point.x shr 4, point.z shr 4)) return denied("chunks-unloaded")
@@ -1773,7 +1780,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val building = city.building(work.buildingId)?.takeIf { it.type == BuildingType.QUARRY }
             ?: throw CivsRejection("building-not-found")
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unloaded")
-        val plan = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("mine-layout-missing")
+        val plan = CivsMinePlan.forBuilding(building, work.miningPlanVersion ?: CivsMinePlan.VERSION)
+            ?: throw CivsRejection("mine-layout-missing")
         val reserved = work.changes.mapTo(hashSetOf()) { it.position }
         val pending = work.changes.filter { cell ->
             requireCivs(cell.position.y in world.minHeight until world.maxHeight, "outside-world")
@@ -1784,6 +1792,18 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
         // Already applied paid blocks may be retired even if protection subsequently changes.
         if (pending.isEmpty()) return
+        for (index in CivsMineProgress.initialSpineAccess(building, city.minePlans?.get(building.id.toString()), work)) {
+            val step = plan.steps[index]
+            val point = CivsWorksiteLayouts.point(building, step.point)
+            val block = read(city, building, world, point) ?: throw CivsRejection("protected-area")
+            val expected = plan.expectedAfter(index, building.rotation)
+            val soundBacking = step.shaftSupport && expected == "minecraft:cobblestone" &&
+                block.type.isOccluding && !block.type.hasGravity() && block.type !in UNBREAKABLE
+            requireCivs(block.blockData.asString == expected || soundBacking, "stale-worksite")
+            requireCivs(worldAccess.canModify(city.owner, block, Bukkit.createBlockData(expected).material), "lands-denied")
+            requireCivs(mineMutationAllowed(city, building, world, change(block, expected), index,
+                planVersion = plan.version) == true, "protected-area")
+        }
         val ordinal = work.miningOrdinal ?: work.focus?.let { focus ->
             plan.steps.indexOfFirst { it.point == CivsMinePlan.localPoint(building, focus) }.takeIf { it >= 0 }
         } ?: 0
@@ -1803,7 +1823,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     } == true }, "stale-worksite")
             }
             requireCivs(mineMutationAllowed(city, building, world, cell, ordinal, generator = work.miningGenerator,
-                sealing = sealing) == true, "protected-area")
+                sealing = sealing, planVersion = plan.version) == true, "protected-area")
         }
         val excavations = pending.filter { Bukkit.createBlockData(it.after).material.isAir }
             .mapTo(hashSetOf()) { CivsMinePlan.localPoint(building, it.position) }
@@ -1873,29 +1893,37 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val progress = state?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0L
         if (state?.version?.let { it !in 2..CivsMinePlan.VERSION } == true || progress !in 0..steps.size.toLong())
             return blocked(worker, "worksite-layout", point = building.anchor, reason = "mine-progress-invalid")
-        val v1 = geometry.legacyCompleted(city.mineProgress?.get(building.id.toString()) ?: 0L)
-            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "legacy-mine-progress-invalid")
         val v2Step = state?.takeIf { it.version == 2 }?.nextStep ?: state?.v2Step ?: 0L
         val v2Plan = CivsMinePlan.forBuilding(building, 2)
-        val v2 = v2Plan?.completed(v2Step)
-            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v2-mine-progress-invalid")
-        val v3Step = state?.takeIf { it.version == 3 }?.nextStep ?: state?.v3Step ?: 0L
-        val v3 = CivsMinePlan.forBuilding(building, 3)?.completed(v3Step)
-            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v3-mine-progress-invalid")
-        val v4Step = state?.takeIf { it.version == 4 }?.nextStep ?: state?.v4Step ?: 0L
-        val v4 = CivsMinePlan.forBuilding(building, 4)?.completed(v4Step)
-            ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v4-mine-progress-invalid")
-        val legacy = v1 + v2 + v3 + v4
         val execution = mineExecutions[building.id]?.takeIf { it.building == building && it.saved == state &&
             it.legacy == city.mineProgress?.get(building.id.toString()) } ?: run {
             val previous = mineExecutions[building.id]
-            MineExecution(building, state, city.mineProgress?.get(building.id.toString()), progress, progress,
-                state?.takeIf { it.version == geometry.version }?.sectionSteps.orEmpty().toMutableMap(),
+            val v1 = geometry.legacyCompleted(city.mineProgress?.get(building.id.toString()) ?: 0L)
+                ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "legacy-mine-progress-invalid")
+            val v2 = v2Plan?.completed(v2Step)
+                ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v2-mine-progress-invalid")
+            val v3Step = state?.takeIf { it.version == 3 }?.nextStep ?: state?.v3Step ?: 0L
+            val v3 = CivsMinePlan.forBuilding(building, 3)?.completed(v3Step)
+                ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v3-mine-progress-invalid")
+            val v4Step = state?.takeIf { it.version == 4 }?.nextStep ?: state?.v4Step ?: 0L
+            val v4 = CivsMinePlan.forBuilding(building, 4)?.completed(v4Step)
+                ?: return blocked(worker, "worksite-layout", point = building.anchor, reason = "v4-mine-progress-invalid")
+            val v5 = CivsMineProgress.v5State(state)?.let { old ->
+                requireNotNull(CivsMinePlan.forBuilding(building, 5)).let { plan -> plan.steps.withIndex()
+                    .filter { plan.completed(it.index, old.nextStep, old.sectionSteps.orEmpty()) }
+                    .associate { it.value.point to it.value.after } }
+            }.orEmpty()
+            val initial = geometry.normalizedProgress(progress,
+                if (state?.version == geometry.version) state.sectionSteps.orEmpty()
+                else CivsMineProgress.retainedSpine(building, state))
+            MineExecution(building, state, city.mineProgress?.get(building.id.toString()), progress, initial.first,
+                initial.second.toMutableMap(),
                 selected = previous?.selected, cursor = previous?.cursor ?: 0,
                 retryAt = previous?.retryAt?.toMutableMap() ?: hashMapOf(), lastDenial = previous?.lastDenial,
-                lastDeniedSection = previous?.lastDeniedSection)
+                lastDeniedSection = previous?.lastDeniedSection, legacyBlocks = v1 + v2 + v3 + v4 + v5)
                 .also { mineExecutions[building.id] = it }
         }
+        val legacy = execution.legacyBlocks
         val sectionKeys = geometry.sections.keys.toList()
         fun nextOrdinal(section: String): Int? = geometry.sections.getValue(section)
             .getOrNull(geometry.sectionCount(section, execution.prefix, execution.sections).toInt())
@@ -2373,7 +2401,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun mineBuiltStanding(building: CivBuilding, point: CivPosition, prefix: Long,
         sections: Map<String, Long> = emptyMap(), state: CivMinePlanState? = null): Boolean =
         CivsMinePlan.forBuilding(building)?.let { it.builtStanding(CivsMinePlan.localPoint(building, point), prefix, sections) } == true ||
-            CivsMineProgress.priorStanding(state, point)
+            CivsMineProgress.priorStanding(building, state, point)
 
     private fun shaftStandingConnected(world: World, p: CivPosition, shaft: CivPosition,
         centralStanding: MutableMap<Int, Boolean> = hashMapOf()): Boolean {
@@ -2615,6 +2643,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             for (ring in listOf(adjacent, wider)) for (dy in listOf(0, 1, -1, -2)) for ((dx, dz) in ring)
                 if (dx * dx + dz * dz + (dy + 1.12) * (dy + 1.12) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH)
                     add(CivPosition(dx, dy, dz))
+            // Keep the old choices first, then include every point whose adult eye
+            // reaches a real block face. A lower third-ring slope can reach under a
+            // low crown even when every old head position is occupied by leaves.
+            val radius = kotlin.math.ceil(CITIZEN_BLOCK_REACH).toInt()
+            val target = CivPosition(0, 0, 0)
+            for (dy in (-radius - 1)..(radius - 1)) for (dx in -radius..radius) for (dz in -radius..radius) {
+                val offset = CivPosition(dx, dy, dz)
+                if (dx == 0 && dz == 0 || offset in this) continue
+                val eye = Location(null, dx + .5, dy + 1.62, dz + .5)
+                if (citizenBlockAimPoints(eye, target).any { aim ->
+                        eye.toVector().distanceSquared(aim.toVector()) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH
+                    }) add(offset)
+            }
         }
         private val LADDER_WORK_OFFSETS = listOf(1, 0, 2, -1, 3, -2, -3).map { CivPosition(0, it, 0) } + WORK_OFFSETS +
             buildList {

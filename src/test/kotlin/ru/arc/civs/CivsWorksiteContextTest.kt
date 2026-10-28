@@ -14,7 +14,7 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 
 class CivsWorksiteContextTest : FunSpec({
-    for (liquid in listOf(false, true)) test("live mine v5 step 1818 observes a protected neighbour with liquid $liquid without modifying it") {
+    for (liquid in listOf(false, true)) test("the former V5 step 1818 target observes a protected neighbour with liquid $liquid without modifying it") {
         contextWorld("mine-1818-$liquid", Material.STONE) { world, runtime, access ->
             val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(-1844, 70, -2696), 180).copy(
                 bounds = CivBox(CivPosition(-1853, 65, -2695), CivPosition(-1835, 87, -2677)),
@@ -22,17 +22,22 @@ class CivsWorksiteContextTest : FunSpec({
             val forest = spatialBuilding("nordic", "lumberjack", 1, CivPosition(-1870, 63, -2689)).copy(
                 bounds = CivBox(CivPosition(-1876, 63, -2695), CivPosition(-1864, 72, -2683)))
             val worker = spatialWorker(mine, "IRON_PICKAXE")
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val physicalTarget = CivPosition(19, -9, -10)
+            // V6 extends the shaft before the galleries; preserve this physical hazard,
+            // not the historical V5 ordinal of the excavation.
+            val targetOrdinal = geometry.steps.indexOfFirst { it.point == physicalTarget && it.after == null }
+            check(targetOrdinal >= 0) { "Current mine plan lost the protected-neighbour target $physicalTarget" }
             val city = spatialCity(world.uid, listOf(mine, forest), worker).copy(
                 center = mine.anchor, radius = 80,
-                minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, 1818)))
+                minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, targetOrdinal.toLong())))
             access(city)
             for (x in -119..-112) for (z in -172..-165) world.loadChunk(x, z)
-            val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
-            geometry.steps[1818].point shouldBe CivPosition(19, -9, -10)
+            geometry.steps[targetOrdinal].point shouldBe physicalTarget
             // This hazard-observation regression has genuine deep cover. The separate
             // sparse-section regression retains the live shallow surface and defers it.
             seedMineNaturalCover(world, mine)
-            seedContextMine(world, mine, 1818)
+            seedContextMine(world, mine, targetOrdinal)
             val target = CivPosition(-1863, 61, -2686)
             val neighbour = CivPosition(-1864, 61, -2686)
             world.getBlockAt(neighbour.x, neighbour.y, neighbour.z).type = Material.STONE

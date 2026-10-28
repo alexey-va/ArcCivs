@@ -612,12 +612,13 @@ class CivsForestryTest : FunSpec({
 
     test("an optional unloaded stance cannot pin a paid tree ahead of its loaded remote worker") {
         forestryWorksite("forestry-optional-unloaded-stance", autonomous = false, nanoTime = { 0L },
-            settings = CivsWorksiteSettings(standingChecksPerPulse = 128, rayChecksPerPulse = 1)) { world, runtime, initial ->
+            // A complete 224-candidate ordinary sweep must fit before its same-pulse remote probe.
+            settings = CivsWorksiteSettings(standingChecksPerPulse = 256, rayChecksPerPulse = 1)) { world, runtime, initial ->
             val worker = initial.workers.single()
             val root = CivPosition(15, 64, -26)
             forestrySmallOak(world, root)
-            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
-                if (x != root.x || z != root.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            for (x in root.x - 3..root.x + 3) for (z in root.z - 3..root.z + 3)
+                if (x != root.x || z != root.z) for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
             val scan = CivsForestry.Scan(root, "OAK_LOG")
             while (!scan.complete && !scan.failed) scan.advance(128) { p -> world.getBlockAt(p.x, p.y, p.z).blockData.asString }
             val job = requireNotNull(scan.job(listOf(root))).copy(next = 1)
@@ -718,9 +719,9 @@ class CivsForestryTest : FunSpec({
             forestrySmallOak(world, firstRoot)
             forestrySmallOak(world, laterRoot)
             // The isolated footing passes support/body/ray checks, but has no supported incoming step.
-            for (x in firstRoot.x - 2..firstRoot.x + 2) for (z in firstRoot.z - 2..firstRoot.z + 2)
+            for (x in firstRoot.x - 3..firstRoot.x + 3) for (z in firstRoot.z - 3..firstRoot.z + 3)
                 if ((x != firstRoot.x || z != firstRoot.z) && (x != onlyStanding.x || z != onlyStanding.z))
-                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+                    for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
             fun select(): CivWorldWork {
                 repeat(3_000) {
                     clock.performTicks(5)
@@ -754,6 +755,7 @@ class CivsForestryTest : FunSpec({
             select().focus shouldBe laterRoot
             val reopened = onlyStanding.copy(x = onlyStanding.x + 1, y = 63)
             world.getBlockAt(reopened.x, reopened.y, reopened.z).type = Material.DIRT
+            world.getBlockAt(reopened.x + 1, reopened.y, reopened.z).type = Material.DIRT
             runtime.changed(world.uid, reopened)
             val refreshed = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
             (refreshed["deferredForestApproaches"] as Map<*, *>)["total"] shouldBe 0
@@ -774,9 +776,9 @@ class CivsForestryTest : FunSpec({
             val root = CivPosition(-15, 64, -26)
             val onlyStanding = root.copy(x = root.x + 1)
             forestrySmallOak(world, root)
-            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+            for (x in root.x - 3..root.x + 3) for (z in root.z - 3..root.z + 3)
                 if ((x != root.x || z != root.z) && (x != onlyStanding.x || z != onlyStanding.z))
-                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+                    for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
             repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val first = requireNotNull(runtime.plan(city, worker))
             first.standing shouldBe onlyStanding
@@ -798,6 +800,7 @@ class CivsForestryTest : FunSpec({
             repeat(20) { runtime.pulse(listOf(city)); runtime.plan(city, worker) shouldBe null }
             val reopened = onlyStanding.copy(x = onlyStanding.x + 1, y = 63)
             world.getBlockAt(reopened.x, reopened.y, reopened.z).type = Material.DIRT
+            world.getBlockAt(reopened.x + 1, reopened.y, reopened.z).type = Material.DIRT
             runtime.changed(world.uid, reopened)
             repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val retried = requireNotNull(runtime.plan(city, worker))
@@ -983,8 +986,8 @@ class CivsForestryTest : FunSpec({
         forestryWorksite("forestry-inaccessible-$planting") { world, runtime, city ->
             val worker = city.workers.single()
             val blockedRoot = CivPosition(-15, 64, -26)
-            for (x in blockedRoot.x - 2..blockedRoot.x + 2) for (z in blockedRoot.z - 2..blockedRoot.z + 2)
-                if (x != blockedRoot.x || z != blockedRoot.z) for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+            for (x in blockedRoot.x - 3..blockedRoot.x + 3) for (z in blockedRoot.z - 3..blockedRoot.z + 3)
+                if (x != blockedRoot.x || z != blockedRoot.z) for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
             val laterRoot = CivPosition(10, 64, -26)
             if (!planting) {
                 forestrySmallOak(world, blockedRoot)
@@ -1046,9 +1049,9 @@ class CivsForestryTest : FunSpec({
             forestrySmallOak(world, root)
             world.getBlockAt(care.x, care.y, care.z).type = Material.OAK_SAPLING
             // Preserve one locally valid stance whose incoming route was rejected.
-            for (x in root.x - 2..root.x + 2) for (z in root.z - 2..root.z + 2)
+            for (x in root.x - 3..root.x + 3) for (z in root.z - 3..root.z + 3)
                 if ((x != root.x || z != root.z) && (x != onlyStanding.x || z != onlyStanding.z))
-                    for (y in 61..63) world.getBlockAt(x, y, z).type = Material.AIR
+                    for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
             fun entry(): Map<*, *> =
                 (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
             fun select(): CivWorldWork {

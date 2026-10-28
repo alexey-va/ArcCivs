@@ -28,6 +28,8 @@ class CivsCommand(
         java.util.concurrent.CompletableFuture.failedFuture(CivsRejection("layout-export-unavailable")) },
     private val prepareHotload: () -> Map<String, Any?> = { mapOf("state" to "failed", "failure" to "hotload-unavailable") },
     private val hotloadStatus: () -> Map<String, Any?> = { mapOf("state" to "active") },
+    private val debugTerrainAt: (UUID, UUID, CivPosition) -> Map<String, Any?> = { _, _, _ ->
+        mapOf("error" to "terrain-capture-unavailable") },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() == "hotload") {
@@ -39,6 +41,28 @@ class CivsCommand(
             val receipt = if (error != null) mapOf("schema" to 1, "state" to "failed", "error" to error)
                 else if (args[1] == "prepare") prepareHotload() else hotloadStatus()
             sender.sendMessage(hotloadLine(receipt))
+            return true
+        }
+        if (args.firstOrNull() == "debug-terrain-at") {
+            val city = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val worker = args.getOrNull(2)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val coordinates = args.drop(3).map { it.toIntOrNull() }
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 6 -> "invalid-terrain-arguments"
+                city == null -> "invalid-city-id"
+                worker == null -> "invalid-worker-id"
+                coordinates.any { it == null } -> "invalid-terrain-position"
+                hotloadStatus()["state"] != "active" -> "not-ready"
+                else -> null
+            }
+            val receipt = if (error != null) mapOf("error" to error) else runCatching {
+                debugTerrainAt(requireNotNull(city), requireNotNull(worker), CivPosition(
+                    requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2])))
+            }.getOrElse { mapOf("error" to (CivsDiagnostics.rejection(it)?.reason ?: "terrain-capture-failed")) }
+            sender.sendMessage("ARCCIVS_TERRAIN_CAPTURE " + Gson().toJson(
+                mapOf("schema" to 1, "source" to "fresh-native-command", "focus_origin" to "operator-request") + receipt +
+                    ("state" to if (receipt["error"] == null) "captured" else "failed")))
             return true
         }
         val layoutExport = args.getOrNull(0) == "debug" && args.getOrNull(1) == "layout"
@@ -179,7 +203,7 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
 
         private fun hotloadLine(receipt: Map<String, Any?>): String = "ARCCIVS_HOTLOAD " + Gson().toJson(receipt)

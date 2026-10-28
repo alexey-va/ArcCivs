@@ -475,7 +475,7 @@ class CivsCitizens(
                 remove(actor, reason)
                 continue
             }
-            if (!reconcilePlan(actor, requireNotNull(plan))) continue
+            if (!reconcilePlan(actor, requireNotNull(plan), city)) continue
             try {
                 syncResident(actor.npc, worker, requireNotNull(plan))
                 update(actor, city, requireNotNull(world), nowMillis)
@@ -606,7 +606,7 @@ class CivsCitizens(
             if (plan.worldWork == null && plan.token.constructionId == null && plan.idleReason != "searching-work" || !plan.chunksReady(world) ||
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                 actor.route?.chunks?.ready(world) == false) continue
-            if (!reconcilePlan(actor, plan)) continue
+            if (!reconcilePlan(actor, plan, city)) continue
             try {
                 syncResident(actor.npc, worker, plan)
                 update(actor, city, world, nowMillis)
@@ -629,7 +629,7 @@ class CivsCitizens(
                 !activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
             val plan = currentPlan(actor, city, worker)?.takeIf { it.idleReason == "unassigned" } ?: continue
             if (!plan.chunksReady(world) || !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
-                actor.route?.chunks?.ready(world) == false || !reconcilePlan(actor, plan)) continue
+                actor.route?.chunks?.ready(world) == false || !reconcilePlan(actor, plan, city)) continue
             try {
                 syncResident(actor.npc, worker, plan)
                 update(actor, city, world, nowMillis)
@@ -648,7 +648,7 @@ class CivsCitizens(
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
     }
 
-    private fun reconcilePlan(actor: Actor, nextPlan: CitizenPlan): Boolean {
+    private fun reconcilePlan(actor: Actor, nextPlan: CitizenPlan, city: Settlement): Boolean {
         val mineEpisode = actor.mineRouteEpisode.key
         val mineActive = nextPlan.type == BuildingType.QUARRY && nextPlan.courier == null &&
             !actor.sheltering && !actor.returningToWarehouse && actor.attacker == null && actor.foodSource == null &&
@@ -660,7 +660,8 @@ class CivsCitizens(
         val restartVisual = actor.cycle.phase == CitizenPhase.CLOSED && nextPlan.worldWork?.autonomousVisual == true
         if (restartVisual || actor.plan != nextPlan && (!citizenPlansContinue(actor.plan, nextPlan) ||
                 actor.plan.courier?.carrying != nextPlan.courier?.carrying)) {
-            if (citizenStorageNeedsReset(actor.plan.storage, nextPlan.storage, actor.npc.location.point())) {
+            if (citizenStorageNeedsReset(actor.plan.storage, nextPlan.storage, actor.npc.location.point(),
+                    CivsLogistics.maximumTransferDistance(city))) {
                 remove(actor, "waiting")
                 return false
             }
@@ -3150,7 +3151,7 @@ class CivsCitizens(
         val to = (waypoint ?: resolved).location(world)
         if (idleAnchor != null && !idleDestinationFree(actor, to)) return false
         val distance = from.distance(to)
-        if (!citizenRouteWithinReach(from.point(), to.point())) {
+        if (!citizenRouteWithinReach(from.point(), to.point(), CivsLogistics.maximumTransferDistance(city))) {
             if (idleAnchor == null && actor.plan.idleReason in listOf(null, "placing")) pauseNavigation(actor, "route-unreachable", "outside-route-range", to, now)
             return false
         }
@@ -4251,12 +4252,15 @@ internal fun citizenNearEndpoint(from: CitizenPoint, target: CivPosition): Boole
 internal fun citizenAtSupportedEndpoint(world: World, from: CitizenPoint, target: CivPosition): Boolean =
     citizenNearEndpoint(from, target) && citizenPacketSupported(world, from)
 
-internal fun citizenRouteWithinReach(from: CitizenPoint, to: CitizenPoint): Boolean {
-    val maximum = CivsRules.MAX_WORK_ROUTE_DISTANCE + CITIZEN_ROUTE_ARRIVAL_TOLERANCE
+internal fun citizenRouteWithinReach(from: CitizenPoint, to: CitizenPoint,
+    maximumDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE): Boolean {
+    if (maximumDistance !in 1..CivsLogistics.MAX_TRANSFER_DISTANCE) return false
+    val maximum = maximumDistance + CITIZEN_ROUTE_ARRIVAL_TOLERANCE
     return from.distanceSquared(to) <= maximum * maximum
 }
-internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, actualPosition: CitizenPoint): Boolean =
-    previous != next && !citizenRouteWithinReach(actualPosition, next.point())
+internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, actualPosition: CitizenPoint,
+    maximumDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE): Boolean =
+    previous != next && !citizenRouteWithinReach(actualPosition, next.point(), maximumDistance)
 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
     val shipmentId: UUID? = null, val craftJobId: UUID? = null,
@@ -5082,6 +5086,7 @@ private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
     val current = CivsMinePlan.forBuilding(mine) ?: return CitizenMinePassage({ false }, { false })
     val bottom = CivsWorksiteLayouts.point(mine, current.bottom)
     val sections = (accessSections ?: state?.takeIf { it.version == current.version }?.sectionSteps).orEmpty().toMap()
+    val v5 = CivsMineProgress.v5State(state)
     val prefixes = buildList {
         add(current to accessStep)
         val v4 = if (state?.version == 4) state.nextStep else state?.v4Step
@@ -5090,6 +5095,7 @@ private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
         if (v3 != null && v3 > 0) CivsMinePlan.forBuilding(mine, 3)?.let { add(it to v3) }
         val v2 = if (state?.version == 2) state.nextStep else state?.v2Step
         if (v2 != null && v2 > 0) CivsMinePlan.forBuilding(mine, 2)?.let { add(it to v2) }
+        if (v5 != null && current.version != 5) CivsMinePlan.forBuilding(mine, 5)?.let { add(it to v5.nextStep) }
     }
     val legacy = state?.legacyStep?.takeIf { it > 0 }?.let(current::legacyCompleted)
     fun legacyOpen(p: CivPosition) = legacy?.containsKey(p) == true && legacy[p].let {
@@ -5099,9 +5105,9 @@ private fun citizenMineRoutePassage(mine: CivBuilding, accessStep: Long,
         val local = CivsMinePlan.localPoint(mine, CivPosition(kotlin.math.floor(point.x).toInt(),
             point.y.roundToInt(), kotlin.math.floor(point.z).toInt()))
         prefixes.any { (plan, prefix) -> plan.builtStanding(local, prefix,
-            if (plan.version == current.version) sections else emptyMap()) } ||
+            if (plan.version == current.version) sections else if (plan.version == 5) v5?.sectionSteps.orEmpty() else emptyMap()) } ||
             legacyOpen(local) && legacyOpen(local.copy(y = local.y + 1)) ||
-            CivsMineProgress.priorStanding(state, CivPosition(kotlin.math.floor(point.x).toInt(),
+            CivsMineProgress.priorStanding(mine, state, CivPosition(kotlin.math.floor(point.x).toInt(),
                 point.y.roundToInt(), kotlin.math.floor(point.z).toInt()))
     }
     return CitizenMinePassage(completed) { point -> point.y >= bottom.y - .125 || completed(point) }

@@ -48,6 +48,25 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsServiceTest : FunSpec({
+    test("operator terrain capture rejects an unready service and a worker outside the selected city without native access") {
+        serviceScenario { h ->
+            val worker = h.city.workers.first()
+            val origin = CivPosition(8, 55, 8)
+            var feetReads = 0
+            every { h.citizens.residentFeet(any()) } answers { feetReads++; null }
+            h.service.debugTerrainAt(h.city.id, worker.id, origin)["error"] shouldBe "not-ready"
+            h.start()
+            val cities = h.service.settlements()
+            val saves = h.saves.toList()
+            val reads = feetReads
+            h.service.debugTerrainAt(UUID.randomUUID(), worker.id, origin)["error"] shouldBe "city-not-found"
+            h.service.debugTerrainAt(h.city.id, UUID.randomUUID(), origin)["error"] shouldBe "worker-not-found"
+            h.service.settlements() shouldBe cities
+            h.saves shouldBe saves
+            feetReads shouldBe reads
+        }
+    }
+
     test("a staffed tavern serves existing bread through the ordinary pickup receipt with a hall fallback") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))

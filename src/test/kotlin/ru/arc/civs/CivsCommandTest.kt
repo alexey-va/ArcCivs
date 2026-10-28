@@ -14,6 +14,94 @@ import org.bukkit.entity.Player
 import java.util.UUID
 
 class CivsCommandTest : FunSpec({
+    test("terrain-at accepts only the console with both use and admin permissions") {
+        var captures = 0
+        val router = CivsCommand(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+            debugTerrainAt = { _, _, _ -> captures++; emptyMap() })
+        val args = arrayOf("debug-terrain-at", UUID.randomUUID().toString(), UUID.randomUUID().toString(), "8", "55", "8")
+        for ((sender, denied) in listOf(
+            mockk<Player>(relaxed = true) to null,
+            mockk<CommandSender>(relaxed = true) to null,
+            mockk<ConsoleCommandSender>(relaxed = true) to "arccivs.use",
+            mockk<ConsoleCommandSender>(relaxed = true) to "arccivs.admin")) {
+            val messages = mutableListOf<String>()
+            every { sender.hasPermission(any<String>()) } returns true
+            if (denied != null) every { sender.hasPermission(denied) } returns false
+            every { sender.sendMessage(capture(messages)) } returns Unit
+            router.onCommand(sender, mockk(), "civs", args) shouldBe true
+            messages.lastOrNull()?.startsWith("ARCCIVS_TERRAIN_CAPTURE ") shouldBe true
+            val receipt = JsonParser.parseString(messages.last().removePrefix("ARCCIVS_TERRAIN_CAPTURE ")).asJsonObject
+            receipt["state"].asString shouldBe "failed"
+            receipt["error"].asString shouldBe "not-authorized"
+        }
+        captures shouldBe 0
+        CivsCommand.completions(true, true, arrayOf("debug-terrain"), console = false) shouldBe emptyList()
+        CivsCommand.completions(true, true, arrayOf("debug-terrain"), console = true) shouldBe listOf("debug-terrain-at")
+    }
+
+    test("terrain-at rejects malformed arguments and a stopped runtime before calling the native callback") {
+        val messages = mutableListOf<String>()
+        var captures = 0
+        var state = "active"
+        val router = CivsCommand(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+            hotloadStatus = { mapOf("state" to state) }, debugTerrainAt = { _, _, _ -> captures++; emptyMap() })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val city = UUID.randomUUID().toString(); val worker = UUID.randomUUID().toString()
+        val valid = arrayOf("debug-terrain-at", city, worker, "8", "55", "8")
+        val cases = listOf(valid.dropLast(1).toTypedArray() to "invalid-terrain-arguments",
+            (valid + "extra") to "invalid-terrain-arguments",
+            arrayOf("debug-terrain-at", "bad", worker, "8", "55", "8") to "invalid-city-id",
+            arrayOf("debug-terrain-at", city, "bad", "8", "55", "8") to "invalid-worker-id") +
+            listOf("2147483648", "-2147483649", "NaN", "1.5").map { value ->
+                arrayOf("debug-terrain-at", city, worker, value, "55", "8") to "invalid-terrain-position"
+            }
+        for ((args, error) in cases) {
+            router.onCommand(console, mockk(), "civs", args)
+            messages.lastOrNull()?.startsWith("ARCCIVS_TERRAIN_CAPTURE ") shouldBe true
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_TERRAIN_CAPTURE ")).asJsonObject["error"].asString shouldBe error
+        }
+        state = "preparing"
+        router.onCommand(console, mockk(), "civs", valid)
+        JsonParser.parseString(messages.last().removePrefix("ARCCIVS_TERRAIN_CAPTURE ")).asJsonObject["error"].asString shouldBe "not-ready"
+        captures shouldBe 0
+    }
+
+    test("terrain-at forwards exact coordinates once and returns one structured JSON line for success or failure") {
+        val messages = mutableListOf<String>()
+        val city = UUID.randomUUID(); val worker = UUID.randomUUID(); val origin = CivPosition(-1889, 55, -2748)
+        val calls = mutableListOf<Triple<UUID, UUID, CivPosition>>()
+        var reject = false
+        val router = CivsCommand(mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true), mockk(relaxed = true),
+            debugTerrainAt = { cityId, workerId, point ->
+                calls += Triple(cityId, workerId, point)
+                if (reject) throw CivsRejection("capture-outside-city")
+                mapOf("voxel_count" to 891, "focus_origin" to "operator-request", "capture_center" to point)
+            })
+        val console = mockk<ConsoleCommandSender>(relaxed = true) {
+            every { hasPermission(any<String>()) } returns true
+            every { sendMessage(capture(messages)) } returns Unit
+        }
+        val args = arrayOf("debug-terrain-at", city.toString(), worker.toString(), "-1889", "55", "-2748")
+        router.onCommand(console, mockk(), "civs", args)
+        calls shouldBe listOf(Triple(city, worker, origin))
+        messages.size shouldBe 1
+        messages.single().startsWith("ARCCIVS_TERRAIN_CAPTURE ") shouldBe true
+        messages.single().contains('\n') shouldBe false
+        val receipt = JsonParser.parseString(messages.single().removePrefix("ARCCIVS_TERRAIN_CAPTURE ")).asJsonObject
+        receipt["state"].asString shouldBe "captured"
+        receipt["voxel_count"].asInt shouldBe 891
+        receipt["capture_center"].asJsonObject["y"].asInt shouldBe 55
+        reject = true
+        router.onCommand(console, mockk(), "civs", args)
+        messages.size shouldBe 2
+        val failed = JsonParser.parseString(messages.last().removePrefix("ARCCIVS_TERRAIN_CAPTURE ")).asJsonObject
+        failed["state"].asString shouldBe "failed"
+        failed["error"].asString shouldBe "capture-outside-city"
+    }
+
     test("hotload requires a console administrator and exact prepare or status syntax") {
         val messages = mutableListOf<String>()
         var prepares = 0

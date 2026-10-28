@@ -15,9 +15,9 @@ import java.util.UUID
 class CivsMineSparseTest : FunSpec({
     test("deep spine receipts preserve the first unfinished V5 ordinal and only prove their actual section") {
         val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
-        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 5))
         val gap = plan.steps.indices.first { plan.section(it) != "spine" }
-        val before = CivMinePlanState(CivsMinePlan.VERSION, gap.toLong(), sectionSteps = emptyMap())
+        val before = CivMinePlanState(5, gap.toLong(), sectionSteps = emptyMap())
         val index = plan.sections.getValue("spine").first { it >= gap }
         val step = plan.steps[index]
         val sections = plan.advanceSection(index, emptyMap())
@@ -25,7 +25,7 @@ class CivsMineSparseTest : FunSpec({
         next shouldBe before.nextStep
         val work = CivWorldWork(UUID.randomUUID(), 0, mine.id, mine.entrance,
             listOf(CivPlanBlock(CivsWorksiteLayouts.point(mine, step.point), "minecraft:air", requireNotNull(step.after))),
-            status = "digging-mine", miningPlanVersion = CivsMinePlan.VERSION, miningStep = next,
+            status = "digging-mine", miningPlanVersion = 5, miningStep = next,
             miningAccessStep = before.nextStep, miningSections = sections, miningAccessSections = emptyMap(), miningOrdinal = index)
         val after = CivsMineProgress.after(mine, before, null, work)
         after.nextStep shouldBe gap.toLong()
@@ -89,7 +89,7 @@ class CivsMineSparseTest : FunSpec({
         CivsMineProgress.after(mine, before, null, work).seals shouldBe null
     }
 
-    test("an unsafe upper V5 gallery defers while a paid lower section keeps the exact old prefix") {
+    test("an unsafe upper gallery defers while a paid lower section keeps the exact current prefix") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("mine-upper-deferred").also(paper.server::addWorld)
             val plugin = paper.createSimplePlugin("MineSections")
@@ -97,7 +97,10 @@ class CivsMineSparseTest : FunSpec({
             try {
                 val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(0, 70, 0), 180)
                 val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
-                val old = 1818L
+                val old = geometry.steps.indices.first { index -> geometry.steps[index].let { step ->
+                    step.stage == "gallery" && step.floor == 1 && step.after == null &&
+                        CivsMineSafety.requiredCover(geometry, index, step.point) == CivsMineSafety.FULL_COVER
+                } }.toLong()
                 var city = spatialCity(world.uid, listOf(mine), spatialWorker(mine, "IRON_PICKAXE")).copy(
                     minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, old)))
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)

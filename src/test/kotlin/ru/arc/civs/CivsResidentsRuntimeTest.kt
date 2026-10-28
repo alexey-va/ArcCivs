@@ -4893,18 +4893,20 @@ private fun runtimeSleepingBody(npc: PacketPlayerNpc): BoundingBox {
     }
 }
 
-private fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, workerId: UUID = UUID.randomUUID(),
+internal fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, workerId: UUID = UUID.randomUUID(),
+    worldFactory: () -> ResidentRuntimeWorld = ::ResidentRuntimeWorld,
+    server: org.mockbukkit.mockbukkit.ServerMock? = null,
     block: (ResidentRuntime) -> Unit) {
     failOnUnsupportedMockBukkitOperation {
-        MockBukkitTestRuntime.open().use { paper ->
-            val fixture = ResidentRuntime(paper, useOwnedNavigationExecutor, workerId)
+        (if (server == null) MockBukkitTestRuntime.open() else MockBukkitTestRuntime.open(server)).use { paper ->
+            val fixture = ResidentRuntime(paper, useOwnedNavigationExecutor, workerId, worldFactory)
             try { block(fixture) } finally { fixture.close() }
         }
     }
 }
 
-private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean,
-    val workerId: UUID) : AutoCloseable {
+internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean,
+    val workerId: UUID, worldFactory: () -> ResidentRuntimeWorld = ::ResidentRuntimeWorld) : AutoCloseable {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
     private val navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val navigationSettings = CivsNavigationSettings()
@@ -4912,7 +4914,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
         (navigationSettings.nativeBudgetMillis * 1_000_000).toLong(), nanoTime = { 0L })
     private val navigationWorkers = ArrayDeque<Runnable>()
     val logger get() = plugin.logger
-    val world = ResidentRuntimeWorld().also(paper.server::addWorld)
+    val world = worldFactory().also(paper.server::addWorld)
     private val packets = mockk<PaperPacketNpcs>(relaxed = true)
     var viewing = true
     var background = false
@@ -4947,6 +4949,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     var courier: CivCourierPlan? = null
     var courierProvider: ((Settlement, CivWorker) -> CivCourierPlan?)? = null
     var pickups = 0
+    var pickupProvider: ((UUID, UUID, CivCargo) -> CompletableFuture<Settlement>)? = null
+    var dropoffProvider: ((UUID, UUID, CivCargo, UUID) -> CompletableFuture<Settlement>)? = null
     var pickedCargo: CivCargo? = null
     var onPickup: (UUID, UUID, CivCargo) -> Unit = { _, _, _ -> }
     val pendingPickup = CompletableFuture<Settlement>()
@@ -4954,6 +4958,8 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
     val gestures = mutableMapOf<UUID, Int>()
     var displayedHand = Material.AIR
     var work: CivWorldWork? = null
+    var workProvider: ((Settlement, CivWorker) -> CivWorldWork?)? = null
+    var workIdleProvider: ((Settlement, CivWorker) -> String)? = null
     var constructionColumns = emptySet<Long>()
     var idleReason = "waiting-inputs"
     val pendingDelivery = CompletableFuture<Settlement>()
@@ -5054,14 +5060,21 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
                 onPickup(city, worker, cargo)
                 pickups++
                 pickedCargo = cargo
-                pendingPickup
-            }, dropoffCargo = { _, _, cargo, target ->
-                cargo shouldBe requireNotNull(courier).cargo
-                target shouldBe requireNotNull(courier).destinationBuildingId
-                unloads++
-                pendingUnload
+                pickupProvider?.invoke(city, worker, cargo) ?: pendingPickup
+            }, dropoffCargo = { city, worker, cargo, target ->
+                val provider = dropoffProvider
+                if (provider != null) {
+                    unloads++
+                    provider(city, worker, cargo, target)
+                } else {
+                    cargo shouldBe requireNotNull(courier).cargo
+                    target shouldBe requireNotNull(courier).destinationBuildingId
+                    unloads++
+                    pendingUnload
+                }
             },
-            workPlan = { _, _ -> workPlans++; work }, workIdleReason = { _, _ -> idleReason }, packetOwner = packets,
+            workPlan = { city, worker -> workPlans++; workProvider.let { if (it == null) work else it(city, worker) } },
+            workIdleReason = { city, worker -> workIdleProvider?.invoke(city, worker) ?: idleReason }, packetOwner = packets,
             residentSupplySource = { _, worker -> foodSource.takeIf { worker.id == workerId } },
             workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
                 supplyRequests++
@@ -5403,7 +5416,7 @@ private class ResidentRuntime(private val paper: MockBukkitTestRuntime, useOwned
 }
 
 /** A stone plane with no tile entities. Only pinned MockBukkit's missing terrain queries are supplied. */
-private class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
+internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
     val threatEntities = mutableListOf<Entity>()
     val particles = mutableListOf<Triple<Particle, Int, Location>>()
     val sounds = mutableListOf<Triple<Sound, Float, Float>>()

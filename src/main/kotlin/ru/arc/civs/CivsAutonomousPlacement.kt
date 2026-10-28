@@ -242,12 +242,17 @@ internal class CivsAutonomousPlacement(
         private fun infill(): List<CivsAutonomousCandidate> {
             val pair = templates ?: return emptyList()
             if (infillTried) return emptyList()
-            infillTried = true
+            val terrainKnown = this::surface.isInitialized
+            infillTried = terrainKnown
             candidateSource = "infill"
             val seen = candidates.mapTo(hashSetOf()) { it.building.anchor to it.building.rotation }
-            return CivsSettlementLayout.infill(city, pair.first, pair.second, access)
-                .filter { (it.building.anchor to it.building.rotation) !in seen }
-                .also { infillCandidates = it.size }
+            // Filter the detached surface before the 64-result cap. A shoreline must
+            // not let the first unavailable yards hide a connected dry inner plot.
+            return CivsSettlementLayout.infill(city, pair.first, pair.second, access, eligible = { building ->
+                (building.anchor to building.rotation) !in seen && (!terrainKnown ||
+                    CivsAutonomousTerraform.options(city, listOf(CivsAutonomousCandidate(building)), surface).isNotEmpty())
+            })
+                .also { infillCandidates += it.size }
         }
 
         private fun grade(choices: List<CivsAutonomousCandidate>): List<CivTerraformOption> =

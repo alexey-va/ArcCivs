@@ -1,9 +1,11 @@
 package ru.arc.civs
 
 import com.google.gson.JsonParser
+import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
 import io.mockk.every
+import io.mockk.mockk
 import io.mockk.spyk
 import io.mockk.verify
 import org.bukkit.Bukkit
@@ -14,6 +16,111 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsTerrainDebugTest : FunSpec({
+    test("operator terrain bounds keep the entire fixed box inside the city and world without integer wraparound") {
+        val city = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Bounds", UUID.randomUUID(), CivPosition(0, 64, 0),
+            8, "test", Stock(), emptyList(), emptyList())
+        CivsTerrainDebug.requestedBounds(city, CivPosition(4, -59, 4), -64, 320) shouldBe
+            CivBox(CivPosition(0, -64, 0), CivPosition(8, -54, 8))
+        CivsTerrainDebug.requestedBounds(city, CivPosition(-4, 314, -4), -64, 320) shouldBe
+            CivBox(CivPosition(-8, 309, -8), CivPosition(0, 319, 0))
+        for (origin in listOf(CivPosition(5, 64, 0), CivPosition(-5, 64, 0), CivPosition(0, 64, 5), CivPosition(0, 64, -5)))
+            shouldThrow<CivsRejection> { CivsTerrainDebug.requestedBounds(city, origin, -64, 320) }.reason shouldBe "capture-outside-city"
+        for (y in listOf(-65, -64, -60, 315, 319, 320))
+            shouldThrow<CivsRejection> { CivsTerrainDebug.requestedBounds(city, CivPosition(0, y, 0), -64, 320) }
+                .reason shouldBe "capture-bounds-outside-world"
+        for (origin in listOf(CivPosition(Int.MIN_VALUE, 64, 0), CivPosition(Int.MAX_VALUE, 64, 0),
+            CivPosition(0, Int.MIN_VALUE, 0), CivPosition(0, Int.MAX_VALUE, 0),
+            CivPosition(0, 64, Int.MIN_VALUE), CivPosition(0, 64, Int.MAX_VALUE)))
+            shouldThrow<CivsRejection> { CivsTerrainDebug.requestedBounds(city, origin, -64, 320) }
+                .reason shouldBe "capture-bounds-overflow"
+    }
+
+    test("an operator origin captures all 891 native states at Y55 without changing the actual resident or loading chunks") {
+        terrainFixture { world, city, worker ->
+            world.loadChunk(1, 0)
+            val origin = CivPosition(24, 55, 8)
+            world.getBlockAt(24, 55, 8).blockData = Bukkit.createBlockData("minecraft:ladder[facing=north,waterlogged=false]")
+            world.getBlockAt(24, 54, 8).type = Material.COBBLESTONE
+            world.getBlockAt(24, 56, 8).type = Material.AIR
+            val actual = Location(world, 8.5, 64.25, 8.5)
+            val loaded = world.loadedChunks.map { it.x to it.z }.toSet()
+            val privateWorker = worker.copy(name = "PRIVATE_RESIDENT_NAME", items = listOf(CivResidentItem("DIAMOND", 64)))
+            val selected = city.copy(workers = listOf(privateWorker))
+
+            val snapshot = CivsTerrainDebug.capture(selected, privateWorker, actual, null, 42_000, origin)
+
+            snapshot["error"] shouldBe null
+            snapshot["focus_origin"] shouldBe "operator-request"
+            snapshot["capture_center"] shouldBe origin
+            snapshot["actual"] shouldBe listOf(8.5, 64.25, 8.5)
+            snapshot["bounds"] shouldBe mapOf("min" to CivPosition(20, 50, 4), "max" to CivPosition(28, 60, 12))
+            snapshot["voxel_count"] shouldBe 891
+            snapshot["unavailable_count"] shouldBe 0
+            snapshot["size"] shouldBe listOf(9, 11, 9)
+            val ladder = terrainPaletteAt(snapshot, origin)
+            ladder["block_data"] shouldBe "minecraft:ladder[facing=north,waterlogged=false]"
+            ladder["collision"] shouldBe listOf(listOf(0.0, 0.0, 13.0 / 16.0, 1.0, 1.0, 1.0))
+            terrainPaletteAt(snapshot, origin.copy(y = 54))["block_data"] shouldBe "minecraft:cobblestone"
+            terrainPaletteAt(snapshot, origin.copy(y = 56))["collision"] shouldBe emptyList<Any>()
+            val encoded = com.google.gson.Gson().toJson(snapshot)
+            for (secret in listOf("PRIVATE_RESIDENT_NAME", "DIAMOND", "inventory", "entities", "nbt"))
+                encoded.contains(secret) shouldBe false
+            actual shouldBe Location(world, 8.5, 64.25, 8.5)
+            world.loadedChunks.map { it.x to it.z }.toSet() shouldBe loaded
+            world.getBlockAt(24, 55, 8).type shouldBe Material.LADDER
+        }
+    }
+
+    test("an operator box fails before native reads if any required chunk is unloaded") {
+        terrainFixture { world, city, worker ->
+            val observed = spyk(world)
+            every { observed.isChunkLoaded(any<Int>(), any<Int>()) } answers {
+                firstArg<Int>() == 0 && secondArg<Int>() == 0
+            }
+            val loaded = world.loadedChunks.map { it.x to it.z }.toSet()
+            val snapshot = CivsTerrainDebug.capture(city, worker, Location(observed, 8.5, 64.0, 8.5), null, 1_000,
+                CivPosition(15, 55, 8))
+            snapshot["error"] shouldBe "chunks-unloaded"
+            snapshot["focus_origin"] shouldBe "operator-request"
+            snapshot["voxels"] shouldBe null
+            snapshot["palette"] shouldBe null
+            verify(exactly = 0) { observed.getBlockAt(any<Int>(), any<Int>(), any<Int>()) }
+            verify(exactly = 0) { observed.getChunkAt(any<Int>(), any<Int>(), true) }
+            verify(exactly = 0) { observed.loadChunk(any<Int>(), any<Int>()) }
+            verify(exactly = 0) { observed.loadChunk(any<Int>(), any<Int>(), any<Boolean>()) }
+            world.loadedChunks.map { it.x to it.z }.toSet() shouldBe loaded
+        }
+    }
+
+    test("operator captures reject a foreign worker and an out-of-city box before reading blocks") {
+        terrainFixture { world, city, worker ->
+            val observed = spyk(world)
+            for ((selectedWorker, origin, error) in listOf(
+                Triple(worker.copy(id = UUID.randomUUID()), CivPosition(8, 55, 8), "worker-not-found"),
+                Triple(worker, city.center.copy(x = city.center.x + city.radius, y = 55), "capture-outside-city"))) {
+                val snapshot = CivsTerrainDebug.capture(city, selectedWorker, Location(observed, 8.5, 64.0, 8.5), null, 1_000, origin)
+                snapshot["error"] shouldBe error
+                snapshot["voxels"] shouldBe null
+            }
+            verify(exactly = 0) { observed.getBlockAt(any<Int>(), any<Int>(), any<Int>()) }
+        }
+    }
+
+    test("operator capture requires entity ticking rather than merely an existing chunk") {
+        terrainFixture { world, city, worker ->
+            val observed = spyk(world)
+            every { observed.getChunkAt(0, 0, false) } returns mockk<org.mockbukkit.mockbukkit.world.ChunkMock> {
+                every { loadLevel } returns org.bukkit.Chunk.LoadLevel.BORDER
+            }
+            val snapshot = CivsTerrainDebug.capture(city, worker, Location(observed, 8.5, 64.0, 8.5), null, 1_000,
+                CivPosition(8, 55, 8))
+            snapshot["error"] shouldBe "chunks-unloaded"
+            snapshot["voxels"] shouldBe null
+            verify(exactly = 0) { observed.getBlockAt(any<Int>(), any<Int>(), any<Int>()) }
+            verify(exactly = 0) { observed.loadChunk(any<Int>(), any<Int>()) }
+        }
+    }
+
     test("explicit terrain requires exact valid filters and all includes autonomous state without native terrain capture") {
         val city = UUID.randomUUID().toString()
         val worker = UUID.randomUUID().toString()

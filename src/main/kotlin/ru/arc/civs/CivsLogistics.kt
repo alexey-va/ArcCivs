@@ -30,6 +30,7 @@ data class CivSupplyRequest(val buildingId: UUID, val material: String, val need
 /** Demand is derived from local stores; only accepted, physically picked-up cargo needs persistence. */
 object CivsLogistics {
     const val MAX_CARGO = 64L
+    const val MAX_TRANSFER_DISTANCE = 256
     internal val QUARRY_SUPPLIES = mapOf("LADDER" to 16L, "TORCH" to 8L, "COBBLESTONE" to 32L)
     internal fun quarrySupplies(building: CivBuilding): Map<String, Long> = QUARRY_SUPPLIES +
         CivsMinePlan.forBuilding(building)?.structuralMaterials.orEmpty().associateWith {
@@ -127,7 +128,7 @@ object CivsLogistics {
                 constructionDestination(city, it.buildingId, requireNotNull(warehouse.control))
             } else city.building(request.buildingId)?.takeIf { it.control != null }
             if (target == null) continue
-            if (target.id == warehouse.id || !withinRoute(requireNotNull(warehouse.control), requireNotNull(target.control))) continue
+            if (target.id == warehouse.id || !withinRoute(city, requireNotNull(warehouse.control), requireNotNull(target.control))) continue
             val amount = minOf(MAX_CARGO, (request.needed - request.inTransit).coerceAtLeast(0), available[request.material] ?: 0,
                 CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(request.material)).toLong())
             if (amount > 0) {
@@ -138,7 +139,7 @@ object CivsLogistics {
         }
         for (source in city.buildings) {
             if (source.phase != BuildingPhase.ACTIVE || source.control == null || CivsRules.isBuilder(city, source)) continue
-            if (!withinRoute(source.control, requireNotNull(warehouse.control))) continue
+            if (!withinRoute(city, source.control, requireNotNull(warehouse.control))) continue
             val material = CivsProduction.material(source) ?: continue
             val reserve = desiredStock(city, source)[material] ?: 0L
             val amount = minOf(MAX_CARGO, ((stock(source.id)[material] ?: 0L) - reserve).coerceAtLeast(0),
@@ -148,7 +149,7 @@ object CivsLogistics {
         for (producer in city.workers) {
             val meeting = workerSources[producer.id] ?: continue
             val source = producer.assignment?.let(city::building) ?: continue
-            if (!withinRoute(meeting, requireNotNull(warehouse.control))) continue
+            if (!withinRoute(city, meeting, requireNotNull(warehouse.control))) continue
             for ((material, surplus) in workerExcess(city, producer)) {
                 val amount = minOf(MAX_CARGO, surplus, CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(material)).toLong(),
                     storageRoom(warehouse.id, material))
@@ -210,7 +211,7 @@ object CivsLogistics {
         ("$city/$worker/$cycle/$source/$target/$material" + (sourceWorkerId?.let { "/$it" } ?: "")).toByteArray(StandardCharsets.UTF_8))
 
     internal fun constructionDestination(city: Settlement, buildingId: UUID, source: CivPosition): CivBuilding? {
-        val stores = CivsRules.constructionStores(city, buildingId).filter { withinRoute(source, requireNotNull(it.control)) }
+        val stores = CivsRules.constructionStores(city, buildingId).filter { withinRoute(city, source, requireNotNull(it.control)) }
         return stores.firstOrNull { building -> city.workers.any { it.assignment == building.id } } ?: stores.firstOrNull()
     }
 
@@ -223,24 +224,28 @@ object CivsLogistics {
             // Old construction shipments retain their receipt identity, but never refill the site barrel.
             return constructionDestination(city, target.id, source)
                 ?: city.building(cargo.sourceBuildingId)?.takeIf { it.type == BuildingType.WAREHOUSE && it.control != null &&
-                    withinRoute(source, requireNotNull(it.control)) }
+                    withinRoute(city, source, requireNotNull(it.control)) }
                 ?: city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE && it.control != null &&
-                    withinRoute(source, requireNotNull(it.control)) }.minByOrNull { distanceSquared(source, requireNotNull(it.control)) }
+                    withinRoute(city, source, requireNotNull(it.control)) }.minByOrNull { distanceSquared(source, requireNotNull(it.control)) }
         }
         return city.building(cargo.targetBuildingId)?.takeIf { it.control != null }
             ?: city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE && it.control != null &&
-                withinRoute(source, requireNotNull(it.control)) }
+                withinRoute(city, source, requireNotNull(it.control)) }
                 .minByOrNull { distanceSquared(source, requireNotNull(it.control)) }
             ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL && it.control != null &&
-                withinRoute(source, requireNotNull(it.control)) }
+                withinRoute(city, source, requireNotNull(it.control)) }
     }
+
+    /** Automatic cities may place producers on opposite sides; normal supply retains its existing reach. */
+    fun maximumTransferDistance(city: Settlement): Int = if (city.autonomy == null) CivsRules.MAX_WORK_ROUTE_DISTANCE
+        else (city.radius.toLong() * 2).coerceIn(CivsRules.MAX_WORK_ROUTE_DISTANCE.toLong(), MAX_TRANSFER_DISTANCE.toLong()).toInt()
 
     private fun distanceSquared(from: CivPosition, to: CivPosition): Double =
         (from.x.toDouble() - to.x).let { it * it } + (from.y.toDouble() - to.y).let { it * it } +
             (from.z.toDouble() - to.z).let { it * it }
 
-    private fun withinRoute(from: CivPosition, to: CivPosition): Boolean =
-        distanceSquared(from, to) <= CivsRules.MAX_WORK_ROUTE_DISTANCE.toDouble() * CivsRules.MAX_WORK_ROUTE_DISTANCE
+    private fun withinRoute(city: Settlement, from: CivPosition, to: CivPosition): Boolean =
+        distanceSquared(from, to) <= maximumTransferDistance(city).toDouble() * maximumTransferDistance(city)
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,
         craftInputs: Map<UUID, Map<String, Long>> = emptyMap()): Settlement {
@@ -255,7 +260,7 @@ object CivsLogistics {
             !validCargo(city, cargo), "stale-delivery")
         val producer = cargo.sourceWorkerId?.let { id ->
             city.workers.firstOrNull { it.id == id }?.takeIf { it.id != workerId && it.assignment == source.id &&
-                withinRoute(cargo.sourceEntrance, requireNotNull(warehouse.control)) &&
+                withinRoute(city, cargo.sourceEntrance, requireNotNull(warehouse.control)) &&
                 (workerExcess(city, it, craftInputs[it.id].orEmpty())[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
         }
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))

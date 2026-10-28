@@ -217,7 +217,7 @@ open class ArcCivsPlugin : JavaPlugin() {
             })
             val command = CivsCommand(service, ui, text, lifecycle.tasks, service::debugState, service::configureSettlementSetting,
                 service::repairBuildingStorage, service::retryConstruction, service::debugLayout,
-                this::prepareHotload, this::hotloadStatus)
+                this::prepareHotload, this::hotloadStatus, service::debugTerrainAt)
             requireNotNull(getCommand("civs")).apply { setExecutor(command); tabCompleter = command }
             lifecycle.registerHealth("settlements", service::health)
             lifecycle.reportHealthEvery(1_200)

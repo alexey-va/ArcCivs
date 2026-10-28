@@ -28,7 +28,7 @@ private val MINE_TIMBER_FENCE_STATE = Regex(
 /** Only the native collision/drop operations absent from the pinned MockBukkit are supplied here.
  * BlockData, mutations, loaded chunks and the world remain ordinary MockBukkit state.
  * This is a stone-plane fixture, not evidence of native growth or resident navigation. */
-internal class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE,
+internal open class CivsWorksiteWorldFixture(name: String, private val ground: Material = Material.STONE,
     private val collisionForData: ((BlockData) -> List<BoundingBox>?)? = null) : WorldMock(ground, 63) {
     private val cells = hashMapOf<Coordinate, BlockMock>()
     var rayTraces = 0
@@ -174,8 +174,8 @@ internal class CivsWorksiteWorldFixture(name: String, private val ground: Materi
     }
 }
 
-/** The pinned parser omits ladder properties and every BlockData.rotate operation.
- * Supply only ladder and V5 timber mine states; unknown states still use its strict parser. */
+/** The pinned parser omits ladder/connected-wall properties and every BlockData.rotate operation.
+ * Supply known mine states and captured static states; unknown states still use its strict parser. */
 internal class CivsWorksiteServerFixture : ServerMock() {
     override fun createBlockData(data: String): BlockData {
         val timberState = TIMBER_LOG_STATE.matchEntire(data)
@@ -185,6 +185,9 @@ internal class CivsWorksiteServerFixture : ServerMock() {
             data.startsWith("minecraft:ladder[") -> Material.LADDER
             data == "minecraft:cobblestone" -> Material.COBBLESTONE
             data == "minecraft:torch" -> Material.TORCH
+            data in CAPTURED_COBBLESTONE_WALL_STATES -> Material.COBBLESTONE_WALL
+            data in CAPTURED_GLASS_PANE_STATES -> Material.GLASS_PANE
+            data in CAPTURED_IRON_BARS_STATES -> Material.IRON_BARS
             timberState != null -> {
                 val timber = timberState.groupValues[1]
                 val part = when {
@@ -206,6 +209,9 @@ internal class CivsWorksiteServerFixture : ServerMock() {
         override fun clone(): BlockDataMock = MineDataFixture(material, state)
         override fun rotate(rotation: StructureRotation) {
             if (rotation == StructureRotation.NONE) return
+            check(material !in setOf(Material.COBBLESTONE_WALL, Material.GLASS_PANE, Material.IRON_BARS)) {
+                "Captured native wall/pane/bars fixture does not support rotation"
+            }
             val faces = listOf("north", "east", "south", "west")
             val turns = when (rotation) { StructureRotation.CLOCKWISE_90 -> 1; StructureRotation.CLOCKWISE_180 -> 2; else -> 3 }
             when {
@@ -236,6 +242,24 @@ internal class CivsWorksiteServerFixture : ServerMock() {
     }
 
     private companion object {
+        val CAPTURED_GLASS_PANE_STATES = setOf(
+            "minecraft:glass_pane[east=true,north=false,south=false,waterlogged=false,west=true]",
+            "minecraft:glass_pane[east=false,north=true,south=true,waterlogged=false,west=false]",
+        )
+        val CAPTURED_IRON_BARS_STATES = setOf(
+            "minecraft:iron_bars[east=true,north=false,south=false,waterlogged=false,west=true]",
+            "minecraft:iron_bars[east=false,north=true,south=true,waterlogged=false,west=false]",
+        )
+        val CAPTURED_COBBLESTONE_WALL_STATES = setOf(
+            "minecraft:cobblestone_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]",
+            "minecraft:cobblestone_wall[east=none,north=none,south=tall,up=true,waterlogged=false,west=none]",
+            "minecraft:cobblestone_wall[east=none,north=tall,south=low,up=true,waterlogged=false,west=tall]",
+            "minecraft:cobblestone_wall[east=none,north=tall,south=none,up=true,waterlogged=false,west=none]",
+            "minecraft:cobblestone_wall[east=none,north=tall,south=none,up=true,waterlogged=false,west=tall]",
+            "minecraft:cobblestone_wall[east=tall,north=none,south=none,up=true,waterlogged=false,west=none]",
+            "minecraft:cobblestone_wall[east=tall,north=none,south=tall,up=true,waterlogged=false,west=none]",
+            "minecraft:cobblestone_wall[east=tall,north=tall,south=none,up=true,waterlogged=false,west=none]",
+        )
         val TIMBER_LOG_STATE = Regex("minecraft:(oak|spruce|dark_oak)_log\\[axis=y]")
         val TIMBER_PLANKS_STATE = Regex("minecraft:(oak|spruce|dark_oak)_planks")
     }

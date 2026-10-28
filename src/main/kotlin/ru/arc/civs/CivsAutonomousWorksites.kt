@@ -14,7 +14,10 @@ internal object CivsAutonomousWorksites {
 
     fun visual(city: Settlement, building: CivBuilding, work: CivWorldWork): CivWorldWork =
         if (!supports(city, building)) work else work.copy(inputs = emptyMap(), outputs = emptyMap(),
-            equipmentAfter = null, autonomousVisual = true).also { validate(city, it) }
+            equipmentAfter = null, autonomousVisual = true).also {
+                requireWork(building.type != BuildingType.QUARRY || it.miningPlanVersion == CivsMinePlan.VERSION)
+                validate(city, it)
+            }
 
     /** Natural growth may continue after a sealed visual write. An exact untouched preimage still wins. */
     fun nativeAfterMatches(cell: CivPlanBlock, actual: String): Boolean {
@@ -39,7 +42,7 @@ internal object CivsAutonomousWorksites {
         requireWork(work.autonomousVisual && work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null &&
             work.forestry == null && work.upkeep == null && work.changes.size in 1..128 && work.durationMillis > 0)
         requireWork(work.changes.map { it.position }.distinct().size == work.changes.size)
-        val domain = domain(building)
+        val domain = domain(building, work.miningPlanVersion ?: CivsMinePlan.VERSION)
         requireWork(work.changes.all { cell ->
             city.contains(cell.position.x, cell.position.z) && local(building, cell.position) in domain.cells &&
                 cell.before != cell.after
@@ -49,7 +52,8 @@ internal object CivsAutonomousWorksites {
             requireWork(work.status in setOf("working-field", "watering", "fertilizing"))
             requireWork(work.changes.all { fieldChangeAllowed(building, work.status, it) })
         } else {
-            val plan = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("worksite-layout")
+            val plan = CivsMinePlan.forBuilding(building, work.miningPlanVersion ?: CivsMinePlan.VERSION)
+                ?: throw CivsRejection("worksite-layout")
             requireWork(work.status in setOf("digging-mine", "securing-mine") && work.miningPlanVersion == plan.version &&
                 work.miningStep?.let { it in 0L..plan.steps.size.toLong() } == true)
             val allowed = setOf("AIR", "COBBLESTONE", "LADDER", "TORCH") + plan.structuralMaterials
@@ -87,7 +91,7 @@ internal object CivsAutonomousWorksites {
     private data class Domain(val cells: Set<CivPosition>, val boxes: List<CivBox>)
     private val domains = ConcurrentHashMap<Pair<String, Int>, Domain>()
 
-    private fun domain(building: CivBuilding): Domain = domains.computeIfAbsent(building.schematicId to CivsMinePlan.VERSION) {
+    private fun domain(building: CivBuilding, version: Int = CivsMinePlan.VERSION): Domain = domains.computeIfAbsent(building.schematicId to version) {
         val cells = linkedSetOf<CivPosition>()
         if (building.type == BuildingType.FARM) {
             val farm = CivsWorksiteLayouts.site(building)?.getAsJsonObject("farm")
@@ -97,7 +101,7 @@ internal object CivsAutonomousWorksites {
                 cells += soil.copy(y = soil.y + 1)
             }
         } else if (building.type == BuildingType.QUARRY) {
-            val plan = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("worksite-layout")
+            val plan = CivsMinePlan.forBuilding(building, version) ?: throw CivsRejection("worksite-layout")
             cells += plan.steps.map { it.point }
             val sides = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
             // Same possible native shell as CivsWorksites.mineFrontier; fluid-only neighbours are never written.

@@ -1817,7 +1817,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
 
     for ((style, legacy) in listOf("nordic" to false, "medievaloak" to false, "caledonia" to false, "medievaloak" to true)) {
         val scenario = if (legacy) "$style legacy miner physically migrates V3 step83 and completes its first current level"
-            else "$style miner physically completes three then four then five aligned floors"
+            else "$style miner physically completes six then seven then eight aligned floors"
         test(scenario) {
             failOnUnsupportedMockBukkitOperation {
                 MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
@@ -2081,8 +2081,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 }
                             }
                         }
-                        // Fixed side lights are preserved by each level's independent scan.
-                        if (!legacy) placedTorches shouldBe 260L
+                        // Eight floors retain fifty side lights each, plus ten at the entrance;
+                        // upgrades preserve those native lights rather than paying for them again.
+                        if (!legacy) placedTorches shouldBe 410L
                     }
                     tasks.close()
                 }

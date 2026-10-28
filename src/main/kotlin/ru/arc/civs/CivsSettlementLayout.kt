@@ -246,8 +246,9 @@ internal object CivsSettlementLayout {
                     corners(bounds).all { insideCore(frame, it, 4) } &&
                         !CivsAutonomousGeometry.overlaps(bounds, frame.court) &&
                         (bounds.min.x..bounds.max.x).none { x -> (bounds.min.z..bounds.max.z).any { z -> key(x, z) in streetCells } }) &&
-                CivsRules.workRouteWithinReach(city, b.entrance) &&
-                (exterior || reserveUnbuiltStreets || frontages.isEmpty() || streetDistance(b) != null)
+                // Frontage is preferred by ranking. Infill may extend a short
+                // connected lane when every existing street plot is unavailable.
+                CivsRules.workRouteWithinReach(city, b.entrance)
         }.sortedWith(compareBy<CivBuilding> { if (exterior || frontages.isEmpty()) 0 else streetDistance(it) ?: 100 }
             .thenBy(::score).thenBy { it.entrance.x }.thenBy { it.entrance.z }.thenBy { it.rotation })
             .asSequence().filter(eligible).take(64).map { CivsAutonomousCandidate(it, !exterior && streetDistance(it) != null) }.toList()

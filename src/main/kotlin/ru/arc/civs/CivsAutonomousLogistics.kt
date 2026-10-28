@@ -130,7 +130,8 @@ internal object CivsAutonomousLogistics {
             }
         } }
         return CivSupplySnapshot(city.id, CivAutonomousSupplyObservation(civSupplyInputs(city)), stores, emptyList(),
-            couriers, workers, existing, materials.mapValues { it.value.toInt() }, autonomousStock = true)
+            couriers, workers, existing, materials.mapValues { it.value.toInt() }, autonomousStock = true,
+            maximumTransferDistance = CivsLogistics.maximumTransferDistance(city))
     }
 }
 

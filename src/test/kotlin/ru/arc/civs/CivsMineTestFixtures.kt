@@ -24,6 +24,5 @@ internal fun seedMinePaidSpine(world: CivsWorksiteWorldFixture, mine: CivBuildin
     }
     val (next, sections) = plan.normalizedProgress(state.nextStep,
         state.sectionSteps.orEmpty() + ("spine" to plan.sections.getValue("spine").size.toLong()))
-    return state.copy(nextStep = next, sectionSteps = sections,
-        v5Step = state.v5Step ?: state.nextStep.takeIf { state.sectionSteps == null })
+    return state.copy(nextStep = next, sectionSteps = sections)
 }

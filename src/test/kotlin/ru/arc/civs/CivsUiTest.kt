@@ -1432,7 +1432,9 @@ class CivsUiTest : FunSpec({
             val base = settlement(h.player)
             val hall = base.buildings.first()
             h.city = base.copy(workers = base.workers.mapIndexed { index, worker ->
-                if (index in 1..2) worker.copy(name = if (index == 1) "Матвей" else "Арина", assignment = hall.id,
+                // A random builder inclination is legitimate; keep this profession assertion deterministic.
+                if (index in 1..2) worker.copy(id = if (index == 1) UUID(0, 1) else worker.id,
+                    name = if (index == 1) "Матвей" else "Арина", assignment = hall.id,
                     nextDeliveryAt = 60_000, skills = if (index == 1) mapOf("TOWN_HALL" to 17L) else null) else worker
             }, inventory = base.inventory!!.copy(materials = mapOf("PAPER" to 6L)))
             every { h.host.buildingStatus(hall.id) } returns "building-status.waiting-inputs"

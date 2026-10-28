@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "provenance": "Auto2 quarry native capture and source-authored Caledonia worksite geometry. Joined-oak arrangement follows the Auto2 forestry incident regression. Hall, hut, roof, retained road and surrounding dirt plane are explicit scenario variations, not a live-world reconstruction.",
+  "nativeMap": {
+    "resource": "/mine-regina-floor3-native.json",
+    "sha256": "9f29038a0e6495a53066411c378a5615232fbaef9434068c6597cfd8a3131bbc",
+    "cells": 891
+  },
+  "blueprints": {
+    "forester": {
+      "id": "civs/minecolonies/caledonia/fundamentals/lumberjack1",
+      "sourceSha256": "c2b461694ab83a7e0409171a82039745f51d881e601ef0b6310a1e27d9f925d5"
+    },
+    "quarry": {
+      "id": "civs/minecolonies/caledonia/fundamentals/miner1",
+      "sourceSha256": "38b4a7dba7245e08db6929f30178d04f35af2d12fb8c803e64babd9ada3dd634"
+    }
+  },
+  "limits": [
+    "MockBukkit with recorded native colliders; not a running Paper server or player acceptance.",
+    "Work completion supplies an explicit resident-arrival observation; it does not establish walking or natural tree growth.",
+    "Only the 891 recorded cells are native terrain evidence. The executed mine prefix and surrounding terrain are declared seeded continuation.",
+    "No private MineColonies schematic payload or catalog is needed by this portable regression."
+  ]
+}
