@@ -23,6 +23,7 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsResidentsRuntimeTest' \
   --tests 'ru.arc.civs.CivsAutonomyTest' \
   --tests 'ru.arc.civs.CivsResidentMealsTest' \
+  --tests 'ru.arc.civs.CivsResidentMealElevationTest' \
   --tests 'ru.arc.civs.CivsTavernStaffingRuntimeTest'
 ```
 
@@ -34,6 +35,16 @@ native open-door collision panel. It checks actual packet movement for open,
 closed, and mirrored door approaches, plus centered controls. A required
 same-height first-cell center is retained without changing clear direct routes,
 door-opening behavior, collision tolerances, or search budgets.
+
+The meal-elevation regression builds an explicit three-block staircase and an
+upstairs food barrel. Both ordinary and autonomous residents must walk to it,
+remain physically clear, observe the meal session and debit one existing meal.
+Per-tick coordinates bound horizontal movement and single-block height changes;
+the same actor must remain alive throughout. The fixture's `teleports` counter
+also counts ordinary packet movement, so it is not an oracle for travel skips.
+Two pure cases retain ordinary leisure bounds and reject points above/below an
+explicit meal destination. The original runtime cases failed 2/2 without the
+repair; the final four cases and existing idle/citizen checks passed 64/64.
 
 The tavern cases cover temporary staffing by an idle builder, recovery for
 accepted construction or its queue head, approaching guests and pending meal
@@ -92,10 +103,12 @@ cases and 89 physical/Citizens/Journey cases passing in the current validation.
 
 This allocation test does not prove NPC arrival. A separate true-NPC,
 single-actor forestry replay passed 1/1 at 82.176 m in 6,000 ms with one
-receipt. The later two-actor attempt no longer fails during fixture setup from
-OOM; strict captured-world checks now stop arrival because the required native
-cells below public Y56 are missing. Refresh the factual overlay after a new
-debug capture before treating that replay as an arrival result.
+receipt. A later two-actor attempt performed an actual nine-wood pickup but
+did not reach warehouse dropoff: strict captured-world checks rejected missing
+lower native cells on the return search. That attempt also projected the
+service roster, which changed normal staffing and recruitment. The next replay
+retains the complete canonical service roster and scopes only physical actors.
+Refresh factual overlays before treating the complete chain as arrival proof.
 
 For public diagnostic geometry fixtures, normalize an empty `transit: []` to
 null (remove the field) for non-Road buildings, and give assigned workers a
@@ -124,13 +137,13 @@ placement, terraform, and layout classes passed 70/70 combined (2 + 22 + 28 +
 | Area | Existing coverage | Remaining boundary |
 | --- | --- | --- |
 | Grades and roads | Navigation tests cover one-block rises/descents and stair travel. `CivsRoadMaintenanceTest` covers short captured hills, composed local cuts, rejected long slopes, and receipt replay. | These fixtures do not establish route quality across arbitrary long natural grades. |
-| Auto2 producer-to-warehouse supply | `CivsAuto2SupplyRegressionTest` covers public-geometry FARM/FORESTER transfers through model allocation, pickup, and unload, plus ordinary-distance and malformed-limit boundaries; the current owner run is GREEN. A separate single-actor true-NPC forestry replay passed. | The two-actor true-NPC replay still has no arrival result: required native cells below public Y56 are missing from its strict overlay. Model transfer tests are not NPC arrival acceptance. |
+| Auto2 producer-to-warehouse supply | `CivsAuto2SupplyRegressionTest` covers public-geometry FARM/FORESTER transfers through model allocation, pickup, and unload, plus ordinary-distance and malformed-limit boundaries. A separate single-actor true-NPC forestry replay passed; a later pair performed an actual pickup. | The pair still has no complete dropoff result; native return-search data and the full canonical service roster must be present. Model transfer tests are not NPC arrival acceptance. |
 | Slabs, stairs, and shaped collisions | `CivsResidentNavigationTest` covers lower slabs and changed geometry; `CivsResidentCollisionsTest` checks gates, doors, and swept body collisions. The new journey class covers top slab → bottom slab → stair → deck across four directions, both travel directions, and three speeds. | Corner-shape checks remain fixture-defined collision behavior, not native client movement proof. |
 | Fences, gates, and doors | Closed gates can be treated as passages and opened during packet motion; tall fences/gates are swept for collision. Door-corner collision and route replanning after shape changes are covered. | No live-server/client acceptance is implied by these helper tests. |
 | Mine exits and work reach | `CivsMineExitNavigationTest`, `CivsMineAccessRegressionTest`, `CivsMineWorkStandingTest`, and `CivsMineRouteEpisodeTest` cover ladders, headroom, supported exits, standing positions, and recovery behavior. | Mine-exit coverage does not prove every uncaptured stair or shaft layout. |
 | Chunks, cache, and budgets | Navigation suites cover unknown chunk frontiers, unload/reload invalidation, world separation, bounded cache behavior, route budgets, cancellation, and replanning. The new journey class unloads/reloads the active chunk in both travel directions and continues after replanning. | These tests exercise test-owned chunk/cache seams, not actual Paper chunk streaming under a live client. |
 | Dynamic obstruction and stuck recovery | Resident navigation/runtime tests cover inserted walls, changed stair geometry, occupied routes, waits, detours, progress accounting, repeated mine-route episodes, and recovery. | A full process restart in the middle of a resident walking episode is not covered. |
-| Food interruption and duplicate durability | Resident runtime tests invalidate meal work when its assumptions change and resume jobs without granting travel credit. Road and mine tests replay durable receipts and check for duplicate work; resident delivery tests cover an exactly-once arrival in-process. | Walking episode + arrival + duplicate durable receipt across a process restart remains an uncovered combination. |
+| Food interruption and duplicate durability | Resident runtime tests invalidate meal work when its assumptions change and resume jobs without granting travel credit. Meal-elevation cases require actual stair travel and one existing meal debit while retaining ordinary leisure bounds. Road and mine tests replay durable receipts and check for duplicate work; resident delivery tests cover an exactly-once arrival in-process. | Walking episode + arrival + duplicate durable receipt across a process restart remains an uncovered combination. |
 
 The two recent journey gaps are now covered by portable cases: mid-journey
 chunk unload/reload and the top-slab-to-bottom-slab-to-stair/deck transition.

@@ -3185,6 +3185,7 @@ class CivsCitizens(
         val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
             listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id })
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
+        val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
             (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))) paths.begin(city) else null
         // Only the outside leg to the real entrance is ordinary city travel. Internal
@@ -3192,7 +3193,7 @@ class CivsCitizens(
         val routeMine = mine.takeIf { entrance == null }
         val motion = navigation.request(world, from, to, { point ->
             citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
-                (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point) &&
+                (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point, mealTarget) &&
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
             (entrance != null || minePassage == null || minePassage.allows(second)) },
@@ -4807,13 +4808,17 @@ internal fun citizenSafeIdlePosition(world: World, anchor: CivPosition, at: Citi
         citizenSleepClear(world, citizenStandingBounds(feet, 1.0))
 }
 
-/** A displaced resident may walk back, but a new idle path cannot extend its original distance or height. */
-internal fun citizenIdleRouteAllowed(anchor: CivPosition, from: CitizenPoint, point: CivPosition): Boolean {
+/** Idle walks retain their envelope; an observed meal visit also includes its validated destination. */
+internal fun citizenIdleRouteAllowed(anchor: CivPosition, from: CitizenPoint, point: CivPosition,
+                                    mealTarget: CivPosition? = null): Boolean {
     fun horizontal(x: Double, z: Double) = (x - (anchor.x + 0.5)) * (x - (anchor.x + 0.5)) +
         (z - (anchor.z + 0.5)) * (z - (anchor.z + 0.5))
-    val radiusSquared = maxOf(CITIZEN_IDLE_RADIUS * CITIZEN_IDLE_RADIUS, horizontal(from.x, from.z))
+    val radiusSquared = maxOf(CITIZEN_IDLE_RADIUS * CITIZEN_IDLE_RADIUS, horizontal(from.x, from.z),
+        mealTarget?.let { horizontal(it.x + .5, it.z + .5) } ?: 0.0)
+    val minimumY = minOf(anchor.y - 2.0, from.y, mealTarget?.y?.toDouble() ?: from.y)
+    val maximumY = maxOf(anchor.y + 2.0, from.y, mealTarget?.y?.toDouble() ?: from.y)
     return horizontal(point.x + 0.5, point.z + 0.5) <= radiusSquared &&
-        point.y.toDouble() in minOf(anchor.y - 2.0, from.y)..maxOf(anchor.y + 2.0, from.y)
+        point.y.toDouble() in minimumY..maximumY
 }
 
 /** Authored log floors are walkable; outside active buildings, idle routes avoid trees and climbs. */
