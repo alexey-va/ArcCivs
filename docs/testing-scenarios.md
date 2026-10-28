@@ -338,8 +338,10 @@ claim they are empty because its destination fixture may have a default block.
 Strict replays must reject missing observations instead of inventing terrain.
 
 Keep private player or settlement data outside Git; a local capture can be read
-with `RecordedNativeMap.fromFile(path, sha256)`. Record capture time and source,
-and do not combine separate observations as though they were an atomic snapshot.
+with `RecordedNativeMap.fromFile(path, sha256)` for a native capture or
+`RecordedNativeMap.fromRleFile(path, sha256)` for a converted RLE fixture. Record
+capture time and source, and do not combine separate observations as though they
+were an atomic snapshot.
 
 Convert one or more native capture JSON files into this resource format with:
 
@@ -352,3 +354,27 @@ shasum -a 256 /private/tmp/terrain-fixture.json
 The converter leaves unobserved cells unknown and rejects conflicting overlap,
 conflicting collision shapes for the same state, and failed captures. Review the
 source, coordinates and contents before copying a fixture into test resources.
+
+To keep an exact target box even when some captures are missing, pass
+`--bounds MIN_X MIN_Y MIN_Z MAX_X MAX_Y MAX_Z`. The converter crops inputs to
+that box and writes every unobserved cell as unknown. Local RLE files can be
+opened with `RecordedNativeMap.fromRleFile` using the returned SHA-256.
+
+`CivsAuto2ForestCaptureTest` is an opt-in check for a **partial** captured Auto2
+field. Set `CIVS_AUTO2_FOREST_CITY` and `CIVS_AUTO2_FOREST_CITY_SHA256` to a
+pinned raw Settlement snapshot, and `CIVS_AUTO2_FOREST_TERRAIN` and
+`CIVS_AUTO2_FOREST_TERRAIN_SHA256` to a pinned converted RLE capture. The test
+checks the actual forester footprint, observed saplings and unsampled columns;
+it does not simulate planting or claim that the partial snapshot covers the
+whole field. Keep the raw snapshots outside Git. A full planting replay needs
+all block observations required by the search and its safety checks.
+
+`CivsAuto2ObservedPlantingTest` uses those same pinned inputs for a worksite
+regression: it starts with the captured city and blocks unobserved and out-of-field
+columns using explicit synthetic sapling barriers, then exercises work planning,
+validation, native-state receipts and replay until at least 12 saplings occupy
+observed columns (the target can be raised with `CIVS_AUTO2_FOREST_TARGET_SAPLINGS`).
+The boundary is intentionally more restrictive than the
+actual world; it does not turn missing blocks into evidence. The captured vertical
+slice ends at y69 and capture times differ, so this remains a partial, simulated
+replay, not proof of natural tree growth or an atomic live-world snapshot.

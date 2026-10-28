@@ -93,6 +93,7 @@ internal object CivsForestry {
     const val MAX_HEIGHT = 47
     const val MAX_RADIUS = 15
     private val species = setOf("OAK", "SPRUCE", "BIRCH", "JUNGLE", "ACACIA", "DARK_OAK")
+    fun supportedTimber(material: String): Boolean = material.endsWith("_LOG") && material.removeSuffix("_LOG") in species
     val soils = setOf("DIRT", "GRASS_BLOCK", "COARSE_DIRT", "ROOTED_DIRT", "PODZOL", "MYCELIUM", "MOSS_BLOCK")
 
     fun material(state: String): String = state.substringBefore('[').removePrefix("minecraft:").uppercase()
@@ -158,6 +159,21 @@ internal object CivsForestry {
         val radius = crownRadius(timber)
         return CivBox(CivPosition(roots.minOf { it.x } - radius, roots.minOf { it.y }, roots.minOf { it.z } - radius),
             CivPosition(roots.maxOf { it.x } + radius, roots.maxOf { it.y } + MAX_HEIGHT, roots.maxOf { it.z } + radius))
+    }
+
+    /** Three free columns between separate trees and between roots and a road; one 2x2 plot is one tree. */
+    const val PLANTING_GAP = 3
+    fun plantingBounds(roots: List<CivPosition>): CivBox = CivBox(
+        CivPosition(roots.minOf { it.x } - PLANTING_GAP, roots.minOf { it.y }, roots.minOf { it.z } - PLANTING_GAP),
+        CivPosition(roots.maxOf { it.x } + PLANTING_GAP, roots.maxOf { it.y } + MAX_HEIGHT, roots.maxOf { it.z } + PLANTING_GAP))
+
+    fun rootsClear(city: Settlement, roots: List<CivPosition>, paths: Set<Pair<Int, Int>>): Boolean =
+        roots.all { !blockedColumn(city, it.x, it.z, paths) }
+
+    fun plantingClear(city: Settlement, roots: List<CivPosition>, paths: Set<Pair<Int, Int>>): Boolean {
+        val area = plantingBounds(roots)
+        return rootsClear(city, roots, paths) && city.contains(area.min.x, area.min.z) && city.contains(area.max.x, area.max.z) &&
+            paths.none { it.first in area.min.x..area.max.x && it.second in area.min.z..area.max.z }
     }
 
     fun paths(city: Settlement, retained: Set<Pair<Int, Int>> = emptySet()): Set<Pair<Int, Int>> = buildSet {
@@ -320,7 +336,8 @@ internal object CivsForestry {
     }
 
     /** Capture complete trunks before foliage: touching leaves must not flood into the whole forest. */
-    class Scan(val root: CivPosition, val timber: String, private val roots: List<CivPosition> = listOf(root)) {
+    class Scan(val root: CivPosition, val timber: String, private val roots: List<CivPosition> = listOf(root),
+        private val excluded: (CivPosition) -> Boolean = { false }) {
         private val queue = ArrayDeque<CivPosition>().apply { add(root) }
         private val seen = hashSetOf<CivPosition>()
         private val found = linkedMapOf<CivPosition, String>()
@@ -439,6 +456,9 @@ internal object CivsForestry {
                 if (!seen.add(point)) continue
                 used++
                 examined++
+                // A known village structure is a graph boundary, not missing tree evidence.
+                // Its original logs must never join the native tree job.
+                if (excluded(point)) continue
                 val state = read(point)
                 if (state == null) {
                     if (trunks) fail("tree-trunk-unavailable", point) else retainCrown("crown-unavailable")

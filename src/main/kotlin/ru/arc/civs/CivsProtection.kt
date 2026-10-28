@@ -317,15 +317,21 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun tree(event: StructureGrowEvent) {
-        fun blocked(location: Location): Boolean = location.world?.let { world ->
+        fun blockedRoot(location: Location): Boolean = location.world?.let { world ->
             worldLocked(world.uid, CivPosition(location.blockX, location.blockY, location.blockZ)) || protected(location) ||
                 snapshot.growthWorlds[world.uid]?.contains(location.blockX, location.blockY, location.blockZ, null) == true ||
                 forestryPath(world.uid, location.blockX, location.blockZ)
         } ?: false
-        if (blocked(event.location) || event.blocks.any { block ->
-                blocked(block.location) || block.world.let { world ->
-                    citizenCollision(world.uid, CivPosition(block.x, block.y, block.z))
-                }
+        if (blockedRoot(event.location) || event.blocks.any { proposed ->
+                val world = proposed.world
+                val point = CivPosition(proposed.x, proposed.y, proposed.z)
+                val before = proposed.block
+                val leaves = before.blockData as? org.bukkit.block.data.type.Leaves
+                val proposedWood = proposed.type.name.let { it.endsWith("_LOG") || it.endsWith("_WOOD") }
+                worldLocked(world.uid, point) || citizenCollision(world.uid, point) ||
+                    before.blockData.asString != proposed.blockData.asString &&
+                    (protected(proposed.location) && (!before.type.isAir || proposedWood) || !before.type.isAir &&
+                        forestryPath(world.uid, proposed.x, proposed.z) && (leaves == null || leaves.isPersistent))
             }) event.isCancelled = true
     }
 

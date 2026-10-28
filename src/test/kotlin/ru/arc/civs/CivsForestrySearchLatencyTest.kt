@@ -14,7 +14,7 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsForestrySearchLatencyTest : FunSpec({
-    test("many crowded planting candidates yield to a proven free plot without minutes of repeated native scans") {
+    test("a field containing several native saplings reaches a proven free plot within bounded default pulses") {
         var nanos = 0L
         val capture = RecordedNativeMap.fromResourceRle("/scenarios/forestry-planting-pressure.json",
             "7438534d0d8fb1ba2e2b9fa8d5ab6be811174a069c21f09a5548d3e0a978279c")
@@ -33,9 +33,9 @@ class CivsForestrySearchLatencyTest : FunSpec({
                 world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe CivsForestry.saplingState(sapling, 1)
             }
             val available = columns.map { it.copy(y = 64) }.filter { p ->
-                CivsForestry.crownClear(city, listOf(p), "OAK_LOG", CivsForestry.paths(city)) && neighbours.none { (tree, sapling) ->
-                    val radius = 7 + CivsForestry.crownRadius(sapling.removeSuffix("_SAPLING") + "_LOG")
-                    kotlin.math.abs(p.x - tree.x) <= radius && kotlin.math.abs(p.z - tree.z) <= radius
+                CivsForestry.plantingClear(city, listOf(p), CivsForestry.paths(city)) && neighbours.none { (tree, _) ->
+                    kotlin.math.abs(p.x - tree.x) <= CivsForestry.PLANTING_GAP &&
+                        kotlin.math.abs(p.z - tree.z) <= CivsForestry.PLANTING_GAP
                 }
             }
             check(available.size > 100) { "The fixture must contain many genuinely available plots: ${available.size}" }
@@ -58,10 +58,7 @@ class CivsForestrySearchLatencyTest : FunSpec({
                 "No planting with ${available.size} available plots after $coldPulses discovery + $warmPulses warm default pulses: $observed"
             }
             work.status shouldBe "planting-tree"
-            val rejections = observed["plantingRejections"] as Map<*, *>
             check(work.focus in available)
-            check((search["unplantable"] as Int) >= 3) { "The fixture must exercise repeated spacing refusals: $search" }
-            check(((rejections["reasons"] as Map<*, *>)["native-neighbour"] as Long) >= 3)
             runtime.validate(city, work)
             val after = plantingDelayCommit(city, runtime, work)
             after.stock.wood shouldBe city.stock.wood - 1
@@ -70,7 +67,7 @@ class CivsForestrySearchLatencyTest : FunSpec({
         }
     }
 
-    test("bounded owner diagnostics count overlapping crown road and building refusals independently") {
+    test("bounded owner diagnostics report the road gap without reserving a crown over a nearby building") {
         var nanos = 0L
         val paths = hashSetOf<Pair<Int, Int>>()
         plantingDelayFixture("forestry-refusal-reasons", retainedPaths = paths,
@@ -94,11 +91,11 @@ class CivsForestrySearchLatencyTest : FunSpec({
             report["total"] shouldBe 1L
             val reasons = report["reasons"] as Map<*, *>
             reasons["crown-road"] shouldBe 1L
-            reasons["crown-building"] shouldBe 1L
+            reasons["crown-building"] shouldBe null
             check(reasons.size <= 4)
             val last = report["last"] as Map<*, *>
             last["candidate"] shouldBe "${root.x},${root.y},${root.z}"
-            (last["reasons"] as List<*>).toSet() shouldBe setOf("crown-road", "crown-building")
+            (last["reasons"] as List<*>).toSet() shouldBe setOf("crown-road")
             world.getBlockAt(root.x, root.y, root.z).type shouldBe Material.SHORT_GRASS
             city.stock.wood shouldBe 64L
         }
@@ -116,7 +113,7 @@ class CivsForestrySearchLatencyTest : FunSpec({
             val worker = city.workers.single()
             val mill = requireNotNull(city.building(requireNotNull(worker.assignment)))
             val root = CivPosition(-15, 64, -26)
-            val oldTree = root.copy(x = -8)
+            val oldTree = root.copy(x = -12)
             plantingDelaySparseField(world, mill, root)
             world.getBlockAt(oldTree.x, 63, oldTree.z).type = Material.DIRT
             world.getBlockAt(oldTree.x, 64, oldTree.z).blockData = Bukkit.createBlockData("minecraft:oak_sapling[stage=1]")
@@ -141,21 +138,23 @@ class CivsForestrySearchLatencyTest : FunSpec({
 
     test("a native tree change resets partial spacing progress and still denies its newly crowded plot") {
         var nanos = 0L
-        plantingDelayFixture("forestry-changed-spacing", nanoTime = { nanos.also { nanos += 10_000L } }) { world, runtime, city ->
+        var suspended = false
+        var partialBoundary: () -> Boolean = { false }
+        plantingDelayFixture("forestry-changed-spacing", nanoTime = {
+            if (!suspended && partialBoundary()) { nanos += 2_000_000L; suspended = true }
+            nanos.also { nanos += 10_000L }
+        }) { world, runtime, city ->
             val worker = city.workers.single()
             val mill = requireNotNull(city.building(requireNotNull(worker.assignment)))
             val root = CivPosition(-15, 64, -26)
             val neighbour = root.copy(x = -14)
             plantingDelaySparseField(world, mill, root)
-            var partial = false
-            repeat(256) {
-                if (!partial) {
-                    plantingDelayPulse(runtime, city)
-                    val pending = plantingDelayEntry(runtime, worker)["forestPlant"] as? Map<*, *>
-                    partial = pending?.get("checkedColumns")?.let { it as Int > 400 } == true
-                }
+            partialBoundary = {
+                val pending = plantingDelayEntry(runtime, worker)["forestPlant"] as? Map<*, *>
+                pending?.get("checkedColumns")?.let { it as Int >= 16 } == true
             }
-            check(partial)
+            repeat(256) { if (!suspended) plantingDelayPulse(runtime, city) }
+            check(suspended) { "The spacing scan must retain a partial cursor when its ordinary 2ms slice expires" }
             world.getBlockAt(neighbour.x, 63, neighbour.z).type = Material.DIRT
             world.getBlockAt(neighbour.x, 64, neighbour.z).blockData = Bukkit.createBlockData("minecraft:spruce_sapling[stage=1]")
             runtime.changed(world.uid, neighbour)

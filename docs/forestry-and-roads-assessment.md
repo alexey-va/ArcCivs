@@ -33,3 +33,27 @@ With road shares of 10/25/50% and travel shares of 20/50/80%, a ×1.2 travel mul
 Direct changes are separately zero Vault, zero tokens and zero player XP. In an alternative interception scenario, selling all 28/100/292 planted seedlings would mint 56/200/584 nominal Vault. Those plots cannot simultaneously grow the trees counted in the WOOD scenario; external existing stock must fund them. With instant interception, ready stock and no travel, the 3-second planting duration gives a theoretical upper bound of 20 four-seedling plots/minute: 80 saplings or 160 nominal Vault/minute per resident until stock runs out. The one-use recovery kit adds at most four saplings/eight nominal Vault per paid mill. The normal paid-stock table above excludes that one-off kit; using it can reduce the first-cycle stock debit by one. No new shop price, daily cap or observed income is claimed. Existing SELL remains a possible independent native-item redemption path; the planned SELL-off transition and future contracts are not assumed active. The owner requested real forestry and immediate road speed. The selected implementation keeps one payout owner and paid seedlings rather than combining native harvesting with the old timed grant.
 
 Arithmetic input and evaluator output are in `forestry-and-roads-assessment.json` and `forestry-and-roads-assessment-result.json`. Source checks, publication, delivery, runtime activation and native tree/client observation are recorded separately.
+
+## Density and selectable species (2026-10-28)
+
+The requested change is to make room for at least 20 separated saplings around a
+forester where terrain, available resources and access permit. Previously oak
+spacing used the sum of two seven-block crown reserves, so even an unobstructed
+37×37 field could fit at most nine regularly separated single-root trees. The
+new spacing and species selector do not introduce a new price, payout, currency,
+or native-drop rule. The selected species affects the existing sapling input
+and physical tree/drops; changing it does not retroactively change an accepted
+work receipt. Species and tree size can therefore change realised item output
+and cadence, which have not been measured.
+
+For 20 newly planted roots, the existing ordinary-town cost remains 20 matching
+physical saplings. In an autonomous town the existing cost is 20 abstract WOOD
+for 20 single-root plots or 5 WOOD for five four-root plots, subject to the
+one-use construction kit described above; existing saplings reduce the new
+cost. These are separate material units, not Vault. Direct change: **0 Vault,
+0 premium tokens, 0 player XP**. More usable plots can increase eventual native
+item flow and autonomous WOOD production, but no incremental sale or effective
+dynamic shop price has been observed or asserted. The earlier theoretical
+instant-interception ceiling and the active SELL-to-contract transition remain
+as described above. Source verification, live activation and the observed number
+of saplings must be reported separately.

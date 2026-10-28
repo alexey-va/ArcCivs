@@ -70,8 +70,6 @@ class CivsService(
     private var testingSupplyCursor = 0
     private var researchCursor = 0
     private val supplyNoopDiagnostics = linkedMapOf<UUID, String>()
-    private val populationMinuteAt = mutableMapOf<UUID, Long>()
-    private val populationPending = mutableSetOf<UUID>()
     private val lastInjury = mutableMapOf<UUID, CivDeathContext>()
     private val memberNamesPending = mutableSetOf<UUID>()
     private var recoveredMemberNames = emptyMap<UUID, String>()
@@ -175,13 +173,18 @@ class CivsService(
         ::track, ::validateNativeCollected, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock)
 
+    private val residentLife = CivsResidentLifeRuntime(plugin, tasks, citizens, chunkLoading, settings.viewerRange,
+        { cities }, busy, unhealthy, ::settlementActive,
+        { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
+        { id, transform -> mutate(id, transform = transform) }, clock)
+
     init {
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet
         citizens.residentLifeEnabled = true
-        citizens.finishResidentMeal = ::finishResidentMeal
-        citizens.finishResidentRest = ::finishResidentRest
-        citizens.finishResidentLesson = ::finishResidentLesson
+        citizens.finishResidentMeal = residentLife::finishMeal
+        citizens.finishResidentRest = residentLife::finishRest
+        citizens.finishResidentLesson = residentLife::finishLesson
         citizens.worksiteTerrainChanged = worksites::changed
         citizens.worksiteWorldUnloaded = worksites::forgetWorld
         citizens.worksiteChunkUnloaded = worksites::forgetChunk
@@ -368,8 +371,8 @@ class CivsService(
             "residents" -> rows { city ->
                 val workers = city.workers.filter { workerId == null || it.id == workerId }
                 mapOf("city" to city.id, "settings" to (city.settings ?: CivSettlementSettings()),
-                    "testing_permissions" to testingPermissions.debug(setOf(city.owner)), "population_pending" to (city.id in populationPending),
-                    "last_population_minute" to populationMinuteAt[city.id], "immigration" to city.immigration,
+                    "testing_permissions" to testingPermissions.debug(setOf(city.owner)), "population_pending" to (residentLife.pending(city.id)),
+                    "last_population_minute" to residentLife.nextMinuteAt(city.id), "immigration" to city.immigration,
                     "total_workers" to workers.size, "truncated_workers" to (workers.size > 8),
                     "workers" to workers.take(8).map { mapOf("worker" to it.id, "name" to it.name,
                         "assignment" to it.assignment, "cycles" to it.completedCycles, "health" to it.health,
@@ -2778,6 +2781,19 @@ class CivsService(
         }.thenApply { Unit }
     }
 
+    override fun setForesterSpecies(player: Player, cityId: UUID, buildingId: UUID, material: String): CompletableFuture<Unit> =
+        action("forester_species_select", player, "city" to cityId, "building" to buildingId, "material" to material) {
+            researchCity(player, cityId, true)
+            afterCityAvailable(cityId) {
+                rejectIf(!player.isOnline, "player-offline")
+                researchCity(player, cityId, true)
+                mutate(cityId) { city ->
+                    rejectIf(city.building(buildingId)?.type != BuildingType.FORESTER, "invalid-production")
+                    CivsRules.setProduction(city, if (city.autonomy != null) city.owner else player.uniqueId, buildingId, material, now())
+                }.thenApply { Unit }
+            }
+        }
+
     override fun deleteCity(player: Player, expectedCityId: UUID, confirmationName: String): CompletableFuture<Unit> =
         cityAction("delete_city", player, "city" to expectedCityId, allowDeletion = true) { city ->
             CivsRules.requireDeletion(city, player.uniqueId, expectedCityId, confirmationName)
@@ -3052,7 +3068,7 @@ class CivsService(
                 cities = records
                 construction.loadLegacyRetries(records.values)
                 recoveredMemberNames = recovered
-                populationMinuteAt.clear()
+                residentLife.resetMinuteClock()
                 citizens.reconcileResidents()
                 protection.publish(prepared)
                 geometryGeneration++
@@ -3129,10 +3145,10 @@ class CivsService(
             pulseCorpses()
             pulseDeletions()
             pulseControls()
-            pulseImmigration()
+            residentLife.pulseImmigration()
             pulseResearch()
-            pulseAutoAssignments()
-            pulsePopulation()
+            residentLife.pulseAutoAssignments()
+            residentLife.pulsePopulation()
             pulseMemberNames()
             pulseStorage()
             pulseTestingSupplies()
@@ -3351,93 +3367,8 @@ class CivsService(
         }
     }
 
-    private fun pulseImmigration() {
-        cities.values.firstOrNull { city ->
-            city.id !in busy && city.id !in unhealthy && CivsRules.immigrationDue(city, now()) &&
-                (chunkLoading.active(city.id) || plugin.server.onlinePlayers.any { player -> player.world.uid == city.worldId &&
-                    player.location.toVector().distanceSquared(org.bukkit.util.Vector(city.center.x.toDouble(), city.center.y.toDouble(), city.center.z.toDouble())) <= settings.viewerRange * settings.viewerRange })
-        }?.let { city ->
-            runCatching { mutate(city.id) {
-                val id = UUID.randomUUID()
-                CivsRules.immigrate(it, it.owner, id, CivsNames.name(it, id, CivsPopulation.nextImmigrantSex(it)), now())
-            } }
-                .onSuccess { future -> future.whenComplete { saved, failure ->
-                    if (failure == null) CivsDiagnostics.event("resident_arrived", "city" to city.id, "population" to saved.workers.size,
-                        "remaining" to saved.immigration?.remaining)
-                } }.onFailure { log("admit resident ${city.id}", it, city.id) }
-        }
-    }
-
     private fun settlementActive(city: Settlement): Boolean = chunkLoading.active(city.id) ||
         plugin.server.onlinePlayers.any { it.world.uid == city.worldId && city.contains(it.location.blockX, it.location.blockZ) }
-
-    private fun populationActive(city: Settlement): Boolean = city.autonomy?.paused != true && city.pendingDeletion == null && city.id !in unhealthy && settlementActive(city)
-
-    /** Active-time only; one queued update per city prevents continuous work from starving its clock. */
-    private fun finishResidentMeal(cityId: UUID, meal: CivResidentMeal): CompletableFuture<Settlement> =
-        afterCityAvailable(cityId) {
-            citizens.validateResidentMeal(cityId, meal)
-            mutate(cityId) { current ->
-                citizens.validateResidentMeal(cityId, meal)
-                CivsResidentLife.finishMeal(current, meal)
-            }.also { receipt ->
-                // Observability must not turn a durable success into a failed meal.
-                receipt.thenAccept { committed ->
-                    val worker = committed.workers.firstOrNull { it.id == meal.workerId }
-                    CivsDiagnostics.event("resident_meal", "city" to cityId, "worker" to meal.workerId,
-                        "building" to meal.buildingId, "source" to meal.source, "outcome" to "accepted",
-                        "meals_before" to meal.mealsBefore, "meals_after" to worker?.life?.meals,
-                        "hunger_after" to worker?.let(CivsResidents::hunger), "revision" to committed.revision)
-                }
-            }
-        }
-
-    private fun finishResidentRest(cityId: UUID, workerId: UUID, awakeMinute: Long): CompletableFuture<Settlement> =
-        afterCityAvailable(cityId) {
-            citizens.validateResidentRest(cityId, workerId)
-            mutate(cityId) { current ->
-                citizens.validateResidentRest(cityId, workerId)
-                CivsResidentLife.finishRest(current, workerId, awakeMinute)
-            }
-        }
-
-    private fun finishResidentLesson(cityId: UUID, proof: CivResidentLessonProof): CompletableFuture<Settlement> =
-        afterCityAvailable(cityId) {
-            citizens.validateResidentLesson(cityId, proof)
-            mutate(cityId) { current ->
-                citizens.validateResidentLesson(cityId, proof)
-                CivsResidentLife.finishLesson(current, proof)
-            }
-        }
-
-    private fun pulsePopulation() {
-        val active = cities.values.filter(::populationActive)
-        populationMinuteAt.keys.retainAll(active.mapTo(hashSetOf(), Settlement::id))
-        val at = now()
-        active.forEach { populationMinuteAt.putIfAbsent(it.id, at + 60_000) }
-        val city = active.firstOrNull { it.id !in populationPending && at >= populationMinuteAt.getValue(it.id) } ?: return
-        populationPending += city.id
-        runCatching { afterCityAvailable(city.id) {
-            val current = cities[city.id]
-            if (current == null || !populationActive(current) || now() < (populationMinuteAt[city.id] ?: Long.MAX_VALUE))
-                return@afterCityAvailable CompletableFuture.completedFuture(Unit)
-            val awake = citizens.awakeResidentIds(city.id)
-            populationMinuteAt[city.id] = now() + 60_000 // Never replay minutes spent waiting for a save.
-            mutate(city.id) { before ->
-                val advanced = CivsPopulation.advance(before, awake, CivsNames::name)
-                val next = if (before.autonomy != null) CivsAutonomy.activeMinute(advanced, CivsNames::name) else advanced
-                if (next == before) before else next.copy(revision = before.revision + 1)
-            }.thenApply { saved ->
-                CivsDiagnostics.event("resident_life", "city" to city.id, "awake" to awake.size,
-                    "population" to saved.workers.size, "children" to saved.workers.count(CivsResidents::isChild),
-                    "hungry" to saved.workers.count { CivsResidents.hunger(it) <= 6 })
-                Unit
-            }
-        } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
-            populationPending -= city.id
-            if (failure != null) log("advance resident life ${city.id}", failure, city.id)
-        } }.onFailure { populationPending -= city.id; log("advance resident life ${city.id}", it, city.id) }
-    }
 
     private fun rememberedMemberNames(city: Settlement): Settlement = CivsMembership.remember(city,
         (city.members + city.owner).mapNotNull { id ->
@@ -3498,23 +3429,6 @@ class CivsService(
             if (CivsDiagnostics.rejection(failure)?.reason !in setOf("materials-missing", "research-unfunded", "storage-unavailable", "chunk-unloaded"))
                 log("prepare research funding ${city.id}", failure, city.id)
         }
-    }
-
-    private fun pulseAutoAssignments() {
-        val city = cities.values.firstOrNull { city ->
-            city.autonomy?.paused != true && city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
-                CivsRules.needsAutoAssignment(city) { citizens.canReassign(city.id, it) } &&
-                settlementActive(city)
-        } ?: return
-        runCatching { mutate(city.id) { current ->
-            CivsRules.autoAssign(current, current.owner, now()) { citizens.canReassign(current.id, it) }
-        } }.onSuccess { future ->
-            future.whenCompleteSync(tasks) { saved, failure ->
-                if (failure != null) log("auto assign residents ${city.id}", failure, city.id)
-                else CivsDiagnostics.event("workers_auto_assigned", "city" to city.id,
-                    "assigned" to requireNotNull(saved).workers.count { worker -> city.workers.firstOrNull { it.id == worker.id }?.assignment != worker.assignment })
-            }
-        }.onFailure { log("auto assign residents ${city.id}", it, city.id) }
     }
 
     @EventHandler(priority = org.bukkit.event.EventPriority.HIGHEST, ignoreCancelled = false)

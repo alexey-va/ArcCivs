@@ -10,9 +10,11 @@ import org.bukkit.command.ConsoleCommandSender
 import org.bukkit.entity.Player
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.TestTaskScheduler
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
+import java.util.logging.Logger
 
 class CivsTerrainFileCommandTest : FunSpec({
     test("terrain file command preserves console permissions exact syntax and readiness before capture admission") {
@@ -95,6 +97,35 @@ class CivsTerrainFileCommandTest : FunSpec({
             receipt["error"].asString shouldBe if (failure is CivsRejection) "chunks-unloaded" else "terrain-file-write-failed"
             messages.single().contains("PRIVATE_IO_PATH") shouldBe false
             tasks.close()
+        }
+    }
+
+    test("failed terrain capture records a bounded reason in the selected city's history") {
+        val directory = Files.createTempDirectory("civs-terrain-receipt-")
+        val history = CivsCityHistory(directory, {})
+        val scheduler = TestTaskScheduler()
+        val tasks = LifecycleTaskScope(scheduler)
+        val city = UUID.randomUUID()
+        val worker = UUID.randomUUID()
+        try {
+            CivsDiagnostics.install(history, Logger.getLogger("CivsTerrainReceiptTest"))
+            val completion = CompletableFuture<Path>()
+            val router = CivsCommand(mockk(), mockk(), mockk(), tasks, saveTerrainCapture = { completion })
+            val messages = mutableListOf<String>()
+            router.onCommand(terrainFileConsole(messages), mockk(), "civs", arrayOf("debug-terrain-file-at",
+                city.toString(), worker.toString(), "8", "64", "8"))
+            completion.completeExceptionally(CivsRejection("chunks-unloaded"))
+            scheduler.executeImmediate()
+            history.closeAsync().join()
+            val line = Files.readString(directory.resolve("settlements").resolve(city.toString()).resolve("latest.log"))
+            check("terrain_file_capture" in line && "chunks-unloaded" in line && worker.toString() in line)
+            check("terrain-file-write-failed" !in line)
+            terrainFileReceipt(messages.single())["error"].asString shouldBe "chunks-unloaded"
+        } finally {
+            CivsDiagnostics.detach(history)
+            history.closeAsync().join()
+            tasks.close()
+            directory.toFile().deleteRecursively()
         }
     }
 

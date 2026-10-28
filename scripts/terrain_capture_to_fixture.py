@@ -7,11 +7,11 @@ from pathlib import Path
 MAX_CELLS = 2_000_000
 
 
-def convert(captures):
+def convert(captures, bounds=None):
     if not captures:
         raise ValueError("at least one capture is required")
-    minima = [min(c["bounds"]["min"][axis] for c in captures) for axis in ("x", "y", "z")]
-    maxima = [max(c["bounds"]["max"][axis] for c in captures) for axis in ("x", "y", "z")]
+    minima = [min(c["bounds"]["min"][axis] for c in captures) for axis in ("x", "y", "z")] if bounds is None else list(bounds[:3])
+    maxima = [max(c["bounds"]["max"][axis] for c in captures) for axis in ("x", "y", "z")] if bounds is None else list(bounds[3:])
     width, height, depth = [hi - lo + 1 for lo, hi in zip(minima, maxima)]
     if min(width, height, depth) <= 0 or width * height * depth > MAX_CELLS:
         raise ValueError("invalid or oversized fixture bounds")
@@ -26,7 +26,7 @@ def convert(captures):
             point = (minimum[0] + x, minimum[1] + y, minimum[2] + z)
             if any(p < lo or p > hi for p, lo, hi in zip(point, minimum, maximum)):
                 raise ValueError("voxel outside capture bounds")
-            if not available:
+            if not available or any(p < lo or p > hi for p, lo, hi in zip(point, minima, maxima)):
                 continue
             if not isinstance(source_index, int) or not 0 <= source_index < len(source_palette):
                 raise ValueError("invalid palette index")
@@ -76,8 +76,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("captures", nargs="+", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--bounds", nargs=6, type=int, metavar=("MIN_X", "MIN_Y", "MIN_Z", "MAX_X", "MAX_Y", "MAX_Z"),
+                        help="inclusive output bounds; unobserved cells remain unknown")
     args = parser.parse_args()
-    result = convert([json.loads(path.read_text()) for path in args.captures])
+    result = convert([json.loads(path.read_text()) for path in args.captures], args.bounds)
     args.output.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
     print(f"Wrote terrain fixture: {args.output}")
 

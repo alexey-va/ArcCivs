@@ -1303,6 +1303,21 @@ ru:
       glass: 'Стекло'
       iron_ingot: 'Железо'
       iron_tool_kit: 'Набор инструментов'
+  forestry:
+    open: 'Порода деревьев ›'
+    title: 'Порода деревьев'
+    species-label: 'Порода'
+    native-help: 'Лесоруб сажает и рубит выбранную породу. Топор и нужные саженцы положите в бочку лесорубки; начатую рубку он закончит.'
+    auto-help: 'Лесоруб сажает и рубит выбранную породу по обычным правилам деревни. Начатую рубку он закончит.'
+    finishing-tree: 'Лесоруб завершит текущую рубку по прежнему плану, а затем перейдёт к выбранной породе.'
+    saplings: 'Для посадки: <item> × <amount>'
+    species:
+      oak: 'Дуб'
+      spruce: 'Ель'
+      birch: 'Берёза'
+      jungle: 'Тропическое дерево'
+      acacia: 'Акация'
+      dark_oak: 'Тёмный дуб'
   production:
     open: 'Продукция и материалы ›'
     title: 'Продукция здания'
@@ -2618,6 +2633,21 @@ en:
       glass: 'Glass'
       iron_ingot: 'Iron'
       iron_tool_kit: 'Tool kit'
+  forestry:
+    open: 'Tree species ›'
+    title: 'Tree species'
+    species-label: 'Species'
+    native-help: 'The forester plants and harvests the selected species. Keep an axe and matching saplings in the forester barrel; a harvest already started will finish.'
+    auto-help: 'The forester plants and harvests the selected species under the village’s usual rules. A harvest already started will finish.'
+    finishing-tree: 'The forester will finish the current harvest under its original plan, then switch to the selected species.'
+    saplings: 'To plant: <item> × <amount>'
+    species:
+      oak: 'Oak'
+      spruce: 'Spruce'
+      birch: 'Birch'
+      jungle: 'Jungle'
+      acacia: 'Acacia'
+      dark_oak: 'Dark oak'
   production:
     open: 'Products and materials ›'
     title: 'Building product'

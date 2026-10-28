@@ -186,6 +186,8 @@ interface CivsUiHost {
     fun registerContainer(player: Player): CompletableFuture<Unit>
     fun unregisterContainer(player: Player, position: CivPosition): CompletableFuture<Unit>
     fun setProduction(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>
+    fun setForesterSpecies(player: Player, cityId: UUID, buildingId: UUID, material: String): CompletableFuture<Unit> =
+        CompletableFuture.failedFuture(CivsRejection("not-authorized"))
     fun carpentry(player: Player, buildingId: UUID): CivCarpentryView? = null
     fun reload(player: Player): CompletableFuture<Unit>
 }

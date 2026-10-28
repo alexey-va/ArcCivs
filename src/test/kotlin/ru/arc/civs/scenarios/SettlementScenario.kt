@@ -352,8 +352,14 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
     }
 
     companion object {
-        fun fromResourceRle(path: String, sha256: String): RecordedNativeMap {
-            val encoded = JsonParser.parseString(pinnedScenarioResource(path, sha256)).asJsonObject
+        fun fromResourceRle(path: String, sha256: String): RecordedNativeMap =
+            decodeRle(JsonParser.parseString(pinnedScenarioResource(path, sha256)).asJsonObject)
+
+        /** Local captures can use the same compact format without putting world data in test resources. */
+        fun fromRleFile(path: Path, sha256: String): RecordedNativeMap =
+            decodeRle(JsonParser.parseString(pinnedFile(path, sha256)).asJsonObject)
+
+        private fun decodeRle(encoded: com.google.gson.JsonObject): RecordedNativeMap {
             val version = encoded["version"].asInt
             check(version in 1..2 && encoded["order"].asString == "y,z,x")
             val bounds = com.google.gson.Gson().fromJson(encoded["bounds"], CivBox::class.java)
@@ -392,12 +398,15 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
             return RecordedNativeMap(fixture)
         }
 
-        fun fromFile(path: Path, sha256: String): RecordedNativeMap {
+        fun fromFile(path: Path, sha256: String): RecordedNativeMap =
+            RecordedNativeMap(JsonParser.parseString(pinnedFile(path, sha256)).asJsonObject)
+
+        private fun pinnedFile(path: Path, sha256: String): String {
             check(Files.isRegularFile(path)) { "Missing explicitly requested native capture: $path" }
             val bytes = Files.readAllBytes(path)
             val actual = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
             check(actual == sha256) { "Native capture hash mismatch for $path: expected $sha256, got $actual" }
-            return RecordedNativeMap(JsonParser.parseString(bytes.toString(Charsets.UTF_8)).asJsonObject)
+            return bytes.toString(Charsets.UTF_8)
         }
 
         /** Public scene RLE preserves visible states and opaque geometry, not hidden block identities.

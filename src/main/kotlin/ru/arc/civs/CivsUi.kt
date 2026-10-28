@@ -243,6 +243,8 @@ class CivsUi internal constructor(
                         add(tr(player, "label.output") to tr(player, "autonomy.production", "amount" to CivsRules.deliveryAmount(building),
                             "resource" to text.resource(player, resource)))
                     }
+                    if (building.type == BuildingType.FORESTER) add(tr(player, "forestry.species-label") to
+                        treeSpecies(player, requireNotNull(CivsProduction.material(building))))
                 }, if (building.type.isResidence) DialogTables.PanelSkin.COCOA else DialogTables.PanelSkin.NAVY)
                 add(details)
                 if (building.type.isResidence) add(residentRoster(player, residents, details.width))
@@ -270,6 +272,8 @@ class CivsUi internal constructor(
                 add(button(player, "research", "research.open", PERSONAL) { showResearch(player, cityId) })
             if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH, BuildingType.QUARRY))
                 add(button(player, "industry", "industry.open", STOCK) { showIndustryBuilding(player, cityId, buildingId) })
+            if (building.type == BuildingType.FORESTER && isAdmin(player))
+                add(button(player, "production", "forestry.open", LAND) { showForesterSpecies(player, cityId, buildingId) })
             add(button(player, "inventory", "autonomy.barrel-open", STOCK) { openInspectionInventory(player, cityId, buildingId) }
                 .copy(tooltip = tr(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help")))
         }, reopen = { showBuildingInspection(player, cityId, buildingId) }, cityId = city.id)
@@ -1233,8 +1237,10 @@ class CivsUi internal constructor(
                 if (acceptedToolOrders.isNotEmpty()) add(tr(player, "label.output") to Component.join(text.literal(" · "),
                     acceptedToolOrders.map { it.material }.distinct().map { materialName(player, it) }))
                 CivsProduction.material(building)?.takeIf { acceptedToolOrders.isEmpty() && !CivsRules.isBuilder(city, building) && building.type != BuildingType.SAWMILL }?.let { material ->
-                    if (building.type != BuildingType.QUARRY) add(tr(player, "label.output") to
-                        if (building.type in setOf(BuildingType.FARM, BuildingType.FORESTER)) materialName(player, material)
+                    if (building.type != BuildingType.QUARRY) add(tr(player, if (building.type == BuildingType.FORESTER)
+                        "forestry.species-label" else "label.output") to
+                        if (building.type == BuildingType.FORESTER) treeSpecies(player, material)
+                        else if (building.type == BuildingType.FARM) materialName(player, material)
                         else tr(player, "buildings.output", "amount" to CivsProduction.amount(building), "resource" to materialName(player, material)))
                 }
                 city.construction?.takeIf { it.buildingId == buildingId }?.let { order ->
@@ -1281,7 +1287,11 @@ class CivsUi internal constructor(
                 add(button(player, "logistics", "logistics.open", STOCK) { showSupplyRequests(player, buildingId) })
             if ((building.type == BuildingType.SAWMILL || CivsProduction.options(building.type).isNotEmpty()) &&
                 !CivsRules.isBuilder(city, building) && building.type != BuildingType.QUARRY)
-                add(button(player, "production", if (building.type == BuildingType.SAWMILL) "carpentry.open" else "production.open", PERSONAL) {
+                add(button(player, "production", when (building.type) {
+                    BuildingType.FORESTER -> "forestry.open"
+                    BuildingType.SAWMILL -> "carpentry.open"
+                    else -> "production.open"
+                }, if (building.type == BuildingType.FORESTER) LAND else PERSONAL) {
                     showProduction(player, buildingId)
                 })
             if (building.type == BuildingType.BLACKSMITH)
@@ -1569,6 +1579,7 @@ class CivsUi internal constructor(
         val city = city(player) ?: return
         val building = city.building(buildingId) ?: return showBuildings(player)
         if (CivsRules.isBuilder(city, building)) return showBuilding(player, buildingId)
+        if (building.type == BuildingType.FORESTER) return showForesterSpecies(player, city.id, buildingId, error)
         if (building.type == BuildingType.SAWMILL) return showCarpentry(player, buildingId)
         if (building.type in setOf(BuildingType.SMELTERY, BuildingType.CRUSHER)) return showIndustryBuilding(player, city.id, buildingId, error)
         val options = CivsProduction.options(city, building)
@@ -1619,6 +1630,42 @@ class CivsUi internal constructor(
                 })
             }
         }, reopen = { showProduction(player, buildingId) }, cityId = city.id)
+    }
+
+    private fun treeSpecies(player: Player, material: String): Component =
+        tr(player, "forestry.species.${material.removeSuffix("_LOG").lowercase(Locale.ROOT)}")
+
+    private fun showForesterSpecies(player: Player, cityId: UUID, buildingId: UUID, error: Component? = null) {
+        val city = selectedCity(player, cityId) ?: return
+        val building = city.building(buildingId)?.takeIf { it.type == BuildingType.FORESTER } ?: return
+        val selected = requireNotNull(CivsProduction.material(building))
+        val canChoose = canManageSelected(player, city)
+        val locked = (city.autonomy == null && host.cityBusy(player)) || city.construction?.buildingId == buildingId
+        present(player, "civs.forester-species", "forestry.title", listOfNotNull(
+            body(buildingName(player, building.type, building.level)),
+            body(tr(player, "common.detail", "label" to tr(player, "forestry.species-label"),
+                "value" to treeSpecies(player, selected).color(COMMIT))),
+            body(player, if (city.autonomy == null) "forestry.native-help" else "forestry.auto-help"),
+            if (city.forestryJobs?.get(buildingId.toString())?.timber?.let { it != selected } == true)
+                body(player, "forestry.finishing-tree") else null,
+            if (!canChoose) body(text.reason(player, "not-authorized")) else null,
+            if (locked) body(text.reason(player, if (city.construction?.buildingId == buildingId) "construction-busy" else "city-busy")) else null,
+            error?.let(::body),
+        ), buildList {
+            if (canChoose && !locked) CivsProduction.options(city, building).forEachIndexed { index, material ->
+                add(valueButton(player, "production_$index", if (material == selected) "common.selected" else "common.choice",
+                    treeSpecies(player, material), if (material == selected) COMMIT else WHITE,
+                    tr(player, "forestry.saplings", "item" to materialName(player, material.removeSuffix("_LOG") + "_SAPLING"),
+                        "amount" to if (CivsForestry.large(material)) 4 else 1)) {
+                    if (material == selected) showForesterSpecies(player, cityId, buildingId)
+                    else perform(player, "civs.forester-species", "forestry.title", {
+                        if (city.autonomy == null) host.setProduction(player, buildingId, material)
+                        else host.setForesterSpecies(player, cityId, buildingId, material)
+                    }, success = { showForesterSpecies(player, cityId, buildingId) },
+                        failure = { showForesterSpecies(player, cityId, buildingId, it) })
+                })
+            }
+        }, reopen = { showForesterSpecies(player, cityId, buildingId) }, cityId = city.id)
     }
 
     private fun showCarpentry(player: Player, buildingId: UUID, page: Int = 0) {

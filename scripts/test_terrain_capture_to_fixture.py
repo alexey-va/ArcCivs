@@ -24,6 +24,15 @@ class TerrainCaptureFixtureTest(unittest.TestCase):
         self.assertEqual(result["palette"][0]["block_data"], "minecraft:stone")
         self.assertNotIn("unknown_opaque_identity", result["palette"][0])
 
+    def test_explicit_bounds_crop_and_preserve_unsampled_columns(self):
+        result = convert([capture(0, [0, 1])], [-1, 64, 0, 1, 64, 0])
+        self.assertEqual(result["runs"], [1, -1, 1, 0, 1, 1])
+        self.assertEqual(result["bounds"]["min"]["x"], -1)
+        self.assertEqual(result["bounds"]["max"]["x"], 1)
+        cropped = convert([capture(0, [0, 1])], [1, 64, 0, 1, 64, 0])
+        self.assertEqual(cropped["runs"], [1, 0])
+        self.assertEqual(cropped["palette"][0]["block_data"], "minecraft:air")
+
     def test_conflicting_overlap_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "overlapping captures disagree"):
             convert([capture(0, [0, 0]), capture(1, [1, 0])])

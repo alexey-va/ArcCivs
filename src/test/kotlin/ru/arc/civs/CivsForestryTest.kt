@@ -1697,18 +1697,19 @@ class CivsForestryTest : FunSpec({
         CivsForestry.valid(forestryCity(), forestryCity().buildings.last().id.toString(), job.copy(states = job.states.take(1))) shouldBe false
     }
 
-    test("future crown columns and the actual whole growth event keep roofs approaches and retained roads clear") {
+    test("planting keeps road clearance while leaves may grow above roofs and roads") {
         MockBukkitTestRuntime.open().use { paper ->
             val world = paper.addSimpleWorld("forestry-growth-guard")
             val city = forestryCity().copy(worldId = world.uid)
             val roots = listOf(CivPosition(0, 64, 0), CivPosition(0, 64, 1), CivPosition(1, 64, 0), CivPosition(1, 64, 1))
-            CivsForestry.crownClear(city, roots, "SPRUCE_LOG", CivsForestry.paths(city)) shouldBe true
-            CivsForestry.crownClear(city, roots, "SPRUCE_LOG", CivsForestry.paths(city, setOf(7 to 0))) shouldBe false
+            CivsForestry.plantingClear(city, roots, CivsForestry.paths(city)) shouldBe true
+            CivsForestry.plantingClear(city, roots, CivsForestry.paths(city, setOf(7 to 0))) shouldBe true
+            CivsForestry.plantingClear(city, roots, CivsForestry.paths(city, setOf(4 to 0))) shouldBe false
             val house = city.buildings.last().copy(id = UUID(0, 5), type = BuildingType.HOUSE, production = null,
                 anchor = CivPosition(6, 64, 0), bounds = CivBox(CivPosition(6, 63, 0), CivPosition(8, 70, 2)),
                 entrance = CivPosition(7, 64, 3))
             val housed = city.copy(buildings = city.buildings + house)
-            CivsForestry.crownClear(housed, roots, "SPRUCE_LOG", CivsForestry.paths(housed)) shouldBe false
+            CivsForestry.plantingClear(housed, roots, CivsForestry.paths(housed)) shouldBe true
             val locked = hashSetOf<CivPosition>()
             val protection = CivsProtection({ listOf(housed) }, worldLocked = { worldId, point -> worldId == world.uid && point in locked },
                 forestryPath = { worldId, x, z ->
@@ -1722,8 +1723,8 @@ class CivsForestryTest : FunSpec({
                 protection.isProtected(world.uid, point.x, point.y, point.z) shouldBe false
                 val event = growth(point)
                 protection.tree(event)
-                event.isCancelled shouldBe true
-                event.blocks.size shouldBe 1 // Cancel the native tree; never prune it into a partial crown.
+                event.isCancelled shouldBe false
+                event.blocks.size shouldBe 1 // Preserve the complete proposed growth event.
             }
             val open = growth(CivPosition(-12, 100, 0))
             protection.tree(open)
@@ -1790,7 +1791,7 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    for (mature in listOf(false, true)) test("birch planting reserves the neighbouring oak crown when ${if (mature) "its trunk" else "its sapling"} is below leaves") {
+    for (mature in listOf(false, true)) test("a selected birch forester handles an oak ${if (mature) "tree" else "sapling"} below leaves") {
         forestryWorksite("forestry-species-spacing-$mature", timber = "BIRCH", nanoTime = { 0L }) { world, runtime, city ->
             val oak = CivPosition(-5, 64, -26)
             if (mature) forestrySmallOak(world, oak)
@@ -1802,10 +1803,14 @@ class CivsForestryTest : FunSpec({
             val worker = city.workers.single()
             repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val work = requireNotNull(runtime.plan(city, worker))
-            work.status shouldBe "planting-tree"
-            val planted = work.changes.single().position
-            val spacing = CivsForestry.crownRadius("BIRCH_LOG") + CivsForestry.crownRadius("OAK_LOG")
-            (kotlin.math.abs(planted.x - oak.x) > spacing || kotlin.math.abs(planted.z - oak.z) > spacing) shouldBe true
+            if (mature) {
+                work.status shouldBe "felling-tree"
+                work.focus shouldBe oak
+            } else {
+                work.status shouldBe "planting-tree"
+                val planted = work.changes.single().position
+                (kotlin.math.abs(planted.x - oak.x) >= 4 || kotlin.math.abs(planted.z - oak.z) >= 4) shouldBe true
+            }
             runtime.validate(city, work)
             world.getBlockAt(oak.x, oak.y, oak.z).type shouldBe if (mature) Material.OAK_LOG else Material.OAK_SAPLING
         }
@@ -1865,9 +1870,7 @@ class CivsForestryTest : FunSpec({
                     repeat(1_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val second = requireNotNull(runtime.plan(city, worker))
                     second.status shouldBe "planting-tree"
-                    val crown = CivsForestry.crownBounds(second.changes.map { it.position }, "OAK_LOG")
-                    val reserved = crown.copy(min = crown.min.copy(x = crown.min.x - 7, z = crown.min.z - 7),
-                        max = crown.max.copy(x = crown.max.x + 7, z = crown.max.z + 7))
+                    val reserved = CivsForestry.plantingBounds(second.changes.map { it.position })
                     (planted.x in reserved.min.x..reserved.max.x && planted.z in reserved.min.z..reserved.max.z) shouldBe false
                     runtime.validate(city, second)
                     world.getBlockAt(planted.x, planted.y, planted.z).type shouldBe Material.OAK_SAPLING

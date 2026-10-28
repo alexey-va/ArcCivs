@@ -88,6 +88,11 @@ class CivsCommand(
                     saveTerrainCapture { debugTerrainAt(requireNotNull(city), requireNotNull(worker), CivPosition(
                         requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2]))) }
                 }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { path, failure ->
+                    CivsDiagnostics.event("terrain_file_capture", "city" to city, "worker" to worker,
+                        "center" to CivPosition(requireNotNull(coordinates[0]), requireNotNull(coordinates[1]), requireNotNull(coordinates[2])),
+                        "status" to if (failure == null && path != null) "saved" else "failed",
+                        "reason" to if (failure == null && path != null) null else
+                            (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "terrain-file-write-failed"))
                     sender.sendMessage(terrainFileLine(path, failure))
                 }
                 return true

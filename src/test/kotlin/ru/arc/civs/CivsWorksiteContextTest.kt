@@ -126,7 +126,7 @@ class CivsWorksiteContextTest : FunSpec({
                     val point = work.changes.single().position
                     (kotlin.math.abs(point.x - 17) > CivsForestry.crownRadius("BIRCH_LOG")) shouldBe true
                     for (previous in planted) {
-                        (kotlin.math.abs(point.x - previous.x) > 6 || kotlin.math.abs(point.z - previous.z) > 6) shouldBe true
+                        (kotlin.math.abs(point.x - previous.x) > 3 || kotlin.math.abs(point.z - previous.z) > 3) shouldBe true
                     }
                     planted += point
                 }
