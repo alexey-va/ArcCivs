@@ -2144,12 +2144,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val effect = excavations.singleOrNull() ?: around
         val connected = hashSetOf<CivPosition>()
         val landings = listOfNotNull(geometry.entranceLanding) + geometry.floors
+        // Deep access is a narrow ladder until its spine is paid; enclose that passage locally.
+        // The frozen V5 rows retain their wider frontier, including the upper boundary row.
+        val oldLowest = geometry.takeIf { it.version == 6 &&
+            it.sectionCount("spine", accessStep, sectionSteps) < it.sections.getValue("spine").size }
+            ?.forVersion(5)?.lowest
+        val narrowColumns = geometry.ladderAt(effect.y).let { setOf(it.x to it.z) }
+        fun columnsAt(y: Int) = if (oldLowest != null && y < oldLowest) narrowColumns else geometry.shaftColumns
         if ((effect.x to effect.z) in geometry.shaftColumns) {
             val open = hashSetOf<CivPosition>()
             // Only the current two-row air component belongs to this frontier. A
             // prospective cut must not connect a cave before its real receipt does.
             for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y, effect.y + 1)) {
-                for ((x, z) in geometry.shaftColumns) {
+                for ((x, z) in columnsAt(y)) {
                     val local = CivPosition(x, y, z)
                     val observed = CivsWorksiteLayouts.point(building, local)
                     val block = observeMineHazard(world, observed) ?: run {
@@ -2191,7 +2198,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val central = geometry.ladderAt(effect.y).let { effect.x == it.x && effect.z == it.z } ||
                     effect.y >= geometry.transferFeetY && effect.x == geometry.bottom.x && effect.z == geometry.bottom.z
                 for (y in maxOf(geometry.lowest, effect.y)..minOf(geometry.bottom.y, effect.y + 1)) {
-                    for ((x, z) in geometry.shaftColumns) {
+                    for ((x, z) in columnsAt(y)) {
                         if (CivPosition(x, y, z) !in connected) continue
                         // Opening the central column touches only the previous outer ring.
                         // Widening touches this ring and the preceding face of its own column.
@@ -2199,7 +2206,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                             (central && y == effect.y || !central && y > effect.y && (x != effect.x || z != effect.z))) continue
                         for ((dx, dz) in sides) {
                             val wall = CivPosition(x + dx, y, z + dz)
-                            if ((wall.x to wall.z) in geometry.shaftColumns) continue
+                            if ((wall.x to wall.z) in columnsAt(y)) continue
                             if (landings.any { floor -> floor.cells.any {
                                     it.x == wall.x && it.z == wall.z && wall.y in it.y + 1..it.y + floor.height
                                 } } && (geometry.builtStanding(wall, accessStep, sectionSteps) ||

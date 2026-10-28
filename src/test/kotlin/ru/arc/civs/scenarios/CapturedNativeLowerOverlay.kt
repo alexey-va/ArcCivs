@@ -18,8 +18,11 @@ internal fun appendNativeLowerCaptures(fixture: JsonObject, captures: List<JsonO
     val observed = linkedMapOf<CivPosition, String>()
     val shapes = linkedMapOf<String, JsonObject>()
     for (capture in captures) {
-        check(capture["state"]?.asString == "captured" && capture["source"]?.asString == "fresh-native-command" &&
-            capture["focus_origin"]?.asString == "operator-request") { "Not a successful explicit native operator capture" }
+        val legacyResident = !capture.has("state") && capture["focus_origin"]?.asString == "resident-feet"
+        check(capture["source"]?.asString == "fresh-native-command" && (legacyResident ||
+            capture["state"]?.asString == "captured" && capture["focus_origin"]?.asString == "operator-request")) {
+            "Not a successful explicit native capture"
+        }
         check(capture["city"]?.asString == expectedCity.toString() && capture["world"]?.asString == expectedWorld.toString()) {
             "Native lower capture city/world mismatch"
         }
@@ -40,8 +43,19 @@ internal fun appendNativeLowerCaptures(fixture: JsonObject, captures: List<JsonO
         val voxels = capture.getAsJsonArray("voxels")
         check(listOf(width, height, depth) == listOf(9L, 11L, 9L) && voxels.size() == 891 &&
             capture["voxel_count"].asInt == 891) { "Incomplete fixed native capture window" }
-        check(Gson().fromJson(capture["capture_center"], CivPosition::class.java) ==
-            CivPosition(nativeBounds.min.x + 4, nativeBounds.min.y + 5, nativeBounds.min.z + 4)) { "Native capture center/bounds mismatch" }
+        val center = CivPosition(nativeBounds.min.x + 4, nativeBounds.min.y + 5, nativeBounds.min.z + 4)
+        if (legacyResident) {
+            val actual = capture.getAsJsonArray("actual")
+            check(actual != null && actual.size() == 3 && actual.all {
+                it.isJsonPrimitive && it.asJsonPrimitive.isNumber && it.asDouble.isFinite()
+            }) { "Legacy native capture has no finite resident position" }
+            check(actual.map { kotlin.math.floor(it.asDouble) } == listOf(center.x, center.y, center.z).map { it.toDouble() }) {
+                "Legacy native resident position/bounds mismatch"
+            }
+        }
+        if (!legacyResident || capture.has("capture_center")) check(Gson().fromJson(capture["capture_center"], CivPosition::class.java) == center) {
+            "Native capture center/bounds mismatch"
+        }
         val chunks = capture.getAsJsonArray("chunks").associate { encoded -> encoded.asJsonObject.let {
             check(it["loaded"].asBoolean && it["load_level"].asString == "ENTITY_TICKING") { "Native capture contains a non-ticking chunk" }
             (it["x"].asInt to it["z"].asInt) to it

@@ -19,6 +19,7 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsMineAccessRegressionTest' \
   --tests 'ru.arc.civs.CivsMineWorkStandingTest' \
   --tests 'ru.arc.civs.CivsMineRouteEpisodeTest' \
+  --tests 'ru.arc.civs.CivsMineFrontierRepairTest' \
   --tests 'ru.arc.civs.CivsRoadMaintenanceTest' \
   --tests 'ru.arc.civs.CivsResidentsRuntimeTest' \
   --tests 'ru.arc.civs.CivsAutonomyTest' \
@@ -84,10 +85,11 @@ portable worksite replay uses the checked-in `auto2-worksites.json` fixture.
 None of these tests needs private schematics, saved Auto2 state, or network
 uploads/downloads.
 
-`CapturedNativeLowerOverlayTest` has eight portable contract cases for joining
+`CapturedNativeLowerOverlayTest` has eleven portable contract cases for joining
 factual lower captures: unchanged public cells and strict unknown space,
 duplicate windows, city/world mismatches, crop bounds, loaded data, exact
-colliders, and contradictory overlapping observations. Its synthetic capture
+colliders, contradictory overlapping observations, and supplemental state
+colliders that cannot replace known public geometry. Its synthetic capture
 envelopes test the merge contract; they do not prove an actual resident route.
 
 `CivsAuto2SupplyRegressionTest` uses the pinned public city geometry. The old
@@ -101,14 +103,20 @@ rejects a duplicate unload. It also checks the territory cap and rejects
 malformed limits. The owner reports the regression GREEN, with 31 pure supply
 cases and 89 physical/Citizens/Journey cases passing in the current validation.
 
-This allocation test does not prove NPC arrival. A separate true-NPC,
-single-actor forestry replay passed 1/1 at 82.176 m in 6,000 ms with one
-receipt. A later two-actor attempt performed an actual nine-wood pickup but
-did not reach warehouse dropoff: strict captured-world checks rejected missing
-lower native cells on the return search. That attempt also projected the
-service roster, which changed normal staffing and recruitment. The next replay
-retains the complete canonical service roster and scopes only physical actors.
-Refresh factual overlays before treating the complete chain as arrival proof.
+This allocation test does not prove NPC arrival. The true-NPC forestry replay
+now retains all five canonical service residents and family links, focusing
+only its physical actors. The single-producer case passed: 1,160 normal ticks,
+22.911 m recorded travel, 6,000 ms observed work, one native receipt and three
+wood. Its working zone and durable state survived completion and a duplicate
+callback was rejected. Admission follows the actual staffed building, so the
+earlier projected-roster expectation of at least 30 m was not retained.
+
+The two-actor replay performed an actual initial three-wood pickup/dropoff and
+an accepted meal. Its subsequent trip for six newly earned wood reached an
+uncaptured lower cell at (-1872,55,-2728), so the intended after-work handoff
+remains unproven with that input set. This is a strict fixture prerequisite;
+the replay must not substitute AIR or treat it as a product defect. Separate
+live city-history evidence establishes committed warehouse hauling.
 
 For public diagnostic geometry fixtures, normalize an empty `transit: []` to
 null (remove the field) for non-Road buildings, and give assigned workers a
@@ -126,6 +134,21 @@ The mine-cover replay keeps a controlled natural-stone continuation below the
 public Y56 surface boundary; it is a declared fixture continuation, not an
 underground world capture.
 
+The V6 frontier regression uses a generated cave behind paid ladder backing.
+During the new deep spine, the immediate ladder shell must close without
+requiring unreachable walls across the old wide footprint. Five portable cases
+cover that local shell, the unchanged V5 boundary row, widening after the spine,
+reopening an exact paid seal, and rejection of liquids, locked blocks and
+unreachable work. Frozen V2–V5 plan orders remain unchanged.
+
+The opt-in resident-mining replay also runs the actual Citizens and Service
+callbacks. Its original V5 control completes one economic cycle. The current
+V6 case must continue after its first credit and complete a second cycle: 60
+native commits, 120,000 ms observed work and six stone in the recorded run.
+Native work itself grants no economic credit. The fixture retains all five
+service residents and family links, focusing one physical actor. This is model
+evidence with a declared natural-stone continuation, not live Paper acceptance.
+
 Recorded verification from the task owner's session on 2026-10-27 22:58 UTC
 (2026-10-28 Moscow time):
 `CivsResidentJourneyNavigationTest` passed 26/26 cases, and the four planner,
@@ -137,7 +160,7 @@ placement, terraform, and layout classes passed 70/70 combined (2 + 22 + 28 +
 | Area | Existing coverage | Remaining boundary |
 | --- | --- | --- |
 | Grades and roads | Navigation tests cover one-block rises/descents and stair travel. `CivsRoadMaintenanceTest` covers short captured hills, composed local cuts, rejected long slopes, and receipt replay. | These fixtures do not establish route quality across arbitrary long natural grades. |
-| Auto2 producer-to-warehouse supply | `CivsAuto2SupplyRegressionTest` covers public-geometry FARM/FORESTER transfers through model allocation, pickup, and unload, plus ordinary-distance and malformed-limit boundaries. A separate single-actor true-NPC forestry replay passed; a later pair performed an actual pickup. | The pair still has no complete dropoff result; native return-search data and the full canonical service roster must be present. Model transfer tests are not NPC arrival acceptance. |
+| Auto2 producer-to-warehouse supply | `CivsAuto2SupplyRegressionTest` covers public-geometry FARM/FORESTER transfers through model allocation, pickup and unload. The canonical single-producer replay earns three wood; a pair completes an initial pickup/dropoff and a meal. | The pair's later after-work transfer still needs an uncaptured lower cell. Model transfer tests and the initial handoff do not prove that later transfer. |
 | Slabs, stairs, and shaped collisions | `CivsResidentNavigationTest` covers lower slabs and changed geometry; `CivsResidentCollisionsTest` checks gates, doors, and swept body collisions. The new journey class covers top slab → bottom slab → stair → deck across four directions, both travel directions, and three speeds. | Corner-shape checks remain fixture-defined collision behavior, not native client movement proof. |
 | Fences, gates, and doors | Closed gates can be treated as passages and opened during packet motion; tall fences/gates are swept for collision. Door-corner collision and route replanning after shape changes are covered. | No live-server/client acceptance is implied by these helper tests. |
 | Mine exits and work reach | `CivsMineExitNavigationTest`, `CivsMineAccessRegressionTest`, `CivsMineWorkStandingTest`, and `CivsMineRouteEpisodeTest` cover ladders, headroom, supported exits, standing positions, and recovery behavior. | Mine-exit coverage does not prove every uncaptured stair or shaft layout. |
@@ -163,7 +186,8 @@ CI.
 | --- | --- | --- | --- |
 | Real private-blueprint worksite replay | `CIVS_SCENARIO_SCHEMATICS_ROOT` | Private schematic root | `CIVS_SCENARIO_ATELIER_ROOT` (defaults to `../ruscrafting-ops/scripts/location-atelier`) |
 | Auto2 mine cover | `CIVS_SCENARIO_MINE_STATE` | `CIVS_SCENARIO_PUBLIC_MAP`, `CIVS_SCENARIO_NATIVE_FACTS`, `CIVS_SCENARIO_SCHEMATICS_ROOT` | `CIVS_SCENARIO_CITY_STATE` (checks the source building and mine plan), `CIVS_SCENARIO_ATELIER_ROOT` |
-| Auto2 resident forestry | `CIVS_SCENARIO_CITY_STATE` | `CIVS_SCENARIO_CITY_MAP`, `CIVS_SCENARIO_NATIVE_FACTS` | `CIVS_SCENARIO_NATIVE_OVERLAYS` (factual lower native captures) |
+| Auto2 resident forestry | `CIVS_SCENARIO_CITY_STATE` | `CIVS_SCENARIO_CITY_MAP`, `CIVS_SCENARIO_NATIVE_FACTS` | `CIVS_SCENARIO_NATIVE_OVERLAYS` (factual lower native captures), `CIVS_SCENARIO_NATIVE_COLLISION_CAPTURES` (exact state colliders only) |
+| Auto2 resident mining | `CIVS_SCENARIO_MINING_CITY_STATE` (V5), `CIVS_SCENARIO_MINING_CURRENT_CITY_STATE` (V6) | `CIVS_SCENARIO_PUBLIC_MAP`, `CIVS_SCENARIO_NATIVE_FACTS`, `CIVS_SCENARIO_SCHEMATICS_ROOT`; V6 also requires `CIVS_SCENARIO_CURRENT_MINE_CAPTURE` and `CIVS_SCENARIO_CURRENT_MINE_SHA256` | Factual lower overlays; exact bush/farm collider captures with hashes; `CIVS_SCENARIO_ATELIER_ROOT` |
 
 Enable only the replay whose local inputs are available. For example:
 Gradle does not track these runtime environment variables or external files as
@@ -173,7 +197,10 @@ facts, schematic, or atelier root changes; otherwise the filtered task may be
 considered up-to-date.
 
 Without the enable variable, Kotest disables the one blueprint case, two mine
-cases, or two resident-forestry cases for that replay. They do not substitute
+cases, two resident-forestry cases, or the two independently enabled
+resident-mining cases for that replay. Mining uses its own enable variables;
+enabling forestry must not activate mining's private-blueprint requirements.
+They do not substitute
 placeholder private state or fetch private inputs; the optional paths are read
 only when explicitly supplied locally.
 
@@ -189,6 +216,23 @@ before the single fixture decode. Public cells and their known colliders stay
 unchanged, and every uncaptured cell remains unavailable in the strict replay.
 Supplying this file does not itself establish two-actor pickup/dropoff or live
 acceptance; the actual resident callbacks and receipt assertions must pass.
+
+The lower join also accepts the original resident-feet capture format when
+`state` is absent, `source` is `fresh-native-command`, and the finite numeric
+`actual` position floors to the fixed window center. An existing
+`capture_center` must agree. This legacy branch retains all city/world,
+availability, chunk, voxel and collider checks; errored records and malformed
+new operator captures remain rejected. Four added legacy cases bring the
+portable overlay/collider contract suite to 15 passing cases.
+
+If the pinned facts lack a visible block state's collider, optionally provide
+`CIVS_SCENARIO_NATIVE_COLLISION_CAPTURES=/private/tmp/native-state-facts/captures.json`.
+It uses the same raw capture-array format and validates the city/world,
+891-cell availability, ticking chunks and native block-local collision boxes.
+Only collider facts for observed states are consumed; none of these later
+captures replaces a public world cell. Contradictory observations and attempts
+to replace an already known public collider fail. Keep separate capture times
+and hashes: combining these inputs does not make an atomic world snapshot.
 
 ```sh
 CIVS_SCENARIO_SCHEMATICS_ROOT=/private/tmp/private-schematics \
@@ -215,3 +259,13 @@ they do not establish the original identity of blocks inside opaque fills. The
 separate native-block snapshot 891 pins actual block states only for its
 sampled cells. These replays still use test helpers and do not replace native
 Paper/server or player-client acceptance.
+
+For resident mining, `CIVS_SCENARIO_NATIVE_COLLISION_CAPTURE` and
+`CIVS_SCENARIO_NATIVE_COLLISION_SHA256` can supply an exact missing state
+collider; the farm equivalents are `CIVS_SCENARIO_NATIVE_FARM_CAPTURE` and
+`CIVS_SCENARIO_NATIVE_FARM_SHA256`. Raw native captures supply observed collision
+facts without replacing public block identities. Missing facts and uncaptured
+space continue to fail explicitly. The current V6 clock starts at its supplied
+native capture's timestamp; the original V5 control retains its public capture
+timestamp. Separate capture epochs remain recorded; the composed fixture is not
+an atomic world snapshot.

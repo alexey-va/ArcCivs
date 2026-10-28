@@ -52,6 +52,54 @@ class CapturedNativeLowerOverlayTest : FunSpec({
         fixture.getAsJsonArray("voxels").size() shouldBe 891
     }
 
+    test("legacy resident-feet raw captures join unchanged with or without an explicit center") {
+        for (explicitCenter in listOf(false, true)) {
+            val fixture = overlayPublicFixture()
+            val publicCells = fixture.getAsJsonArray("voxels").deepCopy().toList()
+            val native = overlayLegacyWindow().also { if (!explicitCenter) it.remove("capture_center") }
+            val raw = native.toString()
+            appendNativeLowerCaptures(fixture, listOf(native), OVERLAY_CITY, OVERLAY_WORLD) shouldBe 486
+            native.toString() shouldBe raw
+            native.has("state") shouldBe false
+            fixture.getAsJsonArray("voxels").take(publicCells.size) shouldBe publicCells
+        }
+    }
+
+    test("legacy resident-feet actual position must floor to the exact recorded center") {
+        val fixture = overlayPublicFixture()
+        val before = fixture.toString()
+        // Truncating this negative offset would incorrectly accept zero as its block coordinate.
+        val native = overlayLegacyWindow().also { it.getAsJsonArray("actual").set(0, Gson().toJsonTree(-.25)) }
+        shouldThrow<IllegalStateException> { appendNativeLowerCaptures(fixture, listOf(native), OVERLAY_CITY, OVERLAY_WORLD) }
+        fixture.toString() shouldBe before
+    }
+
+    test("legacy resident-feet captures still require available voxels and ticking chunks") {
+        for (unavailableVoxel in listOf(false, true)) {
+            val fixture = overlayPublicFixture()
+            val before = fixture.toString()
+            val native = overlayLegacyWindow()
+            if (unavailableVoxel) native.getAsJsonArray("voxels")[0].asJsonArray.set(4, Gson().toJsonTree(false))
+            else native.getAsJsonArray("chunks")[0].asJsonObject.addProperty("load_level", "BORDER")
+            shouldThrow<IllegalStateException> { appendNativeLowerCaptures(fixture, listOf(native), OVERLAY_CITY, OVERLAY_WORLD) }
+            fixture.toString() shouldBe before
+        }
+    }
+
+    test("legacy compatibility never admits errored captures or malformed new operator envelopes") {
+        val invalid = listOf(
+            overlayLegacyWindow().also { it.addProperty("state", "error") },
+            overlayLegacyWindow().also { it.addProperty("state", "captured") },
+            overlayLegacyWindow().also { it.addProperty("source", "cached-native") },
+            overlayWindow().also { it.remove("capture_center") })
+        for (native in invalid) {
+            val fixture = overlayPublicFixture()
+            val before = fixture.toString()
+            shouldThrow<IllegalStateException> { appendNativeLowerCaptures(fixture, listOf(native), OVERLAY_CITY, OVERLAY_WORLD) }
+            fixture.toString() shouldBe before
+        }
+    }
+
     for (field in listOf("city", "world")) test("a mismatched native $field rejects before changing the encoded world") {
         val fixture = overlayPublicFixture()
         val before = fixture.toString()
@@ -104,6 +152,41 @@ class CapturedNativeLowerOverlayTest : FunSpec({
         }
         fixture.toString() shouldBe before
     }
+
+    test("exact supplemental state colliders leave public identities and unknown cells intact") {
+        val native = overlayWindow().also { it.getAsJsonArray("palette").set(0,
+            overlayShape("minecraft:bush").also { shape -> shape.add("collision", JsonArray()) }) }
+        val facts = capturedStateCollisionFacts(listOf(native), OVERLAY_CITY, OVERLAY_WORLD)
+        val fixture = overlayPublicFixture().also {
+            it.getAsJsonArray("palette")[0].asJsonObject.apply { addProperty("block_data", "minecraft:bush"); remove("collision") }
+        }
+        withOverlayMap(fixture) { capture ->
+            val before = capture.states.toMap()
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+                val world = CapturedResidentWorld(capture, nativeStateFacts = facts).also(paper.server::addWorld)
+                world.strict = true
+                world.getBlockAt(0, 56, 0).type shouldBe Material.BUSH
+                world.getBlockAt(0, 56, 0).collisionShape.boundingBoxes.toList() shouldBe emptyList()
+                shouldThrow<IllegalStateException> { world.getBlockAt(0, 55, 0) }
+            }
+            capture.states shouldBe before
+        }
+    }
+
+    test("supplemental collider observations reject the wrong world and contradictory native shapes") {
+        val native = overlayWindow()
+        shouldThrow<IllegalStateException> { capturedStateCollisionFacts(listOf(native), OVERLAY_CITY, UUID(0, 99)) }
+        val contradictory = overlayWindow().also { it.getAsJsonArray("palette")[0].asJsonObject.add("collision", JsonArray()) }
+        shouldThrow<IllegalStateException> { capturedStateCollisionFacts(listOf(native, contradictory), OVERLAY_CITY, OVERLAY_WORLD) }
+    }
+
+    test("supplemental state facts cannot replace an already known public collider") {
+        withOverlayMap(overlayPublicFixture()) { capture ->
+            MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use {
+                shouldThrow<IllegalStateException> { CapturedResidentWorld(capture, nativeStateFacts = mapOf("minecraft:stone" to emptyList())) }
+            }
+        }
+    }
 })
 
 private val OVERLAY_CITY = UUID(0, 1)
@@ -131,6 +214,12 @@ private fun overlayWindow(center: CivPosition = CivPosition(0, 55, 0)): JsonObje
         "palette" to listOf(overlayShape("minecraft:stone")),
         "voxels" to (0..8).flatMap { x -> (0..8).flatMap { z -> (0..10).map { y -> listOf(x, y, z, 0, true) } } }
     )).asJsonObject
+}
+
+private fun overlayLegacyWindow(): JsonObject = overlayWindow().also {
+    it.remove("state")
+    it.addProperty("focus_origin", "resident-feet")
+    it.add("actual", Gson().toJsonTree(listOf(.75, 55.25, .75)))
 }
 
 private fun withOverlayMap(fixture: JsonObject, block: (RecordedNativeMap) -> Unit) {

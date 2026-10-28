@@ -186,8 +186,10 @@ internal class CivsWorksiteServerFixture : ServerMock() {
             data == "minecraft:cobblestone" -> Material.COBBLESTONE
             data == "minecraft:torch" -> Material.TORCH
             data in CAPTURED_COBBLESTONE_WALL_STATES -> Material.COBBLESTONE_WALL
+            data == CAPTURED_MOSSY_COBBLESTONE_WALL_STATE -> Material.MOSSY_COBBLESTONE_WALL
             data in CAPTURED_GLASS_PANE_STATES -> Material.GLASS_PANE
             data in CAPTURED_IRON_BARS_STATES -> Material.IRON_BARS
+            data == CAPTURED_GLOW_LICHEN_STATE -> Material.GLOW_LICHEN
             timberState != null -> {
                 val timber = timberState.groupValues[1]
                 val part = when {
@@ -209,8 +211,8 @@ internal class CivsWorksiteServerFixture : ServerMock() {
         override fun clone(): BlockDataMock = MineDataFixture(material, state)
         override fun rotate(rotation: StructureRotation) {
             if (rotation == StructureRotation.NONE) return
-            check(material !in setOf(Material.COBBLESTONE_WALL, Material.GLASS_PANE, Material.IRON_BARS)) {
-                "Captured native wall/pane/bars fixture does not support rotation"
+            check(material !in setOf(Material.COBBLESTONE_WALL, Material.MOSSY_COBBLESTONE_WALL, Material.GLASS_PANE, Material.IRON_BARS, Material.GLOW_LICHEN)) {
+                "Captured native directional fixture does not support rotation"
             }
             val faces = listOf("north", "east", "south", "west")
             val turns = when (rotation) { StructureRotation.CLOCKWISE_90 -> 1; StructureRotation.CLOCKWISE_180 -> 2; else -> 3 }
@@ -242,6 +244,8 @@ internal class CivsWorksiteServerFixture : ServerMock() {
     }
 
     private companion object {
+        const val CAPTURED_MOSSY_COBBLESTONE_WALL_STATE = "minecraft:mossy_cobblestone_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]"
+        const val CAPTURED_GLOW_LICHEN_STATE = "minecraft:glow_lichen[down=false,east=false,north=false,south=true,up=false,waterlogged=true,west=false]"
         val CAPTURED_GLASS_PANE_STATES = setOf(
             "minecraft:glass_pane[east=true,north=false,south=false,waterlogged=false,west=true]",
             "minecraft:glass_pane[east=false,north=true,south=true,waterlogged=false,west=false]",

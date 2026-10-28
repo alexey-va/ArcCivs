@@ -19,32 +19,43 @@ import ru.arc.civs.ResidentRuntimeWorld
 /** Native states/colliders for the existing real Citizens runtime fixture.
  * Synthetic origin cells exist only during that fixture's initial bootstrap.
  * Activate [strict] before the scenario clock starts; every unknown read then fails. */
-internal class CapturedResidentWorld(val capture: RecordedNativeMap) : ResidentRuntimeWorld() {
+internal class CapturedResidentWorld(val capture: RecordedNativeMap,
+    private val nativeStateFacts: Map<String, List<BoundingBox>> = emptyMap(),
+    private val declaredContinuation: Map<CivPosition, String> = emptyMap()) : ResidentRuntimeWorld() {
     private val nativeCells = hashMapOf<Coordinate, BlockMock>()
     private val nativeData: Map<String, BlockData>
     val rejectedNativeReads = linkedSetOf<String>()
+    var lastRejectedNativeRead: Map<String, Any?>? = null
+        private set
     var strict = false
 
     private fun missingNative(message: String): Nothing {
         if (rejectedNativeReads.size < 8) rejectedNativeReads += message
+        lastRejectedNativeRead = mapOf("reason" to message, "callers" to Throwable().stackTrace
+            .filter { it.className.startsWith("ru.arc.civs.") && !it.className.contains("CapturedResidentWorld") }.take(5).map { it.toString() })
         error(message)
     }
 
     init {
         capture.loadedChunks.forEach { (x, z) -> loadChunk(x, z) }
-        val palette = capture.states.values.toSet().associateWith { state -> runCatching { Bukkit.createBlockData(state) } }
+        val palette = (capture.states.values + declaredContinuation.values).toSet().associateWith { state -> runCatching { Bukkit.createBlockData(state) } }
         val unsupported = palette.filterValues { it.isFailure }
         check(unsupported.isEmpty()) { "Unsupported captured native state parsing: " + unsupported.entries.joinToString("; ") {
             (state, failure) -> "$state: ${failure.exceptionOrNull()?.message}"
         } }
         nativeData = palette.mapValues { it.value.getOrThrow() }
+        for ((state, boxes) in nativeStateFacts) nativeData[state]?.let { data ->
+            val known = capture.collision(data)
+            check(known == null || known.toSet() == boxes.toSet()) { "Supplemental native collider conflicts with the covered state $state" }
+        }
     }
 
     override fun getBlockAt(x: Int, y: Int, z: Int): BlockMock = getBlockAt(Coordinate(x, y, z))
 
     override fun getBlockAt(point: Coordinate): BlockMock {
         val p = CivPosition(point.x, point.y, point.z)
-        if (p !in capture.states) {
+        val recorded = capture.states[p] ?: declaredContinuation[p]
+        if (recorded == null) {
             if (strict) missingNative("Missing native capture cell x=${point.x} y=${point.y} z=${point.z}")
             return super.getBlockAt(point)
         }
@@ -52,7 +63,7 @@ internal class CapturedResidentWorld(val capture: RecordedNativeMap) : ResidentR
             object : BlockMock(Material.AIR, Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
                 override fun isPassable(): Boolean = collisionShape.boundingBoxes.isEmpty()
                 override fun getCollisionShape(): VoxelShape {
-                    val boxes = capture.collision(blockData)
+                    val boxes = capture.collision(blockData) ?: nativeStateFacts[blockData.asString]
                         ?: missingNative("Missing native collision facts for ${blockData.asString} at $p")
                     return object : VoxelShape {
                         override fun getBoundingBoxes(): Collection<BoundingBox> = boxes
@@ -71,7 +82,7 @@ internal class CapturedResidentWorld(val capture: RecordedNativeMap) : ResidentR
                     type.name.endsWith("_LEAVES") -> emptyList()
                     else -> error("Unspecified captured-world drop sample for $type at $p")
                 }
-            }.also { it.blockData = nativeData.getValue(capture.states.getValue(p)).clone() }
+            }.also { it.blockData = nativeData.getValue(recorded).clone() }
         }
     }
 
