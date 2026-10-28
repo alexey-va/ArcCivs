@@ -258,6 +258,8 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedWorld = mutableMapOf<Key, UUID>()
     private val lockedGround = mutableMapOf<UUID, UUID>()
     private val homeCursors = mutableMapOf<UUID, Int>()
+    internal var residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY
+    internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
     internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
     internal var validateUpkeepNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "upkeep-authority-unavailable"))
@@ -455,8 +457,10 @@ class CivsStorage(private val plugin: Plugin,
             val afterWorker = transaction.after.workers.single { it.id == worker.id }
             require(collected.before == CivsEquipment.slots(worker))
             require(afterWorker.copy(items = worker.items, inventory = worker.inventory, hasCollectedItems = worker.hasCollectedItems) == worker)
-            require(transaction.after.copy(workers = transaction.after.workers.map { if (it.id == worker.id) worker else it },
+            require(transaction.after.copy(stock = collected.food?.stockBefore ?: transaction.after.stock,
+                workers = transaction.after.workers.map { if (it.id == worker.id) worker else it },
                 revision = claim.city.revision) == claim.city)
+            if (collected.food != null) reject(collected.containers.any { !foodCanModify(claim.city, it.container) }, "lands-denied")
         }
         transaction.forestry?.let { require(it.before(transaction.after) == claim.city) }
         transaction.upkeep?.let { require(it.before(transaction.after) == claim.city) }
@@ -594,6 +598,94 @@ class CivsStorage(private val plugin: Plugin,
             } && citizenCollectedHomeTarget(city, home, world, source.position) != null) return source.position
         }
         return null
+    }
+
+    /** At most sixteen nearest indexed holders; never load chunks or invent a stock entry. */
+    private fun foodSources(city: Settlement, worker: CivWorker, from: org.bukkit.Location,
+        reserve: Boolean = false): Sequence<Pair<CivBuilding, Source>> {
+        val positions = city.buildings.filter { CivsResidentFood.eligible(city, worker, it) &&
+            (!reserve || CivsResidentFood.reserveBuilding(city, it)) }.flatMap { building ->
+            buildingPositions(city, building.id).map { (point, type) -> Triple(building, point, type) }
+        }.distinctBy { it.second }.sortedWith(compareBy<Triple<CivBuilding, CivPosition, String?>> { (building, _, _) ->
+            if (!reserve) 0 else when (building.type) { BuildingType.TAVERN -> 0; BuildingType.WAREHOUSE -> 1; else -> 2 }
+        }.thenBy { (_, point, _) ->
+            val dx = point.x + .5 - from.x; val dy = point.y - from.y; val dz = point.z + .5 - from.z
+            dx * dx + dy * dy + dz * dz
+        }).take(16)
+        return positions.asSequence().mapNotNull { (building, point, type) ->
+            if (!foodCanModify(city, point)) null
+            else resolveSources(city, sequenceOf(point to type)).firstOrNull()?.let { building to it }
+        }
+    }
+
+    internal fun residentFoodSource(city: Settlement, worker: CivWorker, feet: org.bukkit.Location): CivResidentFoodSource? {
+        checkMain(); requireOpen()
+        if (city.inventory?.mode == CivStorageMode.VIRTUAL || feet.world?.uid != city.worldId ||
+            CivsResidents.hunger(worker) > 14 || residentFoods.carried(city, worker) != null) return null
+        for ((building, source) in foodSources(city, worker, feet)) {
+            val material = source.inventory.storageContents.asSequence().mapNotNull(::plain).firstOrNull {
+                residentFoods.mayPickUp(city, worker, it.material) &&
+                    CivsEquipment.supplyRoom(worker, Material.valueOf(it.material)) > 0
+            }?.material ?: continue
+            val world = plugin.server.getWorld(city.worldId) ?: return null
+            val target = citizenCollectedHomeTarget(city, building, world, source.position) ?: continue
+            return CivResidentFoodSource(building.id, source.position, target, material)
+        }
+        return null
+    }
+
+    /** An existing Auto FOOD unit becomes one ordinary bread only in this exact native receipt. */
+    internal fun prepareFoodMaterialization(city: Settlement, workerId: UUID, feet: org.bukkit.Location): CivCollectedPlan {
+        checkClaim(city)
+        val worker = city.workers.single { it.id == workerId }
+        reject(city.autonomy?.paused != false || city.inventory != null || city.stock.food <= 0 ||
+            feet.world?.uid != city.worldId, "resident-food-missing")
+        for ((building, source) in foodSources(city, worker, feet, reserve = true)) {
+            val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+            if (citizenCollectedHomeTarget(city, building, world, source.position) == null) continue
+            val original = source.inventory.storageContents.map(CivResidentItem::of)
+            val count = original.filterNotNull().filter { it.material == "BREAD" && it.data == null }.sumOf { it.amount }
+            if (count >= CivsResidentFood.BATCH) return CivCollectedPlan(worker, null)
+            val slot = original.indexOfFirst { it == null || it.material == "BREAD" && it.data == null && it.amount < 64 }
+            if (slot < 0) continue
+            val moved = minOf(CivsResidentFood.BATCH - count, city.stock.food.toInt().coerceAtMost(CivsResidentFood.BATCH))
+            val before = original[slot]
+            val after = CivResidentItem("BREAD", (before?.amount ?: 0) + moved)
+            val change = CivNativeContainerChange(source.position, source.type, slot, before, after)
+            return CivCollectedPlan(worker, CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
+                containers = listOf(change), food = CivResidentFoodReceipt(building.id, city.stock, moved)),
+                city.stock.copy(food = city.stock.food - moved))
+        }
+        return CivCollectedPlan(worker, null)
+    }
+
+    internal fun prepareFoodPickup(city: Settlement, workerId: UUID, target: CivResidentFoodSource,
+        feet: org.bukkit.Location): CivCollectedPlan {
+        checkClaim(city)
+        val worker = city.workers.single { it.id == workerId }
+        val building = city.building(target.buildingId) ?: throw CivsRejection("building-not-found")
+        reject(!CivsResidentFood.eligible(city, worker, building) ||
+            target.container !in buildingPositions(city, building.id) || !civsCanReachContainer(feet, target.container), "worker-too-far")
+        reject(!foodCanModify(city, target.container), "lands-denied")
+        reject(!residentFoods.mayPickUp(city, worker, target.material) || residentFoods.carried(city, worker) != null ||
+            CivsResidents.hunger(worker) > 14 || worker.cargo != null,
+            "resident-food-missing")
+        val source = resolve(city, target.container, buildingPositions(city, building.id)[target.container])
+        var remaining = minOf(CivsResidentFood.BATCH, CivsEquipment.supplyRoom(worker, Material.valueOf(target.material)))
+        val changes = mutableListOf<CivNativeContainerChange>()
+        for ((slot, stack) in source.inventory.storageContents.withIndex()) {
+            val before = plain(stack)?.takeIf { it.material == target.material } ?: continue
+            val moved = minOf(remaining, before.amount)
+            if (moved <= 0) break
+            changes += CivNativeContainerChange(source.position, source.type, slot, CivResidentItem(target.material, before.amount),
+                (before.amount - moved).takeIf { it > 0 }?.let { CivResidentItem(target.material, it) })
+            remaining -= moved
+        }
+        reject(changes.isEmpty(), "resident-food-missing")
+        val count = changes.sumOf { (it.before?.amount ?: 0) - (it.after?.amount ?: 0) }
+        val supplied = CivsEquipment.collectSupplies(worker, mapOf(target.material to count.toLong()))
+        return CivCollectedPlan(supplied, CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
+            containers = changes, food = CivResidentFoodReceipt(building.id, city.stock, material = target.material)))
     }
 
     internal fun prepareHomeDeposit(city: Settlement, workerId: UUID, destination: CivPosition,
@@ -1418,6 +1510,10 @@ class CivsStorage(private val plugin: Plugin,
             val native = source.inventory.getItem(change.slot)
             val before = runCatching { matchesNative(native, change.before) }.getOrDefault(false)
             val after = runCatching { matchesNative(native, change.after) }.getOrDefault(false)
+            // A recorded after-state must finish accounting. Only a still-needed native write
+            // requires today's claim authority; denied recovery keeps the exact receipt locked.
+            if (collected.food != null && (expectedBefore || !after) && !foodCanModify(transaction.after, change.container))
+                return CivInventoryApplyResult.Retry(mapOf("reason" to "food-lands-denied"))
             if (expectedBefore) {
                 if (!before) return CivInventoryApplyResult.Conflict(mapOf("reason" to "home-before-drift"))
             } else if (!after) {

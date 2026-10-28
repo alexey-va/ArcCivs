@@ -160,6 +160,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
             val service = CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
+                residentFoods = CivsResidentFoods.native(),
                 offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
                     val collisions = lifecycle.own(CivsResidentCollisions(this, citizens::collisionActors, citizens::nudgeResident))

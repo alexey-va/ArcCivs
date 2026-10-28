@@ -165,7 +165,8 @@ object CivsLogistics {
     }
 
     /** Equipped and custom items stay personal; real work inputs and sixteen bread stay available. */
-    internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
+    internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap(),
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Map<String, Long> {
         if (city.autonomy != null && city.inventory == null) return if (worker.cargo == null && !CivsResidents.isChild(worker))
             Resource.entries.associate { it.name to (worker.pendingStock?.get(it) ?: 0L) }.filterValues { it > 0 }
         else emptyMap()
@@ -174,7 +175,7 @@ object CivsLogistics {
         if (worker.cargo != null || CivsResidents.isChild(worker) || CivsRules.isBuilder(city, building) ||
             building.type !in setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.SAWMILL,
                 BuildingType.BLACKSMITH, BuildingType.STONEMASON, BuildingType.LIBRARY, BuildingType.TOWN_HALL)) return emptyMap()
-        val reserve = workerReserve(city, worker, craftInputs)
+        val reserve = workerReserve(city, worker, craftInputs, foods)
         return CivsEquipment.slots(worker).drop(CivsEquipment.BAG).filterNotNull().filter { item ->
             val type = org.bukkit.Material.valueOf(item.material)
             item.data == null && type.maxDurability.toInt() == 0 && CivsEquipment.armorSlot(item.material) == null
@@ -184,9 +185,19 @@ object CivsLogistics {
     }
 
     /** The same personal food and profession supplies stay with a worker on a home visit. */
-    internal fun workerReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
+    internal fun workerReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap(),
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Map<String, Long> {
+        val reserve = workerWorkReserve(city, worker, craftInputs).toMutableMap()
+        foods.personalReserve(worker).forEach { (material, count) ->
+            reserve[material] = if (material == "BREAD") maxOf(reserve[material] ?: 0, count)
+                else Math.addExact(reserve[material] ?: 0, count)
+        }
+        return reserve
+    }
+
+    internal fun workerWorkReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
         val building = worker.assignment?.let(city::building)
-        if (building == null) return mapOf("BREAD" to 16L)
+        if (building == null) return emptyMap()
         val inputs = if (CivsRules.isBuilder(city, building)) CivsMaterials.unpaid(city.construction?.materials.orEmpty())
             else if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(city, building)
         return inputs + when (building.type) {
@@ -196,7 +207,7 @@ object CivsLogistics {
             BuildingType.QUARRY -> quarrySupplies(building)
             BuildingType.FORESTER -> mapOf(requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING" to 4L)
             else -> emptyMap()
-        } + ("BREAD" to 16L)
+        }
     }
 
     private fun job(city: Settlement, worker: CivWorker, warehouse: CivBuilding, source: CivBuilding,
@@ -248,7 +259,8 @@ object CivsLogistics {
         distanceSquared(from, to) <= maximumTransferDistance(city).toDouble() * maximumTransferDistance(city)
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,
-        craftInputs: Map<UUID, Map<String, Long>> = emptyMap()): Settlement {
+        craftInputs: Map<UUID, Map<String, Long>> = emptyMap(),
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Settlement {
         if (cargo.stockResource != null) return CivsAutonomousLogistics.pickup(city, workerId, cargo)
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         if (worker.cargo == cargo.copy(inventoryBacked = true)) return city
@@ -261,7 +273,7 @@ object CivsLogistics {
         val producer = cargo.sourceWorkerId?.let { id ->
             city.workers.firstOrNull { it.id == id }?.takeIf { it.id != workerId && it.assignment == source.id &&
                 withinRoute(city, cargo.sourceEntrance, requireNotNull(warehouse.control)) &&
-                (workerExcess(city, it, craftInputs[it.id].orEmpty())[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
+                (workerExcess(city, it, craftInputs[it.id].orEmpty(), foods)[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
         }
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))
             .copy(cargo = cargo.copy(inventoryBacked = true))

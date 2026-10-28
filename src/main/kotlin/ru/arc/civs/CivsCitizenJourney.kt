@@ -9,6 +9,78 @@ import kotlin.math.roundToInt
 
 internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, PICKUP_READY, PICKING_UP, RETURNING, READY, DELIVERING, PAUSED, CLOSED }
 
+internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
+    val shipmentId: UUID? = null, val craftJobId: UUID? = null,
+    val researchProjectId: UUID? = null, val industryRecipe: String? = null)
+internal data class CitizenPlan(val token: CitizenToken, val storage: CivPosition, val workplace: CivPosition?,
+    val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
+    val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false,
+    val autonomousWork: CivBuilding? = null, val industryWork: CivIndustryWork? = null,
+    val pendingStockDelivery: Stock? = null) {
+    val spawnOrigin: CivPosition get() = if (courier?.cargo?.sourceWorkerId != null) storage else courier?.cargo?.sourceEntrance ?: storage
+    fun travelTarget(phase: CitizenPhase): CivPosition =
+        if (phase == CitizenPhase.TO_WORK || phase == CitizenPhase.RETURNING && completeAtWorkplace) requireNotNull(workplace) else storage
+    fun cycle() = CitizenCycle(token, workMillis, completeAtWorkplace, courier != null, courier?.carrying == true,
+        worldWork != null || type == BuildingType.GUARD_TOWER || type == BuildingType.TAVERN ||
+            completeAtWorkplace && autonomousWork != null ||
+            type == BuildingType.BUILDER_HUT && idleReason in listOf(null, "placing") && !suppliesNeeded,
+        visualSubaction = worldWork?.autonomousVisual == true, pendingStockDelivery = pendingStockDelivery != null)
+}
+
+/** Internal placement phases and pickup publication preserve the same observed work/journey. */
+internal fun citizenPlansContinue(previous: CitizenPlan, next: CitizenPlan): Boolean {
+    if (previous.type == BuildingType.BUILDER_HUT && previous.token.constructionId != null &&
+        previous.idleReason in listOf(null, "placing") && next.idleReason in listOf(null, "placing") &&
+        previous.copy(idleReason = next.idleReason) == next) return true
+    val first = previous.courier ?: return false
+    val second = next.courier ?: return false
+    return previous.token == next.token && previous.storage == next.storage && previous.workplace == next.workplace &&
+        first.destinationBuildingId == second.destinationBuildingId && first.cargo.id == second.cargo.id &&
+        first.cargo.warehouseId == second.cargo.warehouseId && first.cargo.sourceBuildingId == second.cargo.sourceBuildingId &&
+        first.cargo.targetBuildingId == second.cargo.targetBuildingId && first.cargo.material == second.cargo.material &&
+        first.cargo.sourceWorkerId == second.cargo.sourceWorkerId && first.cargo.stockResource == second.cargo.stockResource
+}
+
+internal fun citizenCurrentPlan(previous: CitizenPlan, phase: CitizenPhase, current: () -> CitizenPlan?): CitizenPlan? {
+    if (previous.pendingStockDelivery != null && phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED) ||
+        previous.courier != null && (phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
+            previous.courier.cargo.sourceWorkerId != null && !previous.courier.carrying &&
+                phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED)) ||
+        previous.worldWork != null && (phase == CitizenPhase.DELIVERING ||
+            phase == CitizenPhase.READY && !previous.worldWork.cropCare)) return previous
+    val next = current()
+    if (next != null && phase in setOf(CitizenPhase.WORKING, CitizenPhase.PICKUP_READY, CitizenPhase.READY,
+            CitizenPhase.RETURNING, CitizenPhase.DELIVERING) && previous.copy(workMillis = next.workMillis) == next)
+        return previous
+    if (next != null && phase !in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED) &&
+        next.workplace == previous.workplace && next.storage == previous.storage) {
+        if (previous.autonomousWork != null && previous.idleReason == null &&
+            next.token.copy(industryRecipe = previous.token.industryRecipe) == previous.token &&
+            next.idleReason in listOf(null, "waiting-reassignment", "waiting-orders", "waiting-inputs")) return previous
+    }
+    return next
+}
+
+internal data class CitizenWorkHandoff(val buildingId: UUID, val cycle: Long, val at: CitizenPoint, val tick: Long,
+    val activity: String)
+
+/** Only a committed world action admits a short discovery handoff in the same local activity. */
+internal fun citizenWorkActivityStatus(plan: CitizenPlan, phase: CitizenPhase, actual: CitizenPoint,
+    handoff: CitizenWorkHandoff?, tick: Long): String? {
+    if (phase == CitizenPhase.PAUSED) return null
+    val continues = handoff != null && handoff.buildingId == plan.token.assignmentId &&
+        handoff.cycle == plan.token.completedCycles && tick - handoff.tick in 0L..20L &&
+        actual.distanceSquared(handoff.at) <= 4.0 * 4.0
+    val work = plan.worldWork
+    if (plan.idleReason == null && phase == CitizenPhase.TO_WORK && work != null &&
+        actual.distanceSquared(work.standing.point()) <= 4.0 * 4.0 &&
+        (plan.type == BuildingType.FARM && work.status == "working-field" || continues && handoff?.activity == work.status))
+        return work.status
+    // Keep only the brief committed-action -> next-target handoff in the same activity.
+    // A search lasting beyond one second is still visible; this never covers a failure.
+    return if (plan.idleReason == "searching-work" && continues) handoff?.activity else null
+}
+
 private const val CITIZEN_DELIVERY_RETRY_DELAY_MILLIS = 5_000L
 
 /** Only observed work counts. Producers return cargo to storage; builders finish the session at their worksite. */

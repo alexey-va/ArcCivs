@@ -60,35 +60,41 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
-    test("a tavern meal stays seated through navigation ticks and spends one food only after four observed seconds") {
+    test("a carried meal stays at its actual position through navigation ticks and spends one item after four observed seconds") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
                 var meals = 0
                 h.owner.finishResidentMeal = { cityId, plan ->
                     h.owner.validateResidentMeal(cityId, plan)
-                    npc.isSeated shouldBe true
+                    npc.isSeated shouldBe false
+                    h.usingMainHand shouldBe true
                     h.city = CivsResidentLife.finishMeal(h.city, plan)
                     meals++
                     CompletableFuture.completedFuture(h.city)
                 }
                 h.owner.pulse(3_000)
-                withClue(h.owner.debug(h.city.id, h.workerId)) { npc.isSeated shouldBe true }
+                withClue(h.owner.debug(h.city.id, h.workerId)) { h.usingMainHand shouldBe true }
                 val seatedAt = npc.location
-                seatedAt.y shouldBe 64.5 - .7040625
+                seatedAt.y shouldBe 64.0
                 val origin = requireNotNull(h.owner.residentFeet(h.workerId))
                 origin shouldBe Location(h.world, 5.5, 64.0, .5)
                 repeat(60) { h.navigate() }
-                npc.isSeated shouldBe true
+                npc.isSeated shouldBe false
+                h.usingMainHand shouldBe true
                 npc.location shouldBe seatedAt
                 h.owner.pulse(4_000); h.owner.pulse(5_000); h.owner.pulse(6_000)
                 meals shouldBe 0
+                CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "BREAD") shouldBe 2
                 h.city.stock.food shouldBe 2L
                 h.owner.pulse(7_000)
                 meals shouldBe 1
-                h.city.stock.food shouldBe 1L
+                h.city.stock.food shouldBe 2L
+                CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "BREAD") shouldBe 1
                 h.owner.pulse(8_000)
                 npc.isSeated shouldBe false
+                h.usingMainHand shouldBe false
+                h.displayedHand shouldBe Material.IRON_AXE
                 npc.location shouldBe origin
                 h.city.workers.first { it.id == h.workerId }.life!!.meals shouldBe 1L
                 h.deliveries shouldBe 0
@@ -114,8 +120,8 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    for (interruption in listOf("damage", "night", "night-guard", "chair-removed", "moved", "world-unloaded", "removed"))
-    test("$interruption cancels a seated meal and its retained payment proof") {
+    for (interruption in listOf("damage", "night", "night-guard", "support-removed", "moved", "world-unloaded", "removed"))
+    test("$interruption cancels a carried meal and its retained payment proof") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat(guard = interruption == "night-guard")
@@ -127,17 +133,22 @@ class CivsResidentsRuntimeTest : FunSpec({
                     pending
                 }
                 for (now in 3_000L..7_000L step 1_000) h.owner.pulse(now)
-                npc.isSeated shouldBe true
+                npc.isSeated shouldBe false
+                h.usingMainHand shouldBe true
+                h.displayedHand shouldBe Material.BREAD
                 val accepted = requireNotNull(proof)
                 when (interruption) {
                     "damage" -> h.owner.damage(h.workerId, 1.0)
                     "night", "night-guard" -> { h.world.time = 13_000; h.owner.pulse(8_000) }
-                    "chair-removed" -> { h.world.getBlockAt(6, 64, 0).type = Material.AIR; h.owner.pulse(8_000) }
-                    "moved" -> npc.teleport(Location(h.world, 8.5, 64.0, 4.5))
+                    "support-removed" -> { val at = npc.location; h.world.getBlockAt(at.blockX, at.blockY - 1, at.blockZ).type = Material.AIR; h.owner.pulse(8_000) }
+                    "moved" -> { npc.teleport(Location(h.world, 8.5, 64.0, 4.5)); h.owner.pulse(8_000) }
                     "world-unloaded" -> h.owner.onWorldUnload(org.bukkit.event.world.WorldUnloadEvent(h.world))
                     else -> { h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId }); h.owner.pulse(8_000) }
                 }
                 npc.isSeated shouldBe false
+                h.usingMainHand shouldBe false
+                h.displayedHand shouldBe Material.IRON_AXE
+                h.city.workers.firstOrNull { it.id == h.workerId }?.let { CivsEquipment.plainCount(it, "BREAD") shouldBe 2 }
                 shouldThrow<CivsRejection> { h.owner.validateResidentMeal(h.city.id, accepted) }.reason shouldBe "stale-meal"
                 h.city.stock.food shouldBe 2L
                 h.city.workers.firstOrNull { it.id == h.workerId }?.hunger?.shouldBe(14)
@@ -147,20 +158,23 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a changed adjacent exit retires a fully enclosed seated actor without a distant recovery jump") {
+    test("a newly enclosed meal position cancels eating without spending food or making a distant recovery jump") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
                 h.owner.pulse(3_000)
-                npc.isSeated shouldBe true
-                val seated = npc.location
-                h.world.getBlockAt(5, 64, 0).type = Material.STONE
-                h.world.getBlockAt(6, 66, 0).type = Material.STONE
+                h.usingMainHand shouldBe true
+                val at = npc.location
+                val teleports = h.teleports
+                h.world.getBlockAt(at.blockX, at.blockY, at.blockZ).type = Material.STONE
+                h.world.getBlockAt(at.blockX, at.blockY + 1, at.blockZ).type = Material.STONE
                 h.owner.damage(h.workerId, 1.0)
-                npc.isSeated shouldBe false
-                npc.isValid shouldBe false
-                npc.location shouldBe seated
+                h.usingMainHand shouldBe false
+                h.displayedHand shouldBe Material.IRON_AXE
+                npc.location shouldBe at
+                h.teleports shouldBe teleports
                 h.city.stock.food shouldBe 2L
+                CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "BREAD") shouldBe 2
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
         }
     }
@@ -280,14 +294,14 @@ class CivsResidentsRuntimeTest : FunSpec({
     }
 
     for (automatic in listOf(false, true))
-    test("awake idle resident eats one existing meal only after real arrival and a sustained session Auto $automatic") {
+    test("awake idle resident eats one existing carried item only after a sustained session Auto $automatic") {
         residentRuntime { h ->
             h.navigationNow = 2_000
             h.owner.residentLifeEnabled = true
             h.city = h.city.copy(inventory = if (automatic) null else CivInventory(CivStorageMode.VIRTUAL),
                 autonomy = if (automatic) CivAutonomy() else null, stock = if (automatic) Stock(food = 3) else Stock(),
                 workers = h.city.workers.map { it.copy(hunger = 14, life = CivResidentLife(awakeMinutes = 6),
-                    inventory = if (automatic) null else mapOf("BREAD" to 2L)) })
+                    inventory = mapOf("BREAD" to 2L)) })
             var meals = 0
             h.owner.finishResidentMeal = { cityId, plan ->
                 h.owner.validateResidentMeal(cityId, plan)
@@ -304,8 +318,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
             h.city.workers.single().hunger shouldBe 20
             h.city.workers.single().life!!.meals shouldBe 1L
-            if (automatic) h.city.stock.food shouldBe 2L
-            else CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1L
+            if (automatic) h.city.stock.food shouldBe 3L
+            CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
             h.city.workers.single().completedCycles shouldBe 0L
             h.deliveries shouldBe 0
         }
@@ -316,7 +330,8 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.navigationNow = 2_000
             h.owner.residentLifeEnabled = true
             h.city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(food = 2),
-                workers = h.city.workers.map { it.copy(hunger = 14, life = CivResidentLife(awakeMinutes = 6)) })
+                workers = h.city.workers.map { it.copy(hunger = 14, inventory = mapOf("BREAD" to 2L),
+                    life = CivResidentLife(awakeMinutes = 6)) })
             var captured: CivResidentMeal? = null
             val pending = CompletableFuture<Settlement>()
             h.owner.finishResidentMeal = { cityId, plan -> h.owner.validateResidentMeal(cityId, plan); captured = plan; pending }
@@ -4756,6 +4771,10 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     var workReady = true
     var testingAllowed = false
     var foodSource: UUID? = null
+    var physicalFoodSource: CivResidentFoodSource? = null
+    var physicalFoodPickup: (CivResidentFoodSource) -> CompletableFuture<Settlement> = {
+        CompletableFuture.failedFuture(CivsRejection("resident-food-missing"))
+    }
     var workPlans = 0
     val failedWorkPositions = mutableListOf<CivWorldWork>()
     var onWorkPositionFailed: (Settlement, CivWorker, CivWorldWork) -> Boolean = { _, _, _ -> false }
@@ -4771,7 +4790,10 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     val pendingPickup = CompletableFuture<Settlement>()
     val steps = mutableListOf<Pair<Location, Location>>()
     val gestures = mutableMapOf<UUID, Int>()
-    var displayedHand = Material.AIR
+    private val displayedHands = mutableMapOf<UUID, Material>()
+    val displayedHand: Material get() = displayedHands[workerId] ?: Material.AIR
+    private val usingMainHands = mutableMapOf<UUID, Boolean>()
+    val usingMainHand: Boolean get() = usingMainHands[workerId] ?: false
     var work: CivWorldWork? = null
     var workProvider: ((Settlement, CivWorker) -> CivWorldWork?)? = null
     var workIdleProvider: ((Settlement, CivWorker) -> String)? = null
@@ -4847,7 +4869,9 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                     Unit
                 }
                 every { stand() } answers { seated = false }
-                every { setEquipment(EquipmentSlot.HAND, any()) } answers { displayedHand = secondArg<ItemStack>().type; Unit }
+                every { setEquipment(EquipmentSlot.HAND, any()) } answers { displayedHands[profile.uuid] = secondArg<ItemStack>().type; Unit }
+                every { isUsingMainHand } answers { usingMainHands[profile.uuid] ?: false }
+                every { isUsingMainHand = any() } answers { usingMainHands[profile.uuid] = firstArg(); Unit }
                 every { swingMainHand() } answers { gestures[profile.uuid] = gestures.getOrDefault(profile.uuid, 0) + 1; Unit }
                 every { remove() } answers { valid = false; seated = false; Unit }
             }
@@ -4909,6 +4933,9 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             workPlan = { city, worker -> workPlans++; workProvider.let { if (it == null) work else it(city, worker) } },
             workIdleReason = { city, worker -> workIdleProvider?.invoke(city, worker) ?: idleReason }, packetOwner = packets,
             residentSupplySource = { _, worker -> foodSource.takeIf { worker.id == workerId } },
+            residentFoodSource = { _, worker -> physicalFoodSource.takeIf { CivsResidents.hunger(worker) <= 14 &&
+                CivsEquipment.usableCount(worker, "BREAD") == 0 } },
+            pickupResidentFood = { _, _, source -> physicalFoodPickup(source) },
             workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
                 supplyRequests++
                 pendingSupplies
@@ -4949,7 +4976,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             buildings = city.buildings + listOfNotNull(tavern, tower),
             workers = city.workers.map { it.copy(assignment = tower?.id ?: it.assignment,
                 nextDeliveryAt = if (guard) 1 else it.nextDeliveryAt,
-                hunger = 14, life = CivResidentLife(awakeMinutes = 6)) } +
+                hunger = 14, inventory = mapOf("BREAD" to 2L, "IRON_AXE" to 1L),
+                life = CivResidentLife(awakeMinutes = 6)) } +
                 CivWorker(UUID.randomUUID(), "Innkeeper", tavern.id, nextDeliveryAt = 1)))
         owner.pulse(2_000)
         val npc = owner.collisionActors().first { it.uniqueId == workerId }
@@ -5073,6 +5101,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         city = city.copy(buildings = city.buildings.map { if (it.id == hall.id) hall else it },
             autonomy = CivAutonomy(), inventory = null, stock = Stock(food = 306),
             workers = city.workers.map { it.copy(hunger = if (it.id in hungry) 14 else 20,
+                inventory = if (it.id in hungry) mapOf("BREAD" to 4L) else it.inventory,
                 life = CivResidentLife(awakeMinutes = 20)) })
         owner.residentLifeEnabled = true
     }

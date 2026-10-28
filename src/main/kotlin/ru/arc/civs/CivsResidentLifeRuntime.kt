@@ -22,6 +22,7 @@ internal class CivsResidentLifeRuntime(
     private val afterPopulationAvailable: (UUID, () -> CompletableFuture<Unit>) -> CompletableFuture<Unit>,
     private val mutate: (UUID, (Settlement) -> Settlement) -> CompletableFuture<Settlement>,
     private val clock: () -> Long,
+    private val foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
 ) {
     private val cities get() = settlements()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
@@ -56,7 +57,7 @@ internal class CivsResidentLifeRuntime(
             citizens.validateResidentMeal(cityId, meal)
             mutate(cityId) { current ->
                 citizens.validateResidentMeal(cityId, meal)
-                CivsResidentLife.finishMeal(current, meal)
+                CivsResidentLife.finishMeal(current, meal, foods)
             }.also { receipt ->
                 // Observability must not turn a durable success into a failed meal.
                 receipt.thenAccept { committed ->
@@ -64,7 +65,8 @@ internal class CivsResidentLifeRuntime(
                     CivsDiagnostics.event("resident_meal", "city" to cityId, "worker" to meal.workerId,
                         "building" to meal.buildingId, "source" to meal.source, "outcome" to "accepted",
                         "meals_before" to meal.mealsBefore, "meals_after" to worker?.life?.meals,
-                        "hunger_after" to worker?.let(CivsResidents::hunger), "revision" to committed.revision)
+                        "hunger_after" to worker?.let(CivsResidents::hunger), "material" to meal.material,
+                        "amount" to meal.amount, "nutrition" to meal.nutrition, "revision" to committed.revision)
                 }
             }
         }

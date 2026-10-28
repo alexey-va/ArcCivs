@@ -61,14 +61,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private data class Cached(val building: CivBuilding, val worker: CivWorker, val work: CivWorldWork)
     private val cached = hashMapOf<UUID, Cached>()
     private val cursors = hashMapOf<UUID, Int>()
-    private data class FarmScan(val building: CivBuilding, val plots: List<CivPosition>,
-        var next: Int = 0, var examined: Int = 0, var lastFocus: CivPosition? = null,
-        val harvest: MutableSet<CivPosition> = linkedSetOf(), val field: MutableSet<CivPosition> = linkedSetOf(),
-        val care: MutableSet<CivPosition> = linkedSetOf(), val dirty: MutableSet<CivPosition> = linkedSetOf()) {
-        val columns = plots.associateBy { it.x to it.z }
-        val chunks = plots.mapTo(hashSetOf()) { (it.x shr 4) to (it.z shr 4) }
-    }
-    private val farmScans = hashMapOf<UUID, FarmScan>()
+    private val farmScans = hashMapOf<UUID, CivsFarmWorksite>()
     private val reportedFarmSelections = hashMapOf<UUID, Int>()
     private val reportedMineSelections = hashMapOf<UUID, Int>()
     private data class Need(val building: CivBuilding, val cycle: Long, val status: String,
@@ -332,9 +325,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     // Reopen deferred sections without preempting an admitted safe branch.
                     execution.retryAt.clear()
                 }
-            farmScans[workerId]?.let { scan ->
-                scan.columns[point.x to point.z]?.let { scan.dirty += it }
-            }
+            farmScans[workerId]?.changed(point)
             forestSearches[workerId]?.let { search ->
                 search.byColumn[point.x to point.z]?.let { search.dirty += it }
                 search.treeColumns.removeIf { it.x == point.x && it.z == point.z }
@@ -408,7 +399,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 changedPaths.any { (x, z) -> kotlin.math.abs(x.toLong() - point.x) <= margin && kotlin.math.abs(z.toLong() - point.z) <= margin }
         }
         for (workerId in workerIds) {
-            farmScans[workerId]?.let { scan -> scan.plots.filterTo(scan.dirty) { affected(it, 0) } }
+            farmScans[workerId]?.protectionChanged { affected(it, 0) }
             forestSearches[workerId]?.let { search ->
                 search.columns.filterTo(search.dirty) { affected(it, 0) }
                 search.retryRoots.keys.removeIf { affected(it, CivsForestry.MAX_RADIUS) }
@@ -638,7 +629,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (work != null) {
             needs.remove(worker.id)
             workSpots.remove(worker.id)
-            fieldScan?.lastFocus = work.focus
+            fieldScan?.selected(work.focus)
             cached[worker.id] = Cached(building, worker, work)
             if (work.remoteWork) reportRemoteWork(city, worker, building, world, work, "ordinary-approach-unavailable", 0)
             rejectedWorkSpots[worker.id]?.takeIf {
@@ -904,7 +895,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             val crop = read(city, building, world, focus) ?: throw CivsRejection("protected-area")
             val soil = read(city, building, world, focus.copy(y = focus.y - 1)) ?: throw CivsRejection("protected-area")
             val age = crop.blockData as? Ageable
-            requireCivs(soil.type == Material.FARMLAND && crop.type == cropAndSeed(building).first &&
+            requireCivs(soil.type == Material.FARMLAND && crop.type == CivsFarmWorksite.cropAndSeed(building).first &&
                 age != null && age.age < age.maximumAge, "stale-worksite")
             requireCivs(work.status != "watering" || !world.hasStorm() || world.getHighestBlockYAt(focus.x, focus.z) > focus.y,
                 "stale-worksite")
@@ -1164,32 +1155,16 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             .copy(equipmentAfter = CivsEquipment.slots(supplied))
     }
 
-    private fun scanFarm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): FarmScan {
+    private fun scanFarm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivsFarmWorksite {
         val scan = farmScans[worker.id]?.takeIf { it.building == building }
-            ?: FarmScan(building, CivsWorksiteLayouts.field(building)).also { farmScans[worker.id] = it }
+            ?: CivsFarmWorksite(building).also { farmScans[worker.id] = it }
         val autonomous = CivsAutonomousWorksites.supports(city, building)
-        val available by lazy { if (autonomous) emptyMap() else CivsEquipment.available(worker, stock(city, building.id)) }
-        val crop = cropAndSeed(building).first
-        repeat(minOf(columnsRemaining, scan.plots.size)) {
-            if (nanoTime() >= forestDeadline) return scan
-            columnsRemaining--
-            val dirty = scan.dirty.firstOrNull()
-            val point = dirty ?: scan.plots[scan.next]
-            if (dirty != null) scan.dirty.remove(dirty) else {
-                scan.next = (scan.next + 1) % scan.plots.size
-                scan.examined = minOf(scan.examined + 1, scan.plots.size)
-            }
-            scan.harvest.remove(point); scan.field.remove(point); scan.care.remove(point)
-            val soil = read(city, building, world, point) ?: return@repeat
-            val top = read(city, building, world, point.copy(y = point.y + 1)) ?: return@repeat
-            if (soil.type !in SOILS || top.type != crop && !top.type.isAir && top.type !in WEEDS) return@repeat
-            if (soil.type == Material.FARMLAND && top.type == crop) {
-                val age = top.blockData as? Ageable ?: return@repeat
-                if (age.age == age.maximumAge) scan.harvest += point
-                else if (cropCareChanges(world, top, soil, age,
-                        autonomous || (available["BONE_MEAL"] ?: 0) > 0).isNotEmpty()) scan.care += point
-            } else if (top.type != crop) scan.field += point
-        }
+        scan.refresh(world, autonomous,
+            available = { if (autonomous) emptyMap() else CivsEquipment.available(worker, stock(city, building.id)) },
+            maximumColumns = columnsRemaining,
+            admitColumn = {
+                if (nanoTime() >= forestDeadline) false else { columnsRemaining--; true }
+            }, read = { read(city, building, world, it) })
         return scan
     }
 
@@ -1201,123 +1176,31 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     }
 
     private fun farm(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
-        scan: FarmScan, harvestOnly: Boolean): CivWorldWork? {
+        scan: CivsFarmWorksite, harvestOnly: Boolean): CivWorldWork? {
         val autonomous = CivsAutonomousWorksites.supports(city, building)
-        if (!autonomous && CivsEquipment.slots(worker)[4]?.material?.endsWith("_HOE") != true) return null
-        val (crop, seed) = cropAndSeed(building)
-        // A paid Auto field owns its seeds; this planning allowance never creates a carried item.
-        val available by lazy { if (autonomous) mapOf(seed to 1L) else CivsEquipment.available(worker, stock(city, building.id)) }
-        for (point in CivsWorksiteLayouts.irrigation(building)) {
-            val block = read(city, building, world, point, worker = worker) ?: return null
-            if (block.type == Material.WATER) continue
-            if (harvestOnly) return null
-            if (block.type !in SOILS) return blocked(worker, "worksite-soil", point = point,
-                reason = "irrigation-ground", blockMaterial = block.type.name)
-            val standing = beside(city, worker, building, world, point) ?: return null
-            return work(worker, building, standing, listOf(change(block, Material.WATER.createBlockData().asString)),
-                status = "working-field")
+        val selection = scan.select(worker, world, autonomous, harvestOnly,
+            available = { if (autonomous) mapOf(CivsFarmWorksite.cropAndSeed(building).second to 1L)
+                else CivsEquipment.available(worker, stock(city, building.id)) },
+            pending = workSpots[worker.id]?.target,
+            claimed = { farmClaimed(city, worker, building, it) },
+            read = { point, report -> read(city, building, world, point, worker = worker.takeIf { report }) },
+            blocked = { need -> blocked(worker, need.status, need.material, point = need.point,
+                reason = need.reason, blockMaterial = need.blockMaterial) },
+            admit = { point ->
+                val standing = beside(city, worker, building, world, point)
+                CivsFarmWorksite.Attempt(standing?.let { approach -> { action ->
+                    work(worker, building, approach, action.changes, action.inputs, action.outputs,
+                        action.status, action.duration, focus = action.focus)
+                } }, spotSearchPending)
+            })
+        return when (selection) {
+            is CivsFarmWorksite.Selection.Ready -> selection.work
+            CivsFarmWorksite.Selection.Exhausted -> {
+                if (needs.getValue(worker.id).status == "searching-work") blocked(worker, "waiting-growth")
+                null
+            }
+            CivsFarmWorksite.Selection.Unavailable, CivsFarmWorksite.Selection.Pending -> null
         }
-        val pending = workSpots[worker.id]?.target
-        val from = scan.lastFocus ?: building.entrance
-        val nearest = compareBy<CivPosition> { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
-            .thenBy { val dx = from.x.toDouble() - it.x; val dz = from.z.toDouble() - it.z; dx * dx + dz * dz }
-            .thenBy { it.x }.thenBy { it.z }
-        val candidates = scan.harvest.sortedWith(nearest).asSequence() + sequence {
-            if (harvestOnly || scan.examined != scan.plots.size) return@sequence
-            // Visit the next authored plot instead of repeatedly boosting the plant we just left.
-            val after = scan.plots.indexOfFirst { it == scan.lastFocus || it.copy(y = it.y + 1) == scan.lastFocus } + 1
-            val care = scan.plots.indices.map { scan.plots[(after + it) % scan.plots.size] }
-                .filter { it in scan.care }
-                .sortedBy { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
-            yieldAll(scan.field.sortedWith(nearest))
-            yieldAll(care)
-        }
-        var checked = 0
-        for (soilPoint in candidates) {
-            if (farmClaimed(city, worker, building, soilPoint)) continue
-            if (checked++ == 16) return blocked(worker, "searching-work")
-            val wasHarvest = soilPoint in scan.harvest
-            scan.harvest.remove(soilPoint); scan.field.remove(soilPoint); scan.care.remove(soilPoint)
-            val soil = read(city, building, world, soilPoint) ?: continue
-            val top = read(city, building, world, soilPoint.copy(y = soilPoint.y + 1)) ?: continue
-            if (soil.type !in SOILS || top.type != crop && !top.type.isAir && top.type !in WEEDS) continue
-            if (soil.type == Material.FARMLAND && top.type == crop) {
-                val age = top.blockData as? Ageable ?: continue
-                if (age.age < age.maximumAge) {
-                    if (harvestOnly || wasHarvest) continue
-                    val care = careCrop(city, worker, building, world, position(top), available)
-                    if (care != null || spotSearchPending) {
-                        scan.care += soilPoint
-                        return care
-                    }
-                    continue
-                }
-                scan.harvest += soilPoint
-            } else {
-                if (harvestOnly || wasHarvest) continue
-                scan.field += soilPoint
-            }
-            val focus = if (soil.type == Material.FARMLAND) position(top) else soilPoint
-            val standing = beside(city, worker, building, world, focus)
-            if (standing == null) {
-                if (spotSearchPending) return null
-                scan.harvest.remove(soilPoint); scan.field.remove(soilPoint)
-                continue
-            }
-            if (soil.type != Material.FARMLAND) {
-                if (top.type == crop) continue
-                return work(worker, building, standing,
-                    listOf(change(soil, "minecraft:farmland[moisture=7]")) +
-                        if (top.type in WEEDS) listOf(change(top, "minecraft:air")) else emptyList(), status = "working-field")
-            }
-            if (top.type == crop) {
-                val age = top.blockData as? Ageable ?: continue
-                if (age.age != age.maximumAge) continue
-                val drops = (if (autonomous) emptyMap() else drops(top, tool(worker))).toMutableMap()
-                val seedCount = drops[seed] ?: 0
-                val replant = seedCount > 0 || (available[seed] ?: 0) > 0
-                if (seedCount > 0) put(drops, seed, seedCount - 1)
-                val inputs = if (replant && seedCount == 0L) mapOf(seed to 1L) else emptyMap()
-                return work(worker, building, standing,
-                    listOf(change(top, if (replant) crop.createBlockData().asString else "minecraft:air")), inputs, drops, "working-field")
-            }
-            if ((available[seed] ?: 0) > 0) return work(worker, building, standing,
-                listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1), status = "working-field")
-            blocked(worker, "waiting-seeds", seed)
-        }
-        if (scan.examined < scan.plots.size) return blocked(worker, "searching-work")
-        if (needs.getValue(worker.id).status == "searching-work") blocked(worker, "waiting-growth")
-        return null
-    }
-
-    private fun cropAndSeed(building: CivBuilding): Pair<Material, String> = when (CivsProduction.material(building)) {
-        "CARROT" -> Material.CARROTS to "CARROT"
-        "POTATO" -> Material.POTATOES to "POTATO"
-        else -> Material.WHEAT to "WHEAT_SEEDS"
-    }
-
-    private fun careCrop(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
-        focus: CivPosition, available: Map<String, Long>): CivWorldWork? {
-        val crop = read(city, building, world, focus) ?: return null
-        val soil = read(city, building, world, focus.copy(y = focus.y - 1)) ?: return null
-        val age = crop.blockData as? Ageable ?: return null
-        if (soil.type != Material.FARMLAND || crop.type != cropAndSeed(building).first || age.age == age.maximumAge) return null
-        val autonomous = CivsAutonomousWorksites.supports(city, building)
-        val fertilizing = autonomous || (available["BONE_MEAL"] ?: 0) > 0
-        val changes = cropCareChanges(world, crop, soil, age, fertilizing)
-        if (changes.isEmpty()) return null
-        val standing = beside(city, worker, building, world, focus) ?: return null
-        return work(worker, building, standing, changes, if (fertilizing && !autonomous) mapOf("BONE_MEAL" to 1L) else emptyMap(),
-            status = if (fertilizing) "fertilizing" else "watering", duration = 4_000, focus = focus)
-    }
-
-    private fun cropCareChanges(world: World, crop: Block, soil: Block, age: Ageable, fertilizing: Boolean): List<CivPlanBlock> = buildList {
-        val rainExposed = world.hasStorm() && world.getHighestBlockYAt(crop.x, crop.z) <= crop.y
-        if (!rainExposed && soil.blockData.asString != "minecraft:farmland[moisture=7]")
-            add(change(soil, "minecraft:farmland[moisture=7]"))
-        // Exposed rain needs no watering; accepted fertilizer still advances exactly one immature stage.
-        if (!rainExposed || fertilizing)
-            add(change(crop, (age.clone() as Ageable).also { it.age++ }.asString))
     }
 
     private fun forest(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
@@ -2752,7 +2635,6 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun tool(worker: CivWorker): ItemStack = CivsEquipment.slots(worker)[4]?.stack() ?: ItemStack(Material.AIR)
     private fun change(block: Block, after: String) = CivPlanBlock(position(block), block.blockData.asString, after)
     private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
-    private fun put(map: MutableMap<String, Long>, key: String, value: Long) { if (value > 0) map[key] = value else map.remove(key) }
 
     private fun protectedByBuilding(workplace: CivBuilding, other: CivBuilding, point: CivPosition, headroom: Int = 0): Boolean =
         if (workplace.type == BuildingType.FORESTER) other.bounds.contains(point.x, point.y, point.z) ||
@@ -2767,7 +2649,6 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             return when { roll < 95 -> "COBBLESTONE"; roll < 99 -> "COAL"; canMineIron -> "RAW_IRON"; else -> "COBBLESTONE" }
         }
         val TYPES = setOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY)
-        private val SOILS = setOf(Material.DIRT, Material.GRASS_BLOCK, Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.FARMLAND)
         private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN)
         private val UNBREAKABLE = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME, Material.END_PORTAL, Material.NETHER_PORTAL)
         // Keep the four old adjacent sides first, then examine the rest of the two-block

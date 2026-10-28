@@ -13,11 +13,14 @@ data class CivResidentLife(
     val education: Map<String, Long>? = null,
 )
 
-enum class CivResidentMealSource { CARRIED_BREAD, ABSTRACT_FOOD }
+enum class CivResidentMealSource { CARRIED_BREAD, ABSTRACT_FOOD, CARRIED_FOOD }
 
-/** The actor proves arrival at this building; ordinary bread pickup retains its existing item receipt. */
+/** Building is the city context; the actor proves an uninterrupted meal where it actually stands. */
 data class CivResidentMeal(val cityRevision: Long, val workerId: UUID, val buildingId: UUID,
-    val mealsBefore: Long, val source: CivResidentMealSource)
+    val mealsBefore: Long, val source: CivResidentMealSource, val amount: Int = 1,
+    val material: String = "BREAD", val nutrition: Int = 6, val consumeMillis: Long = 1_600L) {
+    val durationMillis: Long get() = maxOf(4_000L, amount * consumeMillis)
+}
 
 /** Detached native observations; the actor must establish a fresh, supported co-location before committing. */
 data class CivResidentLessonProof(val cityRevision: Long, val childId: UUID, val teacherId: UUID,
@@ -50,45 +53,42 @@ object CivsResidentLife {
             childHungerRemainder = CivsResidents.isChild(worker) && !before.childHungerRemainder)
     }
 
-    fun mealPlan(city: Settlement, worker: CivWorker, preferredBuildingId: UUID? = null): CivResidentMeal? {
+    fun mealPlan(city: Settlement, worker: CivWorker, preferredBuildingId: UUID? = null,
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): CivResidentMeal? {
         if (city.pendingDeletion != null || city.autonomy?.paused == true || CivsResidents.hunger(worker) > 14 ||
             city.workers.none { it.id == worker.id }) return null
-        val source = if (city.autonomy != null) {
-            if (city.stock.food == 0L) return null
-            CivResidentMealSource.ABSTRACT_FOOD
-        } else {
-            if (plainBagBread(worker) == null || CivsEquipment.usableCount(worker, "BREAD") <= 0) return null
-            CivResidentMealSource.CARRIED_BREAD
-        }
+        val material = foods.carried(city, worker) ?: return null
+        val food = requireNotNull(foods.definition(material))
+        val amount = minOf((15 - CivsResidents.hunger(worker) + food.nutrition - 1) / food.nutrition,
+            foods.available(city, worker, material))
         val building = if (preferredBuildingId != null) city.building(preferredBuildingId)?.takeIf {
             it.type == BuildingType.TOWN_HALL || CivsRules.staffedTavern(city, it)
         } ?: return null
         else city.buildings.firstOrNull { CivsRules.staffedTavern(city, it) }
             ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL } ?: return null
-        return CivResidentMeal(city.revision, worker.id, building.id, worker.life?.meals ?: 0, source)
+        return CivResidentMeal(city.revision, worker.id, building.id, worker.life?.meals ?: 0,
+            if (material == "BREAD") CivResidentMealSource.CARRIED_BREAD else CivResidentMealSource.CARRIED_FOOD,
+            amount, material, food.nutrition, food.consumeMillis)
     }
 
     /** One existing food unit after actual arrival, never work, stock production or profession XP. */
-    fun finishMeal(city: Settlement, plan: CivResidentMeal): Settlement {
+    fun finishMeal(city: Settlement, plan: CivResidentMeal, foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Settlement {
         val worker = city.workers.firstOrNull { it.id == plan.workerId } ?: throw CivsRejection("worker-not-found")
-        if (plan.cityRevision > city.revision || plan.copy(cityRevision = city.revision) != mealPlan(city, worker, plan.buildingId))
+        if (plan.cityRevision > city.revision || plan.copy(cityRevision = city.revision) != mealPlan(city, worker, plan.buildingId, foods))
             throw CivsRejection("stale-meal")
         val life = worker.life ?: CivResidentLife()
-        if (life.meals == MAX_COUNTER) throw CivsRejection("arithmetic-overflow")
-        val supplied = when (plan.source) {
-            CivResidentMealSource.ABSTRACT_FOOD -> worker
-            CivResidentMealSource.CARRIED_BREAD -> {
-                val items = CivsEquipment.slots(worker).toMutableList()
-                val slot = plainBagBread(worker) ?: throw CivsRejection("resident-food-missing")
-                val bread = requireNotNull(items[slot])
-                items[slot] = bread.copy(amount = bread.amount - 1).takeIf { it.amount > 0 }
-                CivsEquipment.replace(worker, items)
-            }
+        if (life.meals > MAX_COUNTER - plan.amount) throw CivsRejection("arithmetic-overflow")
+        var supplied = worker
+        repeat(plan.amount) {
+            val items = CivsEquipment.slots(supplied).toMutableList()
+            val slot = plainBagFood(supplied, plan.material) ?: throw CivsRejection("resident-food-missing")
+            val bread = requireNotNull(items[slot])
+            items[slot] = bread.copy(amount = bread.amount - 1).takeIf { it.amount > 0 }
+            supplied = CivsEquipment.replace(supplied, items)
         }
-        val fed = supplied.copy(hunger = minOf(20, CivsResidents.hunger(worker) + 6),
-            life = life.copy(lastMealMinute = life.awakeMinutes, meals = life.meals + 1))
-        return changed(city, city.copy(stock = if (plan.source == CivResidentMealSource.ABSTRACT_FOOD)
-            city.stock.copy(food = city.stock.food - 1) else city.stock,
+        val fed = supplied.copy(hunger = minOf(20, CivsResidents.hunger(worker) + plan.nutrition * plan.amount),
+            life = life.copy(lastMealMinute = life.awakeMinutes, meals = life.meals + plan.amount))
+        return changed(city, city.copy(
             workers = city.workers.map { if (it.id == fed.id) fed else it }))
     }
 
@@ -176,8 +176,8 @@ object CivsResidentLife {
         require(CivsResidents.isChild(worker) || education.isEmpty() && !life.childHungerRemainder)
     }
 
-    private fun plainBagBread(worker: CivWorker): Int? = CivsEquipment.slots(worker).let { items ->
-        (CivsEquipment.BAG until items.size).firstOrNull { items[it]?.let { it.material == "BREAD" && it.data == null } == true }
+    private fun plainBagFood(worker: CivWorker, material: String): Int? = CivsEquipment.slots(worker).let { items ->
+        (CivsEquipment.BAG until items.size).firstOrNull { items[it]?.let { it.material == material && it.data == null } == true }
     }
 
     private fun changed(before: Settlement, after: Settlement): Settlement {

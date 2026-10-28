@@ -12,9 +12,15 @@ data class CivNativeContainerChange(val container: CivPosition, val containerTyp
     val before: CivResidentItem?, val after: CivResidentItem?)
 data class CivCollectedTransfer(val workerId: UUID, val before: List<CivResidentItem?>,
     val ground: List<CivGroundItemChange> = emptyList(), val homeId: UUID? = null,
-    val containers: List<CivNativeContainerChange> = emptyList()) {
+    val containers: List<CivNativeContainerChange> = emptyList(), val food: CivResidentFoodReceipt? = null) {
     fun validated(city: Settlement) {
         require(ground.size <= 8 && containers.size <= 108)
+        food?.let {
+            CivsEquipment.validate(before)
+            require(containers.map { change -> change.container to change.slot }.distinct().size == containers.size)
+            it.validated(city, this)
+            return
+        }
         require(ground.isNotEmpty() && homeId == null && containers.isEmpty() ||
             ground.isEmpty() && homeId != null && containers.isNotEmpty())
         CivsEquipment.validate(before)
@@ -54,7 +60,7 @@ data class CivCollectedTransfer(val workerId: UUID, val before: List<CivResident
     }
 }
 
-internal data class CivCollectedPlan(val worker: CivWorker, val transfer: CivCollectedTransfer?)
+internal data class CivCollectedPlan(val worker: CivWorker, val transfer: CivCollectedTransfer?, val stock: Stock? = null)
 data class CivCollectedHome(val homeId: UUID, val container: CivPosition?, val surplus: Boolean)
 
 internal fun civsCollectionHome(city: Settlement, worker: CivWorker): CivBuilding? =

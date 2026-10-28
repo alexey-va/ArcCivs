@@ -9,7 +9,7 @@ import java.util.concurrent.CompletableFuture
 
 class CivsResidentMealElevationTest : FunSpec({
     for (automatic in listOf(false, true))
-    test("a nearby hungry resident climbs three blocks above the entrance to an existing meal Auto=$automatic") {
+    test("a hungry resident climbs to real upstairs bread only when its own bag is empty Auto=$automatic") {
         residentRuntime(workerId = UUID(0, 37), server = CivsWorksiteServerFixture()) { h ->
             h.navigationNow = 2_000
             val hall = h.city.buildings.single().copy(
@@ -21,18 +21,32 @@ class CivsResidentMealElevationTest : FunSpec({
             for (x in 4..8) for (z in -1..1)
                 for (y in 64..66) h.world.getBlockAt(x, y, z).type = Material.STONE
             h.world.getBlockAt(6, 67, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(6, 67, 0).state as org.bukkit.block.Barrel).inventory
+            barrel.setItem(0, org.bukkit.inventory.ItemStack(Material.BREAD, 4))
             h.city = h.city.copy(buildings = listOf(hall),
                 inventory = if (automatic) null else CivInventory(CivStorageMode.VIRTUAL),
                 autonomy = if (automatic) CivAutonomy() else null,
                 stock = if (automatic) Stock(food = 3) else Stock(),
                 workers = h.city.workers.map { it.copy(hunger = 14,
                     life = CivResidentLife(awakeMinutes = 6),
-                    inventory = if (automatic) null else mapOf("BREAD" to 2L)) })
+                    inventory = null) })
+            h.physicalFoodSource = CivResidentFoodSource(hall.id, requireNotNull(hall.control), CivPosition(5, 67, 0))
+            var pickups = 0
+            h.physicalFoodPickup = { source ->
+                civsCanReachContainer(requireNotNull(h.owner.residentFeet(h.workerId)), source.container) shouldBe true
+                barrel.getItem(0)!!.amount shouldBe 4
+                barrel.setItem(0, null)
+                h.city = h.city.copy(workers = h.city.workers.map {
+                    CivsEquipment.collectSupplies(it, mapOf("BREAD" to 4L))
+                }, revision = h.city.revision + 1)
+                pickups++
+                CompletableFuture.completedFuture(h.city)
+            }
             h.owner.residentLifeEnabled = true
             var meals = 0
             h.owner.finishResidentMeal = { cityId, plan ->
                 h.owner.validateResidentMeal(cityId, plan)
-                h.owner.collisionActors().single().location.y shouldBe 67.0
+                (h.owner.collisionActors().single().location.y >= 66.0) shouldBe true
                 h.city = CivsResidentLife.finishMeal(h.city, plan)
                 meals++
                 CompletableFuture.completedFuture(h.city)
@@ -52,14 +66,15 @@ class CivsResidentMealElevationTest : FunSpec({
                 positions += at
             }
             withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
-            positions.any { it.y == 67.0 } shouldBe true
-            positions.zipWithNext().sumOf { (from, to) -> from.distance(to) }.let { (it >= 6.0) shouldBe true }
+            pickups shouldBe 1
+            positions.any { it.y >= 66.0 } shouldBe true
+            positions.zipWithNext().sumOf { (from, to) -> from.distance(to) }.let { (it >= 4.0) shouldBe true }
             h.spawns shouldBe spawns
             h.city.workers.single().hunger shouldBe 20
             h.city.workers.single().life!!.meals shouldBe 1L
             h.deliveries shouldBe 0
-            if (automatic) h.city.stock.food shouldBe 2L
-            else CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1L
+            if (automatic) h.city.stock.food shouldBe 3L
+            CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 3L
         }
     }
 

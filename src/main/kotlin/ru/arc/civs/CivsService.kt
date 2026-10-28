@@ -43,6 +43,7 @@ class CivsService(
     storageAdapter: CivsStorage? = null,
     private val offlinePlayerData: ru.arc.paper.player.PaperOfflinePlayerData? = null,
     supplyExecutor: Executor? = null,
+    private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
 ) : CivsUiHost, Listener, AutoCloseable {
     private data class Preview(
         val id: UUID, val cityId: UUID?, val cityName: String, val style: String, val blueprint: CivBlueprint,
@@ -151,6 +152,9 @@ class CivsService(
             else worksites.rejectStanding(city, worker, work)
         },
         residentSupplySource = ::residentSupplySource, prepareSupplies = { c, w, b -> prepareResidentSupplies(c, w, b) },
+        residentFoodSource = { city, worker -> citizensFeetForFood(worker.id)?.let { storage.residentFoodSource(city, worker, it) } },
+        pickupResidentFood = ::pickupResidentFood,
+        residentFoods = residentFoods,
         craftPlan = ::craftPlan, craftDelivery = ::deliverCraft,
         craftSupplies = { c, w, b, job -> prepareResidentSupplies(c, w, b, job) },
         constructionFocus = { cityId, orderId -> construction.focus(cityId, orderId) },
@@ -176,9 +180,15 @@ class CivsService(
     private val residentLife = CivsResidentLifeRuntime(plugin, tasks, citizens, chunkLoading, settings.viewerRange,
         { cities }, busy, unhealthy, ::settlementActive,
         { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
-        { id, transform -> mutate(id, transform = transform) }, clock)
+        { id, transform -> mutate(id, transform = transform) }, clock, residentFoods)
 
     init {
+        storage.residentFoods = residentFoods
+        storage.foodCanModify = { city, position ->
+            plugin.server.getWorld(city.worldId)?.takeIf { position.y in it.minHeight until it.maxHeight &&
+                it.isChunkLoaded(position.x shr 4, position.z shr 4) }
+                ?.getBlockAt(position.x, position.y, position.z)?.let { world.canModify(city.owner, it) } == true
+        }
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet
         citizens.residentLifeEnabled = true
@@ -2057,11 +2067,46 @@ class CivsService(
     }
 
     internal fun residentSupplySource(city: Settlement, worker: CivWorker): UUID? {
+        // Physical food uses its exact reachable native container rather than a whole-building debit.
+        if (city.inventory?.mode != CivStorageMode.VIRTUAL) return null
         if (city.inventory == null || CivsResidents.hunger(worker) > 14 || CivsEquipment.usableCount(worker, "BREAD") > 0 ||
             CivsEquipment.supplyRoom(worker, Material.BREAD) == 0) return null
         return city.buildings.sortedBy { if (CivsRules.staffedTavern(city, it)) 0 else 1 }.firstOrNull {
             (it.type == BuildingType.TOWN_HALL || CivsRules.staffedTavern(city, it)) && it.control != null &&
             (localStocks(city)(it.id)["BREAD"] ?: 0L) > 0L }?.id
+    }
+
+    private fun citizensFeetForFood(workerId: UUID): org.bukkit.Location? = citizens.residentFeet(workerId)
+
+    internal fun pickupResidentFood(cityId: UUID, workerId: UUID, source: CivResidentFoodSource): CompletableFuture<Settlement> =
+        action("resident_food_pickup", null, "city" to cityId, "worker" to workerId, "building" to source.buildingId) {
+            collectedMutation(cityId, workerId) { city, feet -> storage.prepareFoodPickup(city, workerId, source, feet) }
+        }
+
+    internal fun materializeResidentFood(cityId: UUID, workerId: UUID): CompletableFuture<Settlement> =
+        action("resident_food_materialize", null, "city" to cityId, "worker" to workerId) {
+            collectedMutation(cityId, workerId, materializingFood = true) { city, feet ->
+                storage.prepareFoodMaterialization(city, workerId, feet)
+            }
+        }
+
+    private var nextResidentFoodAt = 0L
+    private var residentFoodCursor = 0
+    private fun pulseResidentFood() {
+        if (now() < nextResidentFoodAt) return
+        val candidates = cities.values.filter { it.autonomy?.paused == false && it.stock.food > 0 &&
+            it.pendingDeletion == null && collectionAvailable(it.id) && settlementActive(it) && it.workers.any { worker ->
+                citizens.residentFeet(worker.id) != null
+            } }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(residentFoodCursor++, candidates.size)]
+        val worker = city.workers.firstOrNull { citizens.residentFeet(it.id) != null } ?: return
+        nextResidentFoodAt = now() + 5_000
+        runCatching { materializeResidentFood(city.id, worker.id) }.onSuccess { future ->
+            future.whenComplete { _, failure -> if (failure != null && CivsDiagnostics.rejection(failure)?.reason !in
+                    setOf("city-busy", "resident-food-missing", "worker-too-far")) log("materialize resident food ${city.id}", failure, city.id) }
+        }.onFailure { if (CivsDiagnostics.rejection(it)?.reason !in setOf("city-busy", "resident-food-missing", "worker-too-far"))
+            log("materialize resident food ${city.id}", it, city.id) }
     }
 
     internal fun prepareResidentSupplies(cityId: UUID, workerId: UUID, buildingId: UUID, craftJobId: UUID? = null): CompletableFuture<Settlement> =
@@ -2188,7 +2233,7 @@ class CivsService(
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
             { citizens.courierPosition(cityId, it) }, { citizens.courierSupplySources(cityId,
                 retained.values.filter { !it.carrying }.mapNotNullTo(hashSetOf()) { it.cargo.sourceWorkerId }) },
-            { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId))
+            { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId), residentFoods)
         return {
             if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
             if (cityId in busy) throw CivsRejection("city-busy")
@@ -2235,7 +2280,7 @@ class CivsService(
                     citizens.requireCargoPickupArrival(cityId, workerId, cargo)
                     return@afterCityAvailable mutate(cityId) { current ->
                         citizens.requireCargoPickupArrival(cityId, workerId, cargo)
-                        CivsLogistics.pickup(current, workerId, cargo)
+                        CivsLogistics.pickup(current, workerId, cargo, foods = residentFoods)
                     }.thenApply { saved ->
                         supply.release(cityId, workerId)
                         CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,
@@ -2248,7 +2293,7 @@ class CivsService(
                 }
                 val available = if (accepted.sourceWorkerId != null) {
                     val source = city.workers.firstOrNull { it.id == accepted.sourceWorkerId } ?: throw CivsRejection("stale-delivery")
-                    CivsLogistics.workerExcess(city, source, craftPlan(city, source)?.inputs.orEmpty())[accepted.material] ?: 0L
+                    CivsLogistics.workerExcess(city, source, craftPlan(city, source)?.inputs.orEmpty(), residentFoods)[accepted.material] ?: 0L
                 } else {
                     val count = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else
@@ -2277,7 +2322,7 @@ class CivsService(
                     ?.let { CivsEquipment.plainCount(it, cargo.material) }
                 val carriedBefore = CivsEquipment.plainCount(worker, cargo.material)
                 inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
-                    CivsLogistics.pickup(before, workerId, cargo, supply.craftJobs(cityId).mapValues { it.value.inputs }).copy(inventory = inventory)
+                    CivsLogistics.pickup(before, workerId, cargo, supply.craftJobs(cityId).mapValues { it.value.inputs }, residentFoods).copy(inventory = inventory)
                 }.thenApply { saved ->
                     CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,
                         "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
@@ -2346,7 +2391,7 @@ class CivsService(
     }
 
     private fun collectionReserve(city: Settlement, worker: CivWorker): Map<String, Long> =
-        CivsLogistics.workerReserve(city, worker, craftPlan(city, worker)?.inputs.orEmpty())
+        CivsLogistics.workerReserve(city, worker, craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
 
     internal fun collectedHome(city: Settlement, worker: CivWorker): CivCollectedHome? {
         if (!collectionAvailable(city.id) || worker.hasCollectedItems != true) return null
@@ -2378,18 +2423,21 @@ class CivsService(
         }
 
     private fun collectedMutation(cityId: UUID, workerId: UUID, allowNight: Boolean = false,
+        materializingFood: Boolean = false,
         prepare: (Settlement, org.bukkit.Location) -> CivCollectedPlan): CompletableFuture<Settlement> {
         checkMain()
         rejectIf(!collectionAvailable(cityId), "city-busy") // Throttle before reserving a city or any native source.
         val city = cities.getValue(cityId)
-        val feet = citizens.residentCollectionFeet(workerId, allowNight) ?: throw CivsRejection("worker-too-far")
+        val feet = if (materializingFood) citizens.residentFeet(workerId) else citizens.residentCollectionFeet(workerId, allowNight)
+        feet ?: throw CivsRejection("worker-too-far")
         rejectIf(feet.world?.uid != city.worldId, "wrong-world")
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         val tx = try {
             val prepared = prepare(city, feet)
             val transfer = prepared.transfer ?: run { storage.unlock(id); return CompletableFuture.completedFuture(city) }
-            val after = CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
+            val after = CivsRules.validate(city.copy(stock = prepared.stock ?: city.stock,
+                workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
                 revision = city.revision + 1))
             CivInventoryTransaction(id, cityId, city.revision, after, emptyList(), collected = transfer).also {
                 storage.seal(it)
@@ -2408,6 +2456,7 @@ class CivsService(
     private fun validateNativeCollected(tx: CivInventoryTransaction) {
         val collected = requireNotNull(tx.collected)
         rejectIf(storage.collectedBeforeState(tx) != CivInventoryApplyResult.Applied, "stale-delivery")
+        if (collected.food?.materialized?.let { it > 0 } == true) return
         val feet = citizens.residentCollectionFeet(collected.workerId, allowNight = collected.homeId != null)
             ?: throw CivsRejection("worker-too-far")
         val world = plugin.server.getWorld(tx.after.worldId) ?: throw CivsRejection("storage-unavailable")
@@ -2530,9 +2579,18 @@ class CivsService(
             val items = if (transfer.ground.isNotEmpty()) transfer.ground.sumOf {
                 it.before.amount - (it.after?.amount ?: 0)
             } else transfer.containers.sumOf { (it.after?.amount ?: 0) - (it.before?.amount ?: 0) }
-            CivsDiagnostics.event(if (transfer.ground.isNotEmpty()) "resident_ground_collected" else "resident_home_deposited",
+            val event = when {
+                transfer.food?.materialized?.let { it > 0 } == true -> "resident_food_materialized"
+                transfer.food != null -> "resident_food_picked_up"
+                transfer.ground.isNotEmpty() -> "resident_ground_collected"
+                else -> "resident_home_deposited"
+            }
+            CivsDiagnostics.event(event,
                 "city" to tx.cityId, "worker" to transfer.workerId, "transaction" to tx.id,
-                "revision" to tx.after.revision, "homeId" to transfer.homeId, "items" to items,
+                "revision" to tx.after.revision, "homeId" to transfer.homeId, "items" to kotlin.math.abs(items),
+                "food_stock_before" to transfer.food?.stockBefore?.food, "food_stock_after" to tx.after.stock.food,
+                "building" to transfer.food?.buildingId,
+                "material" to transfer.food?.material,
                 "slots" to if (transfer.ground.isNotEmpty()) transfer.ground.size else transfer.containers.size)
         }
         tx.residentTransfer?.let { transfer ->
@@ -3151,6 +3209,7 @@ class CivsService(
             residentLife.pulsePopulation()
             pulseMemberNames()
             pulseStorage()
+            pulseResidentFood()
             pulseTestingSupplies()
             autonomousDevelopment.pulseAccessRepair()
             autonomousDevelopment.pulse()

@@ -23,6 +23,7 @@ internal class CivsSupplyPlanning(
     private val sources: () -> Map<UUID, CivPosition>,
     private val unavailable: (UUID) -> Boolean,
     private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
+    private val foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
@@ -69,7 +70,7 @@ internal class CivsSupplyPlanning(
             }
             meetings[worker.id]?.let { point ->
                 if (building != null) workerSources += CivSupplyWorkerSource(worker.id, building.id, point,
-                    CivsLogistics.workerExcess(city, worker, crafts[worker.id]?.inputs.orEmpty()))
+                    CivsLogistics.workerExcess(city, worker, crafts[worker.id]?.inputs.orEmpty(), foods))
             }
             return null
         }

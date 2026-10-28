@@ -1,0 +1,173 @@
+{
+  "version": 1,
+  "title": "ArcCivs native carried meals and paid Auto food buffer, 2026-10-28",
+  "assumptions": [
+    "Low/base/high are independent illustrative city scenarios, not telemetry: 1/5/12 adult residents awake for 1/4/12 real hours/day; network participants 1/10/16 cities. Sleeping and absent time remains excluded.",
+    "Adult hunger drain remains1 per observed awake minute. Existing BREAD restores6, unchanged. Thus a bread-only steady diet consumes10 BREAD/resident-hour. Severe starting hunger0 uses3 existing bread in one observed session to reach18, never extra food credit.",
+    "Before Auto consumes1 abstract FOOD per bread-equivalent meal; after one existing FOOD converts into one real ordinary BREAD through a durable exact-container receipt. No conversion is possible with zero FOOD. Native pickup and eating never debit abstract FOOD a second time.",
+    "A single reachable public buffer holds a target4 real BREAD: staffed active TAVERN, otherwise active WAREHOUSE, otherwise hall; full/unloaded/inaccessible containers fall back honestly or leave FOOD untouched. One world admits at most one native item receipt per5s; conversion batch<=4, not the whole city reserve.",
+    "A resident takes up to4 existing plain food items only when hungry and no usable personal food remains. Existing personal/storage/container permissions remain authoritative. Tool slots, custom metadata, shipment cargo and actual profession ingredient reserves are excluded from autonomous eating.",
+    "One-time maximum initial exposure in the scenarios is4 public bread plus4 per resident=8/24/52 bread, backed by the same FOOD debit; reload does not regrant a stocked buffer. It is an inventory sensitivity, not a new recurring daily award.",
+    "The existing16 BREAD personal courier/home reserve is retained. For newly supported ordinary foods already in a bag,16 per material stays personal; actual profession ingredients are added separately for non-bread foods. This changes item routing/retention only, not creation, consumption nutrition, production or a price.",
+    "This is a new indirect item bridge: authorized native inventory access may move bread elsewhere and later sell it. Current sale prices, actual sell-through and live protection state were not measured; no monetary exchange rate or sale income is invented. Current SELL and planned SELL-to-contract transition remain separate.",
+    "Adversarial extraction is bounded by available earned FOOD and native room. The receipt cadence alone has an ideal4*720=2880 BREAD/world-hour ceiling shared by all cities, before travel, other receipts, finite stock and production. No new production rate or offline income is added.",
+    "Safe new ordinary EAT foods use exact Paper1.21.11 FOOD.nutrition plus CONSUMABLE duration; bread keeps its existing6. Native APPLE is4. Effectful food, remainder containers and custom components are excluded. Apple-only rows are an alternative diet sensitivity, not additive with bread-only rows.",
+    "Physical apple pickup moves an existing apple with exact native debit and bag credit. Eating burns that item and restores its captured native nutrition; it consumes zero abstract FOOD. Apple item sources and prices are unchanged.",
+    "Direct deltas are0 Vault,0 tokens and0 player XP separately. No price/progression cost changes, no invented savings time. Existing native-food/stock accounting, crash, partial/replay, fence failure and interruption checks are required; source tests do not prove runtime activation or client appearance."
+  ],
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "currencies": {
+    "internal_food": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "bread_diet_food_debit",
+          "kind": "burn",
+          "source": "CivsResidentFoods / CivsResidentLife / CivsStorage.prepareFoodMaterialization / CivsInventoryJournal collected native fences",
+          "basis": "Same steady adult bread-equivalent demand; after debit occurs at paid materialization instead of eating.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          }
+        }
+      ]
+    },
+    "item_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "paid_native_representation",
+          "kind": "item",
+          "source": "CivsResidentFoods / CivsResidentLife / CivsStorage.prepareFoodMaterialization / CivsInventoryJournal collected native fences",
+          "basis": "One real bread per existing FOOD debited; steady bread-only diet representation, excluding one-time buffer filling and player export.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          }
+        },
+        {
+          "id": "physical_meal_consumption",
+          "kind": "burn",
+          "source": "CivsResidentFoods / CivsResidentLife / CivsStorage.prepareFoodMaterialization / CivsInventoryJournal collected native fences",
+          "basis": "Exactly one existing bread per6 hunger, same diet demand as the abstract debit above; item units are separate.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              10,
+              200,
+              1440
+            ]
+          }
+        }
+      ]
+    },
+    "item_apple": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "alternative_apple_diet",
+          "kind": "burn",
+          "source": "CivsResidentFoods / CivsResidentLife / CivsStorage.prepareFoodMaterialization / CivsInventoryJournal collected native fences",
+          "basis": "Alternative apple-only sensitivity: nutrition4 gives15 apples/adult-hour; physical items only, no abstract FOOD debit and not additive with the bread-only diet.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              300,
+              2160
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              300,
+              2160
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": []
+}

@@ -47,6 +47,66 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsResidentFoodFairnessTest : FunSpec({
+    for (firstBuffer in listOf("full", "unavailable"))
+    test("food buffers rotate past a $firstBuffer first Auto city to a hungry second city") {
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also {
+                it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            }
+        }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val firstWorker = h.city.workers.first().copy(hunger = 20)
+            val first = CivsRules.validate(h.city.copy(name = "First", buildings = listOf(hall), workers = listOf(firstWorker),
+                inventory = null, autonomy = CivAutonomy(), stock = Stock(food = 20)))
+            val secondHall = hall.copy(id = UUID.randomUUID(), anchor = CivPosition(64, 64, 0),
+                bounds = CivBox(CivPosition(62, 63, -2), CivPosition(66, 68, 2)),
+                entrance = CivPosition(64, 64, -2), control = CivPosition(64, 64, 0))
+            val secondWorker = firstWorker.copy(id = UUID.randomUUID(), name = "Hungry", hunger = 0)
+            val second = CivsRules.validate(first.copy(id = UUID.randomUUID(), name = "Second", center = CivPosition(64, 64, 0),
+                buildings = listOf(secondHall), workers = listOf(secondWorker)))
+            h.world.loadChunk(4, 0)
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            h.world.getBlockAt(64, 64, 0).type = Material.BARREL
+            val firstBarrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+            val secondBarrel = (h.world.getBlockAt(64, 64, 0).state as org.bukkit.block.Barrel).inventory
+            if (firstBuffer == "full") firstBarrel.setItem(0, ItemStack(Material.BREAD, 4))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.citizens.residentFeet(firstWorker.id) } returns Location(h.world, 1.5, 64.0, .5)
+            every { h.citizens.residentFeet(secondWorker.id) } returns Location(h.world, 65.5, 64.0, .5)
+            h.start()
+            val top = mockk<org.bukkit.inventory.Inventory> { every { holder } returns null }
+            val view = mockk<org.bukkit.inventory.InventoryView> {
+                every { topInventory } returns top
+                every { type } returns InventoryType.CRAFTING
+            }
+            val witness = object : org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "FoodBufferWitness") {
+                override fun getOpenInventory(): org.bukkit.inventory.InventoryView = view
+            }
+            h.paper.server.addPlayer(witness)
+            witness.teleport(Location(h.world, 1.5, 65.0, .5))
+            if (firstBuffer == "unavailable") h.world.unloadChunk(0, 0)
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseResidentFood").also { it.isAccessible = true }
+            pulse.invoke(h.service)
+            h.tick()
+            h.saves shouldBe emptyList()
+            h.time += 5_000
+            pulse.invoke(h.service)
+            h.tickUntil("second city food receipt") { h.saves.isNotEmpty() }
+            h.saves.single().first.id shouldBe second.id
+            h.saves.single().first.stock.food shouldBe 16L
+            secondBarrel.getItem(0)!!.type shouldBe Material.BREAD
+            secondBarrel.getItem(0)!!.amount shouldBe 4
+            h.commit()
+            h.service.settlements().first { it.id == first.id }.stock.food shouldBe 20L
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+})
+
 class CivsServiceTest : FunSpec({
     test("operator terrain capture rejects an unready service and a worker outside the selected city without native access") {
         serviceScenario { h ->

@@ -28,19 +28,20 @@ class CivsResidentLifeTest : FunSpec({
     test("an observed meal transfers no work credit and consumes one existing food unit with Auto $autonomous") {
         val initial = lifeCity(tavern = true)
         val worker = initial.workers.first().copy(hunger = 0,
-            inventory = if (autonomous) null else mapOf("BREAD" to 2L), life = CivResidentLife(awakeMinutes = 10))
+            inventory = mapOf("BREAD" to 2L), life = CivResidentLife(awakeMinutes = 10))
         val before = CivsRules.validate(initial.copy(workers = listOf(worker) + initial.workers.drop(1),
             inventory = if (autonomous) null else initial.inventory,
             autonomy = if (autonomous) CivAutonomy() else null, stock = if (autonomous) Stock(10, 20, 3) else Stock()))
         val plan = requireNotNull(CivsResidentLife.mealPlan(before, worker))
         before.building(plan.buildingId)!!.type shouldBe BuildingType.TAVERN
-        plan.source shouldBe if (autonomous) CivResidentMealSource.ABSTRACT_FOOD else CivResidentMealSource.CARRIED_BREAD
+        plan.source shouldBe CivResidentMealSource.CARRIED_BREAD
+        plan.amount shouldBe 2
         // Another worker's committed action does not invalidate this independent meal.
         val concurrent = before.copy(revision = before.revision + 7)
         // A full or unfinished dining room can use the actual hall; an arbitrary home cannot.
         val hall = before.buildings.first { it.type == BuildingType.TOWN_HALL }
         val fallback = requireNotNull(CivsResidentLife.mealPlan(before, worker, hall.id))
-        CivsResidents.hunger(CivsResidentLife.finishMeal(concurrent, fallback).workers.first()) shouldBe 6
+        CivsResidents.hunger(CivsResidentLife.finishMeal(concurrent, fallback).workers.first()) shouldBe 12
         val house = before.buildings.first { it.type == BuildingType.HOUSE }
         CivsResidentLife.mealPlan(before, worker, house.id) shouldBe null
         shouldThrow<CivsRejection> {
@@ -48,17 +49,12 @@ class CivsResidentLifeTest : FunSpec({
         }.reason shouldBe "stale-meal"
         val after = CivsResidentLife.finishMeal(concurrent, plan)
         val fed = after.workers.first()
-        CivsResidents.hunger(fed) shouldBe 6
-        fed.life!!.meals shouldBe 1L
+        CivsResidents.hunger(fed) shouldBe 12
+        fed.life!!.meals shouldBe 2L
         fed.life!!.lastMealMinute shouldBe 10L
         fed.copy(hunger = worker.hunger, inventory = worker.inventory, items = worker.items, life = worker.life) shouldBe worker
-        if (autonomous) {
-            after.stock shouldBe before.stock.copy(food = 2)
-            fed.items shouldBe null
-        } else {
-            after.stock shouldBe before.stock
-            CivsEquipment.plainCount(fed, "BREAD") shouldBe 1
-        }
+        after.stock shouldBe before.stock
+        CivsEquipment.plainCount(fed, "BREAD") shouldBe 0
         shouldThrow<CivsRejection> { CivsResidentLife.finishMeal(after, plan) }.reason shouldBe "stale-meal"
         val unstaffed = before.copy(workers = listOf(worker) + before.workers.drop(1).map { it.copy(assignment = null) })
         unstaffed.building(requireNotNull(CivsResidentLife.mealPlan(unstaffed, worker)).buildingId)!!.type shouldBe BuildingType.TOWN_HALL

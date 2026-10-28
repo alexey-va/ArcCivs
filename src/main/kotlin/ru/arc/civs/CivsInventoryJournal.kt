@@ -85,10 +85,12 @@ internal class CivsInventoryJournal(
         val worker = current.workers.singleOrNull { it.id == transfer.workerId } ?: throw CivsRejection("stale-delivery")
         val afterWorker = tx.after.workers.single { it.id == transfer.workerId }
         rejectIf(current.revision != tx.beforeRevision || current.pendingDeletion != null ||
+            transfer.food?.let { current.stock != it.stockBefore } == true ||
             CivsEquipment.slots(worker) != transfer.before ||
             worker.copy(items = afterWorker.items, inventory = afterWorker.inventory,
                 hasCollectedItems = afterWorker.hasCollectedItems) != afterWorker ||
-            current.copy(workers = current.workers.map { if (it.id == worker.id) afterWorker else it },
+            current.copy(stock = if (transfer.food != null) tx.after.stock else current.stock,
+                workers = current.workers.map { if (it.id == worker.id) afterWorker else it },
                 revision = tx.after.revision) != tx.after, "stale-delivery")
     }
 
@@ -142,6 +144,11 @@ internal class CivsInventoryJournal(
         runCatching {
             tx.collected?.let {
                 if (result != null) {
+                    if (it.food != null) {
+                        val state = storage.collectedBeforeState(tx)
+                        if (state is CivInventoryApplyResult.Retry)
+                            return fail(CivsRejection("inventory-recovery", state.values), retry = true)
+                    }
                     // This invocation has not written any native endpoint yet; fresh absence is never our own debit.
                     val failure = runCatching { requireFreshCollected(tx) }.exceptionOrNull()
                     if (failure != null) return abortUntouchedInventory(tx, result, failure)
