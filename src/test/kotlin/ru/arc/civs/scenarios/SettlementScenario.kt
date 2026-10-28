@@ -376,7 +376,8 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
 
         /** Public scene RLE preserves visible states and opaque geometry, not hidden block identities.
          * Exact native state colliders come from the already-pinned atelier facts, never Material.isSolid(). */
-        fun fromPublicRle(root: Path, nativeFacts: Path, bounds: CivBox): RecordedNativeMap {
+        fun fromPublicRle(root: Path, nativeFacts: Path, bounds: CivBox,
+            nativeLowerCaptures: List<com.google.gson.JsonObject> = emptyList(), nativeWorldId: UUID? = null): RecordedNativeMap {
             val descriptor = JsonParser.parseString(Files.readString(root.resolve("terrain.json"))).asJsonObject
             check(!descriptor["stale"].asBoolean) { "Public terrain fixture was already stale at capture" }
             val factsBytes = Files.readAllBytes(nativeFacts)
@@ -431,10 +432,19 @@ internal class RecordedNativeMap private constructor(fixture: com.google.gson.Js
             }
             // Retain facts for legal work after-states even if no current cell uses them.
             for (state in listOf("minecraft:air", "minecraft:oak_sapling[stage=0]", "minecraft:oak_sapling[stage=1]")) paletteId(state)
-            fixture.add("palette", palette); fixture.add("voxels", voxels)
-            val result = RecordedNativeMap(fixture)
             val expected = (bounds.max.x - bounds.min.x + 1L) * (bounds.max.y - bounds.min.y + 1L) * (bounds.max.z - bounds.min.z + 1L)
-            check(result.states.size.toLong() == expected) { "Requested public capture bounds have missing cells: ${result.states.size}/$expected" }
+            check(voxels.size().toLong() == expected) { "Requested public capture bounds have missing encoded cells: ${voxels.size()}/$expected" }
+            fixture.add("palette", palette); fixture.add("voxels", voxels)
+            val lowerCells = if (nativeLowerCaptures.isEmpty()) 0 else {
+                val scene = descriptor["sceneId"].asString
+                check(scene.startsWith("civs:")) { "Native lower capture requires a city scene" }
+                appendNativeLowerCaptures(fixture, nativeLowerCaptures, UUID.fromString(scene.removePrefix("civs:")),
+                    requireNotNull(nativeWorldId) { "Native lower capture requires the original source world UUID" })
+            }
+            val result = RecordedNativeMap(fixture)
+            check(result.states.size.toLong() == expected + lowerCells) {
+                "Requested public/native capture has missing or repeated cells: ${result.states.size}/${expected + lowerCells}"
+            }
             return result
         }
     }

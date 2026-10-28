@@ -19,11 +19,26 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsMineWorkStandingTest' \
   --tests 'ru.arc.civs.CivsMineRouteEpisodeTest' \
   --tests 'ru.arc.civs.CivsRoadMaintenanceTest' \
-  --tests 'ru.arc.civs.CivsResidentsRuntimeTest'
+  --tests 'ru.arc.civs.CivsResidentsRuntimeTest' \
+  --tests 'ru.arc.civs.CivsAutonomyTest' \
+  --tests 'ru.arc.civs.CivsResidentMealsTest' \
+  --tests 'ru.arc.civs.CivsTavernStaffingRuntimeTest'
 ```
 
 `CivsResidentsRuntimeTest` also covers meal interruptions and resident job
 recovery, so it is included for the full journey/runtime pass.
+
+The tavern cases cover temporary staffing by an idle builder, recovery for
+accepted construction or its queue head, approaching guests and pending meal
+receipts, and keeping the last producers at work regardless of worker order.
+Existing visitors finish at their chosen building; new visitors use the hall
+while the sole keeper returns to construction. These are domain and synthetic
+resident-runtime checks, not live dining acceptance.
+
+The paused-field regression uses the existing monotonic clock seam to expire
+the 2 ms slice after 16 cells, retain its cursor and unused read quotas, and
+resume at the exact next target. Semantic one-pulse assertions use a fixed
+clock; production time and read budgets remain unchanged.
 
 ## Portable Auto2 planning and worksite suites
 
@@ -34,7 +49,8 @@ recovery, so it is included for the full journey/runtime pass.
   --tests 'ru.arc.civs.CivsAutonomousPlacementTest' \
   --tests 'ru.arc.civs.CivsAutonomousTerraformTest' \
   --tests 'ru.arc.civs.CivsSettlementLayoutTest' \
-  --tests 'ru.arc.civs.scenarios.Auto2WorksitesScenarioTest'
+  --tests 'ru.arc.civs.scenarios.Auto2WorksitesScenarioTest' \
+  --tests 'ru.arc.civs.scenarios.CapturedNativeLowerOverlayTest'
 ```
 
 `CivsAuto2PlanningRegressionTest` loads pinned fixtures from
@@ -45,6 +61,12 @@ observed as a boundary, not mocked into a successful world mutation. The
 portable worksite replay uses the checked-in `auto2-worksites.json` fixture.
 None of these tests needs private schematics, saved Auto2 state, or network
 uploads/downloads.
+
+`CapturedNativeLowerOverlayTest` has eight portable contract cases for joining
+factual lower captures: unchanged public cells and strict unknown space,
+duplicate windows, city/world mismatches, crop bounds, loaded data, exact
+colliders, and contradictory overlapping observations. Its synthetic capture
+envelopes test the merge contract; they do not prove an actual resident route.
 
 `CivsAuto2SupplyRegressionTest` uses the pinned public city geometry. The old
 88-block guard rejected the FARM entrance-to-warehouse-control distance of
@@ -117,7 +139,7 @@ CI.
 | --- | --- | --- | --- |
 | Real private-blueprint worksite replay | `CIVS_SCENARIO_SCHEMATICS_ROOT` | Private schematic root | `CIVS_SCENARIO_ATELIER_ROOT` (defaults to `../ruscrafting-ops/scripts/location-atelier`) |
 | Auto2 mine cover | `CIVS_SCENARIO_MINE_STATE` | `CIVS_SCENARIO_PUBLIC_MAP`, `CIVS_SCENARIO_NATIVE_FACTS`, `CIVS_SCENARIO_SCHEMATICS_ROOT` | `CIVS_SCENARIO_CITY_STATE` (checks the source building and mine plan), `CIVS_SCENARIO_ATELIER_ROOT` |
-| Auto2 resident forestry | `CIVS_SCENARIO_CITY_STATE` | `CIVS_SCENARIO_CITY_MAP`, `CIVS_SCENARIO_NATIVE_FACTS` | — |
+| Auto2 resident forestry | `CIVS_SCENARIO_CITY_STATE` | `CIVS_SCENARIO_CITY_MAP`, `CIVS_SCENARIO_NATIVE_FACTS` | `CIVS_SCENARIO_NATIVE_OVERLAYS` (factual lower native captures) |
 
 Enable only the replay whose local inputs are available. For example:
 Gradle does not track these runtime environment variables or external files as
@@ -130,6 +152,19 @@ Without the enable variable, Kotest disables the one blueprint case, two mine
 cases, or two resident-forestry cases for that replay. They do not substitute
 placeholder private state or fetch private inputs; the optional paths are read
 only when explicitly supplied locally.
+
+For missing native terrain below public Y56, add
+`CIVS_SCENARIO_NATIVE_OVERLAYS=/private/tmp/native-lower-captures/captures.json`
+to the resident-forestry invocation. This optional file is a JSON array of the
+unmodified successful native operator-capture objects, with only the
+`ARCCIVS_TERRAIN_CAPTURE ` line prefix removed. Keep the original receipts
+and capture hashes locally. The consumer checks the source city/world,
+complete 891-cell availability, entity-ticking chunks, coordinates and native
+colliders. It joins only recorded cells below Y56 within the public X/Z crop,
+before the single fixture decode. Public cells and their known colliders stay
+unchanged, and every uncaptured cell remains unavailable in the strict replay.
+Supplying this file does not itself establish two-actor pickup/dropoff or live
+acceptance; the actual resident callbacks and receipt assertions must pass.
 
 ```sh
 CIVS_SCENARIO_SCHEMATICS_ROOT=/private/tmp/private-schematics \

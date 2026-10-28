@@ -60,6 +60,37 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentMealsTest : FunSpec({
+    test("new meals use the hall while the sole tavernkeeper awaits accepted building work") {
+        residentRuntime { h ->
+            try {
+                h.standingTavernkeeper()
+                h.acceptTavernConstruction()
+                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
+                CivsRules.staffedTavern(h.city, tavern) shouldBe true
+                h.owner.residentLifeEnabled = true
+                var meals = 0
+                h.owner.finishResidentMeal = { cityId, plan ->
+                    h.owner.validateResidentMeal(cityId, plan)
+                    plan.buildingId shouldBe hall.id
+                    h.city = CivsResidentLife.finishMeal(h.city, plan)
+                    meals++
+                    CompletableFuture.completedFuture(h.city)
+                }
+                h.owner.pulse(5_000)
+                h.mealState()["building"] shouldBe hall.id
+                val target = h.mealState()["target"] as CivPosition
+                h.owner.collisionActors().first { it.uniqueId == h.workerId }
+                    .teleport(Location(h.world, target.x + .5, target.y.toDouble(), target.z + .5))
+                for (now in 6_000L..11_000L step 1_000) h.owner.pulse(now)
+                meals shouldBe 1
+                h.city.stock.food shouldBe 1L
+                h.city.workers.first { it.id == h.workerId }.life!!.meals shouldBe 1L
+                h.deliveries shouldBe 0
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
     for (profession in listOf(BuildingType.FARM, BuildingType.BUILDER_HUT))
     test("$profession completes a meal on the production field-before-owner five and twenty tick cadence") {
         residentRuntime { h ->
@@ -240,6 +271,96 @@ class CivsResidentMealsTest : FunSpec({
             h.mealState()["retry_at"] shouldBe 14_000L
             h.city.stock.food shouldBe 306L
             h.city.workers.single().hunger shouldBe 14
+        }
+    }
+})
+
+class CivsTavernStaffingRuntimeTest : FunSpec({
+    for (profession in listOf(BuildingType.FARM, BuildingType.GUARD_TOWER))
+    test("a $profession in working phase retains its accepted work") {
+        residentRuntime { h ->
+            val farm = h.assignFarm()
+            if (profession == BuildingType.FARM) h.work = CivWorldWork(h.workerId, 0, farm.id,
+                CivPosition(19, 64, 0), emptyList(), durationMillis = 10_000, status = "working-field")
+            else h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                if (it.id == farm.id) it.copy(type = profession, production = null) else it
+            }))
+            val npc = h.owner.collisionActors().single()
+            for (now in 2_000L..6_000L step 1_000) {
+                h.owner.pulse(now)
+                if (h.phase() == CitizenPhase.WORKING) break
+                h.routeTarget()?.let(npc::teleport)
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) { h.phase() shouldBe CitizenPhase.WORKING }
+            h.owner.canReassign(h.city.id, h.workerId) shouldBe false
+            h.deliveries shouldBe 0
+        }
+    }
+
+    test("only an idle standing tavernkeeper with no personal meal can be reassigned from working") {
+        residentRuntime { h ->
+            try {
+                val keeper = h.standingTavernkeeper()
+                h.phase(keeper) shouldBe CitizenPhase.WORKING
+                h.owner.canReassign(h.city.id, keeper) shouldBe true
+                h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = if (it.id == keeper) 14 else 20) })
+                h.owner.residentLifeEnabled = true
+                h.owner.pulse(5_000)
+                h.mealState(keeper)["building"] shouldBe h.city.buildings.first { it.type == BuildingType.TAVERN }.id
+                h.owner.canReassign(h.city.id, keeper) shouldBe false
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
+    for (pendingReceipt in listOf(false, true))
+    test("accepted building waits for an existing tavern guest including pending receipt=$pendingReceipt") {
+        residentRuntime { h ->
+            try {
+                val keeper = h.standingTavernkeeper()
+                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                val guest = h.owner.collisionActors().first { it.uniqueId == h.workerId }
+                if (!pendingReceipt) guest.teleport(Location(h.world, 10.5, 64.0, .5))
+                val pending = CompletableFuture<Settlement>()
+                var proof: CivResidentMeal? = null
+                var meals = 0
+                h.owner.finishResidentMeal = { cityId, plan ->
+                    h.owner.validateResidentMeal(cityId, plan)
+                    proof = plan
+                    meals++
+                    pending
+                }
+                h.owner.residentLifeEnabled = true
+                h.owner.pulse(5_000)
+                if (pendingReceipt) for (now in 6_000L..9_000L step 1_000) h.owner.pulse(now)
+                h.mealState()["building"] shouldBe tavern.id
+                h.mealState()["pending"] shouldBe pendingReceipt
+                h.mealState()["arrived_at"] shouldBe if (pendingReceipt) 5_000L else null
+                val hut = h.acceptTavernConstruction()
+                h.owner.canReassign(h.city.id, keeper) shouldBe false
+                CivsAutonomy.criticalAssignment(h.city) { it == keeper && h.owner.canReassign(h.city.id, it) } shouldBe null
+                val now = if (pendingReceipt) 10_000L else 6_000L
+                h.owner.pulse(now)
+                h.mealState()["building"] shouldBe tavern.id
+                h.city.stock.food shouldBe 2L
+                h.owner.canReassign(h.city.id, keeper) shouldBe false
+                if (pendingReceipt) {
+                    h.city = CivsResidentLife.finishMeal(h.city, requireNotNull(proof))
+                    pending.complete(h.city) shouldBe true
+                    h.owner.pulse(11_000)
+                    h.owner.canReassign(h.city.id, keeper) shouldBe true
+                    CivsAutonomy.criticalAssignment(h.city) { it == keeper && h.owner.canReassign(h.city.id, it) } shouldBe (keeper to hut.id)
+                    val assigned = CivsRules.autoAssign(h.city, h.city.owner, 11_000) {
+                        it == keeper && h.owner.canReassign(h.city.id, it)
+                    }
+                    assigned.workers.first { it.id == keeper }.assignment shouldBe hut.id
+                    assigned.constructionQueue shouldBe h.city.constructionQueue
+                    assigned.stock shouldBe h.city.stock
+                    h.city.stock.food shouldBe 1L
+                    meals shouldBe 1
+                    h.city.workers.first { it.id == h.workerId }.life!!.meals shouldBe 1L
+                }
+                h.deliveries shouldBe 0
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
         }
     }
 })
@@ -5126,6 +5247,32 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigat
         npc.teleport(Location(world, 5.5, 64.0, .5))
         owner.residentLifeEnabled = true
         return npc
+    }
+
+    fun standingTavernkeeper(): UUID {
+        for (x in -1..1) world.loadChunk(x, -2)
+        prepareDiningSeat()
+        owner.residentLifeEnabled = false
+        val keeper = city.workers.single { it.assignment?.let(city::building)?.type == BuildingType.TAVERN }.id
+        owner.pulse(3_000)
+        withClue(owner.debug(city.id, keeper)) { owner.collisionActors().any { it.uniqueId == keeper } shouldBe true }
+        if (phase(keeper) != CitizenPhase.WORKING) {
+            owner.collisionActors().first { it.uniqueId == keeper }.teleport(requireNotNull(routeTarget(keeper)))
+            owner.pulse(4_000)
+        }
+        phase(keeper) shouldBe CitizenPhase.WORKING
+        return keeper
+    }
+
+    fun acceptTavernConstruction(): CivBuilding {
+        val hut = CivBuilding(UUID.randomUUID(), BuildingType.BUILDER_HUT, 1, CivPosition(12, 64, 5), 0,
+            "builder1", CivBox(CivPosition(10, 63, 3), CivPosition(14, 68, 7)),
+            CivPosition(12, 64, 2), BuildingPhase.ACTIVE, control = CivPosition(12, 64, 5))
+        val house = CivBuilding(UUID.randomUUID(), BuildingType.HOUSE, 1, CivPosition(16, 64, 8), 0,
+            "house1", CivBox(CivPosition(15, 63, 7), CivPosition(17, 68, 9)),
+            CivPosition(16, 64, 6), BuildingPhase.SITE, control = CivPosition(16, 64, 8))
+        city = CivsRules.validate(city.copy(buildings = city.buildings + hut + house, constructionQueue = listOf(house.id)))
+        return hut
     }
 
     fun autonomousTrafficTown(headOn: Boolean): Triple<CivBuilding, CivBuilding, CivBuilding> {

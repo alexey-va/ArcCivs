@@ -26,8 +26,12 @@ class Auto2ResidentForestryScenarioTest : FunSpec({
             })
             val capturedAt = JsonParser.parseString(Files.readString(mapRoot.resolve("terrain.json")))
                 .asJsonObject.get("capturedAt").asLong
+            val lowerCaptures = System.getenv("CIVS_SCENARIO_NATIVE_OVERLAYS")?.let { path ->
+                JsonParser.parseString(Files.readString(Path.of(path))).asJsonArray.map { it.asJsonObject }
+            }.orEmpty()
             val capture = RecordedNativeMap.fromPublicRle(mapRoot, facts,
-                CivBox(CivPosition(if (withCourier) -1920 else -1904, 56, -2784), CivPosition(-1832, 183, -2657)))
+                CivBox(CivPosition(if (withCourier) -1920 else -1904, 56, -2784), CivPosition(-1832, 183, -2657)),
+                nativeLowerCaptures = lowerCaptures, nativeWorldId = source.worldId)
             val nativeRoot = CivPosition(-1884, 64, -2688)
             val lowerStanding = CivPosition(-1887, 63, -2687)
             val portable = RecordedNativeMap.fromResourceRle("/scenarios/auto2-forest-roots-surface.json",

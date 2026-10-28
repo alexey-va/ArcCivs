@@ -317,6 +317,99 @@ class CivsAutonomyTest : FunSpec({
         CivsAutonomy.criticalAssignment(city.copy(workers = listOf(carrying))) { true } shouldBe null
     }
 
+    test("five unique essential workers lend only the idle builder to an active tavern") {
+        val city = autonomyTavernTown()
+        val builder = city.workers.first()
+        val tavern = city.buildings.first { it.type == BuildingType.TAVERN }
+        CivsAutonomy.criticalAssignment(city) { true } shouldBe (builder.id to tavern.id)
+        val staffed = CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, 300_000)
+        staffed.workers.first().assignment shouldBe tavern.id
+        staffed.workers.drop(1) shouldBe city.workers.drop(1)
+        staffed.stock shouldBe city.stock
+        staffed.workers.size shouldBe 5
+        val another = autonomyBuilding(BuildingType.TAVERN, phase = BuildingPhase.ACTIVE, occurrence = 1)
+        CivsAutonomy.criticalAssignment(staffed.copy(buildings = staffed.buildings + another)) { true } shouldBe null
+    }
+
+    test("accepted queue head recovers the temporary tavernkeeper before a construction order exists") {
+        val base = autonomyTavernTown()
+        val hut = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        val tavern = base.buildings.first { it.type == BuildingType.TAVERN }
+        val house = autonomyBuilding(BuildingType.HOUSE)
+        val city = base.copy(buildings = base.buildings + house, constructionQueue = listOf(house.id),
+            workers = base.workers.map { if (it.assignment == hut.id) it.copy(assignment = tavern.id) else it })
+        CivsAutonomy.criticalAssignment(city) { true } shouldBe (city.workers.first().id to hut.id)
+        val assigned = CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, 300_000)
+        assigned.workers.first().assignment shouldBe hut.id
+        assigned.construction shouldBe null
+        assigned.constructionQueue shouldBe city.constructionQueue
+        assigned.stock shouldBe city.stock
+        CivsAutonomy.criticalAssignment(assigned) { true } shouldBe null
+    }
+
+    test("accepted builder recovery prefers the safe tavernkeeper after either unique raw producer order") {
+        val base = autonomyTavernTown()
+        val hut = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        val tavern = base.buildings.first { it.type == BuildingType.TAVERN }
+        val house = autonomyBuilding(BuildingType.HOUSE)
+        val keeper = base.workers.first().copy(assignment = tavern.id)
+        for (rawOrder in listOf(listOf(BuildingType.FORESTER, BuildingType.QUARRY),
+            listOf(BuildingType.QUARRY, BuildingType.FORESTER))) {
+            val city = base.copy(buildings = base.buildings + house, constructionQueue = listOf(house.id),
+                workers = (listOf(keeper) + base.workers.drop(1)).sortedBy {
+                    rawOrder.indexOf(it.assignment?.let(base::building)?.type).takeIf { index -> index >= 0 } ?: 2
+                })
+            CivsAutonomy.criticalAssignment(city) { true } shouldBe (keeper.id to hut.id)
+            val assigned = CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, 300_000)
+            assigned.workers.first { it.id == keeper.id }.assignment shouldBe hut.id
+            assigned.workers.filter { it.id != keeper.id } shouldBe city.workers.filter { it.id != keeper.id }
+            assigned.stock shouldBe city.stock
+            assigned.constructionQueue shouldBe city.constructionQueue
+            val free = city.workers.first { it.assignment?.let(city::building)?.type == BuildingType.FARM }
+            CivsAutonomy.criticalAssignment(city.copy(workers = city.workers.map {
+                if (it.id == free.id) it.copy(assignment = null) else it
+            })) { true } shouldBe (free.id to hut.id)
+        }
+    }
+
+    test("accepted builder recovery waits for the blocked keeper without borrowing either last raw producer") {
+        val base = autonomyTavernTown()
+        val hut = base.buildings.first { it.type == BuildingType.BUILDER_HUT }
+        val tavern = base.buildings.first { it.type == BuildingType.TAVERN }
+        val house = autonomyBuilding(BuildingType.HOUSE)
+        val keeper = base.workers.first().copy(assignment = tavern.id)
+        for (rawOrder in listOf(listOf(BuildingType.FORESTER, BuildingType.QUARRY),
+            listOf(BuildingType.QUARRY, BuildingType.FORESTER))) {
+            val city = base.copy(buildings = base.buildings + house, constructionQueue = listOf(house.id),
+                workers = (listOf(keeper) + base.workers.drop(1)).sortedBy {
+                    rawOrder.indexOf(it.assignment?.let(base::building)?.type).takeIf { index -> index >= 0 } ?: 2
+                })
+            // Runtime guest approach and pending meal receipts reject this keeper until they drain.
+            CivsAutonomy.criticalAssignment(city) { it != keeper.id } shouldBe null
+            CivsRules.autoAssign(autonomyRoundtrip(city), city.owner, 300_000) { it != keeper.id } shouldBe city
+            val emergency = city.copy(workers = city.workers.filterNot { it.id == keeper.id })
+            CivsAutonomy.criticalAssignment(emergency) { true } shouldBe (emergency.workers.first().id to hut.id)
+        }
+    }
+
+    test("temporary tavern staffing retains cargo receipts busy builders and each last essential worker") {
+        val city = autonomyTavernTown()
+        val builder = city.workers.first()
+        val house = autonomyBuilding(BuildingType.HOUSE)
+        val cargo = CivCargo(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+            city.center, "BREAD", 1)
+        for (blocked in listOf(
+            city.copy(workers = city.workers.map { if (it.id == builder.id) it.copy(cargo = cargo) else it }),
+            city.copy(workers = city.workers.map { if (it.id == builder.id) it.copy(pendingStock = Stock(1)) else it }),
+            city.copy(workers = city.workers.map { if (it.id == builder.id) it.copy(hasCollectedItems = true) else it }),
+            city.copy(buildings = city.buildings + house, constructionQueue = listOf(house.id)),
+            city.copy(buildings = city.buildings + house, construction = autonomyOrder(house, 65)),
+        )) CivsAutonomy.criticalAssignment(blocked) { true } shouldBe null
+        CivsAutonomy.criticalAssignment(city) { it != builder.id } shouldBe null
+        for (worker in city.workers.drop(1))
+            CivsAutonomy.criticalAssignment(city.copy(workers = listOf(worker))) { true } shouldBe null
+    }
+
     test("accepted production and forestry receipts sustain twelve buildings including the board and three houses without outside inputs") {
         var city = autonomyImmigrants(autonomyCity())
         var now = 300_000L
@@ -330,6 +423,7 @@ class CivsAutonomyTest : FunSpec({
                     schematicId = "autonomy/${goal.type.name.lowercase()}/${goal.targetLevel}", phase = BuildingPhase.CONSTRUCTING)
                     ?: autonomyBuilding(goal.type, occurrence = city.buildings.count { it.type == goal.type }).also { city = CivsRules.placeSite(city, city.owner, it) }
                         .copy(phase = BuildingPhase.CONSTRUCTING)
+                city = CivsRules.enqueue(city, city.owner, building.id)
                 city = CivsRules.autoAssign(city, city.owner, now)
                 val order = autonomyOrder(building, 65)
                 city = CivsRules.reserveBuild(city, city.owner, building, order)
@@ -398,6 +492,15 @@ private fun autonomyImmigrants(before: Settlement): Settlement {
     repeat(5) { index -> city = CivsRules.immigrate(city, city.owner, UUID(2, index.toLong()),
         "Resident $index", 31_000L + index * 60_000) }
     return city
+}
+
+private fun autonomyTavernTown(): Settlement {
+    val types = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM,
+        BuildingType.WAREHOUSE, BuildingType.TAVERN)
+    val buildings = types.map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }
+    val base = autonomyImmigrants(autonomyCity())
+    return CivsRules.validate(base.copy(buildings = base.buildings + buildings,
+        workers = base.workers.mapIndexed { index, worker -> worker.copy(assignment = buildings[index].id, nextDeliveryAt = 1) }))
 }
 
 private fun autonomyLostBuilder(): Settlement {

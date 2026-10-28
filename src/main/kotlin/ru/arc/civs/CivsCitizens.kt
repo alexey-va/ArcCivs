@@ -837,7 +837,15 @@ class CivsCitizens(
         checkMainThread()
         if (closed.get() || workerId in pendingHarm) return false
         val actor = actors[workerId] ?: return true
-        return actor.cityId == cityId && actor.cycle.phase == CitizenPhase.IDLE &&
+        val idleTavernkeeper = actor.plan.type == BuildingType.TAVERN && actor.cycle.phase == CitizenPhase.WORKING &&
+            actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping && !actor.sheltering && !actor.alarmSheltering &&
+            actor.attacker == null && actor.residentYield == null && actor.social.visit == null &&
+            actor.route == null && actor.workDetour == null
+        return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper) &&
+            actor.lifePending == null && actor.mealVisit == null && actor.mentorVisit == null &&
+            (actor.plan.type != BuildingType.TAVERN || actors.values.none {
+                it.cityId == cityId && it.mealVisit?.plan?.buildingId == actor.plan.token.assignmentId
+            }) &&
             actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
             actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
             actor.supplyPickup == null && actor.foodSource == null &&
@@ -2095,6 +2103,13 @@ class CivsCitizens(
         var plan = CivsResidentLife.mealPlan(city, worker, actor.mealVisit?.plan?.buildingId)
             ?: run { stopMeal(actor); return false }
         var building = city.building(plan.buildingId) ?: return false
+        if (actor.mealVisit == null && building.type == BuildingType.TAVERN &&
+            CivsAutonomy.missingBuilderForAcceptedWork(city) &&
+            city.workers.count { it.assignment == building.id && !CivsResidents.isChild(it) } == 1) {
+            val hall = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL } ?: return false
+            plan = CivsResidentLife.mealPlan(city, worker, hall.id) ?: return false
+            building = hall
+        }
         var visit = actor.mealVisit
         if (visit != null && visit.seat == null && !idleDestinationFree(actor, visit.target.location(world))) {
             stopMeal(actor)

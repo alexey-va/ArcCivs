@@ -157,18 +157,25 @@ object CivsAutonomy {
             }
     }
 
+    internal fun missingBuilderForAcceptedWork(city: Settlement): Boolean {
+        if (city.autonomy?.paused != false || city.pendingDeletion != null) return false
+        val buildingId = city.construction?.buildingId ?: city.constructionQueue?.firstOrNull() ?: return false
+        return CivsRules.constructionWorkers(city, buildingId).isEmpty()
+    }
+
     /** Recover a missing critical profession after deaths, without interrupting accepted work. */
     internal fun criticalAssignment(city: Settlement, canReassign: (UUID) -> Boolean): Pair<UUID, UUID>? {
         if (city.autonomy?.paused != false || city.pendingDeletion != null) return null
         fun unstaffed(building: CivBuilding) = CivsRules.slots(city, building) > 0 &&
             city.workers.none { it.assignment == building.id }
-        val builder = city.construction?.takeIf { CivsRules.constructionWorkers(city, it.buildingId).isEmpty() }?.let {
+        val builder = if (missingBuilderForAcceptedWork(city)) {
             city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) }
-        }
+        } else null
         val hungryFarm = city.buildings.firstOrNull { it.type == BuildingType.FARM && city.stock.food < CivsRules.RECRUIT_FOOD &&
             CivsRules.productionAvailable(city, it) && unstaffed(it) }
-        // Existing food/builder recovery may borrow the last raw producer. Industry keeps one of every raw job.
+        // A staffed tavern returns its keeper before builder recovery borrows the last raw producer.
         val urgent = builder ?: hungryFarm
+        val returningTavernkeeper = builder != null && city.buildings.any { CivsRules.staffedTavern(city, it) }
         val industry = CivsIndustry.desiredBuilding(city)
         val missingProducer = industry?.let { listOf(BuildingType.FARM, BuildingType.FORESTER, BuildingType.QUARRY).firstNotNullOfOrNull { type ->
             city.buildings.firstOrNull { it.type == type && CivsRules.productionAvailable(city, it) && unstaffed(it) }
@@ -183,13 +190,17 @@ object CivsAutonomy {
         }
         val target = urgent ?: warehouse ?: missingProducer ?: industry?.takeIf(::unstaffed) ?: tavern
         target ?: return null
-        val worker = city.workers.sortedBy { it.assignment != null }.firstOrNull { worker ->
+        val worker = city.workers.sortedBy { worker -> when {
+            worker.assignment == null -> 0
+            returningTavernkeeper && worker.assignment.let(city::building)?.type == BuildingType.TAVERN -> 1
+            else -> 2
+        } }.firstOrNull { worker ->
             !CivsResidents.isChild(worker) && worker.cargo == null && worker.pendingStock == null && worker.hasCollectedItems != true &&
                 worker.assignment?.toString() !in city.forestryJobs.orEmpty() &&
                 !(city.construction != null && worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true) &&
-                (target.type != BuildingType.TAVERN || worker.assignment == null ||
+                (target.type != BuildingType.TAVERN || worker.assignment?.let(city::building)?.type != BuildingType.TAVERN ||
                     city.workers.count { it.assignment == worker.assignment } > 1) &&
-                dispensable(city, worker, preserveRaw = urgent == null) && canReassign(worker.id)
+                dispensable(city, worker, preserveRaw = urgent == null || returningTavernkeeper) && canReassign(worker.id)
         } ?: return null
         return worker.id to target.id
     }

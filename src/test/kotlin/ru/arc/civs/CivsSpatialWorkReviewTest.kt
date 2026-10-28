@@ -842,15 +842,35 @@ class CivsSpatialWorkReviewTest : FunSpec({
                     (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
                 var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
+                    var nanos = 0L
+                    var expireOnAdmission = false
+                    var clockReads = 0
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused },
+                        nanoTime = { if (expireOnAdmission && ++clockReads == 2) nanos += 3_000_000L; nanos })
+                    fun scan() = ((runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>)["farmScan"]
                     runtime.idleReason(city, worker) shouldBe "searching-work"
                     runtime.pulse(listOf(city))
                     runtime.plan(city, worker) shouldBe null
                     runtime.idleReason(city, worker) shouldBe "searching-work"
+                    val scanned = scan() as Map<*, *>
+                    scanned["next"] shouldBe 16
+                    scanned["examined"] shouldBe 16
                     paused = true
                     repeat(4) { runtime.pulse(listOf(city)) }
                     runtime.plan(city, worker) shouldBe null
+                    scan() shouldBe scanned
                     paused = false
+                    // Expire after the deadline is set; yielding must neither reset the scan nor spend native quotas.
+                    expireOnAdmission = true
+                    runtime.pulse(listOf(city))
+                    runtime.plan(city, worker) shouldBe null
+                    scan() shouldBe scanned
+                    val budget = runtime.debug(setOf(worker.id))["remainingPulseBudget"] as Map<*, *>
+                    budget["columns"] shouldBe 16
+                    budget["standingChecks"] shouldBe 32
+                    budget["rays"] shouldBe 8
+                    nanos shouldBe 3_000_000L
+                    expireOnAdmission = false // Keep the monotonic clock at three milliseconds while resuming.
                     runtime.pulse(listOf(city)) // Resume at cell sixteen, not at the beginning of the field.
                     val work = requireNotNull(runtime.plan(city, worker))
                     work.focus shouldBe mature
@@ -1170,7 +1190,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 plugin.logger.addHandler(handler)
                 try {
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                        val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false })
+                        // Pickup and generator assertions require admission, independent of CI scheduling delays.
+                        val runtime = CivsWorksites(plugin, access, { _, _ -> stock }, { _, _ -> false },
+                            nanoTime = { 0L })
                         runtime.pulse(listOf(city))
                         runtime.plan(city, worker) shouldBe null
                         runtime.idleReason(city, worker) shouldBe "resident-inventory-full"
