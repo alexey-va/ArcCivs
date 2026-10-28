@@ -1967,8 +1967,11 @@ class CivsService(
     /** Ordinary mine receipts retain their captured progress, but always recheck current native authority. */
     private fun validateMineNative(tx: CivInventoryTransaction): CivInventoryApplyResult? {
         val receipt = tx.mine ?: return null
+        // The city has already persisted this exact item/tool transition; recovery only retires its journal.
+        if (receipt.workerBefore != null && cities[tx.cityId] == tx.after) return null
         return try {
-            worksites.validateMineReceiptNative(receipt.before(tx.after), receipt.work)
+            if (receipt.workerBefore != null) worksites.validateMineFallbackReceiptNative(receipt.before(tx.after), receipt.work)
+            else worksites.validateMineReceiptNative(receipt.before(tx.after), receipt.work)
             null
         } catch (failure: CivsRejection) {
             val details = failure.values + ("reason" to failure.reason)

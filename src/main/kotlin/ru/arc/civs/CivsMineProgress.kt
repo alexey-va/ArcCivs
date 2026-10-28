@@ -220,16 +220,28 @@ internal object CivsMineProgress {
 
 /** Native authority retained for new ordinary mine receipts, including restart and partial application. */
 data class CivMineReceipt(val buildingBefore: CivBuilding, val planBefore: CivMinePlanState?,
-    val legacyBefore: Long?, val work: CivWorldWork) {
+    val legacyBefore: Long?, val work: CivWorldWork,
+    /** Null is the original paid excavation proof; a fallback must retain its exact item/tool owner. */
+    val workerBefore: CivWorker? = null) {
     fun before(after: Settlement): Settlement {
         val key = buildingBefore.id.toString()
-        return after.copy(minePlans = if (planBefore == null) after.minePlans?.minus(key)
+        val before = after.copy(minePlans = if (planBefore == null) after.minePlans?.minus(key)
             else after.minePlans.orEmpty() + (key to planBefore),
             mineProgress = if (legacyBefore == null) after.mineProgress?.minus(key)
             else after.mineProgress.orEmpty() + (key to legacyBefore))
+        return workerBefore?.let { worker -> before.copy(
+            workers = before.workers.map { if (it.id == worker.id) worker else it }, revision = after.revision - 1) } ?: before
     }
 
     fun validated(after: Settlement) {
+        workerBefore?.let { worker ->
+            val before = before(after)
+            require(after.building(buildingBefore.id) == buildingBefore && worker.id == work.workerId &&
+                CivsMineFallback.eligible(before, buildingBefore, worker) && CivsMineFallback.matches(work))
+            val at = after.workers.single { it.id == worker.id }.nextDeliveryAt - 1_000
+            require(at >= worker.nextDeliveryAt && CivsRules.finishWorldWork(before, work, at) == after)
+            return
+        }
         require(buildingBefore != null && work != null && after.building(buildingBefore.id) == buildingBefore &&
             buildingBefore.type == BuildingType.QUARRY && work.buildingId == buildingBefore.id && !work.autonomousVisual &&
             work.miningSections != null && work.miningPlanVersion in 5..CivsMinePlan.VERSION)

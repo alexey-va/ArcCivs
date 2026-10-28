@@ -22,7 +22,7 @@ data class CivForestryJob(
     val next: Int = 0,
     val harvestedLogs: Int = 0,
     val seedDeferred: Boolean = false,
-    /** A newly selected joined tree is removed to give the surviving crown room. Old jobs still replant. */
+    /** Harvest without an immediate replacement: joined crowns or a missing kit. Planting remains a separate job. */
     val thinning: Boolean = false,
 ) {
     val timber: String get() = sapling.removeSuffix("_SAPLING") + "_LOG"

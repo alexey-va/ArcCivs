@@ -377,7 +377,8 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         }
                         world.getBlockAt(wall.x, wall.y, wall.z).type = Material.AIR
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            // This oracle covers shell safety; deadline yield/resume has its own search-budget tests.
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                             var refused = false
                             var sealed = false
                             repeat(256) {

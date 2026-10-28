@@ -235,13 +235,11 @@ class CivsForestryDensityTest : FunSpec({
         }
     }
 
-    test("an unfunded mature oak requests its own replant kit and resumes after receiving it while birch supply stays unchanged") {
+    test("an unfunded mature oak is harvested without a replacement kit while birch supply stays unchanged") {
         densityFixture(false, 7_106, tool = "DIAMOND_AXE", timber = "BIRCH_LOG") { h ->
-            val owner = h.addPlayer("ForestrySaplingOwner")
-            owner.openInventory(Bukkit.createInventory(owner, 9))
-            h.city = h.city.copy(owner = owner.uniqueId, workers = listOf(
+            h.city = h.city.copy(workers = listOf(
                 CivsEquipment.consumeInputs(h.worker, mapOf("OAK_SAPLING" to 32L))))
-            // No new planting is possible; the terminal need must name the existing tree's kit.
+            // No new planting is possible, but that must not hold the existing tree for a replacement kit.
             val search = requireNotNull(CivsWorksiteLayouts.site(h.mill)).getAsJsonObject("forester").getAsJsonObject("searchBounds")
             val min = CivsWorksiteLayouts.vector(search["min"])
             val max = CivsWorksiteLayouts.vector(search["max"])
@@ -254,25 +252,6 @@ class CivsForestryDensityTest : FunSpec({
             }
             densityLargeOak().forEach { (p, state) -> h.world.getBlockAt(p.x, p.y, p.z).blockData = Bukkit.createBlockData(state) }
             val building = h.capture.states.filter { (p, _) -> h.mill.bounds.contains(p.x, p.y, p.z) }
-            var sawMissingOak = false
-            repeat(512) {
-                if (h.runtime.plan(h.city, h.worker) == null) {
-                    h.pulse()
-                    sawMissingOak = sawMissingOak || h.runtime.requirement(h.city, h.worker)?.first == "OAK_SAPLING"
-                }
-            }
-            check(sawMissingOak) { "The existing oak must first be held for its own unpaid replacement kit" }
-            h.runtime.plan(h.city, h.worker) shouldBe null
-            val entry = (h.runtime.debug(setOf(h.worker.id))["entries"] as List<*>).single() as Map<*, *>
-            val need = entry["need"] as Map<*, *>
-            need["status"] shouldBe "waiting-saplings"
-            need["material"] shouldBe "OAK_SAPLING"
-            need["amount"] shouldBe 1L
-            h.runtime.requirement(h.city, h.worker)?.first shouldBe "OAK_SAPLING"
-            CivsEquipment.available(h.worker, emptyMap())["BIRCH_SAPLING"] shouldBe 32L
-            owner.inventory.setItem(0, ItemStack(Material.OAK_SAPLING))
-            h.receive(owner, requestedSupplies = mapOf("OAK_SAPLING" to 1L))
-            owner.inventory.getItem(0) shouldBe null
             CivsEquipment.available(h.worker, emptyMap())["BIRCH_SAPLING"] shouldBe 32L
             repeat(64) { if (h.runtime.plan(h.city, h.worker) == null) h.pulse() }
             var jobId: UUID? = null
@@ -285,14 +264,14 @@ class CivsForestryDensityTest : FunSpec({
                 val job = requireNotNull(work.forestry).job
                 job.timber shouldBe "OAK_LOG"
                 if (jobId == null) jobId = job.id else job.id shouldBe jobId
-                work.inputs shouldBe if (batches == 0) mapOf("OAK_SAPLING" to 1L) else emptyMap()
+                work.inputs shouldBe emptyMap()
                 h.commit(work, 1_000L + batches * 10_000L)
                 batches++
                 check(batches < 8)
             } while (h.city.forestryJobs?.containsKey(h.mill.id.toString()) == true)
             CivsEquipment.available(h.worker, emptyMap())["OAK_SAPLING"] shouldBe null
             CivsEquipment.available(h.worker, emptyMap())["BIRCH_SAPLING"] shouldBe 32L
-            h.world.getBlockAt(densityOakRoot.x, densityOakRoot.y, densityOakRoot.z).blockData.asString shouldBe CivsForestry.saplingState("OAK_SAPLING")
+            h.world.getBlockAt(densityOakRoot.x, densityOakRoot.y, densityOakRoot.z).type shouldBe Material.AIR
             building.forEach { (p, state) -> h.world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe state }
         }
     }

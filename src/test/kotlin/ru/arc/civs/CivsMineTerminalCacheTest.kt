@@ -9,6 +9,57 @@ import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsMineTerminalCacheTest : FunSpec({
+    test("a completed invisible lava sweep stays terminal until the actual neighbouring block changes") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            var reads = 0
+            val world = object : CivsWorksiteWorldFixture("mine-invisible-lava-cache") {
+                override fun getBlockAt(x: Int, y: Int, z: Int) = super.getBlockAt(x, y, z).also { reads++ }
+            }.also(paper.server::addWorld)
+            val plugin = paper.createSimplePlugin("InvisibleLavaCache")
+            val mine = spatialBuilding("medievaloak", "miner", 1, CivPosition(0, 63, 0))
+            val worker = spatialWorker(mine, "IRON_PICKAXE")
+            val city = spatialCity(world.uid, listOf(mine), worker)
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val bottom = CivsWorksiteLayouts.point(mine, plan.bottom)
+            for (x in -3..3) for (z in -3..3) world.loadChunk(x, z)
+            for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
+                Bukkit.createBlockData("minecraft:ladder[facing=${plan.facing},waterlogged=false]")
+            val source = bottom.copy(y = bottom.y - 1, z = bottom.z + 1)
+            world.getBlockAt(source.x, source.y, source.z).type = Material.LAVA
+            LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
+                CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+                    fun advance(pulses: Int) { repeat(pulses) { runtime.pulse(listOf(city)); paper.performTicks(5) } }
+                    val points = plan.steps.map { CivsWorksiteLayouts.point(mine, it.point) }
+                    val optionalX = (points.minOf { it.x } - 1) shr 4
+                    val optionalZ = (points.minOf { it.z } - 1) shr 4
+                    world.unloadChunk(optionalX, optionalZ)
+                    advance(512)
+                    runtime.plan(city, worker) shouldBe null
+                    runtime.idleReason(city, worker) shouldBe "worksite-no-access"
+                    reads = 0
+                    advance(512)
+                    (reads > 0) shouldBe true
+                    world.loadChunk(optionalX, optionalZ)
+                    advance(512)
+                    runtime.plan(city, worker) shouldBe null
+                    runtime.idleReason(city, worker) shouldBe "worksite-no-access"
+                    reads = 0
+                    advance(512)
+                    reads shouldBe 0
+                    world.getBlockAt(source.x, source.y, source.z).type = Material.STONE
+                    runtime.changed(world.uid, source)
+                    advance(64)
+                    val work = requireNotNull(runtime.plan(city, worker)) { runtime.debug().toString() }
+                    work.changes.single().position shouldBe bottom.copy(y = bottom.y - 1)
+                    runtime.validate(city, work)
+                    city.minePlans shouldBe null
+                    worker.completedCycles shouldBe 0
+                }
+            }
+        }
+    }
+
     test("an unchanged liquid branch stops native discovery and real world or protection changes reopen it") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             var reads = 0

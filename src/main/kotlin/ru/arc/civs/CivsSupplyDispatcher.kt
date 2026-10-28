@@ -530,6 +530,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 offer(source, warehouse, material, count, CivSupplyTask(source.id, producer.workerId, warehouse.id, material, false), producer)
         }
         val selected = candidates.minWithOrNull(compareBy<Candidate> { if (it.key.construction) 0 else 1 }
+            .thenBy { if (it.key.source == null) 0 else 1 }
             .thenBy { ages[it.key] ?: now }.thenBy { it.distance }.thenBy { it.plan.cargo.id.toString() }) ?: continue
         reserve(courier.workerId, selected.plan, selected.key)
         served += selected.key

@@ -496,6 +496,142 @@ class CivsNativeRoadUpkeepTest : FunSpec({
     }
 })
 
+class CivsMineFallbackAuthorityTest : FunSpec({
+    test("fallback Lands revoked while its journal ACK is pending prevents the item and tool transition") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            val ack = CompletableFuture<CivInventoryTransaction>()
+            var tx: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { tx = firstArg(); ack }
+            h.start()
+            val result = fixture.submit()
+            h.saves shouldBe emptyList()
+            every { h.worldAdapter.canModify(any(), any(), any()) } returns false
+            ack.complete(requireNotNull(tx))
+            h.tickUntil("fallback authority after ACK") { result.isDone || h.saves.isNotEmpty() }
+            h.saves shouldBe emptyList()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { result.join() })?.reason shouldBe "inventory-conflict"
+            h.service.settlements().single() shouldBe fixture.city
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("allowed fallback ACK publishes its frozen output and one tool use exactly once") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            var tx: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { tx = firstArg(); CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val result = fixture.submit()
+            h.tickUntil("allowed fallback credit") { h.saves.isNotEmpty() || result.isDone }
+            h.saves.size shouldBe 1
+            val accepted = requireNotNull(tx)
+            accepted.mine!!.workerBefore shouldBe fixture.worker
+            accepted.mine.before(accepted.after) shouldBe fixture.city
+            accepted.changes shouldBe emptyList()
+            accepted.worldChanges.orEmpty() shouldBe emptyList()
+            val directory = java.nio.file.Files.createTempDirectory("fallback-proof-codec-")
+            try {
+                CivsStore(directory, Executor(Runnable::run)).use { it.saveInventoryTransaction(accepted).join() }
+                CivsStore(directory, Executor(Runnable::run)).use { it.loadInventoryTransactions().join().single() shouldBe accepted }
+            } finally { directory.toFile().deleteRecursively() }
+            h.commit()
+            val after = result.join()
+            after.minePlans shouldBe fixture.city.minePlans
+            after.mineProgress shouldBe fixture.city.mineProgress
+            after.stock shouldBe Stock()
+            after.workers.single().completedCycles shouldBe 1L
+            CivsEquipment.plainCount(after.workers.single(), "COBBLESTONE") shouldBe 1
+            (CivsEquipment.slots(after.workers.single())[4]!!.stack().itemMeta as org.bukkit.inventory.meta.Damageable).damage shouldBe 1
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(accepted.id) }
+        }
+    }
+
+    for (persisted in listOf(false, true)) test("fallback recovery after city persisted=$persisted needs no actor cache and never credits twice") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            val receipt = fixture.receipt()
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(if (persisted) receipt.after else fixture.city))
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            if (persisted) every { h.worldAdapter.canModify(any(), any(), any()) } returns false
+            h.start()
+            if (!persisted) {
+                h.tickUntil("fallback recovery save") { h.saves.isNotEmpty() }
+                h.commit()
+            }
+            h.tickUntil("fallback proof retirement") { h.service.debugState("overview", fixture.city.id, null)["inventory_recovery_total"] == 0 }
+            val after = h.service.settlements().single()
+            after shouldBe receipt.after
+            CivsEquipment.plainCount(after.workers.single(), "COBBLESTONE") shouldBe 1
+            (CivsEquipment.slots(after.workers.single())[4]!!.stack().itemMeta as org.bukkit.inventory.meta.Damageable).damage shouldBe 1
+            h.saves.size shouldBe if (persisted) 0 else 1
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+            verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("unpublished fallback recovery with a missing native barrel remains pending without an output") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            val receipt = fixture.receipt()
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            h.world.getBlockAt(10, 64, 0).type = Material.AIR
+            h.start()
+            h.tickUntil("fallback blocked recovery") {
+                h.service.debugState("overview", fixture.city.id, null)["blocked_recovery_total"] == 1
+            }
+            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe fixture.city
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+
+    test("a fallback ACK in an unloaded chunk retries after load without issuing a second job") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            val ack = CompletableFuture<CivInventoryTransaction>()
+            var tx: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { tx = firstArg(); ack }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val result = fixture.submit()
+            h.world.unloadChunk(0, 0)
+            ack.complete(requireNotNull(tx))
+            h.tickUntil("fallback unload retry") { result.isDone }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { result.join() })?.reason shouldBe "inventory-recovery"
+            h.saves shouldBe emptyList()
+            h.service.debugState("overview", fixture.city.id, null)["blocked_recovery_total"] shouldBe 0
+            h.world.loadChunk(0, 0)
+            h.tickUntil("loaded fallback recovery") { h.saves.isNotEmpty() }
+            h.commit()
+            h.service.settlements().single() shouldBe tx!!.after
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(tx!!.id) }
+        }
+    }
+
+    test("fallback proof cannot mix a grant or change the accepted owner city and output") {
+        serviceScenario(nativeGeometry = true) { h ->
+            val fixture = ServiceMineFallback(h)
+            val receipt = fixture.receipt()
+            val proof = requireNotNull(receipt.mine)
+            shouldThrow<IllegalArgumentException> { receipt.copy(autoSupplyBuildingId = fixture.mine.id).validated() }
+            shouldThrow<IllegalArgumentException> { receipt.copy(after = receipt.after.copy(autonomy = null)).validated() }
+            shouldThrow<IllegalArgumentException> { receipt.copy(mine = proof.copy(work = proof.work.copy(
+                outputs = mapOf("COBBLESTONE" to 2L)))).validated() }
+            shouldThrow<IllegalArgumentException> { receipt.copy(changes = listOf(CivInventorySlotChange(
+                fixture.mine.control!!, "BARREL", 0, null, CivPlainItem("COBBLESTONE", 1)))).validated() }
+            val storage = CivsService::class.java.getDeclaredField("storage").also { it.isAccessible = true }.get(h.service) as CivsStorage
+            storage.reserve(fixture.city, receipt.id)
+            shouldThrow<IllegalArgumentException> { storage.seal(receipt.copy(after = receipt.after.copy(name = "Changed"))) }
+            storage.unlock(receipt.id)
+        }
+    }
+})
+
 class CivsServiceTest : FunSpec({
     test("operator terrain capture rejects an unready service and a worker outside the selected city without native access") {
         serviceScenario { h ->
@@ -6108,6 +6244,54 @@ private fun autonomousDevelopment(service: CivsService): CivsAutonomousDevelopme
 private fun constructionRuntime(service: CivsService): CivsConstructionRuntime =
     CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }
         .get(service) as CivsConstructionRuntime
+
+private class ServiceMineFallback(private val h: ServiceScenario) {
+    val mine = h.city.buildings.last().copy(type = BuildingType.QUARRY, control = CivPosition(10, 64, 0))
+    val worker = h.city.workers.first().copy(assignment = mine.id, nextDeliveryAt = 1,
+        items = List(CivsEquipment.SLOTS) { if (it == 4) CivResidentItem("IRON_PICKAXE", 1) else null })
+    val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+        stock = Stock(), buildings = listOf(h.city.buildings.first(), mine), workers = listOf(worker)))
+    val work = CivWorldWork(worker.id, worker.completedCycles, mine.id, CivPosition(9, 64, 0), emptyList(),
+        outputs = mapOf("COBBLESTONE" to 1L), durationMillis = CivsMineFallback.DURATION_MILLIS, status = "digging-mine",
+        equipmentAfter = worker.items!!.toMutableList().also { slots ->
+            val pickaxe = ItemStack(Material.IRON_PICKAXE)
+            val damage = pickaxe.itemMeta as org.bukkit.inventory.meta.Damageable
+            damage.damage = 1
+            pickaxe.itemMeta = damage
+            slots[4] = CivResidentItem.of(pickaxe)
+        })
+    private val storage = CivsService::class.java.getDeclaredField("storage").also { it.isAccessible = true }
+        .get(h.service) as CivsStorage
+
+    init {
+        h.world.getBlockAt(9, 63, 0).type = Material.STONE
+        h.world.getBlockAt(9, 64, 0).type = Material.AIR
+        h.world.getBlockAt(9, 65, 0).type = Material.AIR
+        h.world.getBlockAt(10, 64, 0).type = Material.BARREL
+        every { h.worldAdapter.canMine(any()) } returns true
+        every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    fun submit(): CompletableFuture<Settlement> {
+        val prepare: (Settlement) -> CivStoragePlan? = { before -> storage.prepareWork(before, mine.id,
+            work.storageInputs(before.workers.single()), emptyMap(), work.changes, work) }
+        val transition: (Settlement, CivInventory) -> Settlement = { before, inventory ->
+            CivsRules.finishWorldWork(before, work, h.time).copy(inventory = inventory)
+        }
+        return CivsService::class.java.getDeclaredMethod("inventoryMutation", UUID::class.java,
+            kotlin.jvm.functions.Function1::class.java, Player::class.java, java.lang.Boolean.TYPE,
+            kotlin.jvm.functions.Function2::class.java).also { it.isAccessible = true }
+            .invoke(h.service, city.id, prepare, null, true, transition) as CompletableFuture<Settlement>
+    }
+
+    fun receipt(): CivInventoryTransaction {
+        val after = CivsRules.finishWorldWork(city, work, h.time)
+        val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, after, emptyList(),
+            mine = CivMineReceipt(mine, null, null, work, workerBefore = worker))
+        return com.google.gson.Gson().fromJson(com.google.gson.Gson().toJson(tx), CivInventoryTransaction::class.java).validated()
+    }
+}
 
 private class ServiceRoadUpkeep(private val h: ServiceScenario, physical: Boolean = false, cobblestone: Int = 0) {
     private val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT,

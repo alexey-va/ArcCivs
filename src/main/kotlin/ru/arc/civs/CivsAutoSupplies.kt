@@ -56,11 +56,15 @@ internal class CivsAutoSupplies {
                 val target = desired.getOrPut(buildingId, ::linkedMapOf)
                 materials.filterValues { it > 0 }.forEach { (material, count) -> target.merge(material, count, Math::max) }
             }
-            city.construction?.takeIf { it.payment != null && it.payment.reservedBatch == null }?.let { order ->
+            city.construction?.takeIf { it.payment != null }?.let { order ->
+                val payment = requireNotNull(order.payment)
                 val stores = CivsRules.constructionStores(city, order.buildingId)
                 val target = stores.firstOrNull { building -> city.workers.any { it.assignment == building.id } } ?: stores.firstOrNull()
-                val needed = order.payment?.awaiting ?: constructionNeed
-                if (target != null && needed != null) {
+                // Stock the remaining bill before the next row, so a one-block row does not cause a round trip.
+                // The final demand still caps every material at one stack and subtracts carried/local/incoming goods.
+                val needed = order.materials?.let(CivsMaterials::unpaid)
+                    ?: if (payment.reservedBatch == null) payment.awaiting ?: constructionNeed.orEmpty() else emptyMap()
+                if (target != null && needed.isNotEmpty()) {
                     val builders = CivsRules.constructionWorkers(city, order.buildingId)
                     require(target.id, needed.mapValues { (material, count) ->
                         (count - builders.sumOf { worker -> carried(worker, material) }).coerceAtLeast(0)

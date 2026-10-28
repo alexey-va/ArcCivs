@@ -168,6 +168,7 @@ data class CivInventoryTransaction(
         mine?.let {
             require(after.inventory != null && !CivsAutonomy.legacyStock(after) && worldChanges.orEmpty() == it.work.changes &&
                 it.work.forestry == null && it.work.upkeep == null)
+            if (it.workerBefore != null) require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
         }
         residentTransfer?.validated(after)
@@ -226,6 +227,7 @@ data class CivInventoryTransaction(
 internal fun CivMineReceipt.detached(): CivMineReceipt = copy(
     buildingBefore = buildingBefore.copy(transit = buildingBefore.transit?.toList()),
     planBefore = planBefore?.let(CivsMineProgress::detached),
+    workerBefore = workerBefore?.let { it.copy(items = it.items?.toList(), inventory = it.inventory?.toMap()) },
     work = work.copy(changes = work.changes.toList(), inputs = work.inputs.toMap(), outputs = work.outputs.toMap(),
         equipmentAfter = work.equipmentAfter?.toList(), miningSections = work.miningSections?.toMap(),
         miningAccessSections = work.miningAccessSections?.toMap(), miningDeferredSeals = work.miningDeferredSeals?.toSet()),
@@ -517,6 +519,7 @@ class CivsStorage(private val plugin: Plugin,
             val key = receipt.buildingBefore.id.toString()
             require(receipt.buildingBefore == claim.city.building(receipt.buildingBefore.id) &&
                 receipt.planBefore == claim.city.minePlans?.get(key) && receipt.legacyBefore == claim.city.mineProgress?.get(key))
+            if (receipt.workerBefore != null) require(receipt.before(transaction.after) == claim.city)
         }
         transaction.autoSupplyBuildingId?.let {
             require(transaction.after == claim.city.copy(revision = transaction.after.revision)) {
@@ -1227,10 +1230,11 @@ class CivsStorage(private val plugin: Plugin,
         val building = city.building(buildingId) ?: throw CivsRejection("building-not-found")
         validateAmounts(inputs)
         validateAmounts(outputs)
-        val mine = work?.takeIf { it.miningSections != null }?.let {
+        val mine = work?.takeIf { it.miningSections != null || CivsMineFallback.matches(it) }?.let {
             require(it.buildingId == buildingId && it.changes == worldChanges && !CivsAutonomy.legacyStock(city))
             CivMineReceipt(building, city.minePlans?.get(buildingId.toString()),
-                city.mineProgress?.get(buildingId.toString()), it).detached()
+                city.mineProgress?.get(buildingId.toString()), it,
+                workerBefore = if (CivsMineFallback.matches(it)) city.workers.single { worker -> worker.id == it.workerId } else null).detached()
         }
         val inventory = requireNotNull(city.inventory)
         if (inventory.mode == CivStorageMode.VIRTUAL) {

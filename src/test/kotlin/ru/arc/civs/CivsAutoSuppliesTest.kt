@@ -167,6 +167,53 @@ class CivsAutoSuppliesTest : FunSpec({
         CivsAutoSupplies.demands(carried, null, CivsResidentFoods.BREAD_ONLY, supplyObservation(carried),
             selectedInputs = inputs) shouldBe emptyList()
     }
+
+    test("a one dirt construction row stocks a useful batch for subsequent rows") {
+        val base = supplyCity(BuildingType.BUILDER_HUT, "")
+        val target = base.buildings.first().copy(level = 2)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 2, 100, 0,
+            ConstructionPhase.WAITING_MATERIALS, Stock(), plannedBuilding = target,
+            batches = CivConstructionBatches(100, 16),
+            materials = mapOf("DIRT" to 80L, "OAK_PLANKS" to 32L, "COBBLESTONE" to 100L),
+            payment = CivConstructionPayment(awaiting = mapOf("DIRT" to 1L)))
+        val city = base.copy(construction = order)
+        val demand = CivsAutoSupplies.demands(city, mapOf("DIRT" to 1L),
+            CivsResidentFoods.BREAD_ONLY, supplyObservation(city)).single()
+        demand shouldBe CivAutoSupplyDemand(base.buildings[2].id,
+            mapOf("COBBLESTONE" to 64L, "DIRT" to 64L, "OAK_PLANKS" to 32L))
+    }
+
+    test("an already paid row can prepare the next trip without duplicating carried or incoming materials") {
+        val base = supplyCity(BuildingType.BUILDER_HUT, "")
+        val target = base.buildings.first().copy(level = 2)
+        val hut = base.buildings[2]
+        val builder = CivsEquipment.collectSupplies(base.workers.last(), mapOf("DIRT" to 20L))
+        val courier = base.workers.first().copy(cargo = CivCargo(UUID.randomUUID(), base.buildings[1].id,
+            base.buildings[1].id, hut.id, base.buildings[1].entrance, "DIRT", 8L, inventoryBacked = true))
+        val order = CivConstruction(UUID.randomUUID(), target.id, 2, 100, 0,
+            ConstructionPhase.PLACING, Stock(), plannedBuilding = target,
+            batches = CivConstructionBatches(100, 16), materials = mapOf("DIRT" to 40L),
+            payment = CivConstructionPayment(reservedBatch = 0))
+        val city = base.copy(workers = listOf(courier, builder), construction = order)
+        CivsAutoSupplies.demands(city, null, CivsResidentFoods.BREAD_ONLY,
+            supplyObservation(city, mapOf(hut.id to mapOf("DIRT" to 3L)))).single() shouldBe
+            CivAutoSupplyDemand(hut.id, mapOf("DIRT" to 12L)) // Local three leaves nine new items.
+        val ordinary = city.copy(autonomy = null)
+        CivsAutoSupplies.demands(ordinary, null, CivsResidentFoods.BREAD_ONLY,
+            supplyObservation(ordinary)) shouldBe emptyList()
+    }
+
+    test("the last paid construction row never refills its already consumed bill") {
+        val base = supplyCity(BuildingType.BUILDER_HUT, "")
+        val target = base.buildings.first().copy(level = 2)
+        val order = CivConstruction(UUID.randomUUID(), target.id, 2, 1, 0,
+            ConstructionPhase.PLACING, Stock(), plannedBuilding = target,
+            batches = CivConstructionBatches(1, 16), materials = emptyMap(),
+            payment = CivConstructionPayment(reservedBatch = 0))
+        val city = base.copy(construction = order)
+        CivsAutoSupplies.demands(city, mapOf("DIRT" to 1L), CivsResidentFoods.BREAD_ONLY,
+            supplyObservation(city)) shouldBe emptyList()
+    }
 })
 
 private fun supplyCity(type: BuildingType, production: String): Settlement {

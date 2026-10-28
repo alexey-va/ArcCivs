@@ -170,22 +170,24 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    for (arrival in listOf("carried", "building-stock")) test("$arrival saplings arriving mid-scan restore priority to an earlier mature tree") {
+    for (arrival in listOf("carried", "building-stock")) test("$arrival saplings arriving mid-scan fund replacement for a newly grown earlier tree") {
         var supplies = emptyMap<String, Long>()
         forestryWorksite("forestry-care-refill-$arrival", autonomous = false, supplies = { supplies }) { world, runtime, before ->
             var city = before
             var worker = city.workers.single()
             val mature = CivPosition(-15, 64, -26)
             val young = CivPosition(10, 64, -26)
-            forestrySmallOak(world, mature)
+            world.getBlockAt(mature.x, mature.y, mature.z).type = Material.OAK_SAPLING
             world.getBlockAt(young.x, young.y, young.z).blockData = Material.OAK_SAPLING.createBlockData()
-            // At most 1,024 of 1,596 columns: the first unfunded root has passed, but care is not admitted yet.
+            // At most 1,024 of 1,596 columns: the earlier sapling has passed, but care is not admitted yet.
             repeat(64) { runtime.pulse(listOf(city)) }
             runtime.plan(city, worker) shouldBe null
             if (arrival == "carried") {
                 worker = CivsEquipment.collectSupplies(worker, mapOf("OAK_SAPLING" to 1L))
                 city = city.copy(workers = listOf(worker))
             } else supplies = mapOf("OAK_SAPLING" to 1L)
+            forestrySmallOak(world, mature)
+            runtime.changed(world.uid, mature)
             repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val work = requireNotNull(runtime.plan(city, worker))
             work.status shouldBe "felling-tree"
@@ -1020,7 +1022,7 @@ class CivsForestryTest : FunSpec({
         }
     }
 
-    test("a physical forester without replacement saplings skips an unaccepted tree and reaches free care") {
+    test("a physical forester without replacement saplings harvests an available tree before optional care") {
         forestryWorksite("forestry-no-seed-care", autonomous = false, nanoTime = { 0L }) { world, runtime, city ->
             val root = CivPosition(-15, 64, -26)
             val care = CivPosition(10, 64, -26)
@@ -1030,8 +1032,8 @@ class CivsForestryTest : FunSpec({
             runtime.residentFeet = { Location(world, root.x - 1.5, 64.0, root.z + .5) }
             repeat(3_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
             val work = requireNotNull(runtime.plan(city, worker))
-            work.status shouldBe "watering"
-            work.focus shouldBe care
+            work.status shouldBe "felling-tree"
+            work.focus shouldBe root
             work.inputs shouldBe emptyMap()
             world.getBlockAt(root.x, root.y, root.z).type shouldBe Material.OAK_LOG
             runtime.validate(city, work)

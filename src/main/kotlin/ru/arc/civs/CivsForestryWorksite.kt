@@ -189,7 +189,8 @@ internal class CivsForestryWorksite(
         forestScans[worker.id]?.takeIf { it.building == building }?.let { scan ->
             return finishForestScan(city, worker, building, world, scan)
         }
-        forestPlants[worker.id]?.takeIf { it.building == building }?.let { plant ->
+        forestPlants[worker.id]?.takeIf { it.building == building &&
+            forestSupply(city, worker, building, it.timber.removeSuffix("_LOG") + "_SAPLING") >= it.roots.size }?.let { plant ->
             val result = finishForestPlant(city, worker, building, world, plant, paths)
             if (result != null || forestPlants[worker.id] != null || spotSearchPending || !forestBudget()) return result
         }
@@ -225,7 +226,8 @@ internal class CivsForestryWorksite(
         }
         // The initial sweep gives existing trees priority. Once covered, alternate an
         // available planting action with harvest/care so natural growth cannot starve it.
-        val plantingTurn = search.next == search.columns.size && search.plantNext && search.planting.isNotEmpty() && !harvestOnly
+        val plantingTurn = search.next == search.columns.size && search.plantNext && search.planting.isNotEmpty() &&
+            supplies >= (if (CivsForestry.large(timber)) 4L else 1L) && !harvestOnly
         if (!plantingTurn) for (point in search.mature.toList()) {
             val result = matureCandidate(point)
             if (result != null || forestScans[worker.id] != null || spotSearchPending || !forestBudget()) return result
@@ -397,7 +399,9 @@ internal class CivsForestryWorksite(
         if (!pending.scan.complete && !pending.scan.failed) return blocked(worker, "searching-work")
         // Only connected, separately grounded trunks prove a surviving neighbour.
         // Shared foliage can also touch a placed log and is not a thinning witness.
-        val thinning = pending.scan.retainedCrownReason == "shared-trunks"
+        // Harvest and planting are independent jobs. Missing a replacement kit must not strand a mature tree.
+        val thinning = pending.scan.retainedCrownReason == "shared-trunks" || !CivsAutonomy.legacyStock(city) &&
+            forestSupply(city, worker, building, pending.scan.timber.removeSuffix("_LOG") + "_SAPLING") < pending.roots.size
         val job = pending.scan.job(pending.roots)?.copy(thinning = thinning,
             seedDeferred = !thinning && CivsAutonomy.legacyStock(city) && city.stock.wood == 0L)
         if (job == null || !CivsForestry.claimClear(city, building.id, job)) {

@@ -1,0 +1,245 @@
+{
+  "version": 1,
+  "title": "ArcCivs Auto mine safe fallback at the existing generator rate",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "Only PHYSICAL Auto quarries with a real pickaxe and safe, loaded, unlocked, unclaimed own storage stance qualify. Ordinary mines and legacy virtual Auto do not receive fallback.",
+    "One exclusive roll per observed 6000ms work session: 95 percent COBBLESTONE, 4 percent COAL, 1 percent RAW_IRON with a suitable tool; an unsuitable iron roll returns COBBLESTONE. This assessment assumes an iron-capable pickaxe.",
+    "Low/base/high assume 150/600/2400 fallback rolls per city-player-day, 0.25/1/4 active hours at the ideal ceiling of 600 rolls/hour, and 1/10/16 cities with one miner each. These are bounded sensitivity scenarios, not measured runtime throughput.",
+    "Before values describe the same blocked physical branch: zero production. The existing fully built generator already has the same 6000ms and 95/4/1 rate. Ordinary native excavation is up to 1800 two-second actions/hour before travel, support, sleep, supplies and meals; it is an alternative activity and is not added to fallback income.",
+    "One existing tool use per fallback receipt including existing Unbreaking and break semantics. Production accumulates in real resident slots, remains limited by bag capacity and ordinary courier/storage transfer, requires real observed arrival/work time, and uses the existing city revision/cycle and inventory journal. Recovery does not roll again.",
+    "Physical discovery receives at most sixteen owner admissions before one fallback work session; a completed persistent refusal can choose it earlier. The physical cursor and predecessor proof are not advanced. Native changes/protection changes reopen branch denials.",
+    "No direct Vault, tokens or player XP changes; no invented money exchange for items. Current EconomyShopGUI SELL/AutoSell remains a separate downstream flow; the owner planned SELL-to-contract transition remains a separate future scenario and no contracts are assumed active.",
+    "At 24 active hours the action ceiling is 14400 rolls/account/day; 95/4/1 expectation is 13680 cobble, 576 coal and 144 raw iron. Multiaccount issuance scales with eligible loaded/staffed cities; no new global item budget exists. Actual search, travel, meals, night, worn tools and finite storage lower this ceiling.",
+    "No price/progression-cost changes, so saving time for a monetary purchase is unknown and not modeled. Purchase-processing-sale arbitrage cannot be quantified without verified current SELL prices and is not claimed zero. No native ore is removed or double counted by fallback."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "auto_fallback_vault",
+          "kind": "mint",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_fallback_tokens",
+          "kind": "mint",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_fallback_player_xp",
+          "kind": "mint",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "1"
+          }
+        }
+      ]
+    },
+    "cobblestone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_fallback_cobblestone",
+          "kind": "item",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.95"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.95"
+          }
+        }
+      ]
+    },
+    "coal": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_fallback_coal",
+          "kind": "item",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.04"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.04"
+          }
+        }
+      ]
+    },
+    "raw_iron": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "auto_fallback_raw_iron",
+          "kind": "item",
+          "source": "CivsWorksites.mine; existing generatorOutput; CivsMineAutoFallbackTest",
+          "basis": "Previously blocked Auto produced zero items; proposed observed six-second fallback uses one exclusive existing 95/4/1 roll.",
+          "before": {
+            "enabled": false,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.01"
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              150,
+              600,
+              2400
+            ],
+            "chance": "0.01"
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

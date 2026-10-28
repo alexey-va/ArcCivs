@@ -14,7 +14,7 @@ import java.util.UUID
 import java.util.logging.Level
 import kotlin.math.roundToInt
 
-/** One observed physical action, committed by the existing item/world receipt. No timed resource grant. */
+/** One observed resident action, committed by the existing item/world receipt; never a background resource grant. */
 data class CivWorldWork(
     val workerId: UUID, val cycle: Long, val buildingId: UUID, val standing: CivPosition,
     val changes: List<CivPlanBlock>, val inputs: Map<String, Long> = emptyMap(),
@@ -138,6 +138,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val retryAt: MutableMap<String, Long> = hashMapOf(), var lastDenial: Need? = null,
         var lastDeniedSection: String? = null,
         val blockedSections: MutableMap<String, Need> = linkedMapOf(),
+        var discoveryAdmissions: Int = 0,
         var unsealedExcavation: CivPosition? = null,
         val legacyBlocks: Map<CivPosition, String?> = emptyMap())
     private val mineExecutions = hashMapOf<UUID, MineExecution>()
@@ -267,7 +268,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 }
             }
         }
-        needs.remove(workerId); workSpots.remove(workerId)
+        needs.remove(workerId)
+        if (completedWork?.let(CivsMineFallback::matches) != true) workSpots.remove(workerId)
         forestry.invalidate(workerId)
         if (completedWork != null) {
             completedWork.changes.forEach { cell ->
@@ -591,7 +593,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val work = proposed?.let { CivsAutonomousWorksites.visual(city, building, it) }
         if (work != null) {
             needs.remove(worker.id)
-            workSpots.remove(worker.id)
+            if (!CivsMineFallback.matches(work)) workSpots.remove(worker.id)
             fieldScan?.selected(work.focus)
             cached[worker.id] = Cached(building, worker, work)
             if (work.remoteWork) reportRemoteWork(city, worker, building, world, work, "ordinary-approach-unavailable", 0)
@@ -835,6 +837,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         requireCivs(work.autonomousVisual == CivsAutonomousWorksites.supports(city, building), "stale-worksite")
         if (work.autonomousVisual) CivsAutonomousWorksites.validate(city, work)
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        if (building.type == BuildingType.QUARRY && work.status == "digging-mine" && work.miningStep == null) {
+            requireCivs(CivsMineFallback.eligible(city, building, worker) && CivsMineFallback.matches(work) &&
+                mineFallbackStanding(city, worker, building, world, work.standing), "stale-worksite")
+        }
         if (building.type == BuildingType.FORESTER && (work.forestry != null || work.changes.isNotEmpty())) {
             try { CivsForestry.validateWork(city, work) { point ->
                 read(city, building, world, point, allowOwn = false)?.blockData?.asString
@@ -1270,6 +1276,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         }
     }
 
+    /** A durable fallback remains subject to native authority without requiring an old actor/cache after restart. */
+    internal fun validateMineFallbackReceiptNative(city: Settlement, work: CivWorldWork) {
+        val worker = city.workers.singleOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
+        val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
+        requireCivs(CivsMineFallback.eligible(city, building, worker) && worker.completedCycles == work.cycle &&
+            CivsMineFallback.matches(work), "stale-worksite")
+        val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unloaded")
+        val control = building.control ?: throw CivsRejection("stale-worksite")
+        requireCivs(world.isChunkLoaded(control.x shr 4, control.z shr 4) &&
+            world.isChunkLoaded(work.standing.x shr 4, work.standing.z shr 4), "chunks-unloaded")
+        requireCivs(mineFallbackStanding(city, worker, building, world, work.standing), "stale-worksite")
+    }
+
     private fun validateMineReceiptBlocks(city: Settlement, work: CivWorldWork) {
         val building = city.building(work.buildingId)?.takeIf { it.type == BuildingType.QUARRY }
             ?: throw CivsRejection("building-not-found")
@@ -1353,14 +1372,55 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 execution.lastDenial = currentNeed(city, worker)
                 execution.lastDeniedSection = section
                 val denial = requireNotNull(execution.lastDenial)
-                if (denial.reason in setOf("mine-thin-cover", "liquid", "adjacent-liquid")) {
+                val invisibleLoadedLava = denial.reason == "line-of-sight-blocked" && denial.blockMaterial == "LAVA" &&
+                    mineBounds[building.id]?.let { bounds ->
+                        ((bounds.min.x shr 4)..(bounds.max.x shr 4)).all { x ->
+                            ((bounds.min.z shr 4)..(bounds.max.z shr 4)).all { z -> world.isChunkLoaded(x, z) }
+                        }
+                    } == true
+                if (denial.reason in setOf("mine-thin-cover", "liquid", "adjacent-liquid", "mine-foreign-block") || invisibleLoadedLava) {
                     // Native safety cannot improve with time. World/protection changes and explicit invalidation reopen it.
                     execution.blockedSections[section] = denial
                 } else execution.retryAt[section] = Bukkit.getCurrentTick().toLong() + 100
                 execution.selected = null
             } }
         }
-        return result
+        val execution = mineExecutions[building.id]
+        if (result != null) { execution?.discoveryAdmissions = 0; return result }
+        if (execution != null && CivsMineFallback.eligible(city, building, worker)) {
+            execution.discoveryAdmissions++
+            val denial = currentNeed(city, worker)
+            val refused = !spotSearchPending && denial?.status in setOf("worksite-protected", "worksite-liquid",
+                "worksite-no-access", "worksite-obstacle", "worksite-unbreakable")
+            if (refused || execution.discoveryAdmissions >= CivsMineFallback.DISCOVERY_ADMISSIONS) {
+                val standing = citizenStorageTarget(city, building, world) {
+                    mineFallbackStanding(city, worker, building, world, it)
+                } ?: return null
+                val roll = java.util.concurrent.ThreadLocalRandom.current().nextInt(100)
+                val output = generatorOutput(roll, roll != 99 || Bukkit.createBlockData("minecraft:iron_ore").isPreferredTool(tool(worker)))
+                execution.discoveryAdmissions = 0
+                return work(worker, building, CivWorkApproach(standing), emptyList(), outputs = mapOf(output to 1L),
+                    status = "digging-mine", duration = CivsMineFallback.DURATION_MILLIS, toolUses = 1)
+            }
+        }
+        return null
+    }
+
+    /** The reserve action uses the real owned workplace and the ordinary observed six-second session. */
+    private fun mineFallbackStanding(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        point: CivPosition): Boolean {
+        val control = building.control ?: return false
+        if (!world.isChunkLoaded(control.x shr 4, control.z shr 4) || locked(city.worldId, control) ||
+            !citizenStorageReady(world, control) || !worldAccess.canMine(world.getBlockAt(control.x, control.y, control.z)) ||
+            !worldAccess.canModify(city.owner, world.getBlockAt(control.x, control.y, control.z)) ||
+            kotlin.math.abs(point.x.toLong() - control.x) + kotlin.math.abs(point.z.toLong() - control.z) != 1L ||
+            kotlin.math.abs(point.y.toLong() - control.y) > 1L || !citizenControlClear(city, point)) return false
+        if (read(city, building, world, point, worker = worker) == null ||
+            read(city, building, world, point.copy(y = point.y + 1), worker = worker) == null ||
+            read(city, building, world, point.copy(y = point.y - 1), worker = worker) == null) return false
+        return worldAccess.canMine(world.getBlockAt(point.x, point.y, point.z)) && citizenStandable(world, point) &&
+            citizenPacketBodyClear(world, CitizenPoint(point.x + .5, point.y.toDouble(), point.z + .5), false) &&
+            citizenCanReachBlock(world, point.location(world).add(.5, 1.62, .5), control)
     }
 
     private fun mineNext(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -2119,7 +2179,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun work(worker: CivWorker, building: CivBuilding, approach: CivWorkApproach, changes: List<CivPlanBlock>,
         inputs: Map<String, Long> = emptyMap(), outputs: Map<String, Long> = emptyMap(), status: String,
         duration: Long = 3_000, miningStep: Long? = null, focus: CivPosition? = null, miningGenerator: Boolean = false,
-        miningAccessStep: Long? = miningStep): CivWorldWork {
+        miningAccessStep: Long? = miningStep, toolUses: Int? = null): CivWorldWork {
         val standing = approach.standing
         val execution = mineExecutions[building.id]?.takeIf { miningStep != null && building.type == BuildingType.QUARRY }
         val geometry = execution?.let { CivsMinePlan.forBuilding(building) }
@@ -2132,10 +2192,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val slots = CivsEquipment.slots(worker)
         val hand = slots[4]?.stack()
         val meta = hand?.itemMeta as? org.bukkit.inventory.meta.Damageable
-        val after = if (meta != null && changes.isNotEmpty() && status != "watering" && status != "fertilizing" &&
+        val after = if (meta != null && (changes.isNotEmpty() || toolUses != null) && status != "watering" && status != "fertilizing" &&
             status != "planting-tree" && !meta.isUnbreakable) {
             val unbreaking = hand.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.UNBREAKING).coerceAtLeast(0)
-            val uses = changes.count { !Bukkit.createBlockData(it.before).material.isAir }
+            val uses = toolUses ?: changes.count { !Bukkit.createBlockData(it.before).material.isAir }
             val wear = (0 until uses).count { java.util.concurrent.ThreadLocalRandom.current().nextLong(unbreaking.toLong() + 1) == 0L }
             val damage = meta.damage + wear
             val worn = if (damage >= hand.type.maxDurability.toInt()) null else {
