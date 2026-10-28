@@ -34,6 +34,8 @@ class CivsCommand(
         mapOf("error" to "terrain-capture-unavailable") },
     private val saveTerrainCapture: (() -> Map<String, Any?>) -> CompletableFuture<Path> = {
         CompletableFuture.failedFuture(CivsRejection("terrain-file-unavailable")) },
+    private val saveSettlementCapture: (UUID, () -> Settlement) -> CompletableFuture<Path> = { _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("settlement-file-unavailable")) },
 ) : CommandExecutor, TabCompleter {
     override fun onCommand(sender: CommandSender, command: Command, label: String, args: Array<out String>): Boolean {
         if (args.firstOrNull() == "hotload") {
@@ -45,6 +47,25 @@ class CivsCommand(
             val receipt = if (error != null) mapOf("schema" to 1, "state" to "failed", "error" to error)
                 else if (args[1] == "prepare") prepareHotload() else hotloadStatus()
             sender.sendMessage(hotloadLine(receipt))
+            return true
+        }
+        if (args.firstOrNull() == "debug-settlement-file") {
+            val city = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+            val error = when {
+                sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
+                args.size != 2 -> "invalid-settlement-arguments"
+                city == null -> "invalid-city-id"
+                hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
+                else -> null
+            }
+            if (error != null) sender.sendMessage(settlementFileLine(failure = CivsRejection(error)))
+            else runCatching {
+                saveSettlementCapture(requireNotNull(city)) {
+                    host.settlements().firstOrNull { it.id == city } ?: throw CivsRejection("city-not-found")
+                }
+            }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { path, failure ->
+                sender.sendMessage(settlementFileLine(path, failure))
+            }
             return true
         }
         if (args.firstOrNull() in setOf("debug-terrain-at", "debug-terrain-file-at")) {
@@ -218,8 +239,14 @@ class CivsCommand(
                 return CivsBlueprints.STYLES.filter { it.startsWith(args[1], true) }
             if (args.size != 1) return emptyList()
             return (listOf("preview") + if (admin) listOf("status", "debug", "reload", "autonomous", "give-resurrection-scroll") +
-                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
+                (if (console) listOf("hotload", "debug-terrain-at", "debug-terrain-file-at", "debug-settlement-file") else emptyList()) else emptyList()).filter { it.startsWith(args[0], true) }
         }
+
+        private fun settlementFileLine(path: Path? = null, failure: Throwable? = null): String =
+            "ARCCIVS_SETTLEMENT_FILE " + Gson().toJson(if (failure == null && path != null)
+                mapOf("schema" to 1, "state" to "saved", "path" to path.toString())
+            else mapOf("schema" to 1, "state" to "failed", "error" to
+                (failure?.let { CivsDiagnostics.rejection(it)?.reason } ?: "settlement-file-write-failed")))
 
         private fun terrainFileLine(path: Path? = null, failure: Throwable? = null): String =
             "ARCCIVS_TERRAIN_FILE " + Gson().toJson(if (failure == null && path != null)
