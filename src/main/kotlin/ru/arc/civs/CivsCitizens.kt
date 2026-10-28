@@ -104,6 +104,7 @@ class CivsCitizens(
         CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) },
     private val immortalResidents: (UUID) -> Boolean = { false },
     private val navigationSettings: CivsNavigationSettings = CivsNavigationSettings(),
+    private val recoveryClock: () -> Long = { System.nanoTime() / 1_000_000L },
 ) : Listener, AutoCloseable {
     internal var residentLifeEnabled = false
     internal var finishResidentMeal: (UUID, CivResidentMeal) -> CompletableFuture<Settlement> = { _, _ ->
@@ -357,9 +358,61 @@ class CivsCitizens(
         }
         actor.cycle.deferWork(now)
         statuses[actor.workerId] = "route-unreachable"
-        escape.step?.let { actor.npc.teleport(it) }
+        if (escape.step != null) actor.npc.teleport(escape.step)
+        else recoverTerrainOverlap(actor, city, now)
         actor.footsteps.reset()
         return true
+    }
+
+    /** An enclosed body may relocate, but its injury, cargo and observed-work receipts stay untouched. */
+    private fun recoverTerrainOverlap(actor: Actor, city: Settlement, now: Long): Boolean {
+        val clock = recoveryClock()
+        if (recoveryBudget == 0 || actor.nextRecoveryAt?.let { clock < it } == true ||
+            actor.lifePending != null || actor.supplyPickup != null || actor.collectedPending != null ||
+            actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return false
+        recoveryBudget--
+        actor.nextRecoveryAt = clock + 5_000L
+        val from = actor.npc.location
+        val origin = CivPosition(from.blockX, from.blockY, from.blockZ)
+        val target = actor.plan.workplace ?: actor.plan.storage
+        val allowed = citizenRouteBuildings(city, actor.plan, target, origin)
+        val safe: (CivPosition) -> Boolean = { recoveryPointSafe(actor, city, it, allowed) }
+        // One proven work stance, 27 local positions, then four existing authored anchors.
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
+        val point = actor.plan.workplace?.takeIf(safe) ?: citizenRecoveryTarget(city, origin, safe)
+            ?: listOfNotNull(worker.homeId?.let(city::building)?.entrance,
+                worker.assignment?.let(city::building)?.entrance,
+                city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }?.entrance, city.center)
+                .distinct().firstOrNull(safe) ?: return false
+        val destination = point.location(actor.npc.world).also { it.yaw = from.yaw; it.pitch = from.pitch }
+        if (!safe(point)) return false
+        cancelRoute(actor, destination)
+        if (!actor.npc.isValid) return false
+        actor.npc.teleport(destination)
+        rememberWorkDetour(actor)
+        actor.terrainObstructedAt = null
+        actor.arrivalWait = null
+        actor.nextRecoveryAt = clock + 60_000L
+        actor.mineRouteEpisode.teleported()
+        CivsDiagnostics.event("citizen_terrain_escape", "city" to city.id, "worker" to actor.workerId,
+            "outcome" to "teleported", "reason" to "no-safe-step", "from" to from.point().coordinates(),
+            "actual" to destination.point().coordinates(), "destination" to point,
+            "injury_pending" to (actor.workerId in pendingHarm), "at" to now)
+        return true
+    }
+
+    private fun recoveryPointSafe(actor: Actor, city: Settlement, point: CivPosition, allowed: Set<UUID>,
+                                  mine: CivBuilding? = null): Boolean {
+        val npc = actor.npc
+        if (!npc.isValid || city.pendingDeletion != null || npc.world.uid != city.worldId || actor.worldId != city.worldId) return false
+        val destination = point.location(npc.world)
+        val body = citizenStandingBounds(destination, npc.scale)
+        for (x in kotlin.math.floor(body.minX).toInt()..kotlin.math.floor(body.maxX).toInt())
+            for (z in kotlin.math.floor(body.minZ).toInt()..kotlin.math.floor(body.maxZ).toInt())
+                if (!citizenRoutePointAllowed(city, allowed, CivPosition(x, point.y, z), mine)) return false
+        return citizenStandable(npc.world, point) && citizenControlClear(city, point) &&
+            citizenPacketBodyClear(npc.world, destination.point(), false) && citizenSleepClear(npc.world, body) &&
+            activeAt(city.id, city.worldId, destination.point(), viewers()) && residentMoveAllowed(actor, destination, destination)
     }
 
     /** Existing overlaps separate by ordinary bounded steps, without teleport recovery or work credit. */
@@ -1433,12 +1486,14 @@ class CivsCitizens(
                 continue
             }
             val city = cityProvider().firstOrNull { it.id == actor.cityId } ?: continue
+            observeArrivalWait(actor, route)
             if (route.trip?.validFor(city) == false) {
                 // Replan from the observed position after a building change; this is not a stuck-route recovery.
                 cancelRoute(actor)
                 continue
             }
             if (route.motion.searching) {
+                if (recoverNavigation(actor, route.target, now, timedOnly = true)) continue
                 if (now >= route.preparationReportAfter) {
                     route.preparationReportAfter = now + 10_000
                     CivsDiagnostics.event("citizen_route_preparing", "city" to actor.cityId,
@@ -1479,6 +1534,7 @@ class CivsCitizens(
                 motion.cancel()
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
+                actor.arrivalWait = null
                 continue
             }
             if (!route.planningReported) {
@@ -1496,6 +1552,8 @@ class CivsCitizens(
                     "intermediate" to route.intermediate)
             }
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
+            if ((motion.failure != null || route.completion != null || route.timedOut(now)) &&
+                recoverNavigation(actor, route.target, now, timedOnly = true)) continue
             if (motion.failure != null) {
                 if (replanNavigation(actor, route, requireNotNull(motion.failure), now)) continue
                 navigationDiagnostic(actor, requireNotNull(motion.failure), route.target, now, terminal = true)
@@ -1519,7 +1577,9 @@ class CivsCitizens(
                 .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             actor.collisionResident = null
             val next = motion.move(before, speed, { from, to -> routeMoveAllowed(actor, from, to) }) { destination ->
-                citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked)
+                citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked).also { opened ->
+                    if (!opened) route.blockedWaypoint = destination.point()
+                }
             }
             if (next != null) {
                 npc.teleport(next)
@@ -1527,6 +1587,7 @@ class CivsCitizens(
                 npc.headYaw = next.yaw
                 npc.pitch = next.pitch
                 val forward = (motion.forwardProgress - route.observedProgress).coerceAtLeast(0.0)
+                if (forward > .000001) actor.arrivalWait = null
                 route.observedProgress = motion.forwardProgress
                 route.progressSinceObservation += forward
                 route.progressSinceReplan += forward
@@ -1954,6 +2015,7 @@ class CivsCitizens(
     }
 
     private fun arriveForWork(actor: Actor, city: Settlement, worker: CivWorker, now: Long) {
+        actor.arrivalWait = null
         actor.route?.takeIf { it.motion.forwardProgress > 0.0 }?.let { route ->
             val actual = actor.npc.location.point()
             CivsDiagnostics.event("citizen_route_arrived", "city" to city.id, "worker" to actor.workerId,
@@ -3243,6 +3305,7 @@ class CivsCitizens(
         if (actor.route?.completion?.cancelReason == "resident-blocked") { pause(actor, status, now); return }
         if (actor.route?.let { it.nativeCollisionTicks > 0 || it.motion.waitingForCollision ||
                 it.previousMotion?.waitingForCollision == true } == true) {
+            actor.arrivalWait = null
             // Native players may legitimately keep a passage closed. Owned residents use bounded retries.
             if (actor.collisionResident != null && actor.residentYield == null &&
                 actor.collisionResident?.let(actors::get)?.residentYield == null &&
@@ -3340,6 +3403,7 @@ class CivsCitizens(
             "from" to route?.from?.coordinates(), "target" to target.point().coordinates(), "actual" to actual.coordinates(),
             "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
             "path_nodes" to route?.motion?.nodeCount, "path_failure" to route?.motion?.failure,
+            "blocked_waypoint" to route?.blockedWaypoint?.coordinates(),
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
             "search_state" to route?.motion?.preparationPhase,
             "preparation_ms" to route?.timing?.preparationElapsed(now), "travel_ms" to route?.timing?.elapsed(now),
@@ -3454,20 +3518,41 @@ class CivsCitizens(
             resolvedTarget(actor, target) == storage.entrance
     }
 
-    /** A proven failed route may recover to a freshly validated loaded endpoint, never into a wall. */
-    private fun recoverNavigation(actor: Actor, target: Location, now: Long, idleAnchor: CivPosition? = null): Boolean {
+    /** Only accepted physical travel resets this deadline; capture/search retries may reread the same terrain. */
+    private fun observeArrivalWait(actor: Actor, route: Route): Boolean {
+        val clock = recoveryClock()
+        if (route.motion.waitingForCollision || route.nativeCollisionTicks > 0 || actor.collisionResident != null ||
+            route.completion?.cancelReason in setOf("resident-blocked", "player-blocked")) {
+            actor.arrivalWait = null
+            return false
+        }
+        val previous = actor.arrivalWait
+        val wait = previous?.takeIf { it.token == actor.plan.token && it.target == route.authored &&
+            it.cargoId == actor.plan.courier?.cargo?.id && it.carrying == actor.plan.courier?.carrying }
+            ?: ArrivalWait(actor.plan.token, route.authored, actor.plan.courier?.cargo?.id, actor.plan.courier?.carrying, clock)
+                .also { actor.arrivalWait = it }
+        return clock - wait.progressAt >= 60_000L
+    }
+
+    /** A failed or expired arrival may recover to a freshly validated loaded endpoint, never into a wall. */
+    private fun recoverNavigation(actor: Actor, target: Location, now: Long, idleAnchor: CivPosition? = null,
+                                  timedOnly: Boolean = false): Boolean {
         val failed = actor.route ?: return false
-        if (actor.plan.worldWork?.upkeep != null) return false
-        if (actor.plan.token.constructionId != null && idleAnchor == null && !actor.sheltering &&
+        val recoveryAnchor = failed.idleAnchor ?: idleAnchor
+        val timedOut = observeArrivalWait(actor, failed)
+        if (timedOnly && !timedOut) return false
+        if (actor.plan.worldWork?.upkeep != null && !timedOut) return false
+        if (actor.plan.token.constructionId != null && recoveryAnchor == null && !actor.sheltering &&
             !actor.returningToWarehouse && actor.foodSource == null &&
-            actor.cycle.phase in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING, CitizenPhase.READY)) return false
-        // Planning latency, denied passages and player obstruction never authorize a recovery teleport.
-        if (failed.motion.searching || failed.motion.waitingForCollision || failed.nativeCollisionTicks > 0 ||
-            now < actor.nextRecoveryAt || actor.attacker != null) return false
-        if (failed.motion.failure in PREPARATION_FAILURES) return false
-        if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now)) return false
-        if (recoveryBudget == 0 || idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
-            actor.plan.idleReason !in listOf(null, "placing") ||
+            actor.cycle.phase in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING, CitizenPhase.READY) && !timedOut) return false
+        // A stalled planner or denied passage may expire; player and resident obstruction remain authoritative.
+        if (failed.motion.searching && !timedOut || failed.motion.waitingForCollision || failed.nativeCollisionTicks > 0 ||
+            actor.nextRecoveryAt?.let { recoveryClock() < it } == true || actor.attacker != null ||
+            actor.workerId in pendingHarm || actor.lifePending != null || actor.supplyPickup != null || actor.collectedPending != null) return false
+        if (failed.motion.failure in PREPARATION_FAILURES && (!timedOut || failed.motion.failure in setOf("chunk-unloaded", "cancelled"))) return false
+        if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now) && !timedOut) return false
+        if (recoveryBudget == 0 || recoveryAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
+            actor.plan.idleReason !in listOf(null, "placing") && !timedOut ||
             actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return false
         val city = cityProvider().firstOrNull { it.id == actor.cityId && it.pendingDeletion == null } ?: return false
         val entity = actor.npc
@@ -3475,9 +3560,10 @@ class CivsCitizens(
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return false
         val home = if (actor.sheltering) citizenHomeBuilding(city, worker) ?: return false else null
         val authored = when {
+            timedOut -> failed.authored // A work cycle may currently be visiting food, supplies or leisure.
             actor.sheltering -> actor.shelter ?: return false
             actor.returningToWarehouse -> actor.plan.storage
-            idleAnchor != null -> idleAnchor
+            recoveryAnchor != null -> recoveryAnchor
             actor.cycle.phase == CitizenPhase.RETURNING -> actor.plan.travelTarget(CitizenPhase.RETURNING)
             actor.cycle.phase in setOf(CitizenPhase.TO_WORK, CitizenPhase.WORKING) ||
                 actor.cycle.phase == CitizenPhase.READY && actor.plan.completeAtWorkplace -> actor.plan.workplace ?: return false
@@ -3485,15 +3571,10 @@ class CivsCitizens(
         }
         recoveryBudget--
         citizenRotateAfterAdmission(actors, actor.workerId)
-        val viewers = viewers()
         val safe: (CivPosition) -> Boolean = { candidate ->
-            citizenStandable(entity.world, candidate) && citizenPacketBodyClear(entity.world, candidate.point(), false) &&
-                citizenControlClear(city, candidate) && citizenRoutePointAllowed(city, failed.allowedBuildings, candidate,
-                    routeMine(actor, city).takeIf { idleAnchor == null }) &&
+            recoveryPointSafe(actor, city, candidate, failed.allowedBuildings, routeMine(actor, city).takeIf { recoveryAnchor == null }) &&
                 (home == null || home.bounds.contains(candidate.x, candidate.y, candidate.z)) &&
-                (idleAnchor == null || citizenWithinIdleArea(idleAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings)) &&
-                activeAt(city.id, city.worldId, candidate.point(), viewers) &&
-                candidate.location(entity.world).let { residentMoveAllowed(actor, it, it) }
+                (recoveryAnchor == null || citizenWithinIdleArea(recoveryAnchor, candidate.point()) && citizenIdleTerrain(entity.world, candidate, city.buildings))
         }
         val storage = storageForTarget(actor, city, authored)
         val point = (when {
@@ -3510,14 +3591,15 @@ class CivsCitizens(
         destination.yaw = previous.yaw
         cancelRoute(actor, destination)
         if (actor.sheltering) actor.shelter = point
-        else if (idleAnchor == null) actor.targets[authored] = point
+        else if (recoveryAnchor == null) actor.targets[authored] = point
         entity.teleport(destination)
         actor.observedYaw = destination.yaw
         actor.navigationEpisodeProgress = 0.0
+        actor.arrivalWait = null
         actor.mineRouteEpisode.teleported()
-        actor.nextRecoveryAt = now + 60_000
+        actor.nextRecoveryAt = recoveryClock() + 60_000L
         actor.footsteps.reset()
-        if (idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse) {
+        if (!timedOut && recoveryAnchor == null && !actor.sheltering && !actor.returningToWarehouse) {
             if (!arrivedAt(actor, city, entity.world, authored)) return false
             arriveForWork(actor, city, worker, now)
         }
@@ -4044,6 +4126,7 @@ class CivsCitizens(
         var harmLogAfter = 0L
         var reportHarmCompletion = false
         var terrainObstructedAt: Long? = null
+        var arrivalWait: ArrivalWait? = null
         var equipmentItems: List<CivResidentItem?>? = null
         var equipmentType: BuildingType? = null
         var careItem: Material? = null
@@ -4074,7 +4157,7 @@ class CivsCitizens(
         var lifePending: UUID? = null
         var lifeRetryAt = 0L
         var restVisit: Int? = null
-        var nextRecoveryAt = 0L
+        var nextRecoveryAt: Long? = null
         var attacker: Monster? = null
         var alarmSheltering = false
         var patrolTarget: CivPosition? = null
@@ -4116,6 +4199,7 @@ class CivsCitizens(
         val timing = CitizenRouteTiming(startedAt, timeoutMillis)
         var preparationReportAfter = startedAt + 2_000
         var preparationRetryAt: Long? = null
+        var blockedWaypoint: CitizenPoint? = null
 
         fun motionReady(tick: Long, now: Long) {
             timing.ready(now)
@@ -4128,6 +4212,8 @@ class CivsCitizens(
         fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
     }
     private data class ResidentAlarm(val monster: Monster, val until: Long)
+    private data class ArrivalWait(val token: CitizenToken, val target: CivPosition, val cargoId: UUID?,
+                                   val carrying: Boolean?, val progressAt: Long)
 
     private data class ResidentMealVisit(val plan: CivResidentMeal, val target: CivPosition, val startedAt: Long, val building: CivBuilding,
         var arrivedAt: Long? = null, var observedAt: Long = 0, var gestureAt: Long = 0,
@@ -4693,12 +4779,12 @@ internal fun citizenOpenRouteDoor(city: Settlement, allowed: Set<UUID>, at: Loca
     val blocks = passage() ?: return false
     val materials = blocks.map { it.type }
     val lower = blocks.first()
-    if (at.distanceSquared(Location(world, lower.x + 0.5, lower.y.toDouble(), lower.z + 0.5)) > 2.5 * 2.5 ||
-        blocks.any { block ->
+    if (blocks.any { block ->
             val p = CivPosition(block.x, block.y, block.z)
             !citizenDoorAllowed(city, allowed, p) || blocked(world.uid, p)
         }) return false
     if (blocks.all { citizenRouteOpenable(it.blockData)?.isOpen == true }) return true
+    if (at.distanceSquared(Location(world, lower.x + 0.5, lower.y.toDouble(), lower.z + 0.5)) > 2.5 * 2.5) return false
     val event = CivsResidentOpenDoorEvent(city.id, lower)
     Bukkit.getPluginManager().callEvent(event)
     if (event.isCancelled) return false

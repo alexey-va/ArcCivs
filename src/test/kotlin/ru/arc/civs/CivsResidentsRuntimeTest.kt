@@ -1214,7 +1214,7 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a field route queued beyond ninety seconds keeps its identity and gets its full movement deadline after planning") {
+    test("a field route queued below the arrival deadline keeps its identity and full movement deadline after planning") {
         residentRuntime { h ->
             val farm = h.assignFarm()
             val actor = h.owner.collisionActors().single()
@@ -1241,9 +1241,8 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.navigate(advanceMillis = 0)
                 }
                 h.pendingNavigationWorkers shouldBe 1
-                repeat(60) {
-                    // Hold the actual submitted planner task beyond both the old field
-                    // deadline and ninety seconds, while native ticks and work pulses continue.
+                repeat(24) {
+                    // An owned planner keeps its identity before the monotonic arrival timeout.
                     h.navigate(advanceMillis = 2_000)
                     h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
                     (h.routeIdentity() === route) shouldBe true
@@ -1252,7 +1251,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                     h.teleports shouldBe teleports
                     h.deliveries shouldBe 0
                 }
-                h.navigationNow shouldBe 122_000L
+                h.navigationNow shouldBe 50_000L
                 h.pendingNavigationWorkers shouldBe 1
                 h.releaseNavigation()
                 var arrived = false
@@ -5043,6 +5042,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     var teleports = 0
         private set
     var navigationNow: Long? = null
+    var recoveryMillis = 0L
     var holdNavigation = false
     var navigationRejections = 0
     var passageLocked = false
@@ -5227,6 +5227,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                 if (holdNavigation) navigationWorkers += task else task.run()
             },
             navigationClock = { navigationNow ?: System.currentTimeMillis() },
+            recoveryClock = { recoveryMillis },
             workPositionFailed = { city, worker, failed ->
                 failedWorkPositions += failed
                 onWorkPositionFailed(city, worker, failed)
@@ -5356,6 +5357,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     fun constructionTarget(): CivPosition = requireNotNull(citizenConstructionTarget(city, world, requireNotNull(constructionSite())))
     fun navigate(advanceMillis: Long = 50L) {
         navigationNow = navigationNow?.plus(advanceMillis)
+        recoveryMillis += advanceMillis
         paper.performTicks(1)
         owner.activateNavigating()
     }

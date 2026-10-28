@@ -696,7 +696,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val timber = requireNotNull(CivsProduction.material(building))
         val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
             forestCareRoots(city, building, world, focus, timber) ?: return changed()
-            else work.changes.map { it.position }
+            else CivsForestry.plantingRoots(work)
         if (!CivsForestry.crownClear(city, roots, timber, CivsForestry.paths(city, forestryPaths(city)))) return changed()
         rejected.retryAt?.let { retryAt ->
             if (city.forestryJobs?.containsKey(building.id.toString()) != true) {
@@ -864,7 +864,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val timber = work.forestry?.job?.timber ?: requireNotNull(CivsProduction.material(building))
                 val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
                     forestCareRoots(city, building, world, requireNotNull(work.focus), timber)
-                        ?: throw CivsRejection("stale-worksite") else work.changes.map { it.position }
+                        ?: throw CivsRejection("stale-worksite") else CivsForestry.plantingRoots(work)
                 requireCivs(CivsForestry.crownClear(city, roots, timber, CivsForestry.paths(city, forestryPaths(city))), "stale-worksite")
             }
         }
@@ -1419,12 +1419,22 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 }
             }
             if (!forestBudget()) return blocked(worker, "searching-work")
-            val ground = forestRead(city, building, world, column.copy(y = surface))
-            val air = forestRead(city, building, world, column.copy(y = surface + 1))
+            var ground = forestRead(city, building, world, column.copy(y = surface))
+            var planting = forestRead(city, building, world, column.copy(y = surface + 1))
+            // WORLD_SURFACE sees grass; the planting receipt owns its exact replacement, including both tall halves.
+            if (ground?.blockData?.asString == "minecraft:tall_grass[half=upper]") {
+                planting = forestRead(city, building, world, column.copy(y = surface - 1))
+                    ?.takeIf { it.blockData.asString == "minecraft:tall_grass[half=lower]" }
+                ground = forestRead(city, building, world, column.copy(y = surface - 2))
+            } else if (ground?.type == Material.SHORT_GRASS) {
+                planting = ground
+                ground = forestRead(city, building, world, column.copy(y = surface - 1))
+            }
             if (!forestBudget()) return blocked(worker, "searching-work")
             nextColumn()
-            if (ground?.type?.name in CivsForestry.soils && ground?.type != Material.COARSE_DIRT && air?.type?.isAir == true)
-                search.planting += position(air)
+            if (ground?.type?.name in CivsForestry.soils && ground?.type != Material.COARSE_DIRT &&
+                planting?.blockData?.asString?.let(CivsForestry::plantingRootState) == true)
+                search.planting += position(planting)
             // Do not spend a second full sweep before using the retained candidates.
             if (search.next == search.columns.size && !harvestOnly) break
         }
@@ -1610,14 +1620,21 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             if (city.autonomy != null) forestPlants.remove(worker.id)
             return blocked(worker, "waiting-saplings", sapling, pending.roots.size.toLong())
         }
+        val cleared = mutableListOf<CivPlanBlock>()
         val blocks = pending.roots.map { point ->
             val block = read(city, building, world, point, allowOwn = false) ?: return unavailable(temporary = true)
             val soil = read(city, building, world, point.copy(y = point.y - 1), allowOwn = false)
                 ?: return unavailable(temporary = true)
-            if (!block.type.isAir || soil.type.name !in CivsForestry.soils) return unavailable()
+            if (!CivsForestry.plantingRootState(block.blockData.asString) || soil.type.name !in CivsForestry.soils) return unavailable()
+            val tall = block.blockData.asString == "minecraft:tall_grass[half=lower]"
             for (height in 1..4) {
                 val headroom = read(city, building, world, point.copy(y = point.y + height), allowOwn = false)
                     ?: return unavailable(temporary = true)
+                if (tall && height == 1) {
+                    if (headroom.blockData.asString != "minecraft:tall_grass[half=upper]") return unavailable()
+                    cleared += change(headroom, "minecraft:air")
+                    continue
+                }
                 if (!headroom.type.isAir && headroom.type !in WEEDS && !headroom.type.name.endsWith("_LEAVES")) return unavailable()
             }
             block
@@ -1627,7 +1644,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             return null
         }
         forestPlants.remove(worker.id)
-        return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) },
+        return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) } + cleared,
             mapOf(sapling to pending.roots.size.toLong()), status = "planting-tree", focus = pending.roots.first())
             .let { if (city.autonomy != null) it.copy(equipmentAfter = null) else it }
     }
@@ -1684,7 +1701,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             else read(city, building, world, point, allowOwn = false)
         for (dx in listOf(0, -1)) for (dz in listOf(0, -1)) {
             val cells = (0..1).flatMap { x -> (0..1).map { z -> root.copy(x = root.x + dx + x, z = root.z + dz + z) } }
-            if (cells.all { point -> at(point)?.type == material &&
+            if (cells.all { point -> at(point)?.let { if (material == Material.AIR)
+                    CivsForestry.plantingRootState(it.blockData.asString) else it.type == material } == true &&
                     at(point.copy(y = point.y - 1))?.type?.name in CivsForestry.soils }) return cells
         }
         return null
@@ -2604,7 +2622,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val slots = CivsEquipment.slots(worker)
         val hand = slots[4]?.stack()
         val meta = hand?.itemMeta as? org.bukkit.inventory.meta.Damageable
-        val after = if (meta != null && changes.isNotEmpty() && status != "watering" && status != "fertilizing" && !meta.isUnbreakable) {
+        val after = if (meta != null && changes.isNotEmpty() && status != "watering" && status != "fertilizing" &&
+            status != "planting-tree" && !meta.isUnbreakable) {
             val unbreaking = hand.getEnchantmentLevel(org.bukkit.enchantments.Enchantment.UNBREAKING).coerceAtLeast(0)
             val uses = changes.count { !Bukkit.createBlockData(it.before).material.isAir }
             val wear = (0 until uses).count { java.util.concurrent.ThreadLocalRandom.current().nextLong(unbreaking.toLong() + 1) == 0L }

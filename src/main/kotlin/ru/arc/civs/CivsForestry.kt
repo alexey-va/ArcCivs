@@ -138,6 +138,11 @@ internal object CivsForestry {
     }
     fun saplingState(sapling: String, stage: Int = 0): String = "minecraft:${sapling.lowercase()}[stage=$stage]"
     fun care(work: CivWorldWork): Boolean = work.status == "watering" && work.forestry == null
+    fun plantingRootState(state: String): Boolean = material(state) in setOf("AIR", "CAVE_AIR", "VOID_AIR") ||
+        state == "minecraft:short_grass" || state == "minecraft:tall_grass[half=lower]"
+    fun plantingRoots(work: CivWorldWork): List<CivPosition> = work.changes.filter {
+        material(it.after).endsWith("_SAPLING")
+    }.map { it.position }
 
     fun large(timber: String): Boolean = timber in setOf("SPRUCE_LOG", "JUNGLE_LOG", "DARK_OAK_LOG")
 
@@ -261,11 +266,17 @@ internal object CivsForestry {
                 validateCare(building, work)
                 return
             }
-            require(work.changes.size in setOf(1, 4) && work.outputs.isEmpty())
+            require(work.outputs.isEmpty())
             val sapling = requireNotNull(CivsProduction.material(building)).removeSuffix("_LOG") + "_SAPLING"
-            require(work.inputs == mapOf(sapling to work.changes.size.toLong()))
-            require(work.changes.all { material(it.before) in setOf("AIR", "CAVE_AIR", "VOID_AIR") && it.after == saplingState(sapling) })
-            val roots = work.changes.map { it.position }
+            val planted = work.changes.filter { it.after == saplingState(sapling) }
+            require(planted.size in setOf(1, 4) && planted.all { plantingRootState(it.before) })
+            require(work.inputs == mapOf(sapling to planted.size.toLong()))
+            val cleared = planted.filter { it.before == "minecraft:tall_grass[half=lower]" }
+                .mapTo(hashSetOf()) { it.position.copy(y = it.position.y + 1) }
+            require(work.changes.size == planted.size + cleared.size && work.changes.map { it.position }.distinct().size == work.changes.size)
+            require(work.changes.all { it in planted || it.position in cleared &&
+                it.before == "minecraft:tall_grass[half=upper]" && it.after == "minecraft:air" })
+            val roots = planted.map { it.position }
             require(roots.distinct().size == roots.size && roots.all { it.y == roots.first().y })
             require(if (large(sapling.removeSuffix("_SAPLING") + "_LOG")) roots.size == 4 &&
                 roots.maxOf { it.x } - roots.minOf { it.x } == 1 && roots.maxOf { it.z } - roots.minOf { it.z } == 1 else roots.size == 1)

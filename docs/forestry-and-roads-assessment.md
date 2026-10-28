@@ -6,6 +6,16 @@ For a level-2 mill, the old nominal interval was 60 seconds, doubled at hunger 6
 
 The calculator uses one hypothetical mill and 1/2/4 active hours per day, with 6/24/72 completed grown trees. These are assumptions, not telemetry. A four-seedling grove starting empty needs one initial planting plus one reservation per harvested tree.
 
+The 2026-10-28 grass-placement correction permits an existing planting operation
+on short grass or a valid two-block tall-grass plant. It does not change the
+per-plot WOOD cost, sapling consumption, harvest output, work duration, or native
+drop rules; the removed grass adds no drop and planting does not wear the axe.
+Direct changes remain zero Vault, zero tokens and zero player XP. Previously
+unusable grassy sites can increase the realised rate of planting and its indirect
+native-sapling flow, within the existing ideal-rate ceiling below; the actual
+increase is unmeasured. The SELL figure below is the historical 2026-10-25 disk
+observation, not a new live quote or a claim about current sales.
+
 | Scenario | Previous gross WOOD potential | New completion WOOD | New seed WOOD debit | New net WOOD potential |
 | --- | ---: | ---: | ---: | ---: |
 | Low | 480 | 48 | 7 | 41 |

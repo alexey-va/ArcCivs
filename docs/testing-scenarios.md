@@ -11,6 +11,8 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsNavigationTerrainTest' \
   --tests 'ru.arc.civs.CivsResidentNavigationTest' \
   --tests 'ru.arc.civs.CivsOpenDoorCornerRegressionTest' \
+  --tests 'ru.arc.civs.CivsLongDoorApproachTest' \
+  --tests 'ru.arc.civs.CivsResidentRecoveryRuntimeTest' \
   --tests 'ru.arc.civs.CivsResidentWorkReachTest' \
   --tests 'ru.arc.civs.CivsResidentCollisionsTest' \
   --tests 'ru.arc.civs.CivsResidentJourneyNavigationTest' \
@@ -37,6 +39,19 @@ native open-door collision panel. It checks actual packet movement for open,
 closed, and mirrored door approaches, plus centered controls. A required
 same-height first-cell center is retained without changing clear direct routes,
 door-opening behavior, collision tolerances, or search budgets.
+
+The long-door regression follows a clear diagonal to an already open door
+4.47 blocks away. The old route failed before movement because the opener's
+interaction range was applied to an open door. A protected footprint and a
+world lock still deny that passage; closed doors still require a nearby opening.
+
+The resident recovery runtime cases exercise an enclosed builder and a courier
+retrying the same denied passage, including 60-second monotonic expiry across
+route retries, a cancelled delayed search result and a pending cargo receipt.
+Safe destinations require loaded chunks, support, collision clearance and
+existing territory and occupancy rules. Actual movement or a new cargo resets
+the wait; unavailable endpoints do not teleport or grant work. The portable
+builder geometry is translated and synthetic; it is not a live-world capture.
 
 The meal-elevation regression builds an explicit three-block staircase and an
 upstairs food barrel. Both ordinary and autonomous residents must walk to it,
@@ -73,9 +88,19 @@ still gets a fresh fork, and each fork keeps the existing 2 GB heap limit.
   --tests 'ru.arc.civs.CivsAutonomousPlacementTest' \
   --tests 'ru.arc.civs.CivsAutonomousTerraformTest' \
   --tests 'ru.arc.civs.CivsSettlementLayoutTest' \
+  --tests 'ru.arc.civs.CivsForestryGrassPlantingTest' \
+  --tests 'ru.arc.civs.CivsForestryPlantingFairnessTest' \
   --tests 'ru.arc.civs.scenarios.Auto2WorksitesScenarioTest' \
   --tests 'ru.arc.civs.scenarios.CapturedNativeLowerOverlayTest'
 ```
+
+The grass planting suite checks ordinary and large-tree plots on short and tall
+grass, complete tall-grass pairs, exact sapling payment and zero grass drops or
+tool wear. It follows planned work through validation, receipt, native changes
+and replay, with several seeded plots and retained road/crown spacing. Missing
+saplings, unavailable sites, protected or changed upper halves and unrelated
+vegetation remain rejected. Its deterministic clock advances through the real
+forest slice and read quotas; it does not lower production budgets.
 
 `CivsAuto2PlanningRegressionTest` loads pinned fixtures from
 `src/test/resources/scenarios/auto2-forest-city-geometry.json` and
