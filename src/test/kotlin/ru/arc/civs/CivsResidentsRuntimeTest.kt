@@ -5026,12 +5026,12 @@ internal fun residentRuntime(useOwnedNavigationExecutor: Boolean = false, worker
     }
 }
 
-internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigationExecutor: Boolean,
+internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val useOwnedNavigationExecutor: Boolean,
     val workerId: UUID, worldFactory: () -> ResidentRuntimeWorld = ::ResidentRuntimeWorld) : AutoCloseable {
     private val plugin = paper.createSimplePlugin("ResidentsTest")
-    private val navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+    private var navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private val navigationSettings = CivsNavigationSettings()
-    private val navigationWork = BudgetedTaskQueue(navigationTasks, navigationSettings.nativeOperationsPerTick,
+    private var navigationWork = BudgetedTaskQueue(navigationTasks, navigationSettings.nativeOperationsPerTick,
         (navigationSettings.nativeBudgetMillis * 1_000_000).toLong(), nanoTime = { 0L })
     private val navigationWorkers = ArrayDeque<Runnable>()
     val logger get() = plugin.logger
@@ -5089,7 +5089,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigat
     private var damage = 0.0
     var city: Settlement
     val otherCities = mutableListOf<Settlement>()
-    val owner: CivsCitizens
+    var owner: CivsCitizens
+        private set
     val visualHealth: Double get() = owner.hologramSnapshots().single().health
 
     init {
@@ -5158,7 +5159,24 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigat
             }
         }
         every { packets.closeAsync() } returns CompletableFuture.completedFuture(null)
-        owner = CivsCitizens(plugin, { if (viewing) listOf(city) + otherCities else emptyList() },
+        owner = createOwner()
+        owner.pulse(1_000)
+        owner.activeCount() shouldBe 1
+    }
+
+    /** Fresh component generation; admission chooses its normal origin, never saved runtime feet. */
+    fun recreateResidents() {
+        owner.closeAsync().join()
+        navigationWork.close()
+        navigationTasks.close()
+        navigationWorkers.clear()
+        navigationTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
+        navigationWork = BudgetedTaskQueue(navigationTasks, navigationSettings.nativeOperationsPerTick,
+            (navigationSettings.nativeBudgetMillis * 1_000_000).toLong(), nanoTime = { 0L })
+        owner = createOwner()
+    }
+
+    private fun createOwner(): CivsCitizens = CivsCitizens(plugin, { if (viewing) listOf(city) + otherCities else emptyList() },
             { _, deliveredWorker, assignment, cycle, nextAt, order, _ ->
                 val token = CitizenToken(assignment, cycle, nextAt, order)
                 val commit = workerDelivery
@@ -5217,10 +5235,6 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, useOwnedNavigat
             pickupGround = { _, _, ids -> groundRequests += ids; pendingGroundCollection },
             depositCollected = { _, _, point -> homeDeposits += point; pendingHomeDeposit },
             immortalResidents = { id -> id == city.id && city.settings?.immortalResidents == true && testingAllowed })
-        owner.pulse(1_000)
-        owner.activeCount() shouldBe 1
-    }
-
     fun prepareDiningSeat(guard: Boolean = false): PacketPlayerNpc {
         navigationNow = 3_000
         if (guard) for (x in -1..1) world.loadChunk(x, -2)

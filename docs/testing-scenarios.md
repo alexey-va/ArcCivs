@@ -14,6 +14,7 @@ Gradle's JUnit class filter and do not activate the opt-in private replays.
   --tests 'ru.arc.civs.CivsResidentWorkReachTest' \
   --tests 'ru.arc.civs.CivsResidentCollisionsTest' \
   --tests 'ru.arc.civs.CivsResidentJourneyNavigationTest' \
+  --tests 'ru.arc.civs.CivsResidentRestartJourneyTest' \
   --tests 'ru.arc.civs.CivsPathsTest' \
   --tests 'ru.arc.civs.CivsMineExitNavigationTest' \
   --tests 'ru.arc.civs.CivsMineAccessRegressionTest' \
@@ -85,7 +86,7 @@ portable worksite replay uses the checked-in `auto2-worksites.json` fixture.
 None of these tests needs private schematics, saved Auto2 state, or network
 uploads/downloads.
 
-`CapturedNativeLowerOverlayTest` has eleven portable contract cases for joining
+`CapturedNativeLowerOverlayTest` has fifteen portable contract cases for joining
 factual lower captures: unchanged public cells and strict unknown space,
 duplicate windows, city/world mismatches, crop bounds, loaded data, exact
 colliders, contradictory overlapping observations, and supplemental state
@@ -155,6 +156,25 @@ Recorded verification from the task owner's session on 2026-10-27 22:58 UTC
 placement, terraform, and layout classes passed 70/70 combined (2 + 22 + 28 +
 18). These are recorded run results, not a guarantee for future runs.
 
+The forest position-witness regression has eight controlled geometries. Three
+fail on the old source: far-to-near movement, another safe angle, and reopening
+one deferred tree while retaining another. The fix keeps the same zone and
+cursors, revalidating only deferred targets now within reach after a standing-cell
+change. Walls, distant movement and movement within the same cell remain negative
+controls; unchanged positions cause no new rays. The eight cases and the 80
+existing forestry/context/native cases passed together. This isolates a cache
+dependency and does not identify the geometry of an uncaptured live tree.
+
+`CivsResidentRestartJourneyTest` recreates Citizens, navigation, Store and Service
+in the same fixture world/JVM, loading actual city and journal files. Three cases
+cover mid-walk restart, recovery of an actual pending receipt with a late callback
+to the retired owner, and a new obstruction. Fresh admission must walk more than
+eight metres through clear swept body positions, complete observed work and save
+one result; a duplicate token cannot add credit. NPC feet and routes are not
+claimed to persist. These cases and the existing runtime/journey/worksite cases
+passed 158/158. This is component recreation, not an OS crash or native Paper
+acceptance.
+
 ## Coverage map
 
 | Area | Existing coverage | Remaining boundary |
@@ -165,13 +185,13 @@ placement, terraform, and layout classes passed 70/70 combined (2 + 22 + 28 +
 | Fences, gates, and doors | Closed gates can be treated as passages and opened during packet motion; tall fences/gates are swept for collision. Door-corner collision and route replanning after shape changes are covered. | No live-server/client acceptance is implied by these helper tests. |
 | Mine exits and work reach | `CivsMineExitNavigationTest`, `CivsMineAccessRegressionTest`, `CivsMineWorkStandingTest`, and `CivsMineRouteEpisodeTest` cover ladders, headroom, supported exits, standing positions, and recovery behavior. | Mine-exit coverage does not prove every uncaptured stair or shaft layout. |
 | Chunks, cache, and budgets | Navigation suites cover unknown chunk frontiers, unload/reload invalidation, world separation, bounded cache behavior, route budgets, cancellation, and replanning. The new journey class unloads/reloads the active chunk in both travel directions and continues after replanning. | These tests exercise test-owned chunk/cache seams, not actual Paper chunk streaming under a live client. |
-| Dynamic obstruction and stuck recovery | Resident navigation/runtime tests cover inserted walls, changed stair geometry, occupied routes, waits, detours, progress accounting, repeated mine-route episodes, and recovery. | A full process restart in the middle of a resident walking episode is not covered. |
-| Food interruption and duplicate durability | Resident runtime tests invalidate meal work when its assumptions change and resume jobs without granting travel credit. Meal-elevation cases require actual stair travel and one existing meal debit while retaining ordinary leisure bounds. Road and mine tests replay durable receipts and check for duplicate work; resident delivery tests cover an exactly-once arrival in-process. | Walking episode + arrival + duplicate durable receipt across a process restart remains an uncovered combination. |
+| Dynamic obstruction and stuck recovery | Resident navigation/runtime tests cover inserted walls, changed stair geometry, occupied routes, waits, detours, progress accounting, repeated mine-route episodes, and recovery. Component-recreation cases start again from fresh admission and bypass a newly inserted obstacle. | A full OS/process crash in the middle of walking is not covered. |
+| Food interruption and duplicate durability | Resident runtime tests invalidate meal work when its assumptions change and resume jobs without granting travel credit. Meal-elevation cases require actual stair travel and one existing meal debit while retaining ordinary leisure bounds. Road/mine tests replay receipts; component recreation checks real arrival, persisted receipt recovery, an old-owner callback and duplicate-token rejection. | The combined sequence has component-level coverage, not an actual process-crash or native Paper run. |
 
 The two recent journey gaps are now covered by portable cases: mid-journey
 chunk unload/reload and the top-slab-to-bottom-slab-to-stair/deck transition.
-The remaining concrete gap is crash/restart through the complete walking,
-arrival, and duplicate-receipt sequence.
+Component recreation now covers walking, arrival and duplicate receipt recovery;
+the remaining boundary is a full process crash on native Paper.
 
 ## Opt-in local replays with private inputs
 

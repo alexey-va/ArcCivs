@@ -931,7 +931,7 @@ class CivsForestryTest : FunSpec({
                     for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         CivsStorage(plugin) { emptyArray() }.use { storage ->
-                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                             runtime.pulse(listOf(city))
                             val before = runtime.debug(setOf(worker.id))
                             val entry = (before["entries"] as List<*>).single() as Map<*, *>
@@ -1750,7 +1750,7 @@ class CivsForestryTest : FunSpec({
                 val city = spatialCity(world.uid, listOf(mill), worker)
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> mapOf("${timber}_SAPLING" to 4L) }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> mapOf("${timber}_SAPLING" to 4L) }, { _, _ -> false }, nanoTime = { 0L })
                     repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val plan = requireNotNull(runtime.plan(city, worker))
                     plan.changes.size shouldBe 4
@@ -1777,7 +1777,7 @@ class CivsForestryTest : FunSpec({
                 val city = spatialCity(world.uid, listOf(mill), worker).copy(inventory = null, autonomy = CivAutonomy(), stock = Stock())
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                     repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val plan = requireNotNull(runtime.plan(city, worker))
                     plan.status shouldBe "planting-tree"
@@ -1846,7 +1846,7 @@ class CivsForestryTest : FunSpec({
                     .copy(inventory = null, autonomy = CivAutonomy(), stock = Stock(20))
                 for (x in -4..4) for (z in -4..4) world.loadChunk(x, z)
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                     repeat(2_000) { if (runtime.plan(city, worker) == null) runtime.pulse(listOf(city)) }
                     val first = requireNotNull(runtime.plan(city, worker))
                     first.status shouldBe "planting-tree"
@@ -1903,6 +1903,159 @@ private fun forestryCapture(): Triple<CivsForestry.Scan, Map<CivPosition, String
         "minecraft:spruce_leaves[distance=1,persistent=false,waterlogged=false]")
     return Triple(CivsForestry.Scan(roots.first(), "SPRUCE_LOG", roots), cells, roots)
 }
+
+/** Declared geometry isolates resident-position eligibility; it is not the live Auto2 tree. */
+private enum class ForestryOriginMove { NEAR, FARTHER, AROUND }
+private data class ForestryOriginRecipe(val name: String, val initiallyNear: Boolean = false, val blocked: Boolean = false,
+    val ordinaryLater: Boolean = false, val deferredLater: Boolean = false, val move: ForestryOriginMove? = null,
+    val expectWork: Boolean = true)
+
+class CivsForestryRemoteRevalidationTest : FunSpec({
+    for (recipe in listOf(
+        ForestryOriginRecipe("a safe near resident can use its own crown without ordinary footings", initiallyNear = true),
+        ForestryOriginRecipe("moving a far resident into remote reach reconsiders its deferred tree", move = ForestryOriginMove.NEAR),
+        ForestryOriginRecipe("a real wall still denies a near resident the remote tree", initiallyNear = true, blocked = true, expectWork = false),
+        ForestryOriginRecipe("a far deferred tree yields to another ordinarily reachable tree", ordinaryLater = true),
+        ForestryOriginRecipe("a different near angle reconsiders a tree without changing the wall", initiallyNear = true, blocked = true, move = ForestryOriginMove.AROUND),
+        ForestryOriginRecipe("no movement or same-cell movement keeps a far tree deferred without new rays", expectWork = false),
+        ForestryOriginRecipe("moving from far to farther does not reopen the deferred tree", move = ForestryOriginMove.FARTHER, expectWork = false),
+        ForestryOriginRecipe("moving near one deferred tree retains the other deferred root", deferredLater = true, move = ForestryOriginMove.NEAR),
+    )) test(recipe.name) {
+        val initiallyNear = recipe.initiallyNear
+        val blocked = recipe.blocked
+        val laterTree = recipe.ordinaryLater || recipe.deferredLater
+        forestryWorksite("remote-revalidation-${recipe.hashCode()}", nanoTime = { 0L }) { world, runtime, initial ->
+            val worker = initial.workers.single()
+            val city = initial.copy(forestrySeeded = setOf(requireNotNull(worker.assignment).toString()))
+            val root = CivPosition(-15, 64, -26)
+            val later = CivPosition(10, 64, -26)
+            forestrySmallOak(world, root)
+            fun closeOrdinaryFootings(at: CivPosition) {
+                for (x in at.x - 3..at.x + 3) for (z in at.z - 3..at.z + 3)
+                    if (x != at.x || z != at.z) for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
+            }
+            closeOrdinaryFootings(root)
+            val leaves = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
+            for (y in 64..66) for (z in root.z - 1..root.z + 1)
+                world.getBlockAt(root.x - 2, y, z).blockData = leaves
+            world.getBlockAt(root.x - 1, 65, root.z).blockData = leaves
+            if (blocked) for (y in 64..66) for (z in root.z - 2..root.z + 2)
+                world.getBlockAt(root.x - 4, y, z).type = Material.STONE
+            if (laterTree) forestrySmallOak(world, later)
+            if (recipe.deferredLater) closeOrdinaryFootings(later)
+            val near = Location(world, root.x - 5.5, 64.0, root.z + .5)
+            val far = near.clone().subtract(12.0, 0.0, 0.0)
+            val farther = far.clone().subtract(3.0, 0.0, 0.0)
+            val around = Location(world, root.x + .5, 64.0, root.z - 5.5)
+            var feet = if (initiallyNear) near else far
+            var feetReads = 0
+            runtime.residentFeet = { feetReads++; feet }
+            val nearPoint = CitizenPoint(near.x, near.y, near.z)
+            citizenPacketSupported(world, nearPoint) shouldBe true
+            citizenPacketBodyClear(world, nearPoint, false) shouldBe true
+            val ordinary = buildList {
+                for (dy in -4..2) for (dx in -3..3) for (dz in -3..3) {
+                    if (dx == 0 && dz == 0) continue
+                    val p = root.copy(x = root.x + dx, y = root.y + dy, z = root.z + dz)
+                    if (citizenStandable(world, p) && citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false) &&
+                        citizenCanReachBlock(world, Location(world, p.x + .5, p.y + 1.62, p.z + .5), root)) add(p)
+                }
+            }
+            ordinary shouldBe emptyList()
+            val scan = CivsForestry.Scan(root, "OAK_LOG")
+            repeat(100) { if (!scan.complete && !scan.failed) scan.advance(192) { world.getBlockAt(it.x, it.y, it.z).blockData.asString } }
+            val intent = forestryTestWork(city, requireNotNull(scan.job(listOf(root))).copy(seedDeferred = true)).copy(remoteWork = true)
+            val nearEye = near.clone().add(0.0, 1.62, 0.0)
+            citizenReachableBlockPoint(world, nearEye, root, CITIZEN_REMOTE_WORK_REACH) shouldBe null
+            (citizenReachableBlockPoint(world, nearEye, root, CITIZEN_REMOTE_WORK_REACH, intent) != null) shouldBe !blocked
+            citizenReachableBlockPoint(world, far.clone().add(0.0, 1.62, 0.0), root, CITIZEN_REMOTE_WORK_REACH, intent) shouldBe null
+            if (recipe.move == ForestryOriginMove.AROUND) {
+                citizenPacketSupported(world, CitizenPoint(around.x, around.y, around.z)) shouldBe true
+                citizenPacketBodyClear(world, CitizenPoint(around.x, around.y, around.z), false) shouldBe true
+                (citizenReachableBlockPoint(world, around.clone().add(0.0, 1.62, 0.0), root, CITIZEN_REMOTE_WORK_REACH, intent) != null) shouldBe true
+            }
+            val known = buildList {
+                for (x in root.x - 6..root.x + 3) for (z in root.z - 3..root.z + 3) for (y in 59..68) add(CivPosition(x, y, z))
+                for (at in listOf(near, far, farther, around)) for (dy in -1..2) add(CivPosition(at.blockX, at.blockY + dy, at.blockZ))
+                if (laterTree) for (x in later.x - 3..later.x + 3) for (z in later.z - 3..later.z + 3) for (y in 59..68)
+                    add(CivPosition(x, y, z))
+            }.associateWith { world.getBlockAt(it.x, it.y, it.z).blockData.asString }
+            fun entry() = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
+            fun deferred() = (entry()["deferredForestApproaches"] as Map<*, *>)["total"] as Int
+            fun deferredObject(point: CivPosition): Any? = ((CivsWorksites::class.java.getDeclaredField("deferredForestApproaches")
+                .also { it.isAccessible = true }.get(runtime) as Map<*, *>)[worker.id] as? Map<*, *>)?.get(point)
+            fun pulse() {
+                (Bukkit.getScheduler() as BukkitSchedulerMock).performTicks(5)
+                runtime.pulse(listOf(city))
+            }
+            fun pumpUntil(done: () -> Boolean) {
+                repeat(2_000) {
+                    if (done()) return
+                    pulse()
+                }
+            }
+            runtime.pulse(listOf(city))
+            pumpUntil { runtime.plan(city, worker) != null || deferred() >= if (recipe.deferredLater) 2 else 1 }
+            val before = entry()["forestSearch"] as Map<*, *>
+            val search = (CivsWorksites::class.java.getDeclaredField("forestSearches").also { it.isAccessible = true }
+                .get(runtime) as Map<*, *>)[worker.id]
+            val keptRoot = if (recipe.deferredLater) checkNotNull(deferredObject(later)) else null
+            val originalRoot = deferredObject(root)
+            if (recipe.move != null) {
+                deferred() shouldBe if (recipe.deferredLater) 2 else 1
+                runtime.plan(city, worker) shouldBe null
+                feet = when (recipe.move) {
+                    ForestryOriginMove.NEAR -> near
+                    ForestryOriginMove.FARTHER -> farther
+                    ForestryOriginMove.AROUND -> around
+                } // The sole changed input; geometry, claims and city remain unchanged.
+            }
+            val raysBefore = world.rayTraces
+            val readsBefore = feetReads
+            pumpUntil { runtime.plan(city, worker) != null }
+            if (!recipe.expectWork) {
+                world.rayTraces shouldBe raysBefore
+                (feetReads - readsBefore <= 2_000) shouldBe true
+                (deferredObject(root) === originalRoot) shouldBe true
+                if (!initiallyNear && recipe.move == null) {
+                    // Fractional movement within the same standing cell is deliberately not a new witness.
+                    feet = feet.clone().add(.1, 0.0, .1)
+                    val sameCellReads = feetReads
+                    repeat(20) { pulse() }
+                    (feetReads - sameCellReads <= 20) shouldBe true
+                    world.rayTraces shouldBe raysBefore
+                    (deferredObject(root) === originalRoot) shouldBe true
+                }
+            }
+            val after = entry()["forestSearch"] as Map<*, *>
+            ((CivsWorksites::class.java.getDeclaredField("forestSearches").also { it.isAccessible = true }
+                .get(runtime) as Map<*, *>)[worker.id] === search) shouldBe true
+            after["columns"] shouldBe before["columns"]
+            ((after["column"] as Int) >= (before["column"] as Int)) shouldBe true
+            known.forEach { (point, state) -> world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe state }
+            city.stock shouldBe initial.stock
+            city.workers shouldBe initial.workers
+            city.forestryJobs shouldBe null
+            if (!recipe.expectWork) {
+                runtime.plan(city, worker) shouldBe null
+                deferred() shouldBe 1
+            } else {
+                val work = checkNotNull(runtime.plan(city, worker)) {
+                    "No work after resident input change; initiallyNear=$initiallyNear laterTree=$laterTree ${runtime.debug(setOf(worker.id))}"
+                }
+                work.focus shouldBe if (recipe.ordinaryLater) later else root
+                work.remoteWork shouldBe !recipe.ordinaryLater
+                runtime.validate(city, work)
+            }
+            if (recipe.deferredLater) {
+                (deferredObject(later) === keptRoot) shouldBe true
+                deferred() shouldBe 1
+            }
+            println("Remote revalidation case=${recipe.name} deferred=${deferred()} field=${after["column"]}/${after["columns"]}" +
+                " work=${runtime.plan(city, worker)?.focus}")
+        }
+    }
+})
 
 private fun forestryTestJob(): CivForestryJob {
     val (scan, cells, roots) = forestryCapture()
@@ -1962,7 +2115,7 @@ private fun forestryCareWork(city: Settlement): CivWorldWork {
 private fun forestryWorksite(name: String, timber: String = "OAK", autonomous: Boolean = true,
     locked: Set<CivPosition> = emptySet(), supplies: () -> Map<String, Long> = { emptyMap() },
     paused: () -> Boolean = { false },
-    nanoTime: () -> Long = System::nanoTime,
+    nanoTime: () -> Long = { 0L },
     settings: CivsWorksiteSettings = CivsWorksiteSettings(),
     collisionForData: ((org.bukkit.block.data.BlockData) -> List<org.bukkit.util.BoundingBox>?)? = null,
     scenario: (CivsWorksiteWorldFixture, CivsWorksites, Settlement) -> Unit) {

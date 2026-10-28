@@ -77,7 +77,7 @@ internal class SettlementScenario private constructor(
     private var tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
     private var store = CivsStore(root, io)
     private val actualResidents = citizenRuntime != null
-    private val citizens = citizenRuntime ?: mockk<CivsCitizens>(relaxed = true)
+    private var citizens = citizenRuntime ?: mockk<CivsCitizens>(relaxed = true)
     private val blueprints = mockk<CivsBlueprints>()
     private val renderer = mockk<CivsPreviewRenderer>(relaxed = true)
     private val boundary = mockk<CivsBoundaryRenderer>(relaxed = true)
@@ -115,12 +115,6 @@ internal class SettlementScenario private constructor(
         } else await(store.save(initial))
         town.plans.forEach { await(store.savePlan(it)) }
         service = createService()
-        if (actualResidents) {
-            // Plan-board packets are unrelated to resident arrival/receipts; retain its spatial guards.
-            val boards = mockk<CivsPlanBoardRenderer>(relaxed = true)
-            every { boards.closeAsync() } returns CompletableFuture.completedFuture(null)
-            CivsService::class.java.getDeclaredField("planBoards").also { it.isAccessible = true }.set(service, boards)
-        }
         worksites = serviceField("worksites")
         roads = serviceField("roadMaintenance")
         pinWorkBudget()
@@ -132,7 +126,14 @@ internal class SettlementScenario private constructor(
         CivsSettings(root.resolve("unused-private-schematics"), setOf(world.name), 128, 10, 50_000, 4, 120, 48, 96),
         store, blueprints, Executor(Runnable::run), previewRenderer = renderer, citizenRuntime = citizens,
         clock = { now }, boundaryRenderer = boundary, storageAdapter = CivsStorage(plugin) { emptyArray() },
-        supplyExecutor = Executor(Runnable::run))
+        supplyExecutor = Executor(Runnable::run)).also { created ->
+            if (actualResidents) {
+                // Plan-board packets are unrelated to resident arrival/receipts; retain its spatial guards.
+                val boards = mockk<CivsPlanBoardRenderer>(relaxed = true)
+                every { boards.closeAsync() } returns CompletableFuture.completedFuture(null)
+                CivsService::class.java.getDeclaredField("planBoards").also { it.isAccessible = true }.set(created, boards)
+            }
+        }
 
     /** Same private callback seam used by CivsServiceTest; production API and scheduling stay untouched. */
     @Suppress("UNCHECKED_CAST")
@@ -218,18 +219,33 @@ internal class SettlementScenario private constructor(
 
     fun restart() {
         check(!actualResidents) { "A real resident fixture needs a fresh packet/NPC owner when restarted" }
+        restartService()
+    }
+
+    /** Store, Service and Citizens recreation in the same fixture world/JVM, not a process crash. */
+    fun restartResidents(runtime: ResidentRuntime) {
+        check(actualResidents && citizens === runtime.owner)
+        restartService {
+            runtime.recreateResidents()
+            citizens = runtime.owner
+            runtime.city = savedCity()
+        }
+    }
+
+    private fun restartService(recreateResidents: () -> Unit = {}) {
         record("restart diskRevision=${savedCity().revision} receipts=${receipts().map { it.id }}")
         service.close()
         tasks.close()
         store.close()
         io.discardPending()
+        recreateResidents()
         tasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
         store = CivsStore(root, io)
         service = createService()
         worksites = serviceField("worksites")
         roads = serviceField("roadMaintenance")
         pinWorkBudget()
-        every { citizens.autonomousVisualWork(any(), any()) } returns null
+        if (!actualResidents) every { citizens.autonomousVisualWork(any(), any()) } returns null
         await(service.start())
         // Startup exposes records before receipt recovery; wait on the durable owner, not a fixed delay.
         advanceUntil("native receipt retirement") { receipts().isEmpty() }

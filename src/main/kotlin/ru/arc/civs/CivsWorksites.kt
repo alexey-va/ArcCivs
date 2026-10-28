@@ -110,7 +110,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val mature: MutableSet<CivPosition> = linkedSetOf(), val unsuitable: MutableSet<CivPosition> = linkedSetOf(),
         val unfunded: MutableSet<CivPosition> = linkedSetOf(), val unplantable: MutableSet<CivPosition> = linkedSetOf(),
         val dirty: MutableSet<CivPosition> = linkedSetOf(), val retryRoots: MutableMap<CivPosition, ForestRetry> = linkedMapOf(),
-        var retryAt: Long? = null, var plantNext: Boolean = false) {
+        var retryAt: Long? = null, var plantNext: Boolean = false, var residentOrigin: CivPosition? = null) {
         val byColumn = columns.associateBy { it.x to it.z }
         val chunks = columns.mapTo(hashSetOf()) { (it.x shr 4) to (it.z shr 4) }
         fun remember(points: MutableSet<CivPosition>, point: CivPosition) {
@@ -1306,6 +1306,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val supplies = forestSupply(city, worker, building, sapling)
         val deferred = deferredForestApproaches.getOrPut(worker.id) { linkedMapOf() }
         deferred.entries.removeIf { it.value.key.building != building }
+        val feet = residentFeet(worker.id)?.takeIf { it.world == world }
         val search = forestSearches[worker.id]?.takeIf { it.building == building }
             ?: run {
                 val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("forester") ?: return null
@@ -1315,12 +1316,24 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 val columns = (min.z..max.z).flatMap { z -> (min.x..max.x).map { x ->
                     CivsWorksiteLayouts.point(building, CivPosition(x, 0, z))
                 } }
-                val feet = residentFeet(worker.id)?.takeIf { it.world == world }
                 ForestSearch(building, supplies, if (feet == null) columns else columns.sortedBy {
                     val dx = it.x + .5 - feet.x; val dz = it.z + .5 - feet.z
                     dx * dx + dz * dz
                 })
             }.also { forestSearches[worker.id] = it }
+        val origin = feet?.let { CivPosition(it.blockX, it.y.roundToInt(), it.blockZ) }
+        if (origin != search.residentOrigin) {
+            search.residentOrigin = origin
+            if (feet != null) {
+                val eye = feet.clone().add(0.0, 1.62, 0.0)
+                val reach = CITIZEN_REMOTE_WORK_REACH
+                refreshRejected(worker.id) { rejected ->
+                    rejected.lastFocus in deferred && citizenBlockAimPoints(eye, rejected.lastFocus).any { aim ->
+                        eye.distanceSquared(aim) <= reach * reach
+                    }
+                }
+            }
+        }
         if (search.saplings != supplies) {
             search.saplings = supplies
             search.unfunded.clear()
