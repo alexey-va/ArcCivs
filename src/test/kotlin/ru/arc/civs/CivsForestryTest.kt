@@ -2001,8 +2001,9 @@ class CivsForestryRemoteRevalidationTest : FunSpec({
             runtime.pulse(listOf(city))
             pumpUntil { runtime.plan(city, worker) != null || deferred() >= if (recipe.deferredLater) 2 else 1 }
             val before = entry()["forestSearch"] as Map<*, *>
-            val search = (CivsWorksites::class.java.getDeclaredField("forestSearches").also { it.isAccessible = true }
-                .get(runtime) as Map<*, *>)[worker.id]
+            val forestry = CivsWorksites::class.java.getDeclaredField("forestry").also { it.isAccessible = true }.get(runtime)
+            val searches = CivsForestryWorksite::class.java.getDeclaredField("forestSearches").also { it.isAccessible = true }
+            val search = (searches.get(forestry) as Map<*, *>)[worker.id]
             val keptRoot = if (recipe.deferredLater) checkNotNull(deferredObject(later)) else null
             val originalRoot = deferredObject(root)
             if (recipe.move != null) {
@@ -2032,8 +2033,7 @@ class CivsForestryRemoteRevalidationTest : FunSpec({
                 }
             }
             val after = entry()["forestSearch"] as Map<*, *>
-            ((CivsWorksites::class.java.getDeclaredField("forestSearches").also { it.isAccessible = true }
-                .get(runtime) as Map<*, *>)[worker.id] === search) shouldBe true
+            ((searches.get(forestry) as Map<*, *>)[worker.id] === search) shouldBe true
             after["columns"] shouldBe before["columns"]
             ((after["column"] as Int) >= (before["column"] as Int)) shouldBe true
             known.forEach { (point, state) -> world.getBlockAt(point.x, point.y, point.z).blockData.asString shouldBe state }

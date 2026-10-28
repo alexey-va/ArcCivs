@@ -24,12 +24,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
     val field: Set<CivPosition> get() = unplanted
     val care: Set<CivPosition> get() = immature
 
-    data class Action(val changes: List<CivPlanBlock>, val inputs: Map<String, Long> = emptyMap(),
-        val outputs: Map<String, Long> = emptyMap(), val status: String = "working-field",
-        val duration: Long = 3_000, val focus: CivPosition? = null)
-    data class Need(val status: String, val material: String? = null, val point: CivPosition? = null,
-        val reason: String? = null, val blockMaterial: String? = null)
-    data class Attempt(val finish: ((Action) -> CivWorldWork)?, val pending: Boolean)
+    data class Attempt(val finish: ((CivWorkAction) -> CivWorldWork)?, val pending: Boolean)
     sealed interface Selection {
         data class Ready(val work: CivWorldWork) : Selection
         data object Unavailable : Selection
@@ -70,22 +65,22 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
     /** Read/claim/admission keep their existing owners; drops are captured only after the shared stance admission succeeds. */
     fun select(worker: CivWorker, world: World, autonomous: Boolean, harvestOnly: Boolean,
         available: () -> Map<String, Long>, pending: CivPosition?, claimed: (CivPosition) -> Boolean,
-        read: (CivPosition, Boolean) -> Block?, blocked: (Need) -> Unit,
+        read: (CivPosition, Boolean) -> Block?, blocked: (CivWorkNeed) -> Unit,
         admit: (CivPosition) -> Attempt): Selection {
         if (!autonomous && CivsEquipment.slots(worker)[4]?.material?.endsWith("_HOE") != true) return Selection.Unavailable
         val (crop, seed) = cropAndSeed(building)
         // A paid Auto field owns its seeds; this planning allowance never creates a carried item.
         val supplies by lazy(available)
-        fun need(value: Need): Selection { blocked(value); return Selection.Unavailable }
+        fun need(value: CivWorkNeed): Selection { blocked(value); return Selection.Unavailable }
         for (point in CivsWorksiteLayouts.irrigation(building)) {
             val block = read(point, true) ?: return Selection.Unavailable
             if (block.type == Material.WATER) continue
             if (harvestOnly) return Selection.Unavailable
-            if (block.type !in SOILS) return need(Need("worksite-soil", point = point,
+            if (block.type !in SOILS) return need(CivWorkNeed("worksite-soil", point = point,
                 reason = "irrigation-ground", blockMaterial = block.type.name))
             val attempt = admit(point)
             val finish = attempt.finish ?: return if (attempt.pending) Selection.Pending else Selection.Unavailable
-            return Selection.Ready(finish(Action(listOf(change(block, Material.WATER.createBlockData().asString)))))
+            return Selection.Ready(finish(CivWorkAction(listOf(change(block, Material.WATER.createBlockData().asString)))))
         }
         val from = lastFocus ?: building.entrance
         val nearest = compareBy<CivPosition> { if (pending == it || pending == it.copy(y = it.y + 1)) 0 else 1 }
@@ -104,7 +99,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         var checked = 0
         for (soilPoint in candidates) {
             if (claimed(soilPoint)) continue
-            if (checked++ == 16) return need(Need("searching-work"))
+            if (checked++ == 16) return need(CivWorkNeed("searching-work"))
             val wasHarvest = soilPoint in ripe
             ripe.remove(soilPoint); unplanted.remove(soilPoint); immature.remove(soilPoint)
             val soil = read(soilPoint, false) ?: continue
@@ -136,7 +131,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
             }
             if (soil.type != Material.FARMLAND) {
                 if (top.type == crop) continue
-                return Selection.Ready(finish(Action(listOf(change(soil, "minecraft:farmland[moisture=7]")) +
+                return Selection.Ready(finish(CivWorkAction(listOf(change(soil, "minecraft:farmland[moisture=7]")) +
                     if (top.type in WEEDS) listOf(change(top, "minecraft:air")) else emptyList())))
             }
             if (top.type == crop) {
@@ -147,14 +142,14 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
                 val replant = seedCount > 0 || (supplies[seed] ?: 0) > 0
                 if (seedCount > 0) put(drops, seed, seedCount - 1)
                 val inputs = if (replant && seedCount == 0L) mapOf(seed to 1L) else emptyMap()
-                return Selection.Ready(finish(Action(listOf(change(top,
+                return Selection.Ready(finish(CivWorkAction(listOf(change(top,
                     if (replant) crop.createBlockData().asString else "minecraft:air")), inputs, drops)))
             }
-            if ((supplies[seed] ?: 0) > 0) return Selection.Ready(finish(Action(
+            if ((supplies[seed] ?: 0) > 0) return Selection.Ready(finish(CivWorkAction(
                 listOf(change(top, crop.createBlockData().asString)), mapOf(seed to 1))))
-            blocked(Need("waiting-seeds", seed))
+            blocked(CivWorkNeed("waiting-seeds", seed))
         }
-        if (examined < plots.size) return need(Need("searching-work"))
+        if (examined < plots.size) return need(CivWorkNeed("searching-work"))
         return Selection.Exhausted
     }
 
@@ -169,7 +164,7 @@ internal class CivsFarmWorksite(val building: CivBuilding) {
         if (changes.isEmpty()) return null
         val attempt = admit(focus)
         val finish = attempt.finish ?: return if (attempt.pending) Selection.Pending else null
-        return Selection.Ready(finish(Action(changes, if (fertilizing && !autonomous) mapOf("BONE_MEAL" to 1L) else emptyMap(),
+        return Selection.Ready(finish(CivWorkAction(changes, if (fertilizing && !autonomous) mapOf("BONE_MEAL" to 1L) else emptyMap(),
             status = if (fertilizing) "fertilizing" else "watering", duration = 4_000, focus = focus)))
     }
 
