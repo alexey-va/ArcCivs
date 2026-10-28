@@ -367,11 +367,18 @@ class CivsResidentFoodFairnessTest : FunSpec({
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.paper.addPlayer("NativeFoodWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+            // This case owns supply fairness; automatic expansion has its own city-save tests.
+            CivsAutonomousDevelopment::class.java.getDeclaredField("nextAutonomyAt").also { it.isAccessible = true }
+                .setLong(autonomousDevelopment(h.service), Long.MAX_VALUE)
             h.start()
             if (firstBuffer == "unavailable") h.world.unloadChunk(0, 0)
             val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
             pulse.invoke(h.service)
             h.saves shouldBe emptyList()
+            // Await the real budgeted capture without advancing the population or grant clocks.
+            val observation = CivsService::class.java.getDeclaredMethod("autoSupplyObservation", Settlement::class.java)
+                .also { it.isAccessible = true }
+            h.tickUntil("second town native supply capture") { observation.invoke(h.service, second) != null }
             h.time += 1_000
             pulse.invoke(h.service)
             h.tickUntil("second town native food receipt") { h.saves.isNotEmpty() }

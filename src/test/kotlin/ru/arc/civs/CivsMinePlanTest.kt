@@ -231,13 +231,16 @@ class CivsMinePlanTest : FunSpec({
                     store.save(city).join()
                     CivsStorage(plugin) { emptyArray() }.use { storage ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                            var runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false })
+                            // Receipt/cutover geometry uses fixed time; the count quotas remain active.
+                            // CivsMineSearchWarningsTest owns elapsed-budget yield/resume coverage.
+                            var runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false },
+                                nanoTime = { 0L })
                             fun nextWork(): CivWorldWork {
                                 repeat(256) {
                                     runtime.pulse(listOf(city))
                                     runtime.plan(city, city.workers.single())?.let { return it }
                                 }
-                                error("cutover $legacyStep failed: ${runtime.idleReason(city, city.workers.single())}")
+                                error("cutover $legacyStep failed: ${runtime.idleReason(city, city.workers.single())}; ${runtime.debug()}")
                             }
                             val first = nextWork()
                             first.miningPlanVersion shouldBe CivsMinePlan.VERSION
@@ -279,7 +282,8 @@ class CivsMinePlanTest : FunSpec({
                             CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE").toLong() shouldBe
                                 CivsLogistics.QUARRY_SUPPLIES.getValue("COBBLESTONE") + first.outputs.getOrDefault("COBBLESTONE", 0)
                             oldPaid.forEach { (p, expected) -> world.getBlockAt(p.x, p.y, p.z).blockData.asString shouldBe expected }
-                            runtime = CivsWorksites(plugin, access, { current, building -> storage.buildingAvailable(current, building) }, { _, _ -> false })
+                            runtime = CivsWorksites(plugin, access, { current, building -> storage.buildingAvailable(current, building) }, { _, _ -> false },
+                                nanoTime = { 0L })
                             val next = nextWork()
                             withClue("cutover $legacyStep cursor=${city.minePlans}, first=$first, next=$next") {
                                 // The same excavated cell now receives its paid ladder; it is not mined twice.
