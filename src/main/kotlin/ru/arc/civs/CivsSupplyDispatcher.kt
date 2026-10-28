@@ -82,7 +82,7 @@ internal class CivsSupplyDispatcher(
         var job: Job? = null
         var plans = emptyMap<UUID, CivCourierPlan>()
         var crafts = emptyMap<UUID, CivCraftJob>()
-        var craftObservation: CivSupplySnapshot? = null
+        var observation: CivSupplySnapshot? = null
         var captured: CaptureSummary? = null
         var acceptedGeneration: Long? = null
         val ages = hashMapOf<CivSupplyTask, Long>()
@@ -111,7 +111,8 @@ internal class CivsSupplyDispatcher(
     fun plan(cityId: UUID, workerId: UUID): CivCourierPlan? { checkOwner(); return cities[cityId]?.plans?.get(workerId) }
     fun retained(cityId: UUID): Map<UUID, CivCourierPlan> { checkOwner(); return cities[cityId]?.plans?.toMap().orEmpty() }
     fun craftJobs(cityId: UUID): Map<UUID, CivCraftJob> { checkOwner(); return cities[cityId]?.crafts?.toMap().orEmpty() }
-    fun craftObservation(cityId: UUID): CivSupplySnapshot? { checkOwner(); return cities[cityId]?.craftObservation }
+    fun observation(cityId: UUID): CivSupplySnapshot? { checkOwner(); return cities[cityId]?.observation }
+    fun craftObservation(cityId: UUID): CivSupplySnapshot? = observation(cityId)?.takeIf { it.craftWorkers.isNotEmpty() }
     fun releaseCraft(cityId: UUID, workerId: UUID, jobId: UUID) {
         checkOwner()
         val city = cities[cityId] ?: return
@@ -162,14 +163,14 @@ internal class CivsSupplyDispatcher(
                 "reservations" to mapOf("waitingPickup" to plans.count { !it.value.carrying },
                     "carrying" to plans.count { it.value.carrying }, "units" to plans.sumOf { it.value.cargo.amount }),
                 "crafts" to sample(city.crafts.values.filter { workerId == null || it.workerId == workerId }) { craft ->
-                    val carried = city.craftObservation?.craftWorkers?.firstOrNull { it.workerId == craft.workerId }?.carried.orEmpty()
+                    val carried = city.observation?.craftWorkers?.firstOrNull { it.workerId == craft.workerId }?.carried.orEmpty()
                     val missing = craft.inputs.mapValues { (material, count) -> (count - (carried[material] ?: 0L)).coerceAtLeast(0) }
                         .filterValues { it > 0 }
                     mapOf("worker" to craft.workerId.toString(), "jobId" to craft.id.toString(), "cycle" to craft.cycle,
                         "building" to craft.buildingId.toString(), "recipe" to craft.recipeId, "recipeVersion" to craft.version,
                         "inputs" to craft.inputs, "output" to mapOf(craft.material to craft.amount),
                         "demand" to craft.demandMaterial, "target" to craft.targetBuildingId.toString(),
-                        "construction" to craft.constructionId?.toString(), "epoch" to city.craftObservation?.craftEpoch?.toString(),
+                        "construction" to craft.constructionId?.toString(), "epoch" to city.observation?.craftEpoch?.toString(),
                         "missingCarriedAtCapture" to missing,
                         "statusAtCapture" to if (missing.isEmpty()) "crafting" else "waiting-materials") },
                 "capturedRequests" to snapshot?.let { sample(it.requests) { request -> mapOf(
@@ -290,7 +291,7 @@ internal class CivsSupplyDispatcher(
                     city.lastAssigned[worker] = now
                 city.plans = result.plans.toMap()
                 city.crafts = result.crafts.toMap()
-                city.craftObservation = snapshot.takeIf { it.craftWorkers.isNotEmpty() }
+                city.observation = snapshot
                 city.acceptedGeneration = job.generation
                 city.ages.keys.retainAll(result.seen)
                 for (key in result.seen) city.ages.putIfAbsent(key, now)
@@ -400,7 +401,8 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     val crafts = CivsCarpentry.allocate(snapshot, cancelled)
     val stores = snapshot.stores.mapValues { (id, store) -> store.copy(desiredStock = store.desiredStock + crafts.required[id].orEmpty()) }
     val stock = stores.mapValues { it.value.stock.toMutableMap() }
-    val sources = snapshot.workerSources.associateBy { it.workerId }
+    // Closed-stock Auto is legacy; ordinary goods become sources only after a native workplace deposit.
+    val sources = snapshot.workerSources.filter { snapshot.autonomousStock }.associateBy { it.workerId }
     val excess = sources.mapValues { it.value.excess.toMutableMap() }
     crafts.jobs.values.forEach { job -> job.inputs.forEach { (material, count) ->
         val newlyReserved = (count - (snapshot.craftJobs[job.workerId]?.inputs?.get(material) ?: 0)).coerceAtLeast(0)

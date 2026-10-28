@@ -162,7 +162,7 @@ private fun depotCargoCity(): Settlement {
         warehouse.id, nextDeliveryAt = 1, cargo = CivCargo(UUID(3, id), warehouse.id, source.id, warehouse.id,
             source.entrance, resource.name, 64, sourceWorkerId = UUID(4, id), stockResource = resource))
     return CivsRules.validate(CivsAutonomy.found(UUID(5, 1), UUID(5, 2), "Depot recovery", UUID(5, 3),
-        CivPosition(0, 64, 0), 64, "medievaloak", hall, 1_000).copy(stock = Stock(),
+        CivPosition(0, 64, 0), 64, "medievaloak", hall, 1_000).copy(inventory = null, stock = Stock(),
         buildings = listOf(hall, first, second, source), workers = listOf(
             courier(1, first, Resource.STONE), courier(2, second, Resource.WOOD)),
         autonomy = CivAutonomy(storage = listOf(hall, first, second, source).associate {

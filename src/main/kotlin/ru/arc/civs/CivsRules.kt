@@ -94,7 +94,7 @@ object CivsRules {
     fun slots(city: Settlement, building: CivBuilding): Int =
         if (building.type == BuildingType.UNIVERSITY) {
             if (CivsResearch.university(city)?.id == building.id) slots(building) else 0
-        } else if (city.autonomy != null) {
+        } else if (CivsAutonomy.legacyStock(city)) {
             if (building.type == BuildingType.BLACKSMITH && building.phase == BuildingPhase.ACTIVE) 1
             else if (building.type in setOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.GUARD_TOWER, BuildingType.TAVERN, BuildingType.SMELTERY,
                     BuildingType.CRUSHER) || resource(building.type) != null) slots(building) else 0
@@ -691,7 +691,7 @@ object CivsRules {
             }
         } else {
             check(productionAvailable(city, building) && slots(city, building) > 0, "invalid-assignment")
-            check(city.autonomy == null || building.type != BuildingType.FORESTER, "stale-worksite")
+            check(!CivsAutonomy.legacyStock(city) || building.type != BuildingType.FORESTER, "stale-worksite")
             if (city.inventory == null) {
                 val resource = resource(building.type) ?: reject("invalid-assignment")
                 val amount = deliveryAmount(building)
@@ -728,8 +728,8 @@ object CivsRules {
         check(worker.assignment == building.id && worker.completedCycles == work.cycle && worker.cargo == null, "stale-delivery")
         check(productionAvailable(city, building) && building.type in CivsWorksites.TYPES, "invalid-assignment")
         val forestry = building.type == BuildingType.FORESTER && (work.forestry != null || work.changes.isNotEmpty())
-        val autonomousForestry = city.autonomy != null && forestry
-        check(city.autonomy == null || autonomousForestry && !city.autonomy.paused, "invalid-assignment")
+        val autonomousForestry = CivsAutonomy.legacyStock(city) && forestry
+        check(!CivsAutonomy.legacyStock(city) || autonomousForestry && city.autonomy?.paused == false, "invalid-assignment")
         if (forestry) try { CivsForestry.validateWork(city, work) } catch (_: IllegalArgumentException) { reject("stale-worksite") }
         val equipped = work.equipmentAfter?.let { CivsEquipment.replace(worker, it) } ?: worker
         val supplied = if (autonomousForestry || work.equipmentAfter != null && work.changes.isEmpty()) equipped else CivsEquipment.consumeInputs(equipped, work.inputs)
@@ -796,13 +796,13 @@ object CivsRules {
             snapshot(validText(city.name, 48) && validText(city.style, 128) && city.radius > 0 && city.revision >= 0 && city.createdAt >= 0)
             snapshot(city.owner !in city.members && city.members.all { present(it) })
             city.autonomy?.let { autonomy ->
-                snapshot(city.inventory == null && city.members.isEmpty() &&
+                snapshot((city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)
                 snapshot(autonomy.layoutHalfWidth?.let { it in 24..56 } != false)
                 autonomy.storage?.let { stores -> snapshot(stores.size <= MAX_SITES && stores.all { (id, store) ->
                     UUID.fromString(id).toString() == id && store.valid()
                 }) }
-                snapshot(city.buildings.all { it.type in CivsAutonomy.allowedTypes })
+                snapshot(!CivsAutonomy.legacyStock(city) || city.buildings.all { it.type in CivsAutonomy.allowedTypes })
             }
             city.memberNames?.let { names ->
                 val participants = (city.members + city.owner).mapTo(hashSetOf(), UUID::toString)
@@ -943,7 +943,8 @@ object CivsRules {
                 snapshot(inventory.containers.all { city.contains(it.x, it.z) && it.y in -4_096..4_096 })
                 inventory.buildingMaterials?.forEach { (id, items) ->
                     val building = city.building(UUID.fromString(id))
-                    snapshot(building != null && items.values.sum() <= CivInventory.buildingCapacity(building))
+                    snapshot(building != null && (city.autonomy != null && inventory.mode == CivStorageMode.PHYSICAL ||
+                        items.values.sum() <= CivInventory.buildingCapacity(building)))
                 }
             }
             city.pendingControls?.let { pending ->
@@ -1007,7 +1008,7 @@ object CivsRules {
     }
 
     private fun validConstructionPrice(city: Settlement, order: CivConstruction, building: CivBuilding): Boolean {
-        if (city.autonomy != null) {
+        if (city.autonomy != null && order.payment == null) {
             val batches = order.batches ?: return false
             return building.type in CivsAutonomy.allowedTypes && order.payment == null &&
                 batches.atomicPairs == true &&

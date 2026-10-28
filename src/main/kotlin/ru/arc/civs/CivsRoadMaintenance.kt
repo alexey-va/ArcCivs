@@ -145,9 +145,23 @@ data class CivRoadUpkeepReceipt(val workerBefore: CivWorker, val stockBefore: St
             (after.roadRouteOverrides.orEmpty() - work.upkeep.overrides().keys + work.upkeep.previousRouteOverrides.orEmpty())
                 .takeIf { it.isNotEmpty() } else after.roadRouteOverrides)
 
-    fun validated(after: Settlement) {
-        require(after.inventory == null && after.autonomy != null && work.workerId == workerBefore.id && acceptedAt >= 0)
-        require(CivsRoadMaintenance.complete(before(after), work, acceptedAt) == after)
+    fun validated(after: Settlement, changes: List<CivInventorySlotChange> = emptyList()) {
+        require(after.autonomy != null && work.workerId == workerBefore.id && acceptedAt >= 0)
+        if (CivsAutonomy.legacyStock(after)) require(changes.isEmpty()) else {
+            require(after.inventory?.mode == CivStorageMode.PHYSICAL && after.stock == stockBefore)
+            val builder = requireNotNull(after.building(work.buildingId))
+            val removed = linkedMapOf<String, Long>()
+            changes.forEach { change ->
+                require(change.container == builder.control || builder.bounds.contains(
+                    change.container.x, change.container.y, change.container.z))
+                require(after.buildings.none { it.id != builder.id && it.control == change.container })
+                val item = requireNotNull(change.before)
+                require(change.after == null || change.after.material == item.material && change.after.amount < item.amount)
+                removed.merge(item.material, (item.amount - (change.after?.amount ?: 0)).toLong(), Math::addExact)
+            }
+            require(removed == work.storageInputs(workerBefore))
+        }
+        require(CivsRoadMaintenance.complete(before(after), work, acceptedAt, nativePaid = true) == after)
     }
 }
 
@@ -191,7 +205,8 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {
         if (!eligible(city) || worker.assignment?.let(city::building)?.let {
                 it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE
-            } != true || CivsResidents.isChild(worker) || worker.cargo != null || !funded(city)) {
+            } != true || CivsResidents.isChild(worker) || worker.cargo != null ||
+            CivsAutonomy.legacyStock(city) && !funded(city)) {
             selected.remove(worker.id)
             waiting.remove(worker.id)
             return null
@@ -199,7 +214,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
         val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
             it.routeOverrides == city.roadRouteOverrides } ?: return null
         selected[worker.id]?.let { work ->
-            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment &&
+            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city) &&
                 (!budget(worker.id) || world.roadUpkeepPending(city, work))) return work
             selected.remove(worker.id)
         }
@@ -208,7 +223,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
             if (!budget(worker.id)) return null
             val cursor = Math.floorMod(cursors[city.id] ?: 0, network.targets.size)
             cursors[city.id] = (cursor + 1) % network.targets.size
-            val work = world.captureRoadUpkeep(city, worker, network.targets[cursor]) ?: return@repeat
+            val work = world.captureRoadUpkeep(city, worker, network.targets[cursor])?.copy(inputs = inputs(city)) ?: return@repeat
             selected[worker.id] = work
             return work
         }
@@ -218,8 +233,19 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
     fun invalidate(workerId: UUID) { selected.remove(workerId); waiting.remove(workerId) }
     fun clear() { networks.clear(); cursors.clear(); selected.clear(); waiting.clear() }
 
+    /** Only an observed damaged column creates a request; healthy roads never reserve or receive supplies. */
+    fun requirements(city: Settlement): Map<UUID, Map<String, Long>> = if (!eligible(city) ||
+        city.inventory?.mode != CivStorageMode.PHYSICAL) emptyMap() else city.workers.mapNotNull { worker ->
+        selected[worker.id]?.takeIf { work -> work.cycle == worker.completedCycles && work.buildingId == worker.assignment &&
+            work.inputs == NATIVE_INPUTS && worker.cargo == null && !CivsResidents.isChild(worker) &&
+            city.building(work.buildingId)?.let { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } == true
+        }?.let { worker.id to it.inputs }
+    }.toMap()
+
     companion object {
         private const val SCAN_COLUMNS = 8
+        private val NATIVE_INPUTS = mapOf("COBBLESTONE" to 1L)
+        private fun inputs(city: Settlement): Map<String, Long> = if (CivsAutonomy.legacyStock(city)) emptyMap() else NATIVE_INPUTS
         internal const val MAX_CLEARANCE = 4
         private val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
         private val stair = Regex("minecraft:(cobblestone|oak|spruce|dark_oak)_stairs\\[facing=(north|south|east|west),half=bottom," +
@@ -330,15 +356,17 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
             require(expected != null && changes == listOfNotNull(floor) + expected)
         }
 
-        fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false && city.inventory == null &&
+        fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false &&
+            (city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) &&
             city.pendingDeletion == null && city.construction == null && city.constructionQueue.orEmpty().isEmpty()
 
         private fun funded(city: Settlement): Boolean =
             city.stock.stone > (CivsAutonomy.nextGoal(city)?.cost?.stone ?: 0L)
 
-        /** One abstract construction-supply STONE per worked column; never a vanilla item recipe. */
-        fun complete(city: Settlement, work: CivWorldWork, at: Long): Settlement {
-            require(eligible(city) && funded(city) && at in 0..Long.MAX_VALUE - 1_000)
+        /** One native cobblestone per worked column; accepted legacy receipts retain their closed debit. */
+        fun complete(city: Settlement, work: CivWorldWork, at: Long, nativePaid: Boolean = false): Settlement {
+            val legacy = CivsAutonomy.legacyStock(city)
+            require(eligible(city) && (!legacy || funded(city)) && at in 0..Long.MAX_VALUE - 1_000)
             val upkeep = requireNotNull(work.upkeep)
             upkeep.validated(city)
             val worker = requireNotNull(city.workers.firstOrNull { it.id == work.workerId })
@@ -349,13 +377,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
             validateChanges(city, upkeep, work.changes)
             require((work.focus == upkeep.floor || work.changes.any { it.position == work.focus }) &&
                 work.status == "repairing-road" && work.durationMillis == 3_000L)
-            require(work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null && work.forestry == null &&
+            require(work.inputs == inputs(city) && work.outputs.isEmpty() && work.equipmentAfter == null && work.forestry == null &&
                 work.miningStep == null && work.miningPlanVersion == null && !work.miningGenerator && work.miningAccessStep == null)
             require(city.contains(work.standing.x, work.standing.z) && work.standing.y in -4_094..4_094 &&
                 (work.standing.x != upkeep.floor.x || work.standing.z != upkeep.floor.z))
             require(city.revision < Long.MAX_VALUE)
-            val updated = worker.copy(completedCycles = worker.completedCycles + 1, nextDeliveryAt = at + 1_000)
-            return CivsRules.validate(city.copy(stock = city.stock.copy(stone = city.stock.stone - 1),
+            require(legacy || nativePaid || work.storageInputs(worker).isEmpty())
+            val paid = if (legacy) worker else CivsEquipment.consumeInputs(worker, work.inputs)
+            val updated = paid.copy(completedCycles = worker.completedCycles + 1, nextDeliveryAt = at + 1_000)
+            return CivsRules.validate(city.copy(stock = if (legacy) city.stock.copy(stone = city.stock.stone - 1) else city.stock,
                 workers = city.workers.map { if (it.id == worker.id) updated else it }, revision = city.revision + 1,
                 roadRouteOverrides = upkeep.routeOverride?.let { city.roadRouteOverrides.orEmpty() + upkeep.overrides() }
                     ?: city.roadRouteOverrides))

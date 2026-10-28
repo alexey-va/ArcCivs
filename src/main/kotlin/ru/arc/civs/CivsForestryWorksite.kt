@@ -145,7 +145,7 @@ internal class CivsForestryWorksite(
     fun plan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         harvestOnly: Boolean): CivWorldWork? {
         spotSearchPending = false
-        if (city.autonomy == null && CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") != true) return null
+        if (!CivsAutonomy.legacyStock(city) && CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") != true) return null
         val paths = CivsForestry.paths(city, forestryPaths(city))
         city.forestryJobs?.get(building.id.toString())?.let { job ->
             return forestBatch(city, worker, building, world, job)
@@ -154,9 +154,9 @@ internal class CivsForestryWorksite(
         if (city.workers.filter { it.assignment == building.id }.minByOrNull { it.id.toString() }?.id != worker.id) return null
         val timber = requireNotNull(CivsProduction.material(building))
         val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
-        val availableSaplings = if (city.autonomy == null)
+        val availableSaplings = if (!CivsAutonomy.legacyStock(city))
             CivsEquipment.available(worker, stock(city, building.id)).filterKeys { it.endsWith("_SAPLING") } else emptyMap()
-        val supplies = if (city.autonomy == null) availableSaplings[sapling] ?: 0L else forestSupply(city, worker, building, sapling)
+        val supplies = if (!CivsAutonomy.legacyStock(city)) availableSaplings[sapling] ?: 0L else forestSupply(city, worker, building, sapling)
         val deferred = deferredRoots(worker, building)
         val feet = residentFeet(worker.id)?.takeIf { it.world == world }
         val search = forestSearches[worker.id]?.takeIf { it.building == building }
@@ -384,7 +384,7 @@ internal class CivsForestryWorksite(
     }
 
     private fun forestSupply(city: Settlement, worker: CivWorker, building: CivBuilding, sapling: String): Long =
-        if (city.autonomy != null) if (city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) 4L else 0L
+        if (CivsAutonomy.legacyStock(city)) if (city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) 4L else 0L
         else CivsEquipment.available(worker, stock(city, building.id))[sapling] ?: 0
 
     private fun finishForestScan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
@@ -399,7 +399,7 @@ internal class CivsForestryWorksite(
         // Shared foliage can also touch a placed log and is not a thinning witness.
         val thinning = pending.scan.retainedCrownReason == "shared-trunks"
         val job = pending.scan.job(pending.roots)?.copy(thinning = thinning,
-            seedDeferred = !thinning && city.autonomy != null && city.stock.wood == 0L)
+            seedDeferred = !thinning && CivsAutonomy.legacyStock(city) && city.stock.wood == 0L)
         if (job == null || !CivsForestry.claimClear(city, building.id, job)) {
             forestScans.remove(worker.id)
             forestSearches[worker.id]?.let { search ->
@@ -510,7 +510,7 @@ internal class CivsForestryWorksite(
         if (pending.next < count) return blocked(worker, "searching-work")
         val sapling = pending.timber.removeSuffix("_LOG") + "_SAPLING"
         if (forestSupply(city, worker, building, sapling) < pending.roots.size) {
-            if (city.autonomy != null) forestPlants.remove(worker.id)
+            if (CivsAutonomy.legacyStock(city)) forestPlants.remove(worker.id)
             return blocked(worker, "waiting-saplings", sapling, pending.roots.size.toLong())
         }
         val cleared = mutableListOf<CivPlanBlock>()
@@ -542,7 +542,7 @@ internal class CivsForestryWorksite(
         forestPlants.remove(worker.id)
         return work(worker, building, standing, blocks.map { change(it, CivsForestry.saplingState(sapling)) } + cleared,
             mapOf(sapling to pending.roots.size.toLong()), status = "planting-tree", focus = pending.roots.first())
-            .let { if (city.autonomy != null) it.copy(equipmentAfter = null) else it }
+            .let { if (CivsAutonomy.legacyStock(city)) it.copy(equipmentAfter = null) else it }
     }
 
     /** Diagnostics only: crownClear remains the admission authority; overlapping reasons are counted separately. */
@@ -563,7 +563,7 @@ internal class CivsForestryWorksite(
     private fun forestBatch(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         job: CivForestryJob): CivWorldWork? {
         val existing = city.forestryJobs?.get(building.id.toString())
-        if (existing == null && !job.thinning && city.autonomy == null && forestSupply(city, worker, building, job.sapling) < job.roots.size)
+        if (existing == null && !job.thinning && !CivsAutonomy.legacyStock(city) && forestSupply(city, worker, building, job.sapling) < job.roots.size)
             return blocked(worker, "waiting-saplings", job.sapling, job.roots.size.toLong())
         val standing = beside(city, worker, building, world, job.root,
             capture = { captureForestBatch(city, worker, building, world, job, CivWorkApproach(job.root)) }) ?: return null
@@ -592,17 +592,17 @@ internal class CivsForestryWorksite(
                 return blocked(worker, "worksite-obstacle", point = point, reason = "tree-cell-changed", blockMaterial = block.type.name)
             if (!block.type.isAir) {
                 if (block.type.name == job.timber) logs++
-                if (city.autonomy == null) drops(block, tool(worker)).forEach { (material, amount) -> outputs.merge(material, amount, Math::addExact) }
+                if (!CivsAutonomy.legacyStock(city)) drops(block, tool(worker)).forEach { (material, amount) -> outputs.merge(material, amount, Math::addExact) }
             }
             val after = if (!job.thinning && point in job.roots) CivsForestry.saplingState(job.sapling) else "minecraft:air"
             if (!block.type.isAir || point in job.roots) changes += change(block, after)
         }
         val progress = CivForestryProgress(job, next, outputs, logs)
-        val output = if (city.autonomy == null) outputs else emptyMap()
+        val output = if (!CivsAutonomy.legacyStock(city)) outputs else emptyMap()
         return work(worker, building, standing, changes,
             if (existing == null && !job.seedDeferred && !job.thinning) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap(), output,
             status = "felling-tree", duration = maxOf(if (job.next == 0) 6_000L else 1_000L, logs * 1_000L), focus = job.root)
-            .copy(forestry = progress).let { if (city.autonomy != null) it.copy(equipmentAfter = null) else it }
+            .copy(forestry = progress).let { if (CivsAutonomy.legacyStock(city)) it.copy(equipmentAfter = null) else it }
     }
 
     /** Spruce, jungle and dark oak use four real, supported saplings for native giant variants. */

@@ -175,6 +175,7 @@ interface CivsUiHost {
     fun supplyRequests(player: Player): List<CivSupplyRequest>
     fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit>
     fun inspectBuilding(player: Player, cityId: UUID, buildingId: UUID): Settlement = throw CivsRejection("not-authorized")
+    fun inspectionMaterials(player: Player, cityId: UUID, buildingId: UUID): Map<String, Long> = emptyMap()
     fun openBuildingInventory(player: Player, cityId: UUID, buildingId: UUID): CompletableFuture<Unit> =
         openBuildingInventory(player, buildingId)
     fun buildingControl(player: Player, buildingId: UUID): CompletableFuture<CivPosition>

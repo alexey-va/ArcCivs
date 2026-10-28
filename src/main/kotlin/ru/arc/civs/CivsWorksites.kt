@@ -158,10 +158,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun cachedMatches(city: Settlement, worker: CivWorker, building: CivBuilding, it: Cached): Boolean =
         it.worker.completedCycles == worker.completedCycles && it.building == building &&
             it.worker.items == worker.items && it.worker.inventory == worker.inventory &&
-            (city.autonomy == null || building.type != BuildingType.FORESTER || it.work.forestry != null || CivsForestry.care(it.work) ||
+            (!CivsAutonomy.legacyStock(city) || building.type != BuildingType.FORESTER || it.work.forestry != null || CivsForestry.care(it.work) ||
                 city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) &&
             (it.work.forestry?.job?.let { job -> city.forestryJobs?.get(building.id.toString())?.let { saved -> saved == job }
-                ?: (job.next == 0 && job.seedDeferred == (!job.thinning && city.autonomy != null && city.stock.wood == 0L)) } != false)
+                ?: (job.next == 0 && job.seedDeferred == (!job.thinning && CivsAutonomy.legacyStock(city) && city.stock.wood == 0L)) } != false)
 
     /** Owner cache only: does not revalidate terrain, consume scan budgets or expire exclusions. */
     internal fun debug(workerIds: Set<UUID>? = null, buildingIds: Set<UUID>? = null): Map<String, Any?> {
@@ -582,7 +582,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (current != null && (building.type == BuildingType.FARM &&
                 (!current.cropCare || fieldScan!!.harvest.none { !farmClaimed(city, worker, building, it) }) ||
                 building.type == BuildingType.FORESTER && !CivsForestry.care(current))) return
-        val proposed = (if (current == null && city.autonomy == null) equipTool(city, worker, building, world) else null) ?: when (building.type) {
+        val proposed = (if (current == null && !CivsAutonomy.legacyStock(city)) equipTool(city, worker, building, world) else null) ?: when (building.type) {
             BuildingType.FARM -> farm(city, worker, building, world, requireNotNull(fieldScan), harvestOnly = current != null)
             BuildingType.FORESTER -> forestry.plan(city, worker, building, world, harvestOnly = current != null)
             BuildingType.QUARRY -> mine(city, worker, building, world)
@@ -696,7 +696,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             rejected.checkedChanges = 0
             workSpots.remove(worker.id)
         }
-        if (city.autonomy == null && work.inputs.any { (material, amount) ->
+        if (!CivsAutonomy.legacyStock(city) && work.inputs.any { (material, amount) ->
                 (CivsEquipment.available(worker, stock(city, building.id))[material] ?: 0) < amount })
             return blocked(worker, "waiting-saplings", work.inputs.keys.first(), work.inputs.values.first())
         while (rejected.checkedChanges < work.changes.size) {
@@ -925,7 +925,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (isPaused(city.id)) return currentNeed(city, worker)?.status?.takeIf {
             building.type == BuildingType.FARM && CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) == true
         } ?: "searching-work"
-        return if (city.autonomy == null && CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
+        return if (!CivsAutonomy.legacyStock(city) && CivsEquipment.slots(worker)[4]?.material?.endsWith(suffix) != true) "waiting-tool"
         else currentNeed(city, worker)?.status ?:
             "searching-work"
     }
@@ -1006,7 +1006,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             plan(city, worker) != null || currentNeed(city, worker)?.status != "searching-work") return false
         val target = workSpots[worker.id]?.target ?: rejectedWorkSpots[worker.id]?.pending?.work?.let(::citizenWorkFocus)
         if (target != null && !citizenChunkReady(world, target.x shr 4, target.z shr 4)) return false
-        if (building.type == BuildingType.FORESTER) return city.autonomy != null ||
+        if (building.type == BuildingType.FORESTER) return CivsAutonomy.legacyStock(city) ||
             CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") == true
         return building.type == BuildingType.QUARRY && (CivsAutonomousWorksites.supports(city, building) ||
             city.inventory != null && CivsEquipment.slots(worker)[4]?.material?.endsWith("_PICKAXE") == true &&

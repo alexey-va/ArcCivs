@@ -272,7 +272,7 @@ private fun autonomousCargoCity(): Settlement {
     val warehouse = autonomousCargoBuilding(BuildingType.WAREHOUSE, 10)
     val farm = autonomousCargoBuilding(BuildingType.FARM, 20)
     return CivsRules.validate(CivsAutonomy.found(UUID.randomUUID(), UUID.randomUUID(), "Courier village", UUID.randomUUID(),
-        CivPosition(0, 64, 0), 128, "medievaloak", hall.copy(level = 1), 1_000).copy(stock = Stock(food = 20),
+        CivPosition(0, 64, 0), 128, "medievaloak", hall.copy(level = 1), 1_000).copy(inventory = null, stock = Stock(food = 20),
         buildings = listOf(hall, warehouse, farm), workers = listOf(
             CivWorker(UUID(2, 1), "Farmer", farm.id, nextDeliveryAt = 1),
             CivWorker(UUID(2, 2), "Courier", warehouse.id, nextDeliveryAt = 1))))

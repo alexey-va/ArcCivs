@@ -239,10 +239,6 @@ class CivsUi internal constructor(
                     if (building.type != BuildingType.HOUSE && CivsRules.slots(city, building) > 0)
                         add(tr(player, "label.workers") to tint(tr(player, "common.fraction", "value" to workers.size,
                             "limit" to CivsRules.slots(city, building)), PEOPLE))
-                    CivsRules.resource(building.type)?.let { resource ->
-                        add(tr(player, "label.output") to tr(player, "autonomy.production", "amount" to CivsRules.deliveryAmount(building),
-                            "resource" to text.resource(player, resource)))
-                    }
                     if (building.type == BuildingType.FORESTER) add(tr(player, "forestry.species-label") to
                         treeSpecies(player, requireNotNull(CivsProduction.material(building))))
                 }, if (building.type.isResidence) DialogTables.PanelSkin.COCOA else DialogTables.PanelSkin.NAVY)
@@ -254,9 +250,20 @@ class CivsUi internal constructor(
             }
             if (building.type == BuildingType.WAREHOUSE || building.type == BuildingType.TOWN_HALL) {
                 if (building.type == BuildingType.TOWN_HALL) add(body(Component.empty()))
-                add(presentation.heading(tint(tr(player, "autonomy.shared-stock"), STOCK)))
+                add(presentation.heading(tint(tr(player, if (city.inventory != null) "autonomy.local-stock"
+                    else "autonomy.shared-stock"), STOCK)))
                 add(body(Component.empty()))
-                add(sharedStock(player, city, compact = building.type == BuildingType.TOWN_HALL))
+                if (city.inventory == null) add(sharedStock(player, city, compact = building.type == BuildingType.TOWN_HALL))
+                else {
+                    val local = runCatching { host.inspectionMaterials(player, city.id, buildingId) }
+                    val rows = local.getOrDefault(emptyMap()).toSortedMap().entries.take(PAGE_SIZE)
+                    if (rows.isNotEmpty()) add(presentation.facts(rows.map { (material, count) ->
+                        materialName(player, material) to tint(text.literal(count), STOCK)
+                    }, DialogTables.PanelSkin.EVERGREEN))
+                    else add(presentation.panel(local.exceptionOrNull()?.let { text.failure(player, it) }
+                        ?: tr(player, "stock.empty"), DialogTables.PanelSkin.EVERGREEN))
+                    add(presentation.panel(tr(player, "stock.physical-help"), DialogTables.PanelSkin.EVERGREEN))
+                }
             }
             val barrelHelp = tr(player, if (isAdmin(player)) "autonomy.barrel-edit-help" else "autonomy.barrel-read-help")
             if (building.type != BuildingType.TOWN_HALL) add(body(barrelHelp))

@@ -12,16 +12,19 @@ data class CivNativeContainerChange(val container: CivPosition, val containerTyp
     val before: CivResidentItem?, val after: CivResidentItem?)
 data class CivCollectedTransfer(val workerId: UUID, val before: List<CivResidentItem?>,
     val ground: List<CivGroundItemChange> = emptyList(), val homeId: UUID? = null,
-    val containers: List<CivNativeContainerChange> = emptyList(), val food: CivResidentFoodReceipt? = null) {
+    val containers: List<CivNativeContainerChange> = emptyList(), val food: CivResidentFoodReceipt? = null,
+    val forestryLeafLoot: CivForestryLeafLootProof? = null) {
     fun validated(city: Settlement) {
         require(ground.size <= 8 && containers.size <= 108)
         food?.let {
+            require(forestryLeafLoot == null)
             CivsEquipment.validate(before)
             require(containers.map { change -> change.container to change.slot }.distinct().size == containers.size)
             it.validated(city, this)
             return
         }
-        require(ground.isNotEmpty() && homeId == null && containers.isEmpty() ||
+        if (forestryLeafLoot != null) CivsForestryLeafLoot.validateTransfer(city, this)
+        else require(ground.isNotEmpty() && homeId == null && containers.isEmpty() ||
             ground.isEmpty() && homeId != null && containers.isNotEmpty())
         CivsEquipment.validate(before)
         val worker = city.workers.single { it.id == workerId }
@@ -42,21 +45,23 @@ data class CivCollectedTransfer(val workerId: UUID, val before: List<CivResident
             count(change.before, -1); count(change.after, 1)
         }
         containers.forEach { change ->
-            val home = city.building(requireNotNull(homeId)) ?: error("Missing home")
-            require(home.type.isResidence || home.type == BuildingType.TOWN_HALL)
-            require(home.id == civsCollectionHome(city, worker)?.id)
             require(change.containerType in CIVS_STORAGE_TYPES && change.slot in 0..26 && change.before != change.after)
-            require(change.container == home.control || home.phase == BuildingPhase.ACTIVE &&
-                home.bounds.contains(change.container.x, change.container.y, change.container.z))
-            require(city.buildings.none { it.id != home.id && it.control == change.container })
-            require(change.container != home.control || change.containerType == "BARREL")
+            if (forestryLeafLoot == null) {
+                val home = city.building(requireNotNull(homeId)) ?: error("Missing home")
+                require(home.type.isResidence || home.type == BuildingType.TOWN_HALL)
+                require(home.id == civsCollectionHome(city, worker)?.id)
+                require(change.container == home.control || home.phase == BuildingPhase.ACTIVE &&
+                    home.bounds.contains(change.container.x, change.container.y, change.container.z))
+                require(city.buildings.none { it.id != home.id && it.control == change.container })
+                require(change.container != home.control || change.containerType == "BARREL")
+            }
             val target = requireNotNull(change.after)
             require(change.before == null || change.before.material == target.material && change.before.data == target.data &&
                 change.before.amount < target.amount)
             count(change.before, -1); count(change.after, 1)
         }
         require(delta.values.all { it == 0L }) { "Collected transfer must conserve exact native items" }
-        if (ground.isNotEmpty()) require(worker.hasCollectedItems == true)
+        if (ground.isNotEmpty() && forestryLeafLoot == null) require(worker.hasCollectedItems == true)
     }
 }
 

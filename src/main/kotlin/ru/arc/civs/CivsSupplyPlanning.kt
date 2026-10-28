@@ -20,15 +20,11 @@ internal class CivsSupplyPlanning(
     private val capture: CivsSupplyCapture,
     private val retained: Map<UUID, CivCourierPlan>,
     private val position: (UUID) -> CivPosition?,
-    private val sources: () -> Map<UUID, CivPosition>,
     private val unavailable: (UUID) -> Boolean,
     private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
-    private val foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
-    private var meetings = emptyMap<UUID, CivPosition>()
-    private val workerSources = mutableListOf<CivSupplyWorkerSource>()
     private val couriers = mutableListOf<CivSupplyCourier>()
     private val craftWorkers = mutableListOf<CivCraftWorker>()
     private var materials = emptyMap<String, Material>()
@@ -45,7 +41,6 @@ internal class CivsSupplyPlanning(
                     observed.capacity, building.type)
             }.toMap()
             requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
-            meetings = sources()
             // The universe also includes arbitrary plain excess such as gravel and dirt.
             val names = requests.map(CivSupplyRequest::material).toMutableSet()
             stores.orEmpty().values.forEach { names += it.stock.keys }
@@ -68,14 +63,11 @@ internal class CivsSupplyPlanning(
                     position(worker.id) ?: building.entrance,
                     materials.mapValues { (_, type) -> CivsEquipment.supplyRoom(worker, type).toLong() })
             }
-            meetings[worker.id]?.let { point ->
-                if (building != null) workerSources += CivSupplyWorkerSource(worker.id, building.id, point,
-                    CivsLogistics.workerExcess(city, worker, crafts[worker.id]?.inputs.orEmpty(), foods))
-            }
             return null
         }
         val existing = retained.mapNotNull { (workerId, plan) ->
             val worker = city.workers.firstOrNull { it.id == workerId } ?: return@mapNotNull null
+            if (!plan.carrying && plan.cargo.sourceWorkerId != null) return@mapNotNull null
             if (worker.cargo == null && unavailable(workerId)) return@mapNotNull null
             val warehouse = city.building(plan.cargo.warehouseId)
             if (warehouse == null || worker.assignment != warehouse.id || warehouse.type != BuildingType.WAREHOUSE ||
@@ -104,7 +96,7 @@ internal class CivsSupplyPlanning(
             }.toMap()
         }.orEmpty()
         return CivSupplySnapshot(city.id, CivSupplyObservation(civSupplyInputs(city), requireNotNull(capture.result)), requireNotNull(stores),
-            requests, couriers.toList(), workerSources.toList(), existing.toMap(), materials.mapValues { it.value.maxStackSize },
+            requests, couriers.toList(), emptyList(), existing.toMap(), materials.mapValues { it.value.maxStackSize },
             constructionTargets, craftWorkers.toList(), crafts.toMap(), constructionId = city.construction?.id, stockTargets = CivsCarpentry.stockTargets(city))
     }
 }

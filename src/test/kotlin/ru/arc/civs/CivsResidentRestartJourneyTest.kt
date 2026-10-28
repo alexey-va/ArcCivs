@@ -14,8 +14,9 @@ import java.util.concurrent.CompletionException
 
 /** Portable component recreation from real city/journal files in one fixture world and JVM. */
 class CivsResidentRestartJourneyTest : FunSpec({
-    test("a restarted walking forester walks from fresh admission and durably finishes exactly once") {
-        restartJourney { journey ->
+    for (automatic in listOf(false, true))
+    test("a restarted walking forester walks from fresh admission and durably finishes exactly once Auto=$automatic") {
+        restartJourney(automatic) { journey ->
             journey.walkPartway()
             val before = journey.run.savedCity()
             journey.restart()
@@ -34,8 +35,9 @@ class CivsResidentRestartJourneyTest : FunSpec({
         }
     }
 
-    test("recovery reconciles a real arrival receipt once and ignores the retired owner's late callback") {
-        restartJourney { journey ->
+    for (automatic in listOf(false, true))
+    test("recovery reconciles a real arrival receipt once and ignores the retired owner's late callback Auto=$automatic") {
+        restartJourney(automatic) { journey ->
             journey.walkPartway()
             journey.restart()
             val before = journey.run.savedCity()
@@ -45,7 +47,9 @@ class CivsResidentRestartJourneyTest : FunSpec({
             journey.run.receipts() shouldBe emptyList()
             journey.run.persistOne() shouldBe true
             val receipt = journey.run.receipts().single().validated()
-            receipt.forestry!!.work shouldBe journey.work
+            journey.completedReceipt = receipt.after
+            receipt.forestry shouldBe null
+            receipt.worldChanges shouldBe journey.work!!.changes
             journey.work!!.changes.forEach { cell ->
                 journey.h.world.getBlockAt(cell.position.x, cell.position.y, cell.position.z).blockData.asString shouldBe cell.before
             }
@@ -68,28 +72,30 @@ class CivsResidentRestartJourneyTest : FunSpec({
             // Deliver a late transport result to the old Citizens generation, not to receipt recovery.
             journey.held.complete(receipt.after) shouldBe true
             journey.run.advanceProductionTicks(40)
+            repeat(30) { if (journey.run.pendingIo > 0 || journey.run.receipts().isNotEmpty()) journey.run.advanceProductionTicks(1) }
             retired.activeCount() shouldBe 0
             journey.assertOneCompletion(before)
             journey.rejectDuplicate()
         }
     }
 
-    test("fresh navigation goes around an obstruction added while the walking owner was stopped") {
-        restartJourney { journey ->
+    for (automatic in listOf(false, true))
+    test("fresh navigation goes around an obstruction added while the walking owner was stopped Auto=$automatic") {
+        restartJourney(automatic) { journey ->
             journey.walkPartway()
             val before = journey.run.savedCity()
             journey.h.viewing = false
-            for (z in -2..2) for (y in 64..66) journey.h.world.getBlockAt(8, y, z).type = Material.STONE
+            for (z in 1..12) for (y in 64..66) journey.h.world.getBlockAt(25, y, z).type = Material.STONE
             journey.restart()
             journey.finishWalkingAndWork()
-            journey.positions.any { it.x in 7.0..10.0 && (it.z < -2.3 || it.z > 3.3) } shouldBe true
+            journey.positions.any { it.x in 24.0..27.0 && (it.z < .7 || it.z > 13.3) } shouldBe true
             journey.assertOneCompletion(before)
             journey.rejectDuplicate()
         }
     }
 })
 
-private fun restartJourney(test: (RestartJourney) -> Unit) = residentRuntime(server = CivsWorksiteServerFixture(),
+private fun restartJourney(automatic: Boolean, test: (RestartJourney) -> Unit) = residentRuntime(server = CivsWorksiteServerFixture(),
     worldFactory = { object : ResidentRuntimeWorld() {
         override fun getHighestBlockYAt(x: Int, z: Int): Int = getHighestBlockYAt(x, z, HeightMap.MOTION_BLOCKING)
         override fun getHighestBlockYAt(x: Int, z: Int, heightMap: HeightMap): Int = (80 downTo 63).first { y ->
@@ -113,20 +119,16 @@ private fun restartJourney(test: (RestartJourney) -> Unit) = residentRuntime(ser
     for (building in listOf(hall, mill)) requireNotNull(building.control).let {
         h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
     }
-    h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null, stock = Stock(wood = 4),
-        buildings = listOf(hall, mill), forestrySeeded = setOf(mill.id.toString()),
-        workers = h.city.workers.map { it.copy(assignment = mill.id, nextDeliveryAt = 1) }))
-    // Persist the real empty-container observation before the journey's single work receipt.
-    CivsStorage(h.paper.createSimplePlugin("RestartCapacity")) { emptyArray() }.use { storage ->
-        storage.foodCanModify = { _, _ -> true }
-        storage.replaceCities(listOf(h.city))
-        val capture = storage.startSupplyCapture(h.city)
-        repeat(3) { if (capture.result == null) capture.step() }
-        val stores = CivsAutonomousStorage.stores(requireNotNull(capture.result))
-        stores.getValue(mill.id.toString()) shouldBe CivAutonomousStore(27, 27, 1)
-        stores.getValue(hall.id.toString()) shouldBe CivAutonomousStore(27, 27, 1)
-        h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(storage = stores)))
-    }
+    h.city = CivsRules.validate(h.city.copy(autonomy = if (automatic) CivAutonomy() else null,
+        inventory = CivInventory(CivStorageMode.PHYSICAL), stock = Stock(),
+        immigration = CivImmigration(0, Long.MAX_VALUE),
+        buildings = listOf(hall, mill),
+        workers = h.city.workers.map { it.copy(assignment = mill.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { slot -> when (slot) {
+                4 -> CivResidentItem("IRON_AXE", 1)
+                CivsEquipment.BAG -> CivResidentItem("OAK_SAPLING", 4)
+                else -> null
+            } }) }))
     h.world.getBlockAt(16, 63, 0).type = Material.DIRT
     for (y in 64..66) h.world.getBlockAt(16, y, 0).blockData = Bukkit.createBlockData("minecraft:oak_log[axis=y]")
     h.world.getBlockAt(16, 67, 0).blockData = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
@@ -142,6 +144,7 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
     private val initial = run.city
     val positions = mutableListOf<Location>()
     var work: CivWorldWork? = null
+    var completedReceipt: Settlement? = null
     private var token: CitizenToken? = null
     var callback: CompletableFuture<Settlement>? = null
     var holdCallback = false
@@ -159,7 +162,7 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
             work = requireNotNull(run.workPlan(run.city, run.city.workers.single { it.id == worker }))
             token = delivered
             h.owner.requireWorldWorkArrival(run.city.id, worker, requireNotNull(work))
-            (h.observedWork(worker) >= CivsResidents.workDuration(run.city.workers.single(), work!!.durationMillis)) shouldBe true
+            (h.observedWork(worker) >= CivsResidents.workDuration(run.city.workers.single { it.id == h.workerId }, work!!.durationMillis)) shouldBe true
             callback = run.residentDelivery(worker, delivered, run.now).whenComplete { saved, _ -> if (saved != null) h.city = saved }
             if (holdCallback) held else requireNotNull(callback)
         }
@@ -170,7 +173,7 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
         until("walking before completion") { walked >= 3.0 && h.phase() == CitizenPhase.TO_WORK }
         walked shouldBe positions.zipWithNext().sumOf { (a, b) -> a.distance(b) }
         h.deliveries shouldBe 0
-        run.city.workers.single().completedCycles shouldBe 0L
+        run.city.workers.single { it.id == h.workerId }.completedCycles shouldBe 0L
         run.savedCity() shouldBe run.city
         run.receipts() shouldBe emptyList()
     }
@@ -205,13 +208,24 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
         val after = run.city
         val accepted = requireNotNull(work)
         accepted.forestry!!.next shouldBe accepted.forestry.job.cells.size
-        after.workers.single().completedCycles shouldBe before.workers.single().completedCycles + 1
-        val earned = CivsRules.deliveryAmount(requireNotNull(before.building(accepted.buildingId))) -
-            if (accepted.inputs.isEmpty()) 0L else 1L
-        after.stock shouldBe before.stock
-        after.workers.single().pendingStock shouldBe Stock(wood = earned)
-        CivsAutonomousLogistics.held(after, Resource.WOOD) shouldBe CivsAutonomousLogistics.held(before, Resource.WOOD) + earned
-        after.revision shouldBe before.revision + 1
+        after.workers.single { it.id == h.workerId }.completedCycles shouldBe before.workers.single { it.id == h.workerId }.completedCycles + 1
+        after.stock shouldBe Stock()
+        after.workers.single { it.id == h.workerId }.pendingStock shouldBe null
+        after.inventory shouldBe before.inventory
+        val credited = completedReceipt ?: after
+        val beforeWorker = before.workers.single { it.id == h.workerId }
+        val afterWorker = credited.workers.single { it.id == h.workerId }
+        (accepted.inputs.keys + accepted.outputs.keys).forEach { material ->
+            CivsEquipment.plainCount(afterWorker, material).toLong() shouldBe
+                CivsEquipment.plainCount(beforeWorker, material).toLong() - (accepted.inputs[material] ?: 0L) +
+                    (accepted.outputs[material] ?: 0L)
+        }
+        (accepted.outputs["OAK_LOG"] ?: 0L) shouldBe 3L
+        credited.revision shouldBe before.revision + 1
+        val control = requireNotNull(after.building(accepted.buildingId)?.control)
+        val holder = h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Container
+        val storedLogs = holder.inventory.storageContents.filterNotNull().filter { it.type == Material.OAK_LOG }.sumOf { it.amount }
+        (CivsEquipment.plainCount(after.workers.single { it.id == h.workerId }, "OAK_LOG") + storedLogs) shouldBe 3
         run.savedCity() shouldBe after
         run.receipts() shouldBe emptyList()
     }
@@ -233,7 +247,7 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
             run.advanceProductionTicks(1)
             h.city = run.city
             if (callback == null) {
-                run.city.workers.single().completedCycles shouldBe initial.workers.single().completedCycles
+                run.city.workers.single { it.id == h.workerId }.completedCycles shouldBe initial.workers.single().completedCycles
                 run.city.stock shouldBe initial.stock
             }
             h.owner.collisionActors().singleOrNull()?.let { current ->

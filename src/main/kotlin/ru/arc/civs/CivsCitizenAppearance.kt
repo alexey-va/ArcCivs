@@ -61,10 +61,11 @@ internal fun citizenFieldCareItem(plan: CitizenPlan): Material? {
     }
 }
 
-internal fun citizenWorkStatus(plan: CitizenPlan, phase: CitizenPhase): String? =
+internal fun citizenWorkStatus(plan: CitizenPlan, phase: CitizenPhase, servingGuests: Boolean = false): String? =
     if (plan.token.constructionId?.let { citizenConstructionWorking(plan, phase, it) } == true) "building"
     else if (plan.type == BuildingType.GUARD_TOWER && plan.idleReason == null && phase == CitizenPhase.WORKING) "guarding"
-    else if (plan.type == BuildingType.TAVERN && plan.idleReason == null && phase == CitizenPhase.WORKING) "serving-guests"
+    else if (plan.type == BuildingType.TAVERN && plan.idleReason == null && phase == CitizenPhase.WORKING)
+        if (servingGuests) "serving-guests" else "waiting-guests"
     else plan.worldWork?.status?.takeIf { phase in setOf(CitizenPhase.WORKING, CitizenPhase.READY, CitizenPhase.DELIVERING) }
 
 internal fun citizenConstructionWorking(plan: CitizenPlan, phase: CitizenPhase, orderId: UUID): Boolean =

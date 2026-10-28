@@ -5,11 +5,11 @@ import java.util.UUID
 /** Only active minutes advance recruitment; pausing or restarting never catches up offline time. */
 data class CivAutonomy(val paused: Boolean = false, val recruitmentMinutes: Int = 0,
     val layoutHalfWidth: Int? = null,
-    /** Closed abstract city products; these quantities never become native inventory items. */
+    /** Legacy closed products; converted once before physical Auto production starts. */
     val products: Map<CivIndustryProduct, Long>? = null,
     /** Adopted geometry only; unpaid plots are not sites, stock, workers or construction receipts. */
     val plan: CivSettlementPlan? = null,
-    /** Last bounded native observation, separately for each building's own containers. */
+    /** Legacy capacity observation; physical Auto reads ordinary native storage. */
     val storage: Map<String, CivAutonomousStore>? = null)
 
 data class CivAutonomyGoal(
@@ -22,8 +22,10 @@ data class CivAutonomyGoal(
     val ready: Boolean get() = missing == Stock()
 }
 
-/** Abstract village stock pays complete buildings once; it never becomes transferable vanilla items. */
+/** Auto owns planning and assignments; legacy closed prices remain only for saved pre-migration work. */
 object CivsAutonomy {
+    fun legacyStock(city: Settlement): Boolean = city.autonomy != null && city.inventory == null
+
     const val RECRUITMENT_MINUTES = 2
     val baseProfile = listOf(BuildingType.BUILDER_HUT, BuildingType.FORESTER, BuildingType.QUARRY,
         BuildingType.FARM, BuildingType.WAREHOUSE, BuildingType.TOWN_HALL, BuildingType.HOUSE, BuildingType.PLAN_BOARD,
@@ -60,7 +62,7 @@ object CivsAutonomy {
         id: UUID, owner: UUID, name: String, worldId: UUID, center: CivPosition,
         radius: Int, style: String, townHall: CivBuilding, now: Long,
     ): Settlement = CivsRules.validate(CivsRules.found(id, owner, name, worldId, center, radius, style, townHall, now)
-        .copy(stock = CivsRules.STARTING_STOCK, inventory = null, autonomy = CivAutonomy()))
+        .copy(autonomy = CivAutonomy()))
 
     /** Finish accepted sites before adding another; the hall waits for a real hut and sustainable producers. */
     fun nextGoal(city: Settlement, maximumLevel: (CivBuilding) -> Int = { it.type.maxLevel }): CivAutonomyGoal? {
@@ -141,9 +143,9 @@ object CivsAutonomy {
     }
 
     internal fun goal(city: Settlement, type: BuildingType, level: Int, id: UUID?): CivAutonomyGoal {
-        val price = if (id?.let(city::building)?.let(CivsPlanBoardBlueprint::needsRefit) == true &&
+        val price = if (!legacyStock(city)) Stock() else if (id?.let(city::building)?.let(CivsPlanBoardBlueprint::needsRefit) == true &&
             type == BuildingType.PLAN_BOARD && level == 1) Stock() else cost(type, level)
-        val missing = Stock((price.wood - city.stock.wood).coerceAtLeast(0),
+        val missing = if (!legacyStock(city)) Stock() else Stock((price.wood - city.stock.wood).coerceAtLeast(0),
             (price.stone - city.stock.stone).coerceAtLeast(0), (price.food - city.stock.food).coerceAtLeast(0))
         return CivAutonomyGoal(type, level, id, price, missing)
     }
@@ -173,7 +175,7 @@ object CivsAutonomy {
         val builder = if (missingBuilderForAcceptedWork(city)) {
             city.buildings.firstOrNull { CivsRules.isBuilder(city, it) && CivsRules.builderCanWork(city, it) && unstaffed(it) }
         } else null
-        val hungryFarm = city.buildings.firstOrNull { it.type == BuildingType.FARM && city.stock.food < CivsRules.RECRUIT_FOOD &&
+        val hungryFarm = city.buildings.firstOrNull { it.type == BuildingType.FARM && legacyStock(city) && city.stock.food < CivsRules.RECRUIT_FOOD &&
             CivsRules.productionAvailable(city, it) && unstaffed(it) }
         // A staffed tavern returns its keeper before builder recovery borrows the last raw producer.
         val urgent = builder ?: hungryFarm
@@ -241,7 +243,7 @@ object CivsAutonomy {
     ): Settlement {
         CivsRules.validate(city)
         val autonomy = city.autonomy ?: return city
-        if (autonomy.paused || city.pendingDeletion != null) return city
+        if (autonomy.paused || city.pendingDeletion != null || !legacyStock(city)) return city
         val stock = city.stock
         val residents = city.workers
         // Food is debited by the observed meal receipt, including awake idle residents.

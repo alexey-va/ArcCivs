@@ -18,6 +18,71 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class CivsRoadMaintenanceTest : FunSpec({
+    test("physical Auto road upkeep consumes one carried cobblestone without closed stock or production credit") {
+        val base = upkeepCity()
+        val worker = CivsEquipment.replace(base.workers.single(), MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }
+            .also { it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", 2) })
+        val city = CivsRules.validate(base.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            workers = listOf(worker)))
+        CivsRoadMaintenance.eligible(city) shouldBe true
+        val work = upkeepWork(city).copy(inputs = mapOf("COBBLESTONE" to 1L))
+        val after = CivsRoadMaintenance.complete(city, work, 3_000)
+        after.stock shouldBe Stock()
+        CivsEquipment.usableCount(after.workers.single(), "COBBLESTONE") shouldBe 1
+        after.workers.single().skills shouldBe worker.skills
+        after.workers.single().completedCycles shouldBe 1L
+        val receipt = CivRoadUpkeepReceipt(worker, city.stock, work, 3_000)
+        receipt.before(after) shouldBe city
+        receipt.validated(after)
+        Gson().fromJson(Gson().toJson(receipt), CivRoadUpkeepReceipt::class.java).validated(after)
+        shouldThrow<IllegalArgumentException> { CivsRoadMaintenance.complete(city, work.copy(inputs = emptyMap()), 3_000) }
+        shouldThrow<IllegalArgumentException> { CivsRoadMaintenance.complete(city.copy(
+            workers = listOf(worker.copy(items = null, inventory = emptyMap()))), work, 3_000) }
+        CivsRoadMaintenance.eligible(city.copy(autonomy = null)) shouldBe false
+    }
+
+    test("native upkeep requests supplies only after a damaged column is captured and drops stale worker requests") {
+        var tick = 0
+        val native = mockk<CivsWorld>()
+        val maintenance = CivsRoadMaintenance(native) { tick }
+        val city = upkeepCity().copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        val worker = city.workers.single()
+        val work = upkeepWork(city)
+        val road = city.buildings.last()
+        val retained = CivPlacementPlan(road.id, city.id, city.worldId, road, work.changes)
+        maintenance.publish(city, CivsRoadMaintenance.prepare(city, listOf(retained)))
+        maintenance.requirements(city) shouldBe emptyMap()
+        every { native.captureRoadUpkeep(any(), any(), any()) } returns null
+        maintenance.plan(city, worker) shouldBe null
+        maintenance.requirements(city) shouldBe emptyMap()
+        tick++
+        every { native.captureRoadUpkeep(any(), any(), any()) } returns work
+        every { native.roadUpkeepPending(any(), any()) } returns true
+        maintenance.plan(city, worker) shouldBe work.copy(inputs = mapOf("COBBLESTONE" to 1L))
+        maintenance.requirements(city) shouldBe mapOf(worker.id to mapOf("COBBLESTONE" to 1L))
+        maintenance.requirements(city.copy(workers = listOf(worker.copy(completedCycles = 1)))) shouldBe emptyMap()
+        maintenance.requirements(city.copy(autonomy = CivAutonomy(paused = true))) shouldBe emptyMap()
+        maintenance.requirements(city.copy(autonomy = null)) shouldBe emptyMap()
+        maintenance.invalidate(worker.id)
+        maintenance.requirements(city) shouldBe emptyMap()
+    }
+
+    test("native upkeep receipt binds the exact local hut debit and rejects unpaid or foreign supplies") {
+        val city = upkeepCity().copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        val work = upkeepWork(city).copy(inputs = mapOf("COBBLESTONE" to 1L))
+        val worker = city.workers.single()
+        val hut = city.building(work.buildingId)!!
+        val debit = CivInventorySlotChange(hut.anchor, "CHEST", 0, CivPlainItem("COBBLESTONE", 2), CivPlainItem("COBBLESTONE", 1))
+        val after = CivsRoadMaintenance.complete(city, work, 3_000, nativePaid = true)
+        val receipt = CivRoadUpkeepReceipt(worker, city.stock, work, 3_000)
+        receipt.validated(after, listOf(debit))
+        for (invalid in listOf(emptyList(), listOf(debit.copy(container = city.buildings.first().anchor)),
+            listOf(debit.copy(after = null)), listOf(debit.copy(before = null, after = CivPlainItem("COBBLESTONE", 1))),
+            listOf(debit.copy(before = CivPlainItem("STONE", 2), after = CivPlainItem("STONE", 1)))))
+            shouldThrow<IllegalArgumentException> { receipt.validated(after, invalid) }
+        shouldThrow<IllegalArgumentException> { receipt.validated(after.copy(stock = Stock(stone = 1)), listOf(debit)) }
+    }
+
     test("Auto2 short saved hill is flattened once for compatible paid owners and survives exact receipt replay") {
         val originalRoute = listOf(64, 64, 64, 65, 66, 67, 67, 67, 66, 65, 64, 64, 64)
             .mapIndexed { z, y -> CivPosition(0, y, z) }

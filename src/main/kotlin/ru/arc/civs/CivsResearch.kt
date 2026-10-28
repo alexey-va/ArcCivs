@@ -48,7 +48,7 @@ object CivsResearch {
         CivResearchId.ENGINEERING -> 8
     }
 
-    fun cost(city: Settlement, id: CivResearchId): CivResearchCost = costV1(city.autonomy != null, id)
+    fun cost(city: Settlement, id: CivResearchId): CivResearchCost = costV1(CivsAutonomy.legacyStock(city), id)
 
     /** Supported historical terms are immutable when a future catalog introduces another version. */
     private fun costV1(autonomous: Boolean, id: CivResearchId): CivResearchCost = if (autonomous) when (id) {
@@ -103,7 +103,7 @@ object CivsResearch {
     }
 
     internal fun inputs(city: Settlement, building: CivBuilding): Map<String, Long> =
-        city.research?.project?.takeIf { city.autonomy == null && !it.funded && !it.paused &&
+        city.research?.project?.takeIf { !CivsAutonomy.legacyStock(city) && !it.funded && !it.paused &&
             building.id == university(city)?.id }?.cost?.materials.orEmpty()
 
     internal fun begin(city: Settlement, research: CivResearchId, projectId: UUID, now: Long): Settlement {
@@ -125,18 +125,19 @@ object CivsResearch {
     internal fun canFund(city: Settlement): Boolean {
         val project = city.research?.project ?: return false
         return !project.funded && !project.paused && city.autonomy?.paused != true && university(city) != null &&
-            (city.autonomy == null || city.stock.covers(project.cost.stock) &&
+            (!CivsAutonomy.legacyStock(city) || city.stock.covers(project.cost.stock) &&
                 project.cost.products.all { (product, amount) -> CivsResearch.product(city, product) >= amount })
     }
 
-    /** Native callers must carry their existing exact inventory receipt; Auto never issues native items. */
+    /** Physical funding carries the existing exact inventory receipt; legacy closed funding remains recoverable. */
     internal fun fund(city: Settlement, projectId: UUID, now: Long, nativePaid: Boolean = false): Settlement {
         available(city)
         val project = project(city, projectId)
         if (project.funded) return city
         requireState(canFund(city), if (project.paused) "research-paused" else "research-unfunded")
-        requireState(city.autonomy != null || nativePaid, "materials-required")
+        requireState(CivsAutonomy.legacyStock(city) || nativePaid, "materials-required")
         val autonomy = city.autonomy?.let { auto ->
+            if (!CivsAutonomy.legacyStock(city)) return@let auto
             val products = auto.products.orEmpty().toMutableMap()
             project.cost.products.forEach { (product, count) ->
                 val remaining = (products[product] ?: 0L) - count
@@ -144,7 +145,7 @@ object CivsResearch {
             }
             auto.copy(products = products.takeIf { it.isNotEmpty() })
         }
-        return revise(city, city.copy(stock = if (autonomy == null) city.stock else city.stock - project.cost.stock,
+        return revise(city, city.copy(stock = if (!CivsAutonomy.legacyStock(city)) city.stock else city.stock - project.cost.stock,
             autonomy = autonomy, research = requireNotNull(city.research).copy(project = project.copy(funded = true)),
             workers = invalidate(city, now)))
     }
@@ -204,13 +205,17 @@ object CivsResearch {
             require(project.workRequired in 1..64 && project.workDone in 0 until project.workRequired)
             require(project.funded || project.workDone == 0)
             val cost = project.cost
-            require(project.termsVersion == 1 && cost == costV1(city.autonomy != null, project.research) &&
+            val native = !CivsAutonomy.legacyStock(city)
+            val expected = costV1(!native, project.research)
+            val migrated = city.autonomy != null && native && project.termsVersion == 2 &&
+                cost == CivsAutoStorageMigration.nativeCost(costV1(true, project.research))
+            require((project.termsVersion == 1 && cost == expected || migrated) &&
                 project.workRequired == sessionsV1(project.research))
             require(cost.stock.wood in 0..CivInventory.MAX_AMOUNT && cost.stock.stone in 0..CivInventory.MAX_AMOUNT &&
                 cost.stock.food in 0..CivInventory.MAX_AMOUNT)
             require(cost.products.size <= CivIndustryProduct.entries.size && cost.products.all { (key, amount) -> key != null && amount in 1..64 })
             CivInventory(CivStorageMode.VIRTUAL, cost.materials).validated()
-            require(if (city.autonomy == null) cost.stock == Stock() && cost.products.isEmpty() else cost.materials.isEmpty())
+            require(if (!CivsAutonomy.legacyStock(city)) cost.stock == Stock() && cost.products.isEmpty() else cost.materials.isEmpty())
         }
     }
 }

@@ -114,7 +114,8 @@ data class CivResidentTransfer(val playerId: UUID, val workerId: UUID,
 
 data class CivStoragePlan(val inventoryAfter: CivInventory, val changes: List<CivInventorySlotChange>,
     val playerDebit: CivPlayerDebit? = null, val residentTransfer: CivResidentTransfer? = null,
-    val worldChanges: List<CivPlanBlock>? = null, val mine: CivMineReceipt? = null)
+    val worldChanges: List<CivPlanBlock>? = null, val mine: CivMineReceipt? = null,
+    val autoSupplyBuildingId: UUID? = null)
 data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupplyResult)
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
 data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
@@ -132,6 +133,8 @@ data class CivInventoryTransaction(
     val upkeep: CivRoadUpkeepReceipt? = null,
     val autonomousVisual: CivAutonomousVisualReceipt? = null,
     val mine: CivMineReceipt? = null,
+    /** Explicit native issuance; absent in older receipts and ordinary transfers/production. */
+    val autoSupplyBuildingId: UUID? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
@@ -139,7 +142,8 @@ data class CivInventoryTransaction(
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
             autonomousVisual != null || after.autonomy != null && residentTransfer != null)
-        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine).size <= 1)
+        require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
+            autoSupplyBuildingId).size <= 1)
         collected?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -154,15 +158,15 @@ data class CivInventoryTransaction(
             it.validated(after)
         }
         upkeep?.let {
-            require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
-            it.validated(after)
+            require(worldChanges.orEmpty() == it.work.changes)
+            it.validated(after, changes)
         }
         autonomousVisual?.let {
             require(changes.isEmpty() && worldChanges.orEmpty() == it.work.changes)
             it.validated(after)
         }
         mine?.let {
-            require(after.inventory != null && after.autonomy == null && worldChanges.orEmpty() == it.work.changes &&
+            require(after.inventory != null && !CivsAutonomy.legacyStock(after) && worldChanges.orEmpty() == it.work.changes &&
                 it.work.forestry == null && it.work.upkeep == null)
             it.validated(after)
         }
@@ -180,6 +184,21 @@ data class CivInventoryTransaction(
             require(change.before != change.after)
             change.before?.validated()
             change.after?.validated()
+        }
+        autoSupplyBuildingId?.let { buildingId ->
+            require(after.autonomy != null && after.inventory?.mode == CivStorageMode.PHYSICAL &&
+                changes.isNotEmpty() && worldChanges.isNullOrEmpty())
+            val building = requireNotNull(after.building(buildingId))
+            val added = linkedMapOf<String, Long>()
+            changes.forEach { change ->
+                require(change.container == building.control || building.phase == BuildingPhase.ACTIVE &&
+                    building.bounds.contains(change.container.x, change.container.y, change.container.z))
+                require(after.buildings.none { it.id != buildingId && it.control == change.container })
+                val item = requireNotNull(change.after)
+                require(change.before == null || change.before.material == item.material && change.before.amount < item.amount)
+                added.merge(item.material, (item.amount - (change.before?.amount ?: 0)).toLong(), Math::addExact)
+            }
+            require(added.size <= 8 && added.values.all { it in 1..64L })
         }
         playerDebit?.let { debit ->
             require(debit.playerId != null && after.canManage(debit.playerId) && debit.changes != null)
@@ -245,6 +264,7 @@ class CivsStorage(private val plugin: Plugin,
         val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet())
     private data class Source(val position: CivPosition, val type: String, val inventory: Inventory)
     private data class Snapshot(val source: Source, val before: List<ItemStack?>, val after: MutableList<ItemStack?>)
+    private data class ResidentReturnCursor(val buildingId: UUID, val next: Int)
     private class DebitSearch(val worldId: UUID, val owner: UUID, val required: Map<String, Long>, val buildings: Set<UUID>?) {
         var positions: Map<CivPosition, String?> = emptyMap()
         var ordered: List<CivPosition> = emptyList()
@@ -258,8 +278,10 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedWorld = mutableMapOf<Key, UUID>()
     private val lockedGround = mutableMapOf<UUID, UUID>()
     private val homeCursors = mutableMapOf<UUID, Int>()
+    private val residentReturnCursors = mutableMapOf<UUID, MutableMap<UUID, ResidentReturnCursor>>()
     internal var residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY
     internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
+    internal var forestryLeafCurrentCity: (UUID) -> Settlement? = { null }
     internal var collectedChunkLease: (PaperChunkKey) -> PaperChunkTicketLease = { error("Collection chunk leases are not wired") }
     internal var validateUpkeepNative: (CivInventoryTransaction) -> CivInventoryApplyResult? = {
         CivInventoryApplyResult.Conflict(mapOf("reason" to "upkeep-authority-unavailable"))
@@ -373,15 +395,24 @@ class CivsStorage(private val plugin: Plugin,
     fun replaceCities(cities: Collection<Settlement>) {
         checkMain(); requireOpen()
         materializationCursors.clear()
+        residentReturnCursors.clear()
         debitSearches.clear()
         supplyCaptures.clear()
         autonomousCaptures.clear()
         index.replace(cities)
     }
-    fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city); supplyCaptures.update(city) }
+    fun updateCity(city: Settlement) {
+        checkMain(); requireOpen(); index.update(city); supplyCaptures.update(city)
+        residentReturnCursors[city.id]?.let { cursors ->
+            val assignments = city.workers.associate { it.id to it.assignment }
+            cursors.entries.removeIf { (id, cursor) -> assignments[id] != cursor.buildingId }
+            if (cursors.isEmpty()) residentReturnCursors.remove(city.id)
+        }
+    }
     fun removeCity(cityId: UUID) {
         checkMain(); requireOpen()
         materializationCursors.remove(cityId)
+        residentReturnCursors.remove(cityId)
         debitSearches.remove(cityId)
         supplyCaptures.remove(cityId)
         autonomousCaptures.remove(cityId)
@@ -487,6 +518,11 @@ class CivsStorage(private val plugin: Plugin,
             require(receipt.buildingBefore == claim.city.building(receipt.buildingBefore.id) &&
                 receipt.planBefore == claim.city.minePlans?.get(key) && receipt.legacyBefore == claim.city.mineProgress?.get(key))
         }
+        transaction.autoSupplyBuildingId?.let {
+            require(transaction.after == claim.city.copy(revision = transaction.after.revision)) {
+                "Auto supply may only change native slots and the city revision"
+            }
+        }
         claim.positions.keys.filterNot { it in positions }.forEach {
             locked.remove(Key(claim.city.worldId, it), transaction.id)
         }
@@ -585,6 +621,67 @@ class CivsStorage(private val plugin: Plugin,
         return CivCollectedPlan(updated, changes.takeIf { it.isNotEmpty() }?.let {
             CivCollectedTransfer(workerId, CivsEquipment.slots(worker), ground = it)
         })
+    }
+
+    /** Actual marked decay Items enter only this forester's indexed native holders. No resident bag or stock changes. */
+    internal fun prepareForestryLeafLoot(city: Settlement, workerId: UUID, entityIds: List<UUID>): CivCollectedPlan {
+        checkClaim(city)
+        require(entityIds.size in 1..8 && entityIds.distinct().size == entityIds.size)
+        val worker = city.workers.single { it.id == workerId }
+        val building = city.building(worker.assignment ?: throw CivsRejection("invalid-assignment"))
+            ?: throw CivsRejection("building-not-found")
+        reject(city.inventory?.mode != CivStorageMode.PHYSICAL || building.type != BuildingType.FORESTER ||
+            building.phase != BuildingPhase.ACTIVE || CivsResidents.isChild(worker), "invalid-assignment")
+        val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+        val positions = buildingPositions(city, building.id).entries.toList()
+        val cursor = (homeCursors[workerId] ?: 0).takeIf { it in positions.indices } ?: 0
+        val ordered = positions.drop(cursor) + positions.take(cursor)
+        if (positions.isNotEmpty()) homeCursors[workerId] = (cursor + 4) % positions.size
+        val snapshots = resolveSources(city, ordered.asSequence().take(4)
+            .filter { foodCanModify(city, it.key) }.map { it.key to it.value }).map { source ->
+            source to source.inventory.storageContents.map(CivResidentItem::of).toMutableList()
+        }.toList()
+        val originals = snapshots.associate { (source, slots) -> source.position to slots.toList() }
+        val ground = mutableListOf<CivGroundItemChange>()
+        val sources = mutableListOf<CivForestryLeafSource>()
+        for (id in entityIds) {
+            val item = world.getEntity(id) as? Item ?: throw CivsRejection("stale-delivery")
+            reject(receiptBootstrap || discardConsumed(item), "ground-item-consumed")
+            val proof = CivsForestryLeafLoot.proof(item) ?: throw CivsRejection("forestry-leaf-source-missing")
+            val source = proof.sources.single()
+            reject(proof.buildingId != building.id || !CivsForestryLeafLoot.current(proof, city) ||
+                item.owner != null || item.thrower != null || !civsGroundItemAvailable(item, worker.id) ||
+                !city.contains(item.location.blockX, item.location.blockZ), "forestry-leaf-source-changed")
+            val position = CivPosition(item.location.blockX, item.location.blockY, item.location.blockZ)
+            reject(!foodCanModify(city, source.leaf) || !foodCanModify(city, position), "lands-denied")
+            val before = requireNotNull(CivResidentItem.of(item.itemStack))
+            reject(before.data != null || !CivsForestryLeafLoot.leafLoot(before.material), "forestry-leaf-item-changed")
+            val maximum = item.itemStack.maxStackSize
+            val room = snapshots.sumOf { (_, slots) -> slots.sumOf { slot ->
+                if (slot == null) maximum else if (slot.material == before.material && slot.data == null) maximum - slot.amount else 0
+            } }
+            if (room < before.amount) continue
+            var remaining = before.amount
+            for ((_, slots) in snapshots) for (empty in listOf(false, true)) for (slot in slots.indices) {
+                val previous = slots[slot]
+                if (remaining == 0 || (previous == null) != empty || previous != null &&
+                    (previous.material != before.material || previous.data != null)) continue
+                val moved = minOf(remaining, maximum - (previous?.amount ?: 0))
+                if (moved <= 0) continue
+                slots[slot] = before.copy(amount = (previous?.amount ?: 0) + moved)
+                remaining -= moved
+            }
+            check(remaining == 0)
+            ground += CivGroundItemChange(id, position, before, null)
+            sources += source
+        }
+        if (ground.isEmpty()) return CivCollectedPlan(worker, null)
+        val containers = snapshots.flatMap { (source, slots) -> slots.indices.mapNotNull { slot ->
+            val before = originals.getValue(source.position)[slot]
+            slots[slot]?.takeIf { it != before }?.let { CivNativeContainerChange(source.position, source.type, slot, before, it) }
+        } }
+        return CivCollectedPlan(worker, CivCollectedTransfer(workerId, CivsEquipment.slots(worker), ground = ground,
+            containers = containers, forestryLeafLoot = CivForestryLeafLootProof(city.id, city.owner, city.worldId, building.id, sources)))
     }
 
     /** Cached membership limits discovery to four real holders in this resident's own home. */
@@ -971,15 +1068,11 @@ class CivsStorage(private val plugin: Plugin,
 
     fun prepareCargoPickup(city: Settlement, cargo: CivCargo): CivStoragePlan {
         require(cargo.amount in 1L..64L)
-        if (cargo.sourceWorkerId != null) {
-            checkClaim(city)
-            reject(cargoRoom(city, cargo.targetBuildingId, cargo.material) < cargo.amount, "storage-full")
-            return CivStoragePlan(requireNotNull(city.inventory), emptyList())
-        }
+        reject(cargo.sourceWorkerId != null, "stale-delivery")
         return prepareBuildingDebit(city, cargo.sourceBuildingId, mapOf(cargo.material to cargo.amount))
     }
 
-    /** A prospective worker handoff never starts without space in the destination's real holders. */
+    /** Free native cargo space excludes named or otherwise custom stacks. */
     fun cargoRoom(city: Settlement, buildingId: UUID, material: String): Long {
         checkMain(); requireOpen()
         if (city.inventory?.mode == CivStorageMode.VIRTUAL) return warehouseSpace(city, buildingId).coerceAtMost(CivsLogistics.MAX_CARGO)
@@ -1004,6 +1097,49 @@ class CivsStorage(private val plugin: Plugin,
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         val supplied = CivsEquipment.collectSupplies(worker, required)
         return CivResidentTransferPlan(prepareBuildingDebit(city, buildingId, required), supplied)
+    }
+
+    /** Return only fitting ordinary bag surplus to this worker's own workplace in one receipt. */
+    fun prepareResidentReturn(city: Settlement, workerId: UUID, buildingId: UUID,
+        craftInputs: Map<String, Long> = emptyMap()): CivResidentTransferPlan {
+        checkClaim(city)
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        reject(city.inventory == null || worker.assignment != buildingId, "invalid-assignment")
+        val offered = CivsLogistics.workerExcess(city, worker, craftInputs, residentFoods)
+        val inventory = requireNotNull(city.inventory)
+        if (offered.isEmpty()) return CivResidentTransferPlan(CivStoragePlan(inventory, emptyList()), worker)
+        val snapshots = if (inventory.mode == CivStorageMode.PHYSICAL) {
+            // Select from cached metadata before resolving any native inventory, then rotate past full windows.
+            val positions = buildingPositions(city, buildingId).entries.toList()
+            if (positions.isEmpty()) emptyList() else {
+                val cursors = residentReturnCursors.getOrPut(city.id, ::mutableMapOf)
+                val start = Math.floorMod(cursors[worker.id]?.takeIf { it.buildingId == buildingId }?.next ?: 0, positions.size)
+                val count = minOf(BACKGROUND_DEBIT_CONTAINERS, positions.size)
+                val window = (0 until count).asSequence().map { offset ->
+                    positions[(start + offset) % positions.size].let { it.key to it.value }
+                }
+                cursors[worker.id] = ResidentReturnCursor(buildingId, (start + count) % positions.size)
+                resolveSources(city, window).map(::snapshot).toList()
+            }
+        } else emptyList()
+        var virtual = inventory
+        val moved = offered.mapValues { (material, count) ->
+            if (inventory.mode == CivStorageMode.PHYSICAL) count - insert(snapshots, material, count)
+            else minOf(count, warehouseSpace(city.copy(inventory = virtual), buildingId)).also { amount ->
+                if (amount > 0) virtual = creditVirtual(city.copy(inventory = virtual), material, amount, buildingId).inventoryAfter
+            }
+        }.filterValues { it > 0 }.toMutableMap()
+        val items = CivsEquipment.slots(worker).toMutableList()
+        for (slot in CivsEquipment.BAG until items.size) {
+            val item = items[slot]?.takeIf { it.data == null } ?: continue
+            val count = minOf(item.amount.toLong(), moved[item.material] ?: 0).toInt()
+            if (count == 0) continue
+            items[slot] = item.copy(amount = item.amount - count).takeIf { it.amount > 0 }
+            moved[item.material] = moved.getValue(item.material) - count
+        }
+        check(moved.values.all { it == 0L })
+        return CivResidentTransferPlan(if (inventory.mode == CivStorageMode.PHYSICAL) plan(inventory, snapshots)
+            else CivStoragePlan(virtual, emptyList()), CivsEquipment.replace(worker, items))
     }
 
     /** Fill a useful carried batch from the assigned hut; a site never remotely spends hut stock. */
@@ -1092,7 +1228,7 @@ class CivsStorage(private val plugin: Plugin,
         validateAmounts(inputs)
         validateAmounts(outputs)
         val mine = work?.takeIf { it.miningSections != null }?.let {
-            require(it.buildingId == buildingId && it.changes == worldChanges && city.autonomy == null)
+            require(it.buildingId == buildingId && it.changes == worldChanges && !CivsAutonomy.legacyStock(city))
             CivMineReceipt(building, city.minePlans?.get(buildingId.toString()),
                 city.mineProgress?.get(buildingId.toString()), it).detached()
         }
@@ -1202,6 +1338,18 @@ class CivsStorage(private val plugin: Plugin,
         return CivStorageSupplyPlan(prepared, CivsSupplyResult(count, missing.values.sum() - count, full))
     }
 
+    /** The same grant planner, restricted to current Auto demands and rechecked native modification authority. */
+    internal fun prepareAutoSupply(city: Settlement, demand: CivAutoSupplyDemand,
+        canModify: (CivPosition) -> Boolean): CivStoragePlan? {
+        reject(city.autonomy?.paused != false || !CivsAutoStorageMigration.ready(city), "not-authorized")
+        // ponytail: use the existing row-search ceiling; oversized admin-authored storage waits for a sliced planner.
+        if (buildingPositions(city, demand.buildingId).size > BACKGROUND_DEBIT_CONTAINERS)
+            throw CivsRejection("storage-unavailable", mapOf("reason" to "auto-supply-container-bound"))
+        val prepared = prepareConstructionSupply(city, demand.buildingId, demand.required)
+        prepared.plan.changes.forEach { reject(!canModify(it.container), "lands-denied") }
+        return prepared.plan.takeIf { it.changes.isNotEmpty() }?.copy(autoSupplyBuildingId = demand.buildingId)
+    }
+
     /** Move reserves into real slots in a bounded receipt; full/unloaded storage leaves every remainder durable. */
     fun prepareMaterialization(city: Settlement, targetMode: CivStorageMode = CivStorageMode.PHYSICAL): CivStoragePlan {
         checkClaim(city)
@@ -1213,7 +1361,8 @@ class CivsStorage(private val plugin: Plugin,
             ?: city.buildings.first { it.type == BuildingType.TOWN_HALL }
         val sharedDestinations = buildingPositions(city, depot.id)
         val buildingDestinations = warehouses.keys.associateWith { id ->
-            buildingPositions(city, UUID.fromString(id), controlOnly = true).keys + sharedDestinations.keys
+            if (city.autonomy != null) buildingPositions(city, UUID.fromString(id)).keys
+            else buildingPositions(city, UUID.fromString(id), controlOnly = true).keys + sharedDestinations.keys
         }
         val eligible = sharedDestinations.keys + buildingDestinations.values.flatten()
         val positions = materializationWindow(city, eligible)
@@ -1389,6 +1538,14 @@ class CivsStorage(private val plugin: Plugin,
             is CivInventoryApplyResult.Conflict -> return authority
             else -> Unit
         }
+        val nativeAuthorityBuilding = transaction.autoSupplyBuildingId ?: transaction.upkeep
+            ?.takeIf { transaction.after.inventory?.mode == CivStorageMode.PHYSICAL }?.work?.buildingId
+        if (nativeAuthorityBuilding != null) for (change in transaction.changes) {
+            val native = resolved.getValue(change.container).inventory.getItem(change.slot)
+            if (!matches(native, change.after) && !foodCanModify(transaction.after, change.container))
+                return CivInventoryApplyResult.Conflict(details(transaction.after, change, "lands-denied") +
+                    mapOf("building" to nativeAuthorityBuilding.toString()))
+        }
         if (player == null && containerState == CivInventoryApplyResult.Applied && worldState == CivInventoryApplyResult.Applied &&
             collectedState == CivInventoryApplyResult.Applied) return containerState
         var playerPersisted = player == null
@@ -1496,6 +1653,17 @@ class CivsStorage(private val plugin: Plugin,
         val world = plugin.server.getWorld(transaction.after.worldId)
             ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "world-unloaded"))
         var pending = false
+        val leafProof = collected.forestryLeafLoot
+        fun leafAuthority(point: CivPosition): CivInventoryApplyResult? {
+            if (leafProof == null) return null
+            val current = forestryLeafCurrentCity(transaction.cityId)
+                ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "forestry-leaf-city-unavailable"))
+            if (!CivsForestryLeafLoot.current(leafProof, current))
+                return CivInventoryApplyResult.Conflict(mapOf("reason" to "forestry-leaf-owner-changed"))
+            if (!foodCanModify(current, point))
+                return CivInventoryApplyResult.Retry(mapOf("reason" to "forestry-leaf-lands-denied"))
+            return null
+        }
         for (change in collected.ground) {
             if (lockedGround[change.entityId] != transaction.id)
                 return CivInventoryApplyResult.Conflict(mapOf("reason" to "unlocked-ground-item"))
@@ -1508,6 +1676,19 @@ class CivsStorage(private val plugin: Plugin,
                 return CivInventoryApplyResult.Conflict(mapOf("reason" to "ground-item-moved"))
             val before = runCatching { matchesNative(item?.itemStack, change.before) }.getOrDefault(false)
             val after = runCatching { matchesNative(item?.itemStack, change.after) }.getOrDefault(false)
+            if (leafProof != null && (expectedBefore || !after)) {
+                leafAuthority(change.position)?.let { return it }
+                val leaf = leafProof.sources.single { it.entityId == change.entityId }
+                leafAuthority(leaf.leaf)?.let { return it }
+                val actual = item?.let(CivsForestryLeafLoot::proof)
+                if (item == null || actual != leafProof.copy(sources = listOf(leaf)) || item.owner != null || item.thrower != null ||
+                    !civsGroundItemAvailable(item, collected.workerId))
+                    return CivInventoryApplyResult.Conflict(mapOf("reason" to "forestry-leaf-source-changed"))
+                val current = requireNotNull(forestryLeafCurrentCity(transaction.cityId))
+                if (!current.contains(item.location.blockX, item.location.blockZ))
+                    return CivInventoryApplyResult.Conflict(mapOf("reason" to "forestry-leaf-item-moved"))
+                leafAuthority(CivPosition(item.location.blockX, item.location.blockY, item.location.blockZ))?.let { return it }
+            }
             if (expectedBefore) {
                 if (!before) return CivInventoryApplyResult.Conflict(mapOf("reason" to "ground-before-drift"))
             } else if (!after) {
@@ -1528,6 +1709,12 @@ class CivsStorage(private val plugin: Plugin,
             val native = source.inventory.getItem(change.slot)
             val before = runCatching { matchesNative(native, change.before) }.getOrDefault(false)
             val after = runCatching { matchesNative(native, change.after) }.getOrDefault(false)
+            if (leafProof != null && (expectedBefore || !after)) {
+                leafAuthority(change.container)?.let { return it }
+                val current = requireNotNull(forestryLeafCurrentCity(transaction.cityId))
+                if (change.container !in buildingPositions(current, leafProof.buildingId))
+                    return CivInventoryApplyResult.Conflict(mapOf("reason" to "forestry-leaf-container-changed"))
+            }
             // A recorded after-state must finish accounting. Only a still-needed native write
             // requires today's claim authority; denied recovery keeps the exact receipt locked.
             if (collected.food != null && (expectedBefore || !after) && !foodCanModify(transaction.after, change.container))
@@ -1941,6 +2128,7 @@ class CivsStorage(private val plugin: Plugin,
         materializationCursors.clear()
         debitSearches.clear()
         homeCursors.clear()
+        residentReturnCursors.clear()
         supplyCaptures.clear()
         autonomousCaptures.clear()
     }

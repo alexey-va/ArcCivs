@@ -108,6 +108,8 @@ class CivsCitizens(
     private val recoveryClock: () -> Long = { System.nanoTime() / 1_000_000L },
 ) : Listener, AutoCloseable {
     internal var residentLifeEnabled = false
+    internal var returnResidentOutputs: (UUID, UUID, UUID) -> CompletableFuture<Settlement> = { _, _, _ ->
+        CompletableFuture.failedFuture(CivsRejection("storage-unavailable")) }
     internal var finishResidentMeal: (UUID, CivResidentMeal) -> CompletableFuture<Settlement> = { _, _ ->
         CompletableFuture.failedFuture(CivsRejection("not-ready")) }
     internal var finishResidentRest: (UUID, UUID, Long) -> CompletableFuture<Settlement> = { _, _, _ ->
@@ -699,7 +701,9 @@ class CivsCitizens(
 
     /** Native transfers keep their observed plan; an approaching courier never owns a producer's work. */
     private fun currentPlan(actor: Actor, city: Settlement, worker: CivWorker): CitizenPlan? {
-        val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null) &&
+        if (city.inventory != null && actor.plan.courier?.let { !it.carrying && it.cargo.sourceWorkerId != null } == true)
+            return plan(city, worker)
+        val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null || actor.outputReturn != null) &&
             worker.assignment == actor.plan.token.assignmentId && worker.completedCycles == actor.plan.token.completedCycles
         return if (actor.supplyPickup != null || collectedPending(actor) || acceptedDetour) actor.plan
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
@@ -728,6 +732,7 @@ class CivsCitizens(
             stopCamp(actor, "plan-changed")
             actor.cycle.close()
             actor.workDetour = null
+            actor.outputReturn = null
             actor.mentorVisit = null
             if (actor.plan.storage != nextPlan.storage || actor.plan.workplace != nextPlan.workplace) actor.targets.clear()
             actor.plan = nextPlan
@@ -759,6 +764,7 @@ class CivsCitizens(
                 if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
                 if (actor?.collectionSeek != null) return "workers.status.walking"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
+                if (actor?.outputReturn != null) return "workers.status.${if (actor.supplyPickup != null) "loading-cargo" else "moving-to-storage"}"
                 actor?.social?.visit?.let {
                     return "workers.status.${if (it.partnerId != null) {
                         if (it.conversationAt == null) "meeting" else "talking"
@@ -778,7 +784,7 @@ class CivsCitizens(
                 }
                 plan?.idleReason?.takeUnless { it == "placing" }?.let { return "workers.status.$it" }
                 if (actors[workerId]?.plan?.token?.let { it != plan?.token } == true) return "workers.status.waiting"
-                if (actor != null && plan != null) citizenWorkStatus(plan, actor.cycle.phase)?.let { return "workers.status.$it" }
+                if (actor != null && plan != null) citizenWorkStatus(plan, actor.cycle.phase, servingTavernGuests(actor, city))?.let { return "workers.status.$it" }
                 if (actor != null && plan?.idleReason == "placing") {
                     val placing = actor.cycle.phase == CitizenPhase.WORKING &&
                         plan.token.constructionId?.let { constructionBuilder(actor, city, it) } != null
@@ -898,6 +904,18 @@ class CivsCitizens(
             actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
             !collectedPending(actor) && actor.collectionSeek == null && actor.collectionHome == null &&
             actor.collectionCycle == null && actor.terrainObstructedAt == null
+    }
+
+    private fun servingTavernGuests(keeper: Actor, city: Settlement): Boolean {
+        if (keeper.plan.type != BuildingType.TAVERN) return false
+        val assignment = keeper.plan.token.assignmentId ?: return false
+        val tavern = city.building(assignment) ?: return false
+        return actors.values.any { guest ->
+            guest !== keeper && guest.cityId == city.id && guest.npc.isValid &&
+                guest.mealVisit?.let { it.plan.buildingId == tavern.id && it.arrivedAt != null } == true &&
+                guest.npc.location.let { at -> tavern.bounds.contains(at.blockX, at.blockY, at.blockZ) ||
+                    citizenNearEndpoint(CitizenPoint(at.x, at.y, at.z), tavern.entrance) }
+        }
     }
 
     /** A committed resurrection may prefer its body site; normal admission still proves safe loaded feet. */
@@ -1065,6 +1083,7 @@ class CivsCitizens(
     internal fun courierSources(cityId: UUID, courierId: UUID): Map<UUID, CivPosition> {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return emptyMap()
+        if (city.inventory != null) return emptyMap()
         return city.workers.mapNotNull { worker ->
             val source = actors[worker.id]?.takeIf { it.workerId != courierId && sourceReady(it, city, worker) &&
                 sourceOffersCargo(it, city, worker) } ?: return@mapNotNull null
@@ -1098,6 +1117,7 @@ class CivsCitizens(
     internal fun courierSupplySources(cityId: UUID, retainedSources: Set<UUID> = emptySet()): Map<UUID, CivPosition> {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return emptyMap()
+        if (city.inventory != null) return emptyMap()
         return city.workers.mapNotNull { worker ->
             val actor = actors[worker.id]?.takeIf { sourceReady(it, city, worker) &&
                 (worker.id in retainedSources || sourceOffersCargo(it, city, worker)) }
@@ -1113,6 +1133,7 @@ class CivsCitizens(
     internal fun courierSourceCurrent(cityId: UUID, cargo: CivCargo): Boolean {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId && it.pendingDeletion == null } ?: return false
+        if (city.inventory != null) return false
         val worker = city.workers.firstOrNull { it.id == cargo.sourceWorkerId } ?: return false
         val source = actors[worker.id] ?: return false
         return worker.assignment == cargo.sourceBuildingId && sourceReady(source, city, worker) &&
@@ -1123,6 +1144,7 @@ class CivsCitizens(
     internal fun requireCargoPickupArrival(cityId: UUID, workerId: UUID, cargo: CivCargo) {
         checkMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
+        if (city.inventory != null) throw CivsRejection("stale-delivery")
         val courier = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid } ?: throw CivsRejection("route-unreachable")
         val sourceId = cargo.sourceWorkerId ?: throw CivsRejection("stale-delivery")
         val source = actors[sourceId] ?: throw CivsRejection("route-unreachable")
@@ -1153,10 +1175,10 @@ class CivsCitizens(
     }
 
     private fun sourceOffersCargo(actor: Actor, city: Settlement, worker: CivWorker): Boolean {
-        val excess = CivsLogistics.workerExcess(city, worker, foods = residentFoods)
+        val excess = CivsLogistics.workerExcess(city, worker, craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
         if (excess.isEmpty()) return false
-        if (city.autonomy != null) return true
-        // Finish useful work while a stack accumulates; idle or blocked producers can hand over a partial stack.
+        if (CivsAutonomy.legacyStock(city)) return true
+        // Finish useful work while a stack accumulates; idle or blocked producers return a partial stack.
         return actor.plan.worldWork == null || actor.cycle.phase == CitizenPhase.PAUSED ||
             excess.values.any { it >= CivsLogistics.MAX_CARGO } || !hasCapacity(city, actor.plan)
     }
@@ -1295,7 +1317,10 @@ class CivsCitizens(
     }
 
     private fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
-        var base = citizenPlan(city, worker, if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)) ?: return null
+        val courier = if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)?.takeUnless {
+            city.inventory != null && !it.carrying && it.cargo.sourceWorkerId != null
+        }
+        var base = citizenPlan(city, worker, courier) ?: return null
         if (city.autonomy?.paused == true) return base.copy(idleReason = "autonomy-paused")
         if (base.pendingStockDelivery != null) {
             actors[worker.id]?.autonomousVisualSession = null
@@ -1335,14 +1360,14 @@ class CivsCitizens(
                 else if (base.idleReason in listOf(null, "placing")) return base.copy(idleReason = "construction-paused")
             }
         }
-        if (city.autonomy == null && base.type in CivsCarpentry.workshops && base.idleReason == null) {
+        if (!CivsAutonomy.legacyStock(city) && base.type in CivsCarpentry.workshops && base.idleReason == null) {
             val job = craftPlan(city, worker)
             base = if (job == null && base.type == BuildingType.SAWMILL) base.copy(idleReason = "waiting-orders")
                 else if (job != null) base.copy(token = base.token.copy(craftJobId = job.id),
                     suppliesNeeded = !CivsEquipment.inputsReady(worker, job.inputs, emptyMap())) else base
         }
         val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
-        val planned = if (city.autonomy != null && admitted.type != BuildingType.FORESTER && !nativeAuto || admitted.courier != null ||
+        val planned = if (CivsAutonomy.legacyStock(city) && admitted.type != BuildingType.FORESTER && !nativeAuto || admitted.courier != null ||
             admitted.type !in CivsWorksites.TYPES || admitted.idleReason != null) admitted else {
             val work = workPlan(city, worker)
             if (work == null) {
@@ -1741,6 +1766,7 @@ class CivsCitizens(
             } else actor.cycle.deferWork(now)
             return
         }
+        if (returnProducerOutputs(actor, city, worker, world, now)) return
         if (returnFromWorkDetour(actor, city, world, now)) return
         if (CivsResidents.isChild(worker)) {
             if (mentor(actor, city, worker, world, now)) return
@@ -1802,7 +1828,7 @@ class CivsCitizens(
                 val target = actor.plan.travelTarget(cycle.phase)
                 if (arrivedAt(actor, city, world, target)) {
                     arriveForWork(actor, city, worker, now)
-                    statuses[actor.workerId] = citizenWorkStatus(actor.plan, actor.cycle.phase) ?: actor.cycle.status()
+                    statuses[actor.workerId] = citizenWorkStatus(actor.plan, actor.cycle.phase, servingTavernGuests(actor, city)) ?: actor.cycle.status()
                     // Arrival starts the observed work interval on this pulse. Its first
                     // gesture and crop-care prop belong to that same interval.
                     if (actor.cycle.phase == CitizenPhase.WORKING) animateWork(actor, city, world, now)
@@ -1866,7 +1892,7 @@ class CivsCitizens(
             statuses[actor.workerId] = if (navigationFailed(actor))
                 "route-unreachable" else workActivityStatus(actor, actor.plan) ?: if (actor.plan.idleReason == "placing" && cycle.phase == CitizenPhase.WORKING &&
                 actor.plan.token.constructionId?.let { constructionBuilder(actor, city, it) } != null) "placing"
-                else citizenWorkStatus(actor.plan, cycle.phase) ?: cycle.status()
+                else citizenWorkStatus(actor.plan, cycle.phase, servingTavernGuests(actor, city)) ?: cycle.status()
             animateWork(actor, city, world, now)
         }
     }
@@ -2048,7 +2074,26 @@ class CivsCitizens(
             it.motion.navigating && !it.motion.searching && navigationTick - it.progressTick >= 40
     } == true
 
-    /** Food is collected at the hall without replacing a cargo/work identity. */
+    /** Ordinary output leaves its bag only after the producer reaches its own workplace. */
+    private fun returnProducerOutputs(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
+        val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
+        if (city.inventory == null || building == null || actor.plan.courier != null ||
+            actor.cycle.phase in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED) ||
+            !sourceOffersCargo(actor, city, worker)) {
+            if (actor.outputReturn != null) { actor.outputReturn = null; cancelRoute(actor) }
+            return false
+        }
+        if (actor.outputReturn != building.id) {
+            rememberWorkDetour(actor)
+            cancelRoute(actor)
+            stopCamp(actor, "work-priority")
+            actor.outputReturn = building.id
+        }
+        actor.cycle.deferWork(now)
+        travelForSupplies(actor, city, world, requireNotNull(building.control), now)
+        return true
+    }
+
     /** Keep the admitted cycle's observed work while a resident visits food or shelter. */
     private fun rememberWorkDetour(actor: Actor) {
         if (actor.cycle.phase in setOf(CitizenPhase.WORKING, CitizenPhase.PICKUP_READY, CitizenPhase.READY) ||
@@ -2402,11 +2447,12 @@ class CivsCitizens(
 
     private fun beginSupplies(actor: Actor, buildingId: UUID, now: Long, resumeWork: Boolean) {
         if (actor.supplyPickup != null || now < actor.supplyRetryAt) return
-        val pickup = SupplyPickup(UUID.randomUUID(), buildingId, resumeWork)
+        val pickup = SupplyPickup(UUID.randomUUID(), buildingId, resumeWork, actor.outputReturn == buildingId)
         actor.supplyPickup = pickup
         val future = try {
             val job = actor.plan.token.craftJobId.takeIf { buildingId == actor.plan.token.assignmentId }
-            if (actor.foodPickupSource != null) pickupResidentFood(actor.cityId, actor.workerId, requireNotNull(actor.foodPickupSource))
+            if (pickup.returnOutputs) returnResidentOutputs(actor.cityId, actor.workerId, buildingId)
+            else if (actor.foodPickupSource != null) pickupResidentFood(actor.cityId, actor.workerId, requireNotNull(actor.foodPickupSource))
             else if (job == null) prepareSupplies(actor.cityId, actor.workerId, buildingId)
             else craftSupplies(actor.cityId, actor.workerId, buildingId, job)
         }
@@ -2441,6 +2487,7 @@ class CivsCitizens(
             } else {
                 actor.supplyFailure = null
                 actor.foodSource = null
+                if (completion.pickup.returnOutputs) actor.outputReturn = null
                 val city = completion.city ?: continue
                 val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
                 if (completion.pickup.resumeWork && workInputsReady(city, worker)) actor.cycle.arrive(now)
@@ -4100,6 +4147,7 @@ class CivsCitizens(
         var shelterSearchIndex = 0
         var nextPlayAt = 0L
         var supplyPickup: SupplyPickup? = null
+        var outputReturn: UUID? = null
         var supplyFailure: Pair<UUID, String>? = null
         var supplyRetryAt = 0L
         var collectionCycle: Long? = null
@@ -4183,7 +4231,7 @@ class CivsCitizens(
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?, val pickup: Boolean = false, val visualWork: CivWorldWork? = null)
     private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?, val epoch: Long)
-    private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean)
+    private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean, val returnOutputs: Boolean = false)
     private data class SupplyCompletion(val workerId: UUID, val actorId: UUID, val pickup: SupplyPickup,
         val city: Settlement?, val error: Throwable?)
 
@@ -4345,8 +4393,8 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
 private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
     plan.pendingStockDelivery?.let { return CivsAutonomousLogistics.pendingRoom(city, it) }
     if (plan.worldWork?.autonomousVisual == true) return true
-    if (city.autonomy != null) plan.industryWork?.let { return CivsIndustry.room(city, it) }
-    if (city.autonomy != null && plan.type == BuildingType.FORESTER) {
+    if (CivsAutonomy.legacyStock(city)) plan.industryWork?.let { return CivsIndustry.room(city, it) }
+    if (CivsAutonomy.legacyStock(city) && plan.type == BuildingType.FORESTER) {
         val work = plan.worldWork ?: return true
         return try { CivsForestry.autoStock(city, work); true } catch (_: CivsRejection) { false }
     }

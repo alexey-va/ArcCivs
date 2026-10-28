@@ -29,8 +29,10 @@ class Auto2WorksitesScenarioTest : FunSpec({
             savedCity() shouldBe before
             persistOne() shouldBe true
             val receipt = receipts().single().validated()
-            receipt.forestry!!.work shouldBe forest
-            receipt.after.stock shouldBe Stock(4, 96, 1)
+            receipt.forestry shouldBe null
+            receipt.worldChanges shouldBe forest.changes
+            receipt.after.stock shouldBe Stock()
+            CivsEquipment.plainCount(receipt.after.workers.single { it.id == forest.workerId }, "OAK_LOG") shouldBe 4
             unchanged(treeBefore)
             savedCity() shouldBe before
 
@@ -48,18 +50,20 @@ class Auto2WorksitesScenarioTest : FunSpec({
             receipts() shouldBe emptyList()
 
             val quarry = nextWork("miner")
-            quarry.autonomousVisual shouldBe true
-            quarry.outputs shouldBe emptyMap()
+            quarry.autonomousVisual shouldBe false
             quarry.miningPlanVersion shouldBe CivsMinePlan.VERSION
             val beforeQuarry = city
             val pendingQuarry = observedCompletion(quarry)
             pendingIo shouldBe 1
             receipts() shouldBe emptyList()
             savedCity() shouldBe beforeQuarry
-            quarry.changes.forEach { state(it.position) shouldBe it.after }
+            quarry.changes.forEach { state(it.position) shouldBe it.before }
             val quarried = await(pendingQuarry)
+            quarry.changes.forEach { state(it.position) shouldBe it.after }
             quarried.stock shouldBe beforeQuarry.stock
-            quarried.workers shouldBe beforeQuarry.workers
+            quarried.workers.filterNot { it.id == quarry.workerId } shouldBe beforeQuarry.workers.filterNot { it.id == quarry.workerId }
+            quarried.workers.single { it.id == quarry.workerId }.completedCycles shouldBe
+                beforeQuarry.workers.single { it.id == quarry.workerId }.completedCycles + 1
             quarried.buildings shouldBe beforeQuarry.buildings
             quarried.revision shouldBe beforeQuarry.revision + 1
             quarried.minePlans!!.getValue(quarry.buildingId.toString()).v5Proof shouldBe
@@ -72,8 +76,12 @@ class Auto2WorksitesScenarioTest : FunSpec({
             val builderBefore = city.workers.single { it.id == road.workerId }
             val beforeRoad = city
             val repaired = complete(road)
-            repaired.stock shouldBe beforeRoad.stock.copy(stone = beforeRoad.stock.stone - 1)
-            repaired.stock.food shouldBe 1
+            repaired.stock shouldBe Stock()
+            CivsEquipment.plainCount(repaired.workers.single { it.id == road.workerId }, "COBBLESTONE") shouldBe
+                CivsEquipment.plainCount(builderBefore, "COBBLESTONE") - 1
+            val foodControl = requireNotNull(town.buildings.getValue("hall").control)
+            val food = world.getBlockAt(foodControl.x, foodControl.y, foodControl.z).state as org.bukkit.block.Container
+            food.inventory.getItem(0)!!.amount shouldBe 1
             repaired.workers.single { it.id == road.workerId }.skills shouldBe builderBefore.skills
             state(town.buildings.getValue("road").anchor) shouldBe "minecraft:dirt_path"
             receipts() shouldBe emptyList()
@@ -176,6 +184,27 @@ private fun ScenarioTown.auto2Town(world: CivsWorksiteWorldFixture, recipe: Auto
     world.getBlockAt(-1870, 63, -2708).type = Material.COBBLESTONE
     // Distinguish supporting fixtures from the real worksite profiles in failure dumps.
     hall.schematicId shouldBe "scenario/hall"
+    buildings["mill"] = mill.copy(control = spatialBuilding("caledonia", "lumberjack", 1, mill.anchor, 180).control)
+    buildings["mine"] = mine.copy(control = spatialBuilding("caledonia", "miner", 1, mine.anchor, 180).control)
+    for (name in listOf("hall", "hut")) buildings[name] = buildings.getValue(name).let {
+        it.copy(control = it.anchor.copy(x = it.anchor.x + 1, y = it.anchor.y + 1, z = it.anchor.z + 1))
+    }
+    for (name in listOf("hall", "hut", "mill", "mine")) requireNotNull(buildings.getValue(name).control).let {
+        world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
+    }
+    val foodControl = requireNotNull(buildings.getValue("hall").control)
+    (world.getBlockAt(foodControl.x, foodControl.y, foodControl.z).state as org.bukkit.block.Container).inventory
+        .setItem(0, org.bukkit.inventory.ItemStack(Material.BREAD))
+    sourceCity = build().copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+        workers = workers.map { (role, worker) -> worker.copy(items = List(CivsEquipment.SLOTS) { slot -> when {
+            slot == 4 && role == "forester" -> CivResidentItem("IRON_AXE", 1)
+            slot == 4 && role == "miner" -> CivResidentItem("IRON_PICKAXE", 1)
+            slot == CivsEquipment.BAG && role == "forester" -> CivResidentItem("OAK_SAPLING", 4)
+            slot == CivsEquipment.BAG && role in listOf("miner", "builder") -> CivResidentItem("COBBLESTONE", 64)
+            slot == CivsEquipment.BAG + 1 && role == "miner" -> CivResidentItem("LADDER", 64)
+            slot == CivsEquipment.BAG + 2 && role == "miner" -> CivResidentItem("TORCH", 64)
+            else -> null
+        } }) })
 }
 
 private fun guardedCells(town: ScenarioTown): List<CivPosition> = listOf(

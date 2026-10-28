@@ -108,36 +108,29 @@ class CivsSupplyDispatcherTest : FunSpec({
         allocateCivSupplies(full).plans shouldBe mapOf(SUPPLY_COURIER to picked)
     }
 
-    test("one producer rendezvous cannot be promised to two couriers for different materials") {
-        val input = supplyFixture().let { it.copy(requests = emptyList(),
-            workerSources = listOf(CivSupplyWorkerSource(UUID(0, 300), SUPPLY_TARGET, CivPosition(4, 64, 0),
-                mapOf("IRON_INGOT" to 32L, "STICK" to 32L)))) }
-        val plans = allocateCivSupplies(input).plans
-        plans.size shouldBe 1
-        plans.values.single().cargo.sourceWorkerId shouldBe UUID(0, 300)
-        allocateCivSupplies(input.copy(retained = plans)).plans shouldBe plans
+    test("ordinary worker bags cannot be offered even when two couriers are free") {
+        val input = supplyFixture().copy(requests = emptyList(),
+            workerSources = listOf(CivSupplyWorkerSource(UUID(0, 300), SUPPLY_TARGET, CivPosition(80, 64, 0),
+                mapOf("IRON_INGOT" to 32L, "STICK" to 32L))))
+        allocateCivSupplies(input).plans shouldBe emptyMap()
     }
 
-    test("a moved producer retains the observed cargo while other couriers can serve another request") {
-        val producer = CivSupplyWorkerSource(UUID(0, 300), SUPPLY_TARGET, CivPosition(4, 64, 0),
-            mapOf("IRON_INGOT" to 32L))
-        val input = supplyFixture().copy(requests = emptyList(), workerSources = listOf(producer))
-        val original = allocateCivSupplies(input).plans
-        original.keys shouldBe setOf(SUPPLY_COURIER)
-        val moved = producer.copy(meeting = CivPosition(6, 64, 0))
-        val changed = input.copy(retained = original, workerSources = listOf(moved),
-            requests = listOf(CivSupplyRequest(SUPPLY_TARGET, "STICK", 64, 0)))
-        val retained = allocateCivSupplies(changed).plans
-        retained.getValue(SUPPLY_COURIER) shouldBe original.getValue(SUPPLY_COURIER)
-        retained.getValue(SUPPLY_SECOND).cargo.material shouldBe "STICK"
-        retained.values.count { it.cargo.sourceWorkerId == producer.workerId } shouldBe 1
-        retained.getValue(SUPPLY_COURIER).cargo.sourceEntrance shouldBe producer.meeting
-        allocateCivSupplies(changed.copy(retained = retained)).plans shouldBe retained
-
-        for (stale in listOf(emptyList(), listOf(moved.copy(buildingId = UUID(0, 999))),
-                listOf(moved.copy(excess = mapOf("IRON_INGOT" to 31L))))) {
-            allocateCivSupplies(changed.copy(workerSources = stale)).plans[SUPPLY_COURIER] shouldBe null
+    test("building stock uses its entrance and remains offered independently of its producer actor") {
+        val base = supplyFixture()
+        val building = base.stores.getValue(SUPPLY_TARGET).copy(outputMaterial = "IRON_INGOT",
+            stock = mapOf("IRON_INGOT" to 32L, "STICK" to 32L))
+        val producer = CivSupplyWorkerSource(UUID(0, 300), SUPPLY_TARGET, CivPosition(80, 64, 0), mapOf("IRON_INGOT" to 64L))
+        val input = base.copy(stores = base.stores + (building.id to building), requests = emptyList(), workerSources = listOf(producer))
+        val plans = allocateCivSupplies(input).plans
+        plans.size shouldBe 2
+        plans.values.forEach {
+            it.cargo.sourceWorkerId shouldBe null
+            it.cargo.sourceBuildingId shouldBe building.id
+            it.cargo.sourceEntrance shouldBe building.entrance
+            it.cargo.amount shouldBe 32L
         }
+        allocateCivSupplies(input.copy(retained = plans, workerSources = emptyList())).plans shouldBe plans
+        allocateCivSupplies(input.copy(retained = plans, workerSources = listOf(producer.copy(meeting = CivPosition(-80, 64, 0))))).plans shouldBe plans
     }
 
     test("construction keeps priority while age and courier waiting order prevent ordinary first-match bias") {

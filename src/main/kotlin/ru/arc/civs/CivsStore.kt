@@ -175,7 +175,8 @@ class CivsStore(
                 buildingBefore = snapshotBuilding(it.buildingBefore),
                 mineProgressBefore = it.mineProgressBefore?.toMap(),
                 minePlansBefore = it.minePlansBefore?.mapValues { (_, state) -> CivsMineProgress.detached(state) }) },
-            collected = transaction.collected?.let { it.copy(before = it.before.toList(), ground = it.ground.toList(), containers = it.containers.toList()) },
+            collected = transaction.collected?.let { it.copy(before = it.before.toList(), ground = it.ground.toList(), containers = it.containers.toList(),
+                forestryLeafLoot = it.forestryLeafLoot?.copy(sources = it.forestryLeafLoot.sources.toList())) },
             resurrection = transaction.resurrection?.let { it.copy(corpse = it.corpse.copy(worker = snapshotWorker(it.corpse.worker))) })
         return submit {
             snapshot.validated()

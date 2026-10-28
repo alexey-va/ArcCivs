@@ -121,7 +121,7 @@ internal class CivsAutonomousDevelopment(
     fun pulse() {
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
-        val candidates = cities.values.filter { it.autonomy?.paused == false && it.pendingDeletion == null &&
+        val candidates = cities.values.filter { it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) && it.pendingDeletion == null &&
             accessReady(it) &&
             it.id !in busy && it.id !in unhealthy && !isPlacing(it.id) && it.id !in autonomyRequests &&
             it.pendingControls.orEmpty().isEmpty() && it.construction == null &&
@@ -272,7 +272,7 @@ internal class CivsAutonomousDevelopment(
                     rejectIf(autonomyRequests[city.id] != request || current.buildings != city.buildings ||
                         current.autonomy?.paused != false || current.construction != null ||
                         current.constructionQueue.orEmpty().isNotEmpty() || !settlementActive(current), "stale-development")
-                    rejectIf(!current.stock.covers(price), "not-enough-resources")
+                    rejectIf(CivsAutonomy.legacyStock(current) && !current.stock.covers(price), "not-enough-resources")
                     commitAutonomousDesign(current, design)
                 }
             }.getOrElse { CompletableFuture.failedFuture<Unit>(it) }.whenCompleteSync(tasks) { _, commitFailure ->

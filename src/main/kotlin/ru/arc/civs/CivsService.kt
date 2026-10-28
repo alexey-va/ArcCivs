@@ -180,6 +180,9 @@ class CivsService(
         ::track, ::validateNativeCollected, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock)
 
+    private val forestryLeafLoot = CivsForestryLeafLoot({ cities }, ::ready, { city, point -> storage.foodCanModify(city, point) },
+        ::collectionAvailable, ::collectForestryLeafLoot)
+
     private val residentLife = CivsResidentLifeRuntime(plugin, tasks, citizens, chunkLoading, settings.viewerRange,
         { cities }, busy, unhealthy, ::settlementActive,
         { id, action -> afterCityAvailable(id, action) }, { id, action -> afterCityAvailable(id, action) },
@@ -187,6 +190,7 @@ class CivsService(
 
     init {
         storage.residentFoods = residentFoods
+        storage.forestryLeafCurrentCity = { cities[it] }
         storage.foodCanModify = { city, position ->
             plugin.server.getWorld(city.worldId)?.takeIf { position.y in it.minHeight until it.maxHeight &&
                 it.isChunkLoaded(position.x shr 4, position.z shr 4) }
@@ -195,6 +199,7 @@ class CivsService(
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet
         citizens.residentLifeEnabled = true
+        citizens.returnResidentOutputs = ::returnResidentOutputs
         citizens.finishResidentMeal = residentLife::finishMeal
         citizens.finishResidentRest = residentLife::finishRest
         citizens.finishResidentLesson = residentLife::finishLesson
@@ -203,6 +208,7 @@ class CivsService(
         citizens.worksiteChunkUnloaded = worksites::forgetChunk
         plugin.server.pluginManager.registerEvents(this, plugin)
         plugin.server.pluginManager.registerEvents(protection, plugin)
+        plugin.server.pluginManager.registerEvents(forestryLeafLoot, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
         tasks.runTimer(1, 1) {
             chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList())
@@ -211,6 +217,7 @@ class CivsService(
             } else emptyList())
             resumeCityActions()
             if (ready()) supply.pulse()
+            if (ready()) forestryLeafLoot.pulse()
             if (ready()) citizens.activateNavigating()
         }
         tasks.runTimer(5, 5) {
@@ -1322,6 +1329,7 @@ class CivsService(
     /** Starting an order reserves the immutable design; each worked row pays independently later. */
     private fun startOrder(actor: UUID, city: Settlement, plan: CivPlacementPlan, bytes: ByteArray): CompletableFuture<Settlement> {
         rejectIf(city.construction != null, "construction-busy")
+        rejectIf(!CivsAutoStorageMigration.ready(city), "materials-migration-pending")
         rejectIf(city.inventory == null && city.autonomy == null, "materials-migration-pending")
         rejectIf(!city.canManage(actor), "not-authorized")
         val building = plan.building
@@ -1341,10 +1349,10 @@ class CivsService(
             val batches = CivConstructionBatches(terrainBatches.size + civsMaterialBatches(plan, atomicPairs = true).size, 16, atomicPairs = true)
             CivConstruction(plan.id, building.id, building.level, batches.total, 0,
                 if (automaticPreparation != null) ConstructionPhase.READY_TO_PLACE else ConstructionPhase.CONSTRUCTING,
-                if (city.autonomy != null && !CivsPlanBoardBlueprint.refit(city.building(building.id), building))
+                if (CivsAutonomy.legacyStock(city) && !CivsPlanBoardBlueprint.refit(city.building(building.id), building))
                     CivsAutonomy.cost(building.type, building.level, materials) else Stock(),
                 plannedBuilding = building, batches = batches, materials = materials,
-                payment = if (city.autonomy != null) null else CivConstructionPayment(),
+                payment = if (CivsAutonomy.legacyStock(city)) null else CivConstructionPayment(),
                 blocksRequired = plan.blocks.count { it.before != it.after } + plan.terrain?.blocks.orEmpty().count { it.before != it.after },
                 blocksPlaced = 0, preparationWorkplace = terrainBatches.firstOrNull()?.workplace ?: plan.terrain?.route?.lastOrNull(),
                 automaticPreparationBatches = automaticPreparation)
@@ -1783,7 +1791,7 @@ class CivsService(
                 val plan = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
                 rejectIf(plan.token.completedCycles != cycle || plan.token.nextDeliveryAt != nextAt, "stale-delivery")
                 val projectId = plan.token.researchProjectId ?: throw CivsRejection("stale-research")
-                if (city.autonomy != null) citizens.requireAutonomousDelivery(cityId, workerId, plan.token)
+                if (CivsAutonomy.legacyStock(city)) citizens.requireAutonomousDelivery(cityId, workerId, plan.token)
                 else citizens.requireSelectedWorkDelivery(cityId, workerId, plan.token)
                 mutate(cityId) { CivsResearch.complete(it, workerId, cycle, nextAt, projectId, at) }.thenApply { saved ->
                     CivsDiagnostics.event("research_session_committed", "city" to cityId, "worker" to workerId, "cycle" to cycle,
@@ -1792,8 +1800,8 @@ class CivsService(
                         "completed" to (saved.research?.project == null), "revision" to saved.revision)
                     saved
                 }
-            } else if (city.autonomy != null && building.type != BuildingType.FORESTER) {
-                rejectIf(constructionId != null || city.autonomy.paused, "stale-delivery")
+            } else if (CivsAutonomy.legacyStock(city) && building.type != BuildingType.FORESTER) {
+                rejectIf(constructionId != null || city.autonomy?.paused == true, "stale-delivery")
                 val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
                 rejectIf(worker.completedCycles != cycle || worker.nextDeliveryAt != nextAt, "stale-delivery")
                 citizens.autonomousVisualWork(cityId, workerId)?.let { work ->
@@ -1834,7 +1842,7 @@ class CivsService(
                 else citizens.requireWorldWorkArrival(cityId, workerId, work)
                 try { worksites.validate(city, work) } catch (failure: Exception) { worksites.invalidate(workerId); throw failure }
                 var completedWork: Settlement? = null
-                (if (city.autonomy != null) autonomousForestryMutation(city, work, at) else inventoryMutation(cityId, { current ->
+                (if (CivsAutonomy.legacyStock(city)) autonomousForestryMutation(city, work, at) else inventoryMutation(cityId, { current ->
                     worksites.validate(current, work)
                     if (citizenWorkFocus(work) == null) citizens.requireStorageArrival(cityId, workerId, assignment)
                     else citizens.requireWorldWorkArrival(cityId, workerId, work)
@@ -1855,10 +1863,10 @@ class CivsService(
                             "point" to work.focus, "blocks" to work.changes.size, "inputs" to work.inputs,
                             "carried_before" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(worker, material) },
                             "carried_after" to work.inputs.mapValues { (material, _) -> CivsEquipment.plainCount(completed, material) },
-                            "storage_inputs" to if (city.autonomy == null) work.storageInputs(worker) else emptyMap<String, Long>(),
-                            "autonomous_wood_delta" to if (city.autonomy != null) saved.stock.wood - city.stock.wood else null,
+                            "storage_inputs" to if (!CivsAutonomy.legacyStock(city)) work.storageInputs(worker) else emptyMap<String, Long>(),
+                            "autonomous_wood_delta" to if (CivsAutonomy.legacyStock(city)) saved.stock.wood - city.stock.wood else null,
                             "seed_deferred" to work.forestry?.job?.seedDeferred,
-                            "initial_seed_kit" to (city.autonomy != null && work.forestry == null && !CivsForestry.care(work) && city.stock.wood == 0L),
+                            "initial_seed_kit" to (CivsAutonomy.legacyStock(city) && work.forestry == null && !CivsForestry.care(work) && city.stock.wood == 0L),
                             "outputs" to work.outputs,
                             "mining_step" to work.miningStep)
                     }
@@ -1887,7 +1895,7 @@ class CivsService(
         }
     }
 
-    /** Auto forestry uses the same native journal while retaining its nontransferable stock contract. */
+    /** Recovery of pre-migration Auto forestry retains its original closed-stock receipt. */
     private fun autonomousForestryMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
         requireAutonomousStorage(city, work.buildingId)
         val id = UUID.randomUUID()
@@ -1923,7 +1931,7 @@ class CivsService(
 
     private fun autonomousUpkeepMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
         rejectIf(!CivsRoadMaintenance.eligible(city), "stale-worksite")
-        rejectIf(city.stock.stone <= (CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.cost?.stone ?: 0L), "materials-missing")
+        rejectIf(CivsAutonomy.legacyStock(city) && city.stock.stone <= (CivsAutonomy.nextGoal(city, blueprints::maximumLevel)?.cost?.stone ?: 0L), "materials-missing")
         val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
         rejectIf(worker.completedCycles != work.cycle || worker.assignment != work.buildingId, "stale-delivery")
         rejectIf(at < worker.nextDeliveryAt, "delivery-too-early")
@@ -1933,8 +1941,10 @@ class CivsService(
             citizens.requireWorldWorkArrival(city.id, work.workerId, work)
             rejectIf(!world.roadUpkeepPending(city, work), "stale-worksite")
             world.validateRoadUpkeep(city, work)
-            val after = CivsRoadMaintenance.complete(city, work, at)
-            CivInventoryTransaction(id, city.id, city.revision, after, emptyList(), worldChanges = work.changes,
+            val prepared = if (CivsAutonomy.legacyStock(city)) null else storage.prepareWork(city, work.buildingId,
+                work.storageInputs(worker), emptyMap(), work.changes)
+            val after = CivsRoadMaintenance.complete(city, work, at, nativePaid = prepared != null)
+            CivInventoryTransaction(id, city.id, city.revision, after, prepared?.changes.orEmpty(), worldChanges = work.changes,
                 upkeep = CivRoadUpkeepReceipt(worker, city.stock, work, at)).also { storage.seal(it, keepViewersOpen = true) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         return inventoryJournal.submit(tx)
@@ -1970,6 +1980,8 @@ class CivsService(
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
         supply.craftJobs(city.id)[worker.id]?.takeIf { CivsCarpentry.valid(city, worker, it) }
 
+    internal fun upkeepRequirements(city: Settlement): Map<UUID, Map<String, Long>> = roadMaintenance.requirements(city)
+
     private fun craftObservationCurrent(city: Settlement): Boolean {
         val snapshot = supply.craftObservation(city.id) ?: return false
         val observation = snapshot.inputKey as? CivSupplyObservation ?: return false
@@ -1993,7 +2005,7 @@ class CivsService(
         return required
     }
 
-    private fun craftRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
+    private fun workSupplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
         city.buildings.filter { it.type in CivsCarpentry.workshops }.flatMap { building ->
             craftRequired(city, building.id).mapNotNull { (material, count) ->
                 val needed = (count - (stock(building.id)[material] ?: 0L)).coerceAtLeast(0)
@@ -2002,7 +2014,7 @@ class CivsService(
                 }.sumOf(CivCargo::amount)
                 if (needed > 0 || incoming > 0) CivSupplyRequest(building.id, material, needed, incoming) else null
             }
-        }
+        } + upkeepSupplyRequests(city, stock)
 
     private fun deliverCraft(cityId: UUID, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long,
         jobId: UUID, at: Long): CompletableFuture<Settlement> = action("craft", null,
@@ -2034,6 +2046,19 @@ class CivsService(
         }
     }
 
+    internal fun upkeepSupplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> =
+        upkeepRequirements(city).flatMap { (workerId, inputs) ->
+            val worker = city.workers.first { it.id == workerId }
+            val target = requireNotNull(worker.assignment)
+            CivsEquipment.storageInputs(worker, inputs).mapNotNull { (material, count) ->
+                val incoming = city.workers.mapNotNull(CivWorker::cargo).filter {
+                    it.material == material && CivsLogistics.destination(city, it)?.id == target
+                }.sumOf(CivCargo::amount)
+                val need = (count - (stock(target)[material] ?: 0L)).coerceAtLeast(0)
+                if (need > 0 || incoming > 0) CivSupplyRequest(target, material, need, incoming) else null
+            }
+        }
+
     private fun localStocks(city: Settlement): (UUID) -> Map<String, Long> {
         val cached = mutableMapOf<UUID, Map<String, Long>>()
         return { id -> cached.getOrPut(id) {
@@ -2047,12 +2072,8 @@ class CivsService(
     /** Local stock permits the trip to storage; work still requires the subsequent physical pickup. */
     internal fun productionReady(city: Settlement, worker: CivWorker): Boolean {
         val building = worker.assignment?.let(city::building) ?: return true
-        if (city.autonomy != null && CivsRules.resource(building.type) != null &&
-            !storage.autonomousCapacityCurrent(city, building.id)) return false
+        if (CivsAutonomy.legacyStock(city)) return false
         if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
-        if (city.autonomy != null) return (citizens.acceptedIndustryWork(city, worker) ?: CivsIndustry.autonomousWork(city, building))
-            ?.let { CivsIndustry.inputsReady(city, it) && CivsIndustry.room(city, it) }
-            ?: (building.type !in CivsIndustry.processorTypes)
         if (building.type in CivsIndustry.processorTypes && CivsProduction.material(building) !in CivsProduction.options(city, building)) return false
         if (CivsRules.isBuilder(city, building) || building.type in CivsWorksites.TYPES) return true
         val inputs = craftPlan(city, worker)?.inputs ?: if (building.type == BuildingType.SAWMILL) return false
@@ -2061,7 +2082,7 @@ class CivsService(
     }
 
     private fun requireAutonomousStorage(city: Settlement, buildingId: UUID? = null) {
-        rejectIf(city.autonomy != null && !storage.autonomousCapacityCurrent(city, buildingId), "storage-observation-stale")
+        rejectIf(CivsAutonomy.legacyStock(city) && !storage.autonomousCapacityCurrent(city, buildingId), "storage-observation-stale")
     }
 
     private fun requireAutonomousDepotStorage(city: Settlement) {
@@ -2070,12 +2091,12 @@ class CivsService(
 
     internal fun workInputsReady(city: Settlement, worker: CivWorker): Boolean {
         val building = worker.assignment?.let(city::building) ?: return true
+        if (CivsAutonomy.legacyStock(city)) return false
         if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
-        if (city.autonomy != null) return (citizens.acceptedIndustryWork(city, worker) ?: CivsIndustry.autonomousWork(city, building))
-            ?.let { CivsIndustry.inputsReady(city, it) }
-            ?: (building.type !in CivsIndustry.processorTypes)
         if (CivsRules.isBuilder(city, building)) {
-            val order = city.construction ?: return true
+            val order = city.construction ?: return roadMaintenance.requirements(city)[worker.id]?.let {
+                CivsEquipment.inputsReady(worker, it, localStocks(city)(building.id))
+            } ?: true
             if (order.payment == null || order.payment.reservedBatch != null) return true
             val required = order.payment.awaiting ?: construction.supplyNeed(city)
             // The first captured row may only remove blocks; its exact debit is prepared before placement.
@@ -2129,6 +2150,24 @@ class CivsService(
         }.onFailure { if (CivsDiagnostics.rejection(it)?.reason !in setOf("city-busy", "resident-food-missing", "worker-too-far"))
             log("materialize resident food ${city.id}", it, city.id) }
     }
+
+    internal fun returnResidentOutputs(cityId: UUID, workerId: UUID, buildingId: UUID): CompletableFuture<Settlement> =
+        action("resident_outputs", null, "city" to cityId, "worker" to workerId, "building" to buildingId) {
+            afterCityAvailable(cityId) {
+                var returned: CivWorker? = null
+                inventoryMutation(cityId, { city ->
+                    citizens.requireStorageArrival(cityId, workerId, buildingId)
+                    val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+                    val prepared = storage.prepareResidentReturn(city, workerId, buildingId, craftPlan(city, worker)?.inputs.orEmpty())
+                    returned = prepared.worker
+                    rejectIf(prepared.worker == worker, "storage-full")
+                    prepared.plan
+                }, keepViewersOpen = true) { before, inventory ->
+                    before.copy(workers = before.workers.map { if (it.id == workerId) requireNotNull(returned) else it },
+                        inventory = inventory, revision = Math.addExact(before.revision, 1))
+                }
+            }
+        }
 
     internal fun prepareResidentSupplies(cityId: UUID, workerId: UUID, buildingId: UUID, craftJobId: UUID? = null): CompletableFuture<Settlement> =
         action("resident_supplies", null, "city" to cityId, "worker" to workerId, "building" to buildingId) {
@@ -2219,7 +2258,9 @@ class CivsService(
     private fun pulseSupply() {
         val relevant = cities.values.filter { city -> city.pendingDeletion == null &&
             (city.inventory != null || city.autonomy?.paused == false) &&
-            city.id !in unhealthy && (if (city.autonomy != null) settlementActive(city) && city.workers.any { worker ->
+            city.id !in unhealthy && (if (city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL)
+                settlementActive(city)
+            else if (CivsAutonomy.legacyStock(city)) settlementActive(city) && city.workers.any { worker ->
                 worker.cargo != null || worker.pendingStock != null || worker.assignment?.let(city::building)?.let {
                     it.type == BuildingType.WAREHOUSE || CivsRules.resource(it.type) != null
                 } == true
@@ -2234,7 +2275,7 @@ class CivsService(
         ids += supply.cityIds().filter { inventoryJournal.pending(it) }
         (supply.cityIds() - ids).forEach { supply.remove(it); supplyObservations.remove(it) }
         for (city in relevant) {
-            val revision = if (city.autonomy != null) city.revision else storage.supplyRevision(city.id)
+            val revision = if (CivsAutonomy.legacyStock(city)) city.revision else storage.supplyRevision(city.id)
             val previous = supplyObservations[city.id]
             if (previous == null || revision != previous.first || now() - previous.second >= 5_000L) {
                 supply.request(city.id)
@@ -2248,7 +2289,7 @@ class CivsService(
             (it.inventory != null || it.autonomy?.paused == false) }
             ?: throw CivsRejection("storage-unavailable")
         if (cityId in busy) throw CivsRejection("city-busy")
-        if (city.autonomy != null) {
+        if (CivsAutonomy.legacyStock(city)) {
             val capture = storage.startSupplyCapture(city)
             return capture@{
                 if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
@@ -2283,13 +2324,12 @@ class CivsService(
             }
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
-            { citizens.courierPosition(cityId, it) }, { citizens.courierSupplySources(cityId,
-                retained.values.filter { !it.carrying }.mapNotNullTo(hashSetOf()) { it.cargo.sourceWorkerId }) },
-            { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId), residentFoods)
+            { citizens.courierPosition(cityId, it) }, { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId))
         return {
             if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
             if (cityId in busy) throw CivsRejection("city-busy")
-            capture.step()
+            capture.step()?.let { snapshot -> snapshot.copy(requests = snapshot.requests +
+                upkeepSupplyRequests(city) { id -> snapshot.stores[id]?.stock.orEmpty() }) }
         }
     }
 
@@ -2305,8 +2345,7 @@ class CivsService(
         val observation = snapshot.inputKey as? CivSupplyObservation ?: return false
         if (observation.inputs != civSupplyInputs(city)) return false
         if (plans.any { (workerId, plan) -> !plan.carrying && citizens.courierUnavailable(city.id, workerId) }) return false
-        if (plans.values.any { !it.carrying && it.cargo.sourceWorkerId != null &&
-                !citizens.courierSourceCurrent(city.id, it.cargo) }) return false
+        if (plans.values.any { !it.carrying && it.cargo.sourceWorkerId != null }) return false
         val buildings = if (snapshot.craftWorkers.isNotEmpty()) snapshot.stores.keys else plans.values.flatMap { plan ->
             if (plan.carrying || plan.cargo.sourceWorkerId != null) listOf(plan.destinationBuildingId)
             else listOf(plan.cargo.sourceBuildingId, plan.destinationBuildingId)
@@ -2344,10 +2383,8 @@ class CivsService(
                         saved
                     }
                 }
-                val available = if (accepted.sourceWorkerId != null) {
-                    val source = city.workers.firstOrNull { it.id == accepted.sourceWorkerId } ?: throw CivsRejection("stale-delivery")
-                    CivsLogistics.workerExcess(city, source, craftPlan(city, source)?.inputs.orEmpty(), residentFoods)[accepted.material] ?: 0L
-                } else {
+                rejectIf(accepted.sourceWorkerId != null, "stale-delivery")
+                val available = run {
                     val count = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
                     val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else
                         (city.building(accepted.sourceBuildingId)?.let { CivsLogistics.desiredStock(city, it)[accepted.material] } ?: 0L) +
@@ -2356,7 +2393,7 @@ class CivsService(
                 }
                 val needed = if (accepted.sourceBuildingId != accepted.warehouseId) CivsLogistics.MAX_CARGO else {
                     val local = localStocks(city)
-                    (CivsLogistics.requests(city, local) + craftRequests(city, local)).firstOrNull { request ->
+                    (CivsLogistics.requests(city, local) + workSupplyRequests(city, local)).firstOrNull { request ->
                         request.material == accepted.material && (request.buildingId == accepted.targetBuildingId ||
                             request.construction && city.construction?.let { order ->
                                 CivsRules.constructionStores(city, order.buildingId).any { it.id == accepted.targetBuildingId }
@@ -2369,10 +2406,7 @@ class CivsService(
                 rejectIf(amount <= 0L, "stale-delivery")
                 val cargo = accepted.copy(amount = amount)
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
-                if (cargo.sourceWorkerId != null) citizens.requireCargoPickupArrival(cityId, workerId, cargo)
-                else citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
-                val sourceBefore = cargo.sourceWorkerId?.let { sourceId -> city.workers.first { it.id == sourceId } }
-                    ?.let { CivsEquipment.plainCount(it, cargo.material) }
+                citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)
                 val carriedBefore = CivsEquipment.plainCount(worker, cargo.material)
                 inventoryMutation(cityId, { storage.prepareCargoPickup(it, cargo) }, keepViewersOpen = true) { before, inventory ->
                     CivsLogistics.pickup(before, workerId, cargo, supply.craftJobs(cityId).mapValues { it.value.inputs }, residentFoods).copy(inventory = inventory)
@@ -2380,9 +2414,7 @@ class CivsService(
                     CivsDiagnostics.event("cargo_pickup_committed", "city" to cityId, "worker" to workerId,
                         "shipment" to cargo.id, "material" to cargo.material, "amount" to cargo.amount,
                         "source" to cargo.sourceBuildingId, "source_worker" to cargo.sourceWorkerId,
-                        "source_before" to sourceBefore, "source_after" to cargo.sourceWorkerId?.let { sourceId ->
-                            saved.workers.firstOrNull { it.id == sourceId }?.let { CivsEquipment.plainCount(it, cargo.material) }
-                        }, "carried_before" to carriedBefore,
+                        "carried_before" to carriedBefore,
                         "carried_after" to CivsEquipment.plainCount(saved.workers.first { it.id == workerId }, cargo.material),
                         "revision" to saved.revision)
                     supply.release(cityId, workerId)
@@ -2460,6 +2492,11 @@ class CivsService(
             collectedMutation(cityId, workerId) { city, feet -> storage.prepareGroundPickup(city, workerId, entities, feet) }
         }
 
+    private fun collectForestryLeafLoot(cityId: UUID, workerId: UUID, entities: List<UUID>): CompletableFuture<Settlement> =
+        action("forestry_leaf_loot", null, "city" to cityId, "worker" to workerId, "entities" to entities.size) {
+            collectedReceipt(cityId, workerId) { city -> storage.prepareForestryLeafLoot(city, workerId, entities) }
+        }
+
     internal fun depositCollected(cityId: UUID, workerId: UUID, destination: CivPosition?): CompletableFuture<Settlement> =
         action("resident_home_deposit", null, "city" to cityId, "worker" to workerId) {
             val city = cities[cityId] ?: throw CivsRejection("no-city")
@@ -2485,10 +2522,18 @@ class CivsService(
         val feet = if (materializingFood) citizens.residentFeet(workerId) else citizens.residentCollectionFeet(workerId, allowNight)
         feet ?: throw CivsRejection("worker-too-far")
         rejectIf(feet.world?.uid != city.worldId, "wrong-world")
+        return collectedReceipt(cityId, workerId) { current -> prepare(current, feet) }
+    }
+
+    private fun collectedReceipt(cityId: UUID, workerId: UUID,
+        prepare: (Settlement) -> CivCollectedPlan): CompletableFuture<Settlement> {
+        checkMain()
+        rejectIf(!collectionAvailable(cityId), "city-busy")
+        val city = cities.getValue(cityId)
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         val tx = try {
-            val prepared = prepare(city, feet)
+            val prepared = prepare(city)
             val transfer = prepared.transfer ?: run { storage.unlock(id); return CompletableFuture.completedFuture(city) }
             val after = CivsRules.validate(city.copy(stock = prepared.stock ?: city.stock,
                 workers = city.workers.map { if (it.id == workerId) prepared.worker else it },
@@ -2510,6 +2555,7 @@ class CivsService(
     private fun validateNativeCollected(tx: CivInventoryTransaction) {
         val collected = requireNotNull(tx.collected)
         rejectIf(storage.collectedBeforeState(tx) != CivInventoryApplyResult.Applied, "stale-delivery")
+        if (collected.forestryLeafLoot != null) return // Exact PDC source, workplace and Lands checks live in the shared native fence.
         if (collected.food?.materialized?.let { it > 0 } == true) return
         val feet = citizens.residentCollectionFeet(collected.workerId, allowNight = collected.homeId != null)
             ?: throw CivsRejection("worker-too-far")
@@ -2547,7 +2593,8 @@ class CivsService(
             }
             require(after.revision == city.revision + 1)
             CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes, prepared.playerDebit,
-                prepared.residentTransfer, prepared.worldChanges, mine = prepared.mine)
+                prepared.residentTransfer, prepared.worldChanges, mine = prepared.mine,
+                autoSupplyBuildingId = prepared.autoSupplyBuildingId)
                 .also { storage.seal(it, keepViewersOpen) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
         return inventoryJournal.submit(tx)
@@ -2616,6 +2663,7 @@ class CivsService(
                 "surface_changed" to (surfaceChange != null),
                 "cleared_cover" to work.changes.count { it.position != upkeep.floor },
                 "stone_spent" to receipt.stockBefore.stone - tx.after.stock.stone,
+                "native_cobblestone_spent" to (work.inputs["COBBLESTONE"] ?: 0L),
                 "recovery_path" to recoveryPath)
         }
         tx.autonomousVisual?.let { receipt ->
@@ -2634,6 +2682,7 @@ class CivsService(
                 it.before.amount - (it.after?.amount ?: 0)
             } else transfer.containers.sumOf { (it.after?.amount ?: 0) - (it.before?.amount ?: 0) }
             val event = when {
+                transfer.forestryLeafLoot != null -> "forestry_leaf_loot_collected"
                 transfer.food?.materialized?.let { it > 0 } == true -> "resident_food_materialized"
                 transfer.food != null -> "resident_food_picked_up"
                 transfer.ground.isNotEmpty() -> "resident_ground_collected"
@@ -2643,7 +2692,7 @@ class CivsService(
                 "city" to tx.cityId, "worker" to transfer.workerId, "transaction" to tx.id,
                 "revision" to tx.after.revision, "homeId" to transfer.homeId, "items" to kotlin.math.abs(items),
                 "food_stock_before" to transfer.food?.stockBefore?.food, "food_stock_after" to tx.after.stock.food,
-                "building" to transfer.food?.buildingId,
+                "building" to (transfer.forestryLeafLoot?.buildingId ?: transfer.food?.buildingId),
                 "material" to transfer.food?.material,
                 "slots" to if (transfer.ground.isNotEmpty()) transfer.ground.size else transfer.containers.size)
         }
@@ -2675,7 +2724,7 @@ class CivsService(
     override fun localMaterials(player: Player, buildingId: UUID): Map<String, Long> =
         managed(player).let { localStocks(it)(buildingId) }
     override fun supplyRequests(player: Player): List<CivSupplyRequest> =
-        managed(player).let { city -> localStocks(city).let { CivsLogistics.requests(city, it) + craftRequests(city, it) } }
+        managed(player).let { city -> localStocks(city).let { CivsLogistics.requests(city, it) + workSupplyRequests(city, it) } }
 
     override fun carpentry(player: Player, buildingId: UUID): CivCarpentryView? {
         val city = managed(player)
@@ -2749,6 +2798,9 @@ class CivsService(
                 CompletableFuture.completedFuture(Unit)
             }
         }
+
+    override fun inspectionMaterials(player: Player, cityId: UUID, buildingId: UUID): Map<String, Long> =
+        storage.buildingAvailable(inspectBuilding(player, cityId, buildingId), buildingId)
 
     override fun openBuildingInventory(player: Player, buildingId: UUID): CompletableFuture<Unit> = cityAction("inventory_open", player, "building" to buildingId) { city ->
         inventoryBuilding(player, city, buildingId)
@@ -3207,7 +3259,7 @@ class CivsService(
         if (city != null && previous?.buildings == city.buildings && previous?.construction?.plannedBuilding == city.construction?.plannedBuilding && previous.members == city.members &&
             previous.inventory?.containers == city.inventory?.containers && previous.pendingControls == city.pendingControls && previous.pendingDeletion == city.pendingDeletion) {
             cities[city.id] = city
-            if (city.autonomy == null && civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
+            if (!CivsAutonomy.legacyStock(city) && civSupplyInputs(previous) != civSupplyInputs(city)) supply.request(city.id)
             return CompletableFuture.completedFuture(Unit)
         }
         val expected = geometryGeneration
@@ -3222,7 +3274,7 @@ class CivsService(
                 if (city == null) storage.removeCity(cityId) else storage.updateCity(city)
                 if (city == null) cities.remove(cityId) else cities[cityId] = city
                 if (city == null) { supply.remove(cityId); supplyObservations.remove(cityId); forestryRoutes.remove(cityId) }
-                else if (city.autonomy == null) supply.request(cityId)
+                else if (!CivsAutonomy.legacyStock(city)) supply.request(cityId)
                 protection.publish(requireNotNull(prepared))
                 geometryGeneration++
             }.onSuccess { result.complete(Unit) }.onFailure(result::completeExceptionally)
@@ -3263,6 +3315,8 @@ class CivsService(
             residentLife.pulsePopulation()
             pulseMemberNames()
             pulseStorage()
+            pulseAutoStorage()
+            pulseAutoSupplies()
             pulseResidentFood()
             pulseTestingSupplies()
             autonomousDevelopment.pulseAccessRepair()
@@ -3325,6 +3379,77 @@ class CivsService(
 
     private var nextStorageTransferAt = 0L
     private var storageCursor = 0
+    private val autoSupplies = CivsAutoSupplies()
+    private var nextAutoMigrationAt = 0L
+    private var autoMigrationCursor = 0
+    private var nextAutoSupplyAt = 0L
+    private var autoSupplyCursor = 0
+
+    private fun pulseAutoStorage() {
+        if (now() < nextAutoMigrationAt) return
+        val candidates = cities.values.filter { CivsAutoStorageMigration.canMigrate(it) && it.id !in busy &&
+            it.id !in unhealthy && it.pendingDeletion == null && !inventoryJournal.pending(it.id) }
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(autoMigrationCursor++, candidates.size)]
+        nextAutoMigrationAt = now() + 1_000L
+        runCatching { mutate(city.id, transform = CivsAutoStorageMigration::migrate) }.onSuccess { accepted ->
+            accepted.whenCompleteSync(tasks) { saved, failure ->
+                if (failure == null && saved != city) {
+                    city.workers.forEach { worksites.invalidate(it.id); roadMaintenance.invalidate(it.id) }
+                    supply.remove(city.id)
+                    supplyObservations.remove(city.id)
+                    CivsDiagnostics.event("autonomous_storage_migrated", "city" to city.id,
+                        "pending_items" to pendingMaterials(requireNotNull(saved)), "revision" to saved.revision)
+                } else if (failure != null) log("migrate autonomous storage ${city.id}", failure, city.id)
+            }
+        }.onFailure { log("migrate autonomous storage ${city.id}", it, city.id) }
+    }
+
+    private fun pulseAutoSupplies() {
+        if (now() < nextAutoSupplyAt) return
+        val candidates = cities.values.filter { it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) &&
+            it.id !in busy && it.id !in unhealthy && it.pendingDeletion == null && !inventoryJournal.pending(it.id) && settlementActive(it) }
+        autoSupplies.retain(cities.values.filter { it.autonomy != null }.mapTo(hashSetOf(), Settlement::id))
+        if (candidates.isEmpty()) return
+        val city = candidates[Math.floorMod(autoSupplyCursor++, candidates.size)]
+        nextAutoSupplyAt = now() + 1_000L
+        val observation = autoSupplyObservation(city) ?: return
+        val need = runCatching { construction.supplyNeed(city) }.getOrNull()
+        val demand = autoSupplies.next(city, need, residentFoods, observation, supply.craftJobs(city.id), upkeepRequirements(city)) ?: return
+        runCatching { inventoryMutation(city.id, { current ->
+            val fresh = autoSupplyObservation(current) ?: throw CivsRejection("storage-observation-stale")
+            rejectIf(demand !in CivsAutoSupplies.demands(current, construction.supplyNeed(current), residentFoods,
+                fresh, supply.craftJobs(current.id), upkeepRequirements(current)), "stale-delivery")
+            val nativeWorld = plugin.server.getWorld(current.worldId) ?: throw CivsRejection("world-unavailable")
+            storage.prepareAutoSupply(current, demand) { point ->
+                world.canModify(current.owner, nativeWorld.getBlockAt(point.x, point.y, point.z))
+            }
+        }, keepViewersOpen = true) { before, inventory ->
+            before.copy(inventory = inventory, revision = Math.addExact(before.revision, 1))
+        } }.onSuccess { accepted -> accepted.whenCompleteSync(tasks) { saved, failure ->
+            if (failure == null && saved != city) {
+                construction.materialsChanged()
+                CivsDiagnostics.event("autonomous_supplies_granted", "city" to city.id, "building" to demand.buildingId,
+                    "requested" to demand.required, "revision" to saved?.revision)
+            } else if (failure != null && CivsDiagnostics.rejection(failure)?.reason !in setOf("city-busy", "stale-delivery",
+                    "storage-unavailable", "storage-observation-stale", "chunks-unloaded", "chunk-unloaded", "lands-denied"))
+                log("supply autonomous workplace ${city.id}", failure, city.id)
+        } }.onFailure { failure ->
+            if (CivsDiagnostics.rejection(failure)?.reason !in setOf("city-busy", "stale-delivery", "storage-unavailable",
+                    "storage-observation-stale", "chunks-unloaded", "chunk-unloaded", "lands-denied")) log("supply autonomous workplace ${city.id}", failure, city.id)
+        }
+    }
+
+    /** Reuse the accepted bounded capture; no whole-city native read belongs in an Auto top-up pulse. */
+    private fun autoSupplyObservation(city: Settlement): CivSupplySnapshot? {
+        val snapshot = supply.observation(city.id)
+        val observed = snapshot?.inputKey as? CivSupplyObservation
+        if (!CivsAutoSupplies.observed(city, snapshot) || observed == null || !storage.supplyCaptureCurrent(city, observed.capture)) {
+            supply.request(city.id)
+            return null
+        }
+        return snapshot
+    }
 
     private fun pulseStorage() {
         if (now() < nextStorageTransferAt) return
@@ -3371,7 +3496,7 @@ class CivsService(
 
     private fun pulseResearch() {
         val candidates = cities.values.filter { city -> city.id !in busy && city.id !in unhealthy && city.pendingDeletion == null &&
-            city.autonomy?.paused != true && settlementActive(city) && CivsResearch.university(city) != null &&
+            city.autonomy?.paused != true && CivsAutoStorageMigration.ready(city) && settlementActive(city) && CivsResearch.university(city) != null &&
             (CivsResearch.canFund(city) || city.autonomy != null && city.research?.project == null &&
                 CivResearchId.entries.any { CivsResearch.reason(city, it) == null }) }
         if (candidates.isEmpty()) return
@@ -3381,7 +3506,7 @@ class CivsService(
             if (project == null) {
                 val research = CivResearchId.entries.first { CivsResearch.reason(city, it) == null }
                 mutate(city.id) { CivsResearch.begin(it, research, UUID.randomUUID(), now()) }
-            } else if (city.autonomy != null) mutate(city.id) { CivsResearch.fund(it, project.id, now()) }
+            } else if (CivsAutonomy.legacyStock(city)) mutate(city.id) { CivsResearch.fund(it, project.id, now()) }
             else inventoryMutation(city.id, { current ->
                 CivsResearch.project(current, project.id)
                 rejectIf(!CivsResearch.canFund(current), "research-unfunded")
@@ -3696,6 +3821,7 @@ class CivsService(
         autonomousPlacement.close()
         world.close()
         HandlerList.unregisterAll(protection)
+        HandlerList.unregisterAll(forestryLeafLoot)
         plugin.server.servicesManager.unregister(ArcBlockProtectionService::class.java, sharedProtection)
         renderer.close()
         boundary.close()

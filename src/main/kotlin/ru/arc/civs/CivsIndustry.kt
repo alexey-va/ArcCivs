@@ -1,6 +1,6 @@
 package ru.arc.civs
 
-/** A fixed selected recipe, copied into the actor plan; no persistent batch or native Auto item. */
+/** A fixed selected recipe, copied into the actor plan; native towns use ordinary material recipes. */
 internal data class CivIndustryRecipe(
     val id: String,
     val type: BuildingType,
@@ -16,7 +16,7 @@ internal data class CivIndustryRecipe(
 
 internal data class CivIndustryWork(val building: CivBuilding, val recipe: CivIndustryRecipe)
 
-/** Seven closed products with one next missing chain stage, never a generic dependency planner. */
+/** Legacy closed recipes keep their saved chain; physical Auto shares ordinary production recipes. */
 internal object CivsIndustry {
     val processorTypes = setOf(BuildingType.SMELTERY, BuildingType.CRUSHER, BuildingType.BLACKSMITH)
 
@@ -37,7 +37,7 @@ internal object CivsIndustry {
             Stock(wood = 2), mapOf(CivIndustryProduct.IRON_INGOT to 3), emptyMap(), "IRON_TOOL_KIT", 1, product)
     }
 
-    fun recipes(city: Settlement, building: CivBuilding): List<CivIndustryRecipe> = if (city.autonomy != null) {
+    fun recipes(city: Settlement, building: CivBuilding): List<CivIndustryRecipe> = if (CivsAutonomy.legacyStock(city)) {
         CivIndustryProduct.entries.map(::recipe).filter { it.type == building.type && allowed(city, building, it) }
     } else CivsProduction.options(city, building).map { material ->
         val selected = building.copy(production = material)
@@ -83,7 +83,7 @@ internal object CivsIndustry {
     }
 
     fun autonomousWork(city: Settlement, building: CivBuilding): CivIndustryWork? {
-        if (city.autonomy?.paused != false || city.pendingDeletion != null || building.phase != BuildingPhase.ACTIVE) return null
+        if (!CivsAutonomy.legacyStock(city) || city.autonomy?.paused != false || city.pendingDeletion != null || building.phase != BuildingPhase.ACTIVE) return null
         val product = nextStage(city) ?: return null
         val recipe = recipe(product)
         if (!allowed(city, building, recipe)) return null
@@ -100,11 +100,11 @@ internal object CivsIndustry {
 
     fun view(city: Settlement) = CivIndustryView(city.id, city.autonomy != null, city.autonomy?.products.orEmpty().toMap(),
         city.buildings.filter { it.type in processorTypes || it.type == BuildingType.QUARRY && city.autonomy != null }.map { building ->
-            val work = if (city.autonomy != null) autonomousWork(city, building) else null
+            val work = if (CivsAutonomy.legacyStock(city)) autonomousWork(city, building) else null
             val choices = recipes(city, building)
             CivIndustryBuildingView(building.id, building.type, building.production, choices.map { it.id },
-                if (city.autonomy != null) work?.recipe?.id else CivsProduction.material(building),
-                if (city.autonomy != null && work == null) "waiting-orders"
+                if (CivsAutonomy.legacyStock(city)) work?.recipe?.id else CivsProduction.material(building),
+                if (CivsAutonomy.legacyStock(city) && work == null) "waiting-orders"
                 else if (work != null && !inputsReady(city, work)) "waiting-inputs" else null, choices.map(::view))
         })
 

@@ -56,10 +56,10 @@ class CivsCitizenRouteRetentionTest : FunSpec({
         }
     }
 
-    for (invalidation in listOf("source-moved-away", "source-removed", "cargo-missing"))
-    test("a distant courier retains a locally moving approach until $invalidation") {
+    for (invalidation in listOf("source-building-moved", "source-removed", "cargo-missing"))
+    test("a distant courier keeps its building route while its producer moves until $invalidation") {
         residentRuntime { h ->
-            val (_, courierId) = h.courierSource()
+            val (sourceBuilding, courierId) = h.courierSource("WHEAT")
             h.idleReason = "searching-work"
             val source = h.owner.collisionActors().single()
             source.teleport(Location(h.world, 22.5, 64.0, .5))
@@ -70,9 +70,11 @@ class CivsCitizenRouteRetentionTest : FunSpec({
             for (x in -4..4) for (z in -1..1) h.world.loadChunk(x, z)
             h.world.getBlockAt(-40, 64, 0).type = Material.BARREL
             h.owner.pulse(2_000)
-            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
+            var stored = 64L
+            h.courierProvider = { city, worker -> if (worker.id != courierId) null else
+                CivsLogistics.plan(city, worker) { id -> if (id == sourceBuilding.id) mapOf("WHEAT" to stored) else emptyMap() } }
+            val accepted = requireNotNull(h.courierProvider?.invoke(h.city, h.city.workers.last()))
+            accepted.cargo.sourceWorkerId shouldBe null
             h.holdNavigation = true
             h.navigationNow = 3_000
             h.owner.pulse(3_000)
@@ -100,14 +102,15 @@ class CivsCitizenRouteRetentionTest : FunSpec({
             withClue(h.navigationState(courierId)) { (motion.forwardProgress >= 3.0) shouldBe true }
             h.pickups shouldBe 0
             h.city.workers.last().cargo shouldBe null
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
+            CivsEquipment.plainCount(h.city.workers.first(), "WHEAT") shouldBe 64
             // Retaining an approach never extends its destination area or source/cargo authority.
             when (invalidation) {
-                "source-moved-away" -> source.teleport(Location(h.world, 45.5, 64.0, .5))
-                "source-removed" -> h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId })
-                else -> h.city = h.city.copy(workers = h.city.workers.map {
-                    if (it.id == h.workerId) it.copy(items = List(CivsEquipment.SLOTS) { null }) else it
+                "source-building-moved" -> h.city = h.city.copy(buildings = h.city.buildings.map {
+                    if (it.id == sourceBuilding.id) it.copy(control = CivPosition(45, 64, 0)) else it
                 })
+                "source-removed" -> h.city = h.city.copy(buildings = h.city.buildings.filterNot { it.id == sourceBuilding.id },
+                    workers = h.city.workers.map { if (it.assignment == sourceBuilding.id) it.copy(assignment = null) else it })
+                else -> stored = 0L
             }
             h.owner.pulse(requireNotNull(h.navigationNow) + 1_000)
             (h.routeIdentity(courierId) === first) shouldBe false

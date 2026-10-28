@@ -105,7 +105,7 @@ private fun localCapacityCity(stock: Stock): Settlement {
     val mill = building(BuildingType.FORESTER, 10)
     val warehouse = building(BuildingType.WAREHOUSE, 20)
     return CivsRules.validate(CivsAutonomy.found(UUID(2, 1), UUID(2, 2), "Local capacity", UUID(2, 3),
-        CivPosition(0, 64, 0), 64, "medievaloak", hall, 1_000).copy(stock = stock,
+        CivPosition(0, 64, 0), 64, "medievaloak", hall, 1_000).copy(stock = stock, inventory = null,
         buildings = listOf(hall, mill, warehouse), workers = listOf(
             CivWorker(UUID(3, 1), "Forester", mill.id, nextDeliveryAt = 1),
             CivWorker(UUID(3, 2), "Courier", warehouse.id, nextDeliveryAt = 1)),

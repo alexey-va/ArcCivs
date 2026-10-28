@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "title": "ArcCivs physical Auto storage and explicit native top-ups",
+  "assumptions": [
+    "Low/base/high sensitivity is one backend administrator with 1/10/500 Auto towns, and 0.25/1/4 active backend hours/day. These are assumptions, not measured activity. The controller global budget is shared by all towns, not multiplied by town count.",
+    "Auto supplies issue actual native items only to an accepted construction row, an assigned workplace buffer/current recipe, an unfunded accepted research bill, or an existing hungry resident home. Ordinary towns receive no automatic grant.",
+    "One controller call every1000ms in the existing20tick maintenance pulse selects one city and one request with at most8materials and64items/material: the absolute service envelope is512items/receipt,1receipt/s=512items/s across the backend. The128-container existing row-search ceiling bounds each native capture; oversized admin-authored buffers defer without issuance. Full/unloaded or denied containers, missing demand, busy state, pending receipts and migration reserves reduce this; this is a gross implementation bound, not predicted production.",
+    "Before, recurring Auto production was nontransferable abstract W/S/F/products; after, actual native harvest/drops and ordinary recipe outputs are real items. Native forestry replaces the abstract4WOOD earning rather than being added to it. Native drop probabilities and tool effects are retained by the root-owned production changes and are not monetized here.",
+    "Migration is one-time: only remaining stock+pendingStock+closed cargo+closed products become a durable native reserve and then actual slots. Existing native bread/bags/equipment are preserved, never issued twice. Producer pending reserves remain assigned to their own workplace; no shared overflow is used for Auto building reserves, and accepted cargo reserves use their resolved destination. WOOD maps to the sole forester log species or OAK_LOG;STONE toCOBBLESTONE;FOOD toBREAD;IRON_TOOL_KIT to exactly1IRON_PICKAXE. A pickaxe is the existing3IRON_INGOT+2STICK recipe, not a bundle of tools.",
+    "New Auto construction uses the same complete captured material bill, carried material debit and journaled per-batch payments as ordinary towns. Already accepted legacy payment=null orders were paid and are not charged again. New research uses ordinary native bills; accepted old bills are converted losslessly once with their funded state preserved.",
+    "Auto item storage, corpses and player mutations retain administrator/protection gates. Privileged extraction of administrator grants remains a possible privileged item source; no ordinary-player withdraw route is introduced. SELL and AutoSell remain current separate channels; planned SELL-to-contract transition is unchanged. No sale quote or fixed item-to-Vault rate is assumed.",
+    "Direct Vault,tokens and playerXP APIs are not added. Item issuance is explicitly nonzero. Resident skill points remain existing internal training, separate from playerXP. Natural immigration/birth use the current common lifecycle; the dead legacy Auto abstract-FOOD recruitment helper does not run for physical towns.",
+    "Migration reserves are not spendable PHYSICAL stock. New planning and automatic top-ups wait while reserves remain; existing PHYSICAL work and consumption continue against actual slots so full local buffers can drain. Null legacy mode admits no new production; retries only move remaining native reserve. Accepted exact slot receipts prevent repeat issuance after unknown acknowledgement outcomes.",
+    "No live backend balances, sell quotes, cadence or post-deploy telemetry were queried in this source-only delegated task. Old economy observations in repository documents are historical, not current verification.",
+    "Final integrated supply logic counts exportable goods through an assigned warehouse courier, including current trips and two bounded route legs. Native road upkeep consumes one actual COBBLESTONE per accepted column, old paid receipts retain one abstract STONE; no extra yield or currency flow. Native inventory writes recheck Lands after journal acknowledgement."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "CivsAutoSupplies and CivsService.pulseAutoSupplies",
+          "basis": "No direct currency or player XP grant is implemented",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "CivsAutoSupplies and CivsService.pulseAutoSupplies",
+          "basis": "No direct currency or player XP grant is implemented",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "CivsAutoSupplies and CivsService.pulseAutoSupplies",
+          "basis": "No direct currency or player XP grant is implemented",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_item_units": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "native_auto_supply_absolute_backend_envelope",
+          "kind": "item",
+          "source": "CivsAutoSupplies8materials*64items and global1000ms controller",
+          "basis": "Gross service ceiling; these alternative administrative scenarios share one backend loop and do not imply continuous accepted demand",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "512",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              900,
+              3600,
+              14400
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

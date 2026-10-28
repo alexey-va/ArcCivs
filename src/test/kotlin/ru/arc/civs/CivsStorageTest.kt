@@ -86,6 +86,192 @@ class CivsStorageTest : FunSpec({
     }
     afterEach { storage.close(); paper.close() }
 
+    test("Auto grants recheck native permission after the durable journal acknowledgement") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        var allowed = true
+        storage.foodCanModify = { _, _ -> allowed }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareAutoSupply(city, CivAutoSupplyDemand(city.buildings.single().id, mapOf("BREAD" to 4L))) { allowed }!!
+        val tx = CivInventoryTransaction(id, city.id, city.revision,
+            city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes,
+            autoSupplyBuildingId = plan.autoSupplyBuildingId)
+        storage.seal(tx)
+        allowed = false // The journal write completed after Lands authority changed.
+        (storage.reconcile(tx) is CivInventoryApplyResult.Conflict) shouldBe true
+        barrel.isEmpty shouldBe true
+        storage.unlock(id)
+    }
+
+    test("Auto grant permission checks all untouched destinations before the first write") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(registered)),
+            buildings = city.buildings.map { it.copy(phase = BuildingPhase.ACTIVE,
+                bounds = CivBox(CivPosition(0, 64, 0), CivPosition(4, 65, 2))) })
+        barrel.setItem(0, ItemStack(Material.BREAD, 2))
+        val id = UUID.randomUUID()
+        val tx = CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1), listOf(
+            CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("BREAD", 2), CivPlainItem("BREAD", 4)),
+            CivInventorySlotChange(registered, "CHEST", 0, null, CivPlainItem("STONE", 1))),
+            autoSupplyBuildingId = city.buildings.single().id)
+        storage.reserve(city, id); storage.seal(tx)
+        storage.foodCanModify = { _, point -> point != registered }
+        val result = storage.reconcile(tx) as CivInventoryApplyResult.Conflict
+        result.values["reason"] shouldBe "lands-denied"
+        barrel.getItem(0)!!.amount shouldBe 2
+        chest.isEmpty shouldBe true
+        storage.unlock(id)
+    }
+
+    test("partial Auto grant recovery keeps owned credits and rechecks only remaining slots") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        val id = UUID.randomUUID()
+        val tx = CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1), listOf(
+            CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("BREAD", 4)),
+            CivInventorySlotChange(control, "BARREL", 1, null, CivPlainItem("STONE", 1))),
+            autoSupplyBuildingId = city.buildings.single().id)
+        storage.reserve(city, id); storage.seal(tx)
+        barrel.setItem(0, ItemStack(Material.BREAD, 4)) // A crash persisted only the first accepted slot.
+        storage.foodCanModify = { _, _ -> false }
+        (storage.reconcile(tx) is CivInventoryApplyResult.Conflict) shouldBe true
+        barrel.getItem(0)!!.amount shouldBe 4
+        barrel.getItem(1) shouldBe null
+        storage.unlock(id); storage.lock(tx)
+        storage.foodCanModify = { _, _ -> true }
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.foodCanModify = { _, _ -> error("Fully applied native grants need no new authority") }
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.amount shouldBe 4
+        barrel.getItem(1)!!.amount shouldBe 1
+        storage.unlock(id)
+    }
+
+    test("typed Auto grant receipts reject transfers foreign scope and city mutations") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(registered)))
+        val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, city.copy(revision = city.revision + 1),
+            listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("BREAD", 4))),
+            autoSupplyBuildingId = city.buildings.single().id).validated()
+        listOf(tx.copy(after = tx.after.copy(autonomy = null)),
+            tx.copy(changes = listOf(tx.changes.single().copy(before = CivPlainItem("BREAD", 5)))),
+            tx.copy(changes = listOf(tx.changes.single().copy(before = CivPlainItem("STONE", 1)))),
+            tx.copy(changes = listOf(tx.changes.single().copy(container = registered, containerType = "CHEST"))),
+            tx.copy(autoSupplyBuildingId = UUID.randomUUID()),
+            tx.copy(worldChanges = listOf(CivPlanBlock(control, "minecraft:air", "minecraft:stone"))),
+            tx.copy(playerDebit = CivPlayerDebit(city.owner, listOf(CivPlayerSlotChange(0, CivPlainItem("BREAD", 4), null))))
+        ).forEach { shouldThrow<IllegalArgumentException> { it.validated() } }
+        storage.reserve(city, tx.id)
+        shouldThrow<IllegalArgumentException> { storage.seal(tx.copy(after = tx.after.copy(name = "Changed"))) }
+        storage.unlock(tx.id)
+    }
+
+    test("Auto supply marker survives the real journal codec while older missing markers stay readable") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision, city.copy(revision = city.revision + 1),
+            listOf(CivInventorySlotChange(control, "BARREL", 0, null, CivPlainItem("BREAD", 4))),
+            autoSupplyBuildingId = city.buildings.single().id).validated()
+        val root = java.nio.file.Files.createTempDirectory("civs-auto-supply-codec-")
+        try {
+            CivsStore(root, java.util.concurrent.Executor(Runnable::run)).use { store ->
+                store.saveInventoryTransaction(tx).join() shouldBe tx
+                store.loadInventoryTransactions().join().single() shouldBe tx
+            }
+            val path = root.resolve("inventory-transactions/${tx.id}.json")
+            val document = com.google.gson.JsonParser.parseString(java.nio.file.Files.readString(path)).asJsonObject
+            document.getAsJsonObject("transaction").remove("autoSupplyBuildingId")
+            java.nio.file.Files.writeString(path, com.google.gson.Gson().toJson(document))
+            CivsStore(root, java.util.concurrent.Executor(Runnable::run)).use { store ->
+                store.loadInventoryTransactions().join().single() shouldBe tx.copy(autoSupplyBuildingId = null)
+            }
+        } finally { root.toFile().deleteRecursively() }
+    }
+
+    test("Auto top-up fills exact native deficit once and rejects ordinary or denied grants") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        storage.foodCanModify = { _, _ -> true }
+        val hall = city.buildings.single()
+        barrel.setItem(0, ItemStack(Material.BREAD, 2))
+        val demand = CivAutoSupplyDemand(hall.id, mapOf("BREAD" to 4L))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> { storage.prepareAutoSupply(city, demand) { false } }.reason shouldBe "lands-denied"
+        barrel.getItem(0)!!.amount shouldBe 2
+        shouldThrow<CivsRejection> { storage.prepareAutoSupply(city.copy(autonomy = null), demand) { true } }.reason shouldBe "not-authorized"
+        val plan = storage.prepareAutoSupply(city, demand) { true }!!
+        val tx = CivInventoryTransaction(id, city.id, city.revision,
+            city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes,
+            autoSupplyBuildingId = plan.autoSupplyBuildingId)
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        barrel.getItem(0)!!.amount shouldBe 4
+        storage.unlock(id)
+        city = tx.after
+        val second = UUID.randomUUID()
+        storage.reserve(city, second)
+        storage.prepareAutoSupply(city, demand) { true } shouldBe null
+        storage.unlock(second)
+    }
+
+    test("a full Auto container keeps the grant unissued and migration reserves are not available") {
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL,
+            materials = mapOf("BREAD" to 9L)))
+        storage.available(city)["BREAD"] shouldBe null
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareMaterialization(city)
+        val tx = CivInventoryTransaction(id, city.id, city.revision,
+            city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes)
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.unlock(id)
+        city = tx.after
+        storage.available(city)["BREAD"] shouldBe 9L
+        repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        val second = UUID.randomUUID()
+        storage.reserve(city, second)
+        storage.prepareAutoSupply(city, CivAutoSupplyDemand(city.buildings.single().id, mapOf("BREAD" to 4L))) { true } shouldBe null
+        storage.unlock(second)
+        barrel.contents.filterNotNull().sumOf(ItemStack::getAmount) shouldBe 27 * 64
+    }
+
+    test("Auto producer reserves materialize in all own workplace containers and never overflow to the hall") {
+        val point = CivPosition(10, 64, 0)
+        val forest = city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
+            anchor = point, bounds = CivBox(point.copy(x = 8, y = 63, z = -2), point.copy(x = 12, y = 67, z = 2)),
+            entrance = point.copy(z = -3), phase = BuildingPhase.ACTIVE, control = point)
+        world.getBlockAt(10, 64, 0).type = Material.BARREL
+        world.getBlockAt(11, 64, 0).type = Material.CHEST
+        indexedBlocks += world.getBlockAt(11, 64, 0)
+        val localBarrel = (world.getBlockAt(10, 64, 0).state as Barrel).inventory
+        val localChest = (world.getBlockAt(11, 64, 0).state as Chest).blockInventory
+        repeat(localBarrel.size) { localBarrel.setItem(it, ItemStack(Material.STONE, 64)) }
+        city = CivsRules.validate(city.copy(autonomy = CivAutonomy(), buildings = city.buildings + forest,
+            inventory = CivInventory(CivStorageMode.PHYSICAL,
+                buildingMaterials = mapOf(forest.id.toString() to mapOf("OAK_LOG" to 5L)))))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val plan = storage.prepareMaterialization(city)
+        plan.changes.map { it.container }.toSet() shouldBe setOf(CivPosition(11, 64, 0))
+        val tx = CivInventoryTransaction(id, city.id, city.revision,
+            city.copy(inventory = plan.inventoryAfter, revision = city.revision + 1), plan.changes)
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        localChest.getItem(0)!!.amount shouldBe 5
+        barrel.isEmpty shouldBe true
+        storage.unlock(id)
+        repeat(localChest.size) { localChest.setItem(it, ItemStack(Material.STONE, 64)) }
+        city = tx.after.copy(inventory = tx.after.inventory!!.copy(
+            buildingMaterials = mapOf(forest.id.toString() to mapOf("OAK_LOG" to 5L))))
+        val blockedId = UUID.randomUUID()
+        storage.reserve(city, blockedId)
+        val blocked = storage.prepareMaterialization(city)
+        blocked.changes shouldBe emptyList()
+        blocked.inventoryAfter.buildingStock(forest.id) shouldBe mapOf("OAK_LOG" to 5L)
+        barrel.isEmpty shouldBe true
+        storage.unlock(blockedId)
+    }
+
     for (autonomous in listOf(false, true)) test("resurrection receipts debit one exact tagged scroll without synthetic stock autonomous=$autonomous") {
         var persisted = 0
         storage.close()
@@ -158,7 +344,7 @@ class CivsStorageTest : FunSpec({
         return building
     }
 
-    test("worker-bag pickup refuses a full real warehouse and never borrows custom-stack space") {
+    test("an old unpicked worker handoff cannot debit a bag with either full or empty warehouse slots") {
         val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
         val quarry = addLocalBuilding(BuildingType.QUARRY, 10)
         val courier = CivWorker(UUID.randomUUID(), "Courier", warehouse.id, nextDeliveryAt = 1)
@@ -169,27 +355,19 @@ class CivsStorageTest : FunSpec({
         repeat(target.size) { target.setItem(it, ItemStack(Material.STONE, 64)) }
         val custom = named(Material.COAL, 63)
         target.setItem(target.size - 1, custom)
-        val sources = mapOf(producer.id to CivPosition(10, 64, 3))
-        val cargo = requireNotNull(CivsLogistics.plan(city, courier, { emptyMap() }, sources) { _, _ -> 64L }).cargo
+        val cargo = CivCargo(CivsLogistics.shipmentId(city.id, courier.id, courier.completedCycles,
+            quarry.id, warehouse.id, "COAL", producer.id), warehouse.id, quarry.id, warehouse.id,
+            quarry.entrance, "COAL", 64, inventoryBacked = true, sourceWorkerId = producer.id)
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         storage.cargoRoom(city, warehouse.id, "COAL") shouldBe 0L
-        shouldThrow<CivsRejection> { storage.prepareCargoPickup(city, cargo) }.reason shouldBe "storage-full"
-        CivsEquipment.plainCount(city.workers.last(), "COAL") shouldBe 64
-        target.getItem(target.size - 1) shouldBe custom
+        shouldThrow<CivsRejection> { storage.prepareCargoPickup(city, cargo) }.reason shouldBe "stale-delivery"
         target.setItem(0, null)
         storage.cargoRoom(city, warehouse.id, "COAL") shouldBe 64L
-        val prepared = storage.prepareCargoPickup(city, cargo)
-        prepared.changes shouldBe emptyList()
-        val picked = CivsLogistics.pickup(city, courier.id, cargo).copy(inventory = prepared.inventoryAfter)
-        val receipt = CivInventoryTransaction(id, city.id, city.revision, picked, prepared.changes).validated()
-        storage.seal(receipt, keepViewersOpen = true)
-        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
-        storage.reconcile(receipt) shouldBe CivInventoryApplyResult.Applied
+        shouldThrow<CivsRejection> { storage.prepareCargoPickup(city, cargo) }.reason shouldBe "stale-delivery"
+        CivsEquipment.plainCount(city.workers.last(), "COAL") shouldBe 64
         target.getItem(0) shouldBe null
         target.getItem(target.size - 1) shouldBe custom
-        CivsEquipment.plainCount(receipt.after.workers.first(), "COAL") shouldBe 64
-        CivsEquipment.plainCount(receipt.after.workers.last(), "COAL") shouldBe 0
     }
 
     test("resident transfers retain native metadata in both directions and replay each endpoint once") {
@@ -491,6 +669,43 @@ class CivsStorageTest : FunSpec({
         world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
         receipt.after.stock shouldBe before.stock.copy(stone = before.stock.stone - 1)
         receipt.after.workers.single().copy(completedCycles = 0, nextDeliveryAt = 1) shouldBe before.workers.single()
+    }
+
+    test("physical Auto upkeep debits only its own hut once and rechecks hut Lands before any native write") {
+        val (legacy, old) = upkeepStorageReceipt(city)
+        val hut = legacy.building(old.upkeep!!.work.buildingId)!!.copy(control = CivPosition(10, 64, 0))
+        city = legacy.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = legacy.buildings.map { if (it.id == hut.id) hut else it })
+        world.getBlockAt(10, 64, 0).type = Material.BARREL
+        val own = (world.getBlockAt(10, 64, 0).state as Barrel).inventory
+        own.setItem(0, ItemStack(Material.COBBLESTONE, 2))
+        barrel.setItem(0, ItemStack(Material.COBBLESTONE, 64)) // Another building is never charged.
+        val work = old.upkeep.work.copy(inputs = mapOf("COBBLESTONE" to 1L))
+        val floor = work.upkeep!!.floor
+        world.getBlockAt(floor.x, floor.y, floor.z).type = Material.DIRT
+        val id = UUID.randomUUID()
+        storage.replaceCities(listOf(city)); storage.reserve(city, id)
+        val plan = storage.prepareWork(city, hut.id, work.storageInputs(city.workers.single()), emptyMap(), work.changes)
+        val after = CivsRoadMaintenance.complete(city, work, 1_000, nativePaid = true)
+        val tx = CivInventoryTransaction(id, city.id, city.revision, after, plan.changes, worldChanges = work.changes,
+            upkeep = CivRoadUpkeepReceipt(city.workers.single(), city.stock, work, 1_000))
+        tx.validated()
+        storage.seal(tx)
+        storage.validateUpkeepNative = { null }
+        storage.foodCanModify = { _, point -> point != hut.control }
+        (storage.reconcile(tx) as CivInventoryApplyResult.Conflict).values["reason"] shouldBe "lands-denied"
+        own.getItem(0)!!.amount shouldBe 2
+        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.DIRT
+        storage.foodCanModify = { _, _ -> true }
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        own.getItem(0)!!.amount shouldBe 1
+        barrel.getItem(0)!!.amount shouldBe 64
+        world.getBlockAt(floor.x, floor.y, floor.z).type shouldBe Material.COBBLESTONE
+        storage.foodCanModify = { _, _ -> false }
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        own.getItem(0)!!.amount shouldBe 1
+        tx.after.stock shouldBe Stock()
+        storage.unlock(id)
     }
 
     test("Auto field receipt needs native authority on every replay and preserves naturally grown crops") {

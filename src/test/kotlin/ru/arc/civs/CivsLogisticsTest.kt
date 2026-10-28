@@ -7,6 +7,59 @@ import io.kotest.matchers.shouldBe
 import java.util.UUID
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
+class CivsBuildingCourierRulesTest : FunSpec({
+    lateinit var paper: MockBukkitTestRuntime
+    beforeEach { paper = MockBukkitTestRuntime.open() }
+    afterEach { paper.close() }
+
+    test("a producer bag cannot supply a new courier before its workplace deposit") {
+        val base = logisticsProducerCity(BuildingType.FORESTER, "OAK_LOG")
+        val producer = CivsEquipment.collectSupplies(base.workers.last(), mapOf("OAK_LOG" to 64L))
+        val city = base.copy(workers = base.workers.dropLast(1) + producer)
+        CivsLogistics.plan(city, city.workers.first(), { emptyMap() },
+            mapOf(producer.id to CivPosition(80, 64, 5))) { _, _ -> 64L } shouldBe null
+        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), {
+            if (it == producer.assignment) mapOf("OAK_LOG" to 48L) else emptyMap()
+        }, mapOf(producer.id to CivPosition(80, 64, 5))) { _, _ -> 64L })
+        plan.cargo.sourceWorkerId shouldBe null
+        plan.cargo.sourceEntrance shouldBe city.buildings.last().entrance
+        plan.cargo.amount shouldBe 48L
+        CivsEquipment.plainCount(city.workers.last(), "OAK_LOG") shouldBe 64
+    }
+
+    test("an old unpicked bag shipment cannot remotely debit its producer") {
+        val base = logisticsProducerCity(BuildingType.FORESTER, "OAK_LOG")
+        val producer = CivsEquipment.collectSupplies(base.workers.last(), mapOf("OAK_LOG" to 64L))
+        val city = base.copy(workers = base.workers.dropLast(1) + producer)
+        val courier = city.workers.first()
+        val warehouse = city.buildings[1]
+        val source = city.buildings.last()
+        val cargo = CivCargo(CivsLogistics.shipmentId(city.id, courier.id, courier.completedCycles,
+            source.id, warehouse.id, "OAK_LOG", producer.id), warehouse.id, source.id, warehouse.id,
+            CivPosition(80, 64, 5), "OAK_LOG", 64, sourceWorkerId = producer.id)
+        shouldThrow<CivsRejection> { CivsLogistics.pickup(city, courier.id, cargo) }.reason shouldBe "stale-delivery"
+        CivsEquipment.plainCount(city.workers.last(), "OAK_LOG") shouldBe 64
+    }
+
+    test("already carried legacy bag cargo survives restart and producer removal") {
+        val city = logisticsProducerCity(BuildingType.FORESTER, "OAK_LOG")
+        val courier = city.workers.first()
+        val source = city.buildings.last()
+        val warehouse = city.buildings[1]
+        val cargo = CivCargo(CivsLogistics.shipmentId(city.id, courier.id, courier.completedCycles,
+            source.id, warehouse.id, "OAK_LOG", city.workers.last().id), warehouse.id, source.id, warehouse.id,
+            CivPosition(80, 64, 5), "OAK_LOG", 64, inventoryBacked = true, sourceWorkerId = city.workers.last().id)
+        val carried = city.copy(workers = city.workers.dropLast(1).map {
+            if (it.id == courier.id) CivsEquipment.collectSupplies(it, mapOf("OAK_LOG" to 64L)).copy(cargo = cargo) else it
+        }).let { Gson().fromJson(Gson().toJson(it), Settlement::class.java) }.let(CivsRules::validate)
+        CivsLogistics.pickup(carried, courier.id, cargo) shouldBe carried
+        CivsLogistics.plan(carried, carried.workers.first()) { emptyMap() }!!.cargo shouldBe cargo
+        val unloaded = CivsLogistics.unload(carried, courier.id, cargo.id, 10_000)
+        unloaded.workers.first().cargo shouldBe null
+        CivsEquipment.plainCount(unloaded.workers.first(), "OAK_LOG") shouldBe 0
+    }
+})
+
 class CivsLogisticsTest : FunSpec({
     lateinit var paper: MockBukkitTestRuntime
     beforeEach { paper = MockBukkitTestRuntime.open() }
@@ -239,7 +292,7 @@ class CivsLogisticsTest : FunSpec({
         plan.cargo.amount shouldBe 64L
     }
 
-    test("a courier takes only real worker-bag surplus and leaves the field reserve and personal equipment") {
+    test("workplace return surplus excludes the field reserve food and personal equipment") {
         val base = logisticsProducerCity(BuildingType.FARM, "WHEAT")
         val farm = base.buildings.last().copy(schematicId = "civs/minecolonies/caledonia/agriculture/horticulture/farmer1")
         val fieldReserve = CivsWorksiteLayouts.field(farm).size.toLong().takeIf { it > 0 } ?: 16L
@@ -252,29 +305,13 @@ class CivsLogisticsTest : FunSpec({
         } })
         val city = base.copy(buildings = base.buildings.dropLast(1) + farm,
             workers = base.workers.dropLast(1) + producer).let(CivsRules::validate)
-        val courier = city.workers.first()
-        val meeting = CivPosition(30, 64, 5)
-        val sources = mapOf(producer.id to meeting)
-        val plan = requireNotNull(CivsLogistics.plan(city, courier, { emptyMap() }, sources) { _, _ -> 64L })
-        plan.cargo.sourceWorkerId shouldBe producer.id
-        plan.cargo.sourceEntrance shouldBe meeting
-        plan.cargo.material shouldBe "WHEAT_SEEDS"
-        plan.cargo.amount shouldBe minOf(64L, 640L - fieldReserve)
-        val picked = CivsLogistics.pickup(city, courier.id, plan.cargo)
-        CivsEquipment.plainCount(picked.workers.last(), "WHEAT_SEEDS") shouldBe 640 - plan.cargo.amount.toInt()
-        picked.workers.last().items!![4] shouldBe producer.items!![4]
-        CivsEquipment.plainCount(picked.workers.last(), "BREAD") shouldBe 16
-        CivsEquipment.plainCount(picked.workers.last(), "BONE_MEAL") shouldBe 16
-        CivsEquipment.plainCount(picked.workers.first(), "WHEAT_SEEDS") shouldBe plan.cargo.amount.toInt()
-        CivsLogistics.pickup(picked, courier.id, plan.cargo) shouldBe picked
-        val restored = Gson().fromJson(Gson().toJson(picked), Settlement::class.java).let(CivsRules::validate)
-        val withoutSource = restored.copy(workers = restored.workers.filterNot { it.id == producer.id })
-        val unloaded = CivsLogistics.unload(withoutSource, courier.id, plan.cargo.id, 10_000)
-        CivsEquipment.plainCount(unloaded.workers.first(), "WHEAT_SEEDS") shouldBe 0
-        unloaded.workers.first().cargo shouldBe null
+        CivsLogistics.workerExcess(city, producer) shouldBe mapOf("WHEAT_SEEDS" to 640L - fieldReserve)
+        CivsLogistics.plan(city, city.workers.first(), { emptyMap() },
+            mapOf(producer.id to CivPosition(30, 64, 5))) { _, _ -> 64L } shouldBe null
+        city.workers.last() shouldBe producer
     }
 
-    test("worker pickup requires current assignment surplus carrier room and real destination room") {
+    test("workplace return retains quarry supplies custom items and already reserved cargo") {
         val base = logisticsProducerCity(BuildingType.QUARRY, "COBBLESTONE")
         val producer = base.workers.last().copy(items = List(CivsEquipment.SLOTS) { index -> when (index) {
             4 -> CivResidentItem("IRON_PICKAXE", 1)
@@ -291,32 +328,16 @@ class CivsLogisticsTest : FunSpec({
             else -> null
         } })
         val city = base.copy(workers = base.workers.dropLast(1) + producer).let(CivsRules::validate)
-        val courier = city.workers.first()
-        val sources = mapOf(producer.id to CivPosition(30, 64, 5))
-        fun plan(current: Settlement = city, room: Long = 64L) = CivsLogistics.plan(current,
-            current.workers.first(), { emptyMap() }, sources) { _, _ -> room }
-        val pickup = requireNotNull(plan())
-        pickup.cargo.material shouldBe "COAL"
-        plan(room = 0) shouldBe null
-        plan(city.copy(workers = city.workers.map { if (it.id == courier.id) it.copy(items = List(CivsEquipment.SLOTS) { slot ->
-            if (slot >= CivsEquipment.BAG) CivResidentItem("STONE", 64) else null
-        }) else it })) shouldBe null
+        CivsLogistics.workerExcess(city, producer) shouldBe mapOf("COAL" to 64L, "DIRT" to 64L,
+            "GRAVEL" to 64L, "IRON_ORE" to 64L)
+        CivsLogistics.plan(city, city.workers.first(), { emptyMap() },
+            mapOf(producer.id to CivPosition(30, 64, 5))) { _, _ -> 64L } shouldBe null
         val reassigned = city.copy(workers = city.workers.map { if (it.id == producer.id) it.copy(assignment = null) else it })
-        shouldThrow<CivsRejection> { CivsLogistics.pickup(reassigned, courier.id, pickup.cargo) }.reason shouldBe "stale-delivery"
-        val noSurplus = city.copy(workers = city.workers.map { if (it.id == producer.id) it.copy(items = it.items!!.map { item ->
-            item?.takeUnless { entry -> entry.material == "COAL" }
-        }) else it })
-        shouldThrow<CivsRejection> { CivsLogistics.pickup(noSurplus, courier.id, pickup.cargo) }.reason shouldBe "stale-delivery"
-        var remaining = city
-        val exported = mutableSetOf<String>()
-        repeat(4) {
-            val next = requireNotNull(plan(remaining))
-            exported += next.cargo.material
-            remaining = CivsLogistics.unload(CivsLogistics.pickup(remaining, courier.id, next.cargo), courier.id, next.cargo.id, 10_000)
-        }
-        exported shouldBe setOf("COAL", "DIRT", "GRAVEL", "IRON_ORE")
-        plan(remaining) shouldBe null
-        remaining.workers.last().items!!.filterNotNull().sumOf { it.amount } shouldBe 1 + 32 + 8 + 16 + 4
+        CivsLogistics.workerExcess(reassigned, reassigned.workers.last()) shouldBe emptyMap()
+        val carrying = producer.copy(cargo = CivCargo(UUID.randomUUID(), city.buildings[1].id,
+            city.buildings.last().id, city.buildings[1].id, city.buildings.last().entrance, "COAL", 64))
+        CivsLogistics.workerExcess(city.copy(workers = city.workers.dropLast(1) + carrying), carrying) shouldBe emptyMap()
+        city.workers.last() shouldBe producer
     }
 
     test("carrot harvest keeps one complete replanting and sixteen personal bread while exporting surplus") {
@@ -325,14 +346,11 @@ class CivsLogisticsTest : FunSpec({
         val planting = CivsWorksiteLayouts.field(farm).size.toLong().takeIf { it > 0 } ?: 16L
         val farmer = base.workers.last().let { CivsEquipment.collectSupplies(it, mapOf("CARROT" to planting + 64L, "BREAD" to 16L)) }
         val city = base.copy(buildings = base.buildings.dropLast(1) + farm, workers = base.workers.dropLast(1) + farmer)
-        val plan = requireNotNull(CivsLogistics.plan(city, city.workers.first(), { emptyMap() },
-            mapOf(farmer.id to CivPosition(30, 64, 5))) { _, _ -> 64L })
-        plan.cargo.material shouldBe "CARROT"
-        plan.cargo.amount shouldBe 64L
-        val picked = CivsLogistics.pickup(city, city.workers.first().id, plan.cargo)
-        CivsEquipment.plainCount(picked.workers.last(), "CARROT") shouldBe planting.toInt()
-        CivsEquipment.plainCount(picked.workers.last(), "BREAD") shouldBe 16
-        CivsLogistics.workerExcess(picked, picked.workers.last()) shouldBe emptyMap()
+        CivsLogistics.workerExcess(city, farmer) shouldBe mapOf("CARROT" to 64L)
+        CivsLogistics.plan(city, city.workers.first(), { emptyMap() },
+            mapOf(farmer.id to CivPosition(30, 64, 5))) { _, _ -> 64L } shouldBe null
+        CivsEquipment.plainCount(city.workers.last(), "CARROT") shouldBe (planting + 64L).toInt()
+        CivsEquipment.plainCount(city.workers.last(), "BREAD") shouldBe 16
     }
 
     test("quarry collection keeps its requested cobblestone reserve and takes only the surplus") {

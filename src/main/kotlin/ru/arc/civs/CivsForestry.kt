@@ -304,7 +304,7 @@ internal object CivsForestry {
         require(if (existing == null) job.next == 0 && job.harvestedLogs == 0 else existing == job)
         if (existing == null) {
             require(claimClear(city, building.id, job))
-            require(job.seedDeferred == (!job.thinning && city.autonomy != null && city.stock.wood == 0L))
+            require(job.seedDeferred == (!job.thinning && CivsAutonomy.legacyStock(city) && city.stock.wood == 0L))
         }
         require(progress.next in job.next + 1..minOf(job.cells.size, job.next + BATCH_SIZE))
         require(progress.next <= job.cells.size - job.roots.size || progress.next == job.cells.size)
@@ -319,8 +319,8 @@ internal object CivsForestry {
         })
         require(progress.harvestedLogs == work.changes.count { material(it.before) == job.timber })
         require(work.inputs == if (existing == null && !job.seedDeferred && !job.thinning) mapOf(job.sapling to job.roots.size.toLong()) else emptyMap<String, Long>())
-        require(work.outputs == if (city.autonomy == null) progress.drops else emptyMap<String, Long>())
-        if (city.autonomy != null) require(progress.drops.isEmpty())
+        require(work.outputs == if (!CivsAutonomy.legacyStock(city)) progress.drops else emptyMap<String, Long>())
+        if (CivsAutonomy.legacyStock(city)) require(progress.drops.isEmpty())
         // The last receipt must actually process every root, whether replanted or thinned.
         if (progress.next == job.cells.size) require(work.changes.filter { it.position in job.roots }.size == job.roots.size)
     }

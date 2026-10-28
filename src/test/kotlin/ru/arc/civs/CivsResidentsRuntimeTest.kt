@@ -1556,13 +1556,13 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("full physical bags keep their items while wandering and return to the captured work before delivery") {
+    test("a full producer bag visits its workplace then resumes the captured work without travel credit") {
         residentRuntime(workerId = UUID(0, 19)) { h ->
             val farm = h.assignFarm()
             val actor = h.owner.collisionActors().single()
-            actor.teleport(Location(h.world, 22.5, 64.0, .5))
-            val focus = CivPosition(23, 63, 0)
-            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
+            actor.teleport(Location(h.world, 25.5, 64.0, .5))
+            val focus = CivPosition(26, 63, 0)
+            val work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(27, 64, 0),
                 listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
                 outputs = mapOf("WHEAT" to 1L), durationMillis = 1_500, status = "working-field", focus = focus)
             h.work = work
@@ -1573,63 +1573,37 @@ class CivsResidentsRuntimeTest : FunSpec({
                 if (slot >= CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 64) else null
             }
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = fullBag) })
-            h.navigationNow = 3_500
+            val returned = CompletableFuture<Settlement>()
+            var requests = 0
+            h.owner.returnResidentOutputs = { cityId, workerId, buildingId ->
+                buildingId shouldBe farm.id
+                h.owner.requireStorageArrival(cityId, workerId, buildingId)
+                requests++
+                returned
+            }
             h.owner.pulse(3_500)
-            h.phase() shouldBe CitizenPhase.PAUSED
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
-            fun outsideWorkReach(): Boolean {
-                val at = actor.location
-                val dx = at.x - (focus.x + .5)
-                val dz = at.z - (focus.z + .5)
-                val margin = CITIZEN_BLOCK_REACH + 1.0
-                return dx * dx + dz * dz > margin * margin
-            }
-            for (tick in 1..1_200) {
-                val before = actor.location
-                h.navigate()
-                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                (before.distance(actor.location) <= .118251) shouldBe true
-                // A floor ray can fail before the body has left reach; require observed distance too.
-                if (outsideWorkReach() && !citizenCanReachBlock(actor, focus) && h.routeIdentity() != null) break
-            }
-            withClue("at=${actor.location} focus=$focus ${h.navigationState()}") { outsideWorkReach() shouldBe true }
-            citizenCanReachBlock(actor, focus) shouldBe false
-            h.phase() shouldBe CitizenPhase.PAUSED
-            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
             h.city.workers.single().items shouldBe fullBag
             h.deliveries shouldBe 0
-            h.steps shouldBe emptyList()
-            val leisureRoute = requireNotNull(h.routeIdentity())
-            val paused = h.navigationState()
-            val freed = fullBag.toMutableList().also { it[CivsEquipment.BAG] = null }
-            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = freed) })
-            // The fixture retains this work plan; worksite cache invalidation on bag edits is a separate contract.
-            h.owner.pulse(requireNotNull(h.navigationNow))
-            withClue("at=${actor.location} focus=$focus paused=$paused navigation=${h.navigationState()}") {
-                h.phase() shouldBe CitizenPhase.RETURNING
-            }
-            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
-            (h.routeIdentity() === leisureRoute) shouldBe false
+            actor.teleport(Location(h.world, 21.5, 64.0, .5))
+            h.owner.pulse(4_000)
+            requests shouldBe 1
+            h.owner.pulse(5_000)
+            requests shouldBe 1
             h.deliveries shouldBe 0
-            for (tick in 1..800) {
-                h.navigate()
-                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                (h.phase() == CitizenPhase.WORKING) shouldBe false
-                if (h.deliveries == 1) break
-            }
-            withClue("at=${actor.location} ${h.navigationState()}") { h.deliveries shouldBe 1 }
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) }, revision = h.city.revision + 1)
+            returned.complete(h.city)
+            h.owner.pulse(6_000)
+            (h.routeIdentity() != null) shouldBe true
+            citizenCanReachBlock(actor, focus) shouldBe false
+            h.deliveries shouldBe 0
+            actor.teleport(Location(h.world, 27.5, 64.0, .5))
+            h.owner.pulse(7_000)
+            h.deliveries shouldBe 0
+            h.owner.pulse(8_500)
+            h.deliveries shouldBe 1
             h.owner.requireWorldWorkArrival(h.city.id, h.workerId, work)
-            h.city.workers.single().items shouldBe freed
-            repeat(3) { h.owner.pulse(requireNotNull(h.navigationNow) + (it + 1) * 1_000) }
-            h.deliveries shouldBe 1
-            h.city = CivsRules.finishWorldWork(h.city, work, requireNotNull(h.navigationNow))
-            h.work = null
-            h.idleReason = "waiting-growth"
-            h.pendingDelivery.complete(h.city)
-            h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
-            h.city.workers.single().completedCycles shouldBe 1L
-            h.city.workers.single().items shouldBe freed.toMutableList().also { it[CivsEquipment.BAG] = CivResidentItem("WHEAT", 1) }
-            h.deliveries shouldBe 1
+            h.city.workers.single().completedCycles shouldBe 0
         }
     }
 
@@ -3425,362 +3399,96 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
-    test("a moving full bag stays available during delayed allocation and five-tick farm pulses") {
-        residentRuntime(workerId = UUID(0, 42)) { h ->
-            val (farm, courierId) = h.courierSource(fullBag = true)
-            val producer = h.owner.collisionActors().single()
-            val initialItems = h.city.workers.first().items
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
-            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 0),
-                listOf(CivPlanBlock(CivPosition(23, 63, 0), "minecraft:stone", "minecraft:air")),
-                outputs = mapOf("WHEAT" to 1L), durationMillis = 1_500, status = "working-field")
-            var accepted: CivCourierPlan? = null
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
-            h.navigationNow = 2_000
-            h.owner.pulse(2_000)
-            h.phase() shouldBe CitizenPhase.PAUSED
-            val origin = producer.location
-            for (tick in 1..1_200) {
-                h.navigate()
-                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
-                if (producer.location.distanceSquared(origin) > .05 && h.routeIdentity() != null) break
-            }
-            withClue(h.navigationState()) { (producer.location.distanceSquared(origin) > .05) shouldBe true }
-            val offeredAt = producer.location
-            val offered = h.owner.courierSupplySources(h.city.id)
-            offered.keys shouldBe setOf(h.workerId)
-            h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
-            val captured = h.city
-            val pendingAllocation = ArrayDeque<Runnable>()
-            val allocation = CompletableFuture.supplyAsync({ requireNotNull(CivsLogistics.plan(captured,
-                captured.workers.last(), { emptyMap() }, offered) { _, _ -> 64L }) },
-                Executor { pendingAllocation += it })
-            // The actual fast lane keeps moving the producer while the allocator has not returned.
-            repeat(60) { tick ->
-                h.navigate()
-                if ((tick + 1) % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
-                if ((tick + 1) % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
-                allocation.isDone shouldBe false
-                h.pickups shouldBe 0
-            }
-            withClue(h.navigationState()) { (producer.location.distanceSquared(offeredAt) > 1.0) shouldBe true }
-            pendingAllocation.removeFirst().run()
-            accepted = allocation.getNow(null)
-            val cargo = requireNotNull(accepted).cargo
-            cargo.sourceEntrance shouldBe offered.getValue(h.workerId)
-            h.owner.courierSourceCurrent(h.city.id, cargo) shouldBe true
-            val acceptedAt = producer.location
-            h.navigationNow = requireNotNull(h.navigationNow) + 60_000
-            // Acceptance also must not block the producer before the courier's first normal pulse.
-            for (tick in 1..240) {
-                h.navigate()
-                if (tick % 5 == 0) h.owner.pulseFieldWork(requireNotNull(h.navigationNow))
-                if (producer.location.distanceSquared(acceptedAt) > .25) break
-            }
-            withClue(h.navigationState()) { (producer.location.distanceSquared(acceptedAt) > .25) shouldBe true }
-            h.owner.pulse(requireNotNull(h.navigationNow))
-            (h.owner.status(h.workerId) == "workers.status.waiting-courier") shouldBe false
-            h.city.workers.first().items shouldBe initialItems
-            h.pickups shouldBe 0
-        }
-    }
-
-    test("a courier retargets a moving worker at bounded intervals and retires the previous approach") {
+    test("a courier keeps its building approach while the producer moves and disappears") {
         residentRuntime { h ->
-            val (_, courierId) = h.courierSource()
+            val (farm, courierId) = h.courierSource(material = "WHEAT", amount = 1)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
             h.idleReason = "searching-work"
             val producer = h.owner.collisionActors().single()
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
+            producer.teleport(Location(h.world, 30.5, 64.0, .5))
             h.owner.pulse(2_000)
-            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
+            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
+                if (it == farm.id) mapOf("WHEAT" to 32L) else emptyMap()
+            })
             h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
             h.holdNavigation = true
+            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            courier.teleport(Location(h.world, 10.5, 64.0, .5))
             h.owner.pulse(3_000)
             val first = requireNotNull(h.routeIdentity(courierId))
-            val firstMotion = requireNotNull(h.routeMotion(courierId))
-            val firstTarget = h.routeTarget(courierId)
-            producer.teleport(Location(h.world, 26.5, 64.0, .5))
-            val fixtureTeleports = h.teleports
-            h.owner.courierSourceCurrent(h.city.id, accepted.cargo) shouldBe true
-            h.owner.pulse(3_250)
-            h.owner.pulse(3_999)
-            h.routeIdentity(courierId) shouldBe first
+            val target = h.routeTarget(courierId)
+            producer.teleport(Location(h.world, 25.5, 64.0, .5))
             h.owner.pulse(4_000)
-            val second = requireNotNull(h.routeIdentity(courierId))
-            (second === first) shouldBe false
-            firstMotion.preparationPhase shouldBe "cancelled"
-            (h.routeTarget(courierId) != firstTarget) shouldBe true
-            producer.teleport(Location(h.world, 26.9, 64.0, .5))
+            h.routeIdentity(courierId) shouldBe first
+            h.routeTarget(courierId) shouldBe target
+            h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId })
             h.owner.pulse(5_000)
-            h.routeIdentity(courierId) shouldBe second
-            producer.teleport(Location(h.world, 30.5, 64.0, .5))
-            h.owner.pulse(6_000)
-            (h.routeIdentity(courierId) === second) shouldBe false
-            h.teleports shouldBe fixtureTeleports + 2
-            h.city.workers.last().cargo shouldBe null
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
+            h.routeIdentity(courierId) shouldBe first
+            h.routeTarget(courierId) shouldBe target
+            h.owner.courierSupplySources(h.city.id) shouldBe emptyMap()
+            h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
             h.pickups shouldBe 0
+            h.city.workers.single().cargo shouldBe null
         }
     }
 
-    test("a retained worker-source courier retries storage-busy only after the five-second pickup delay") {
+    test("a building courier retries storage-busy only after the five-second pickup delay") {
         residentRuntime { h ->
-            val (_, courierId) = h.courierSource()
+            val (farm, courierId) = h.courierSource(material = "WHEAT", amount = 1)
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
             h.idleReason = "searching-work"
-            val producer = h.owner.collisionActors().single()
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
             h.owner.pulse(2_000)
-            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
+            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
+                if (it == farm.id) mapOf("WHEAT" to 32L) else emptyMap()
+            })
             h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
-            h.onPickup = { cityId, workerId, cargo -> h.owner.requireCargoPickupArrival(cityId, workerId, cargo) }
+            h.onPickup = { cityId, workerId, _ -> h.owner.requireStorageArrival(cityId, workerId, farm.id) }
             h.owner.pulse(3_000)
             val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
             courier.teleport(Location(h.world, 21.5, 64.0, .5))
             h.owner.pulse(4_000); h.owner.pulse(5_000); h.owner.pulse(6_000)
             h.pickups shouldBe 1
-            h.phase(courierId) shouldBe CitizenPhase.PICKING_UP
-            h.pendingPickup.completeExceptionally(CivsRejection("storage-busy")) shouldBe true
+            h.pendingPickup.completeExceptionally(CivsRejection("storage-busy"))
             h.owner.pulse(6_100)
             h.phase(courierId) shouldBe CitizenPhase.PAUSED
-            h.owner.status(courierId) shouldBe "workers.status.storage-busy"
-            for (now in listOf(6_200L, 7_000L, 11_099L)) {
-                h.owner.pulse(now)
-                h.phase(courierId) shouldBe CitizenPhase.PAUSED
-                h.pickups shouldBe 1
-            }
+            h.owner.pulse(11_099)
+            h.pickups shouldBe 1
             h.owner.pulse(11_100)
             h.pickups shouldBe 2
             h.pickedCargo shouldBe accepted.cargo
-            // The fixture reuses its failed future; this observes the second admission before its next drain.
-            h.phase(courierId) shouldBe CitizenPhase.PICKING_UP
-            h.city.workers.last().cargo shouldBe null
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
-            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 0
-        }
-    }
-
-    for (ground in listOf(Material.STONE, Material.FARMLAND, Material.DIRT_PATH, Material.STONE_STAIRS))
-    test("worker-bag pickup on $ground follows real feet and rechecks distance walls identity and quantity") {
-        residentRuntime { h ->
-            val (_, courierId) = h.courierSource()
-            h.idleReason = "searching-work"
-            val producer = h.owner.collisionActors().single()
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
-            h.owner.pulse(2_000)
-            var accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
-            val stepped = ground == Material.STONE_STAIRS
-            h.world.getBlockAt(26, if (stepped) 64 else 63, 0).type = ground
-            val standingY = if (stepped) 64.5 else if (ground == Material.STONE) 64.0 else 63.9375
-            val sourceAt = Location(h.world, 26.5, standingY, if (stepped) .85 else .5)
-            producer.teleport(sourceAt)
-            h.owner.courierSourceCurrent(h.city.id, accepted.cargo) shouldBe true
-            h.onPickup = { cityId, workerId, cargo -> h.owner.requireCargoPickupArrival(cityId, workerId, cargo) }
-            h.owner.pulse(3_000)
-            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, accepted.cargo) }
-            h.pickups shouldBe 0
-            courier.teleport(Location(h.world, 25.5, 64.0, .5))
-            h.owner.pulse(4_000); h.owner.pulse(5_000); h.owner.pulse(6_000)
-            h.pickups shouldBe 1
-            h.city.workers.last().cargo shouldBe null
-            val actual = requireNotNull(h.pickedCargo)
-            actual shouldBe accepted.cargo
-            h.owner.requireCargoPickupArrival(h.city.id, courierId, actual)
-            h.owner.requireCargoPickupArrival(h.city.id, courierId, actual.copy(amount = 32))
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual.copy(amount = 65)) }
-            // A deferred city callback must recheck current bodies and the interaction ray.
-            courier.teleport(Location(h.world, 24.5, 64.0, .5))
-            h.world.getBlockAt(25, 64, 0).type = Material.STONE
-            h.world.getBlockAt(25, 65, 0).type = Material.STONE
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            h.world.getBlockAt(25, 64, 0).type = Material.AIR
-            h.world.getBlockAt(25, 65, 0).type = Material.AIR
-            producer.teleport(sourceAt.clone().add(4.0, 0.0, 0.0))
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            producer.teleport(sourceAt)
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual.copy(material = "IRON_INGOT")) }
-            val workers = h.city.workers
-            h.city = h.city.copy(workers = workers.map { if (it.id == h.workerId) it.copy(items =
-                it.items!!.toMutableList().also { slots -> slots[CivsEquipment.BAG] = CivResidentItem("COAL", 63) }) else it })
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            h.city = h.city.copy(workers = workers.map { if (it.id == h.workerId) it.copy(assignment = null) else it })
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            h.city = h.city.copy(workers = workers.filterNot { it.id == h.workerId })
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            h.city = h.city.copy(workers = workers)
-            val worldId = h.city.worldId
-            h.city = h.city.copy(worldId = UUID.randomUUID())
-            shouldThrow<CivsRejection> { h.owner.requireCargoPickupArrival(h.city.id, courierId, actual) }
-            h.city = h.city.copy(worldId = worldId)
-            h.owner.requireCargoPickupArrival(h.city.id, courierId, actual)
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
-            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 0
-            h.city = CivsLogistics.pickup(h.city, courierId, actual)
-            accepted = accepted.copy(carrying = true)
-            h.pendingPickup.complete(h.city)
-            h.owner.pulse(7_000); h.owner.pulse(8_000)
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 0
-            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 64
-            h.city.workers.last().cargo!!.sourceWorkerId shouldBe h.workerId
-            h.pickups shouldBe 1
-        }
-    }
-
-    test("an accepted partial stack does not stop a newly ripe crop or its native work receipt") {
-        residentRuntime { h ->
-            val (farm, courierId) = h.courierSource(material = "WHEAT", amount = 24)
-            h.city = h.city.copy(workers = h.city.workers.map { if (it.id != h.workerId) it else it.copy(items =
-                it.items!!.toMutableList().also { slots ->
-                    slots[4] = CivResidentItem("IRON_HOE", 1)
-                    slots[CivsEquipment.BAG + 1] = CivResidentItem("WHEAT_SEEDS", 43)
-                }) })
-            h.idleReason = "searching-work"
-            val producer = h.owner.collisionActors().single()
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
-            h.owner.pulse(2_000)
-            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
-            accepted.cargo.amount shouldBe 24L
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
-            h.owner.pulse(3_000)
-            val selectedBefore = h.workPlans
-            val focus = CivPosition(23, 64, 1)
-            h.world.getBlockAt(focus.x, focus.y, focus.z).blockData =
-                (Material.WHEAT.createBlockData() as Ageable).also { it.age = it.maximumAge }
-            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(24, 64, 1),
-                listOf(CivPlanBlock(focus, "minecraft:wheat[age=7]", "minecraft:wheat[age=0]")),
-                outputs = mapOf("WHEAT" to 1L, "WHEAT_SEEDS" to 1L), durationMillis = 1_500,
-                status = "working-field", focus = focus)
-            h.owner.pulseFieldWork(3_250)
-            (h.workPlans > selectedBefore) shouldBe true
-            h.owner.status(h.workerId) shouldBe "workers.status.working-field"
-            (h.workerId in h.owner.workingResidentIds(h.city.id)) shouldBe true
-            h.owner.courierSourceCurrent(h.city.id, accepted.cargo) shouldBe true
-            h.owner.courierSupplySources(h.city.id, setOf(h.workerId)).keys shouldBe setOf(h.workerId)
-            for (at in 3_500L..4_750L step 250L) h.owner.pulseFieldWork(at)
-            h.deliveries shouldBe 1
-            h.pickups shouldBe 0
-            h.city = h.city.copy(workers = h.city.workers.map { if (it.id == h.workerId) it.copy(completedCycles = 1) else it })
-            h.work = null
-            h.idleReason = "searching-work"
-            h.pendingDelivery.complete(h.city)
-            h.owner.pulse(5_000)
-            h.owner.courierSourceCurrent(h.city.id, accepted.cargo) shouldBe true
-            h.city.workers.first().completedCycles shouldBe 1
-            CivsEquipment.plainCount(h.city.workers.first(), "WHEAT") shouldBe 24
             h.city.workers.last().cargo shouldBe null
         }
     }
 
-    test("a working producer accumulates a stack but a full bag can offer its small surplus immediately") {
+    test("a working producer accumulates small output before returning a stack to its own building") {
         residentRuntime { h ->
             val farm = h.assignFarm()
             val actor = h.owner.collisionActors().single()
-            actor.teleport(Location(h.world, 22.5, 64.0, .5))
-            fun bag(amount: Int, full: Boolean = false) = List<CivResidentItem?>(CivsEquipment.SLOTS) { slot -> when {
-                slot == 4 -> CivResidentItem("IRON_HOE", 1)
-                slot == CivsEquipment.BAG -> CivResidentItem("COAL", amount)
-                full && slot > CivsEquipment.BAG -> CivResidentItem("IRON_AXE", 1)
+            actor.teleport(Location(h.world, 21.5, 64.0, .5))
+            fun bag(amount: Int) = List<CivResidentItem?>(CivsEquipment.SLOTS) { slot -> when (slot) {
+                4 -> CivResidentItem("IRON_HOE", 1)
+                CivsEquipment.BAG -> CivResidentItem("COAL", amount)
                 else -> null
             } }
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1)) })
             h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(22, 64, 0),
                 listOf(CivPlanBlock(CivPosition(23, 63, 0), "minecraft:stone", "minecraft:air")),
                 outputs = mapOf("WHEAT" to 1L), durationMillis = 30_000, status = "working-field")
+            var requests = 0
+            h.owner.returnResidentOutputs = { _, _, buildingId ->
+                buildingId shouldBe farm.id
+                requests++
+                CompletableFuture()
+            }
             h.owner.pulse(2_000)
-            val courier = UUID.randomUUID()
-            h.owner.courierSources(h.city.id, courier) shouldBe emptyMap()
+            requests shouldBe 0
             h.owner.status(h.workerId) shouldBe "workers.status.working-field"
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(64)) })
-            h.owner.courierSources(h.city.id, courier).keys shouldBe setOf(h.workerId)
-            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1, full = true)) })
-            h.owner.courierSources(h.city.id, courier).keys shouldBe setOf(h.workerId)
-            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag(1, full = true).toMutableList().also { slots ->
-                slots[CivsEquipment.BAG + 1] = CivResidentItem("OAK_SAPLING", 1)
-            }) })
-            h.work = h.work!!.copy(inputs = mapOf("OAK_SAPLING" to 1L), outputs = mapOf("OAK_LOG" to 4L))
             h.owner.pulse(3_000)
-            h.owner.courierSources(h.city.id, courier) shouldBe emptyMap()
-            CivsEquipment.plainCount(h.city.workers.single(), "OAK_SAPLING") shouldBe 1
+            requests shouldBe 1
+            h.owner.courierSupplySources(h.city.id) shouldBe emptyMap()
             h.deliveries shouldBe 0
-        }
-    }
-
-    for (cause in listOf("assignment", "death", "bag", "threat", "unloaded"))
-    test("a $cause source ends a moving-worker approach without debiting either inventory") {
-        residentRuntime { h ->
-            val (_, courierId) = h.courierSource()
-            h.idleReason = "searching-work"
-            val producer = h.owner.collisionActors().single()
-            producer.teleport(Location(h.world, 22.5, 64.0, .5))
-            h.owner.pulse(2_000)
-            val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last(), { emptyMap() },
-                h.owner.courierSupplySources(h.city.id)) { _, _ -> 64L })
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
-            h.owner.pulse(3_000)
-            when (cause) {
-                "assignment" -> h.city = h.city.copy(workers = h.city.workers.map {
-                    if (it.id == h.workerId) it.copy(assignment = null) else it })
-                "death" -> h.city = h.city.copy(workers = h.city.workers.filterNot { it.id == h.workerId })
-                "bag" -> h.city = h.city.copy(workers = h.city.workers.map { if (it.id != h.workerId) it else it.copy(items =
-                    it.items!!.toMutableList().also { slots -> slots[CivsEquipment.BAG] = CivResidentItem("COAL", 63) }) })
-                "threat" -> h.monsterAt(23.5, .5)
-                "unloaded" -> { producer.teleport(Location(h.world, 46.5, 64.0, .5)); h.world.unloadChunk(2, 0) }
-            }
-            h.owner.pulse(4_000)
-            if (cause == "threat") { h.navigate(); h.owner.pulse(5_000) }
-            h.owner.courierSourceCurrent(h.city.id, accepted.cargo) shouldBe false
-            h.routeIdentity(courierId) shouldBe null
-            h.city.workers.firstOrNull { it.id == h.workerId }?.let {
-                CivsEquipment.plainCount(it, "COAL") shouldBe if (cause == "bag") 63 else 64
-            }
-            CivsEquipment.plainCount(h.city.workers.last(), "COAL") shouldBe 0
-            h.city.workers.last().cargo shouldBe null
-            h.pickups shouldBe 0
-        }
-    }
-
-    test("expired worker interception retries rarely after three failures without changing the producer") {
-        residentRuntime { h ->
-            val farm = h.assignFarm()
-            // Isolate expiry/backoff from successful movement and interaction.
-            h.idleReason = "searching-work"
-            val warehouse = farm.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE, schematicId = "warehouse1", production = null,
-                anchor = CivPosition(10, 64, 0), entrance = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0),
-                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
-            h.world.getBlockAt(10, 64, 0).type = Material.BARREL
-            val courierId = UUID.randomUUID()
-            h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + warehouse,
-                workers = h.city.workers.map { it.copy(items = List(CivsEquipment.SLOTS) { slot ->
-                    if (slot == CivsEquipment.BAG) CivResidentItem("COAL", 64) else null
-                }) } + CivWorker(courierId, "Courier", warehouse.id, nextDeliveryAt = 1)))
-            h.owner.collisionActors().single().teleport(Location(h.world, 22.5, 64.0, .5))
-            h.courierProvider = { city, worker -> if (worker.id == courierId)
-                CivsLogistics.plan(city, worker, { emptyMap() }, h.owner.courierSources(city.id, worker.id)) { _, _ -> 64L }
-                else null }
-            var start = 2_000L
-            var expired = 0L
-            repeat(3) { attempt ->
-                h.owner.pulse(start)
-                h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
-                expired = start + 90_000L
-                h.owner.pulse(expired); h.owner.pulse(expired + 1)
-                h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
-                h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
-                start = expired + if (attempt == 0) 5_001L else 15_001L
-            }
-            h.owner.pulse(expired + 59_999L)
-            h.owner.courierSources(h.city.id, courierId) shouldBe emptyMap()
-            h.owner.pulse(expired + 60_001L)
-            h.owner.courierSources(h.city.id, courierId).keys shouldBe setOf(h.workerId)
-            h.pickups shouldBe 0
-            CivsEquipment.plainCount(h.city.workers.first(), "COAL") shouldBe 64
-            h.city.workers.last().cargo shouldBe null
+            CivsEquipment.plainCount(h.city.workers.single(), "COAL") shouldBe 64
         }
     }
 
@@ -5336,6 +5044,11 @@ internal open class ResidentRuntimeWorld : WorldMock(Material.STONE, 63) {
         object : BlockMock(if (point.y <= 63) Material.STONE else Material.AIR,
             Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
             override fun isPassable(): Boolean = type.isAir
+            override fun getDrops(tool: ItemStack?): Collection<ItemStack> = when {
+                type.name.endsWith("_LOG") -> listOf(ItemStack(type))
+                type.name.endsWith("_LEAVES") -> emptyList()
+                else -> super.getDrops(tool)
+            }
             override fun getBoundingBox(): BoundingBox = if (type == Material.LADDER)
                 BoundingBox(x.toDouble(), y.toDouble(), z + 13.0 / 16.0, x + 1.0, y + 1.0, z + 1.0)
             else BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y + when (type) {

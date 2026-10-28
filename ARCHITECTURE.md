@@ -24,76 +24,47 @@ autonomous deletion receipts in a separate table so older backends cannot consum
 a player's personal one-time founding reserve after an autonomous deletion. Do not downgrade a backend that has
 created autonomous snapshots to a version without this mode.
 
-`CivsAutonomy` chooses one paid goal from its service and industry profile, with
-three HOUSE sites and an automatically built central plan board (sixteen sites).
-Engineering permits level three for the hall, university, smeltery and crusher;
-other profile buildings stop at level two. It uses aggregate `Stock` and always has `inventory == null`; migration
-to native item stores excludes this mode. Complete schematic details are covered
-by a one-time wood/stone/food price at `reserveBuild`. FARM and QUARRY perform
-input-free native work with visual receipts, then one observed production session
-earns the unchanged abstract batch and profession experience. With a staffed
-warehouse or a current native capacity observation, this receipt saves
-`CivWorker.pendingStock` at the worksite and the producer continues working.
-Without a courier, saved goods take the existing real depot trip when a depot
-has room. No elapsed
-time, teleport recovery or forecast alone credits a delivery.
+Both village types use `CivInventory(PHYSICAL)`, the ordinary native construction
+bill and batch payments, actual tools and recipe inputs, native world-work drops,
+resident meals, research and population. `autonomy` selects automatic planning,
+placement and staffing; it must not select a second production or navigation engine.
+New building types follow the ordinary validation and recipe rules.
 
-After a courier disappears, already-earned pending goods take a separate direct
-return to a real depot. Arrival moves only those goods, even when total holdings
-have reached capacity; it adds no production cycle, experience or new yield.
-A smaller surviving depot accepts its available room and leaves the remainder
-saved on the resident. The monotonic delivery schedule fences repeated arrival
-callbacks, and an underway return finishes even if a replacement courier starts.
-FORESTER instead plants and harvests native trees through the forestry receipt
-described below. One abstract WOOD pays a complete planting kit (one sapling or
-four for a giant plot); a completed, replanted tree credits the existing 4/8/12
-WOOD once. A mill's paid construction includes one initial kit if its first
-planting encounters zero WOOD. `forestrySeeded` records its use in that same
-receipt, and normal paid planting also consumes that one-use eligibility.
-At zero WOOD a real tree can instead reserve `seedDeferred` on its exact job:
-the final observed harvest pays the one-WOOD kit from its output before replanting.
-Without harvested logs that deferred final receipt cannot plant or grant stock.
-Positive-WOOD jobs prepay once and survive later construction spending unchanged.
-The mill never also produces transferable timber, leaf drops or timed stock.
-The first active warehouse is automatically staffed after the builder and three
-raw professions. The existing supply dispatcher collects pending stock from the
-actual moving producer. Atomic city saves move it into `CivCargo.stockResource`
-at pickup and into spendable city stock only after real depot arrival. The usual
-64-unit shipment limit applies; neither transfer earns another producer reward. Warehouse
-experience still advances once per completed trip. Internal goods never become
-native items: the resident inventory has a separate read-only quantity badge.
-Pending goods and cargo survive restart and reassignment; a removed warehouse
-uses the existing reachable-depot fallback. Death retains closed goods until the
-existing corpse expiry or resurrection, without adding native loot. Native-tree
-receipts keep their existing seed debit and yield, queuing only the positive net
-gain when a courier is staffed or local native capacity has been observed.
-Physical-item settlements retain their existing
-barrel reach and inventory receipt requirements.
+Producers return excess native items to their own work building, retaining tools,
+food and accepted recipe inputs. Couriers collect from fixed building containers
+and deliver through the shared supply allocator and inventory journal. They do
+not intercept walking producers. Existing carried shipments retain their durable
+identity through restart and destination recovery. Actual holders determine space;
+full storage keeps the untransferred goods with their current owner.
 
-Auto storage observations use the same bounded native container capture as ordinary
-logistics. Producers reserve only empty slots in their assigned workplace's own
-containers; another workplace or the shared village stock cannot fill that buffer.
-Closed goods use 64-unit stacks, with different resources sharing the slots.
-Spendable stock occupies active warehouse space, falling back to the hall when no
-warehouse exists. Durable cargo reserves its actual destination before existing
-stock is packed, so another arrival cannot steal its space. Native items are never
-counted again as closed goods. Shrinking or losing storage retains earned goods
-and blocks new intake rather than deleting them. Before the first successful
-observation, legacy snapshots retain their existing capacity rule.
-Observations persist only when counts change. Owner-thread generation checks
-authorize a producer against its own workplace and a depot admission against all
-participating depots; a stale observation saved asynchronously cannot authorize
-new production. Events invalidate relevant generations, and bounded periodic
-captures detect external writers without clearing the worksite's search context.
+`CivsAutoSupplies` is the additional Auto privilege. It considers only known
+construction, accepted work/research and hungry-resident demands. It uses the
+existing bounded native supply capture, subtracts local items, carried supplies,
+incoming cargo and exportable goods elsewhere, then journals only the remaining
+deficit into the target's real containers. Stale or unavailable observations wait
+for capture; new native reads do not scan the entire town in a grant pulse.
+Ordinary settlements receive no automatic grants. Auto containers permit nearby
+inspection, while item modification and extraction require `arccivs.admin` and
+retain deletion and accepted-receipt locks.
 
-The service submits the selected SITE or upgrade through the existing captured
-schematic store, pending control receipt, queue, builder work credit and batch
-placement journal. There is one admitted decision per city; callbacks recheck
-the current mode, goal, pause, activity and construction state. Pausing stops new
-decisions, producer receipts, active population minutes and native paste progress;
-it preserves accepted orders and their paid stock. Observed meals and post-seed recruitment
-consume abstract food in the same durable city revision. No offline catch-up is
-performed, and ordinary health/death and global NPC/chunk limits still apply.
+`CivsAutonomy.legacyStock` identifies only saved Auto records without inventory.
+After accepted journals drain, `CivsAutoStorageMigration` converts their remaining
+closed stock exactly once: shared stock goes to the warehouse (hall fallback),
+producer pending goods retain their workplace, and accepted cargo retains its
+destination. Unplaced migration goods are durable reserves and are not spendable.
+A full local workplace never silently overflows its producer reserve into the hall.
+Existing native bags, food and equipment are not converted again. Unfinished
+forestry jobs keep their selected tree, cursor and harvested prefix. Historical
+already-paid construction, research and replacement kits retain their saved terms.
+Native workers can consume or move existing items while reserves wait for space;
+new grants and automatic development wait for migration completion. Mode change
+invalidates worksite observations once rather than resetting their search every tick.
+
+Meals consume carried food through the same observed animation and receipt in
+both modes. Population uses the same active-minute ageing and family rules after
+migration, without offline catch-up. Planning submits sites and upgrades through
+the existing schematic, control, queue, builder-credit and placement journals;
+pause preserves accepted work and blocks new activity.
 
 `CivsAutonomousPlacement` tries at most 64 centre-facing candidates, reserves
 future building bounds, field space and entrances, and admits at most two searches.

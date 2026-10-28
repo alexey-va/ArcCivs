@@ -105,7 +105,8 @@ class CivsCitizenAppearanceTest : FunSpec({
         val innkeeper = appearancePlan(BuildingType.TAVERN)
         for (phase in CitizenPhase.entries) citizenWorking(innkeeper, phase) shouldBe false
         citizenTool(innkeeper) shouldBe null
-        citizenWorkStatus(innkeeper, CitizenPhase.WORKING) shouldBe "serving-guests"
+        citizenWorkStatus(innkeeper, CitizenPhase.WORKING) shouldBe "waiting-guests"
+        citizenWorkStatus(innkeeper, CitizenPhase.WORKING, servingGuests = true) shouldBe "serving-guests"
         citizenWorkStatus(innkeeper, CitizenPhase.TO_WORK) shouldBe null
     }
 

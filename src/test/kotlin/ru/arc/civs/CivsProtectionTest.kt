@@ -134,8 +134,10 @@ class CivsProtectionTest : FunSpec({
             paper.server.pluginManager.registerEvents(protection, paper.createSimplePlugin("DecorationProtection"))
             val block = world.getBlockAt(1, 64, 1).apply { type = Material.BARREL }
             paper.callEvent(BlockBreakEvent(block, visitor)).isCancelled shouldBe true
-            // Existing editor privileges are intentionally unchanged.
-            paper.callEvent(BlockBreakEvent(block, owner)).isCancelled shouldBe false
+            // Auto container contents stay admin-only, while non-container owner edits remain allowed.
+            paper.callEvent(BlockBreakEvent(block, owner)).isCancelled shouldBe true
+            val stone = world.getBlockAt(2, 64, 2).apply { type = Material.STONE }
+            paper.callEvent(BlockBreakEvent(stone, owner)).isCancelled shouldBe false
             val holder = block.state as Container
             val inventory = mockk<Inventory> {
                 every { getHolder(false) } returns holder

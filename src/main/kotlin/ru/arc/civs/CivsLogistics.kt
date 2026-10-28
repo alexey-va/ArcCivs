@@ -146,19 +146,6 @@ object CivsLogistics {
                 CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(material)).toLong())
             if (amount > 0) candidates += job(city, worker, warehouse, source, warehouse, material, amount)
         }
-        for (producer in city.workers) {
-            val meeting = workerSources[producer.id] ?: continue
-            val source = producer.assignment?.let(city::building) ?: continue
-            if (!withinRoute(city, meeting, requireNotNull(warehouse.control))) continue
-            for ((material, surplus) in workerExcess(city, producer)) {
-                val amount = minOf(MAX_CARGO, surplus, CivsEquipment.supplyRoom(worker, org.bukkit.Material.valueOf(material)).toLong(),
-                    storageRoom(warehouse.id, material))
-                if (amount <= 0) continue
-                val id = shipmentId(city.id, worker.id, worker.completedCycles, source.id, warehouse.id, material, producer.id)
-                candidates += CivCourierPlan(CivCargo(id, warehouse.id, source.id, warehouse.id, meeting, material, amount,
-                    sourceWorkerId = producer.id), warehouse.id, warehouse.entrance, false)
-            }
-        }
         // The durable completed-trip counter rotates ordinary supply and collection together.
         return if (candidates.isEmpty()) null
             else candidates[Math.floorMod(worker.completedCycles, candidates.size.toLong()).toInt()]
@@ -264,35 +251,16 @@ object CivsLogistics {
         if (cargo.stockResource != null) return CivsAutonomousLogistics.pickup(city, workerId, cargo)
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         if (worker.cargo == cargo.copy(inventoryBacked = true)) return city
+        reject(cargo.sourceWorkerId != null, "stale-delivery")
         val source = city.building(cargo.sourceBuildingId) ?: throw CivsRejection("stale-delivery")
         val warehouse = city.building(cargo.warehouseId) ?: throw CivsRejection("stale-delivery")
         reject(city.pendingDeletion != null || worker.cargo != null || worker.assignment != cargo.warehouseId || warehouse.type != BuildingType.WAREHOUSE ||
             warehouse.phase != BuildingPhase.ACTIVE || cargo.sourceWorkerId == null && source.entrance != cargo.sourceEntrance ||
             cargo.id != shipmentId(city.id, workerId, worker.completedCycles, cargo.sourceBuildingId, cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
             !validCargo(city, cargo), "stale-delivery")
-        val producer = cargo.sourceWorkerId?.let { id ->
-            city.workers.firstOrNull { it.id == id }?.takeIf { it.id != workerId && it.assignment == source.id &&
-                withinRoute(city, cargo.sourceEntrance, requireNotNull(warehouse.control)) &&
-                (workerExcess(city, it, craftInputs[it.id].orEmpty(), foods)[cargo.material] ?: 0L) >= cargo.amount } ?: throw CivsRejection("stale-delivery")
-        }
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(cargo.material to cargo.amount))
             .copy(cargo = cargo.copy(inventoryBacked = true))
-        val emptied = producer?.let {
-            val items = CivsEquipment.slots(it).toMutableList()
-            var remaining = cargo.amount.toInt()
-            for (index in CivsEquipment.BAG until items.size) {
-                val item = items[index]?.takeIf { item -> item.data == null && item.material == cargo.material } ?: continue
-                val moved = minOf(remaining, item.amount)
-                items[index] = item.copy(amount = item.amount - moved).takeIf { item -> item.amount > 0 }
-                remaining -= moved
-                if (remaining == 0) break
-            }
-            check(remaining == 0)
-            CivsEquipment.replace(it, items)
-        }
-        return CivsRules.validate(city.copy(workers = city.workers.map { when (it.id) {
-            workerId -> supplied; producer?.id -> requireNotNull(emptied); else -> it
-        } },
+        return CivsRules.validate(city.copy(workers = city.workers.map { if (it.id == workerId) supplied else it },
             revision = Math.addExact(city.revision, 1)))
     }
 

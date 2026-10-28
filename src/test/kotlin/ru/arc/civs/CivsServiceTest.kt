@@ -47,6 +47,198 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsAutoGlobalSupplyServiceTest : FunSpec({
+    test("existing warehouse goods prevent another native grant to the requesting workplace") {
+        lateinit var storage: CivsStorage
+        serviceScenario(storageFactory = { CivsStorage(it) { emptyArray() }.also { storage = it } }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 64, 0))
+            val workshop = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.SMELTERY, production = "STONE",
+                anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, -2), control = CivPosition(20, 64, 0),
+                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)))
+            val workers = h.city.workers.take(2).mapIndexed { index, worker ->
+                worker.copy(assignment = if (index == 0) warehouse.id else workshop.id, nextDeliveryAt = 1)
+            }
+            val city = CivsRules.validate(h.city.copy(buildings = listOf(hall, warehouse, workshop), workers = workers,
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy()))
+            h.world.loadChunk(1, 0)
+            for (x in listOf(0, 10, 20)) h.world.getBlockAt(x, 64, 0).type = Material.BARREL
+            val source = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
+            repeat(6) { source.setItem(it, ItemStack(Material.COBBLESTONE, 64)) }
+            val target = (h.world.getBlockAt(20, 64, 0).state as org.bukkit.block.Barrel).inventory
+            target.setItem(0, ItemStack(Material.CHARCOAL, 1))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.paper.addPlayer("AutoStockWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+            h.start()
+            val field = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+            val dispatcher = field.get(h.service) as CivsSupplyDispatcher
+            h.tickUntil("accepted native global observation") { dispatcher.observation(city.id) != null }
+            dispatcher.plan(city.id, workers.first().id)!!.cargo.amount shouldBe 8L
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            h.time += 1_000
+            pulse.invoke(h.service)
+            h.tick()
+            target.contents.filterNotNull().filter { it.type == Material.COBBLESTONE }.sumOf { it.amount } shouldBe 0
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            // Dirty native generations cannot authorize an issue using the old accepted observation.
+            source.clear()
+            storage.supplyPickup(mockk { every { inventory } returns source })
+            h.time += 1_000
+            pulse.invoke(h.service)
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            h.tickUntil("fresh empty warehouse observation") {
+                dispatcher.observation(city.id)?.stores?.get(warehouse.id)?.stock?.isEmpty() == true
+            }
+            h.time += 1_000
+            pulse.invoke(h.service)
+            h.tickUntil("exact globally missing grant") { h.saves.isNotEmpty() }
+            target.contents.filterNotNull().filter { it.type == Material.COBBLESTONE }.sumOf { it.amount } shouldBe 8
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("an active physical Auto town captures bootstrap food stock before it has a warehouse") {
+        serviceScenario(storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val worker = h.city.workers.first().copy(assignment = null, hunger = 0, homeId = hall.id)
+            val city = CivsRules.validate(h.city.copy(buildings = listOf(hall), workers = listOf(worker),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy()))
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val target = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.paper.addPlayer("AutoBootstrapWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+            h.start()
+            CivsService::class.java.getDeclaredMethod("pulseSupply").also { it.isAccessible = true }.invoke(h.service)
+            val field = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+            val dispatcher = field.get(h.service) as CivsSupplyDispatcher
+            h.tickUntil("bootstrap native observation") { dispatcher.observation(city.id) != null }
+            h.time += 1_000
+            CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }.invoke(h.service)
+            h.tickUntil("bootstrap food receipt") { h.saves.isNotEmpty() }
+            target.contents.filterNotNull().filter { it.type == Material.BREAD }.sumOf { it.amount } shouldBe 4
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+})
+
+class CivsForestryLeafLootServiceTest : FunSpec({
+    test("accepted native leaf events journal ground to the forester workplace without an actor or stock credit") {
+        lateinit var storage: CivsStorage
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() }.also {
+            storage = it
+            it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+        } }) { h ->
+            val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(20, 63, 20))
+            val worker = spatialWorker(mill, "IRON_AXE")
+            val before = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), mill), workers = listOf(worker),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.citizens.residentCollectionFeet(any(), any()) } throws IllegalStateException("Leaf collection must not invent resident arrival")
+            val control = requireNotNull(mill.control)
+            for (x in -1..3) for (z in -1..3) h.world.loadChunk(x, z)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            val holder = h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Barrel
+            h.start()
+            val leaf = CivPosition(30, 67, 30)
+            val block = h.world.getBlockAt(leaf.x, leaf.y, leaf.z)
+            block.blockData = Bukkit.createBlockData("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]")
+            h.paper.server.pluginManager.callEvent(org.bukkit.event.block.LeavesDecayEvent(block))
+            val item = LeafItemFixture(h.paper.server, UUID.randomUUID(), ItemStack(Material.APPLE, 2)).apply {
+                setLocation(Location(h.world, leaf.x + .5, leaf.y + .5, leaf.z + .5))
+                setOnGround(true)
+                pickupDelay = 0
+                h.paper.server.registerEntity(this)
+            }
+            h.paper.server.pluginManager.callEvent(org.bukkit.event.entity.ItemSpawnEvent(item))
+            requireNotNull(CivsForestryLeafLoot.proof(item))
+            block.type = Material.AIR
+            item.setLocation(Location(h.world, leaf.x + .5, 64.0, leaf.z + .5))
+            h.tickUntil("exact native leaf transfer") { holder.inventory.getItem(0)?.amount == 2 }
+            h.tickUntil("leaf receipt retirement") { h.service.settlements().single().revision == before.revision + 1 &&
+                storage.debug(before.id)["total"] == 0 }
+            item.isValid shouldBe false
+            holder.inventory.getItem(0) shouldBe ItemStack(Material.APPLE, 2)
+            h.service.settlements().single().workers shouldBe before.workers
+            h.service.settlements().single().stock shouldBe before.stock
+            verify(exactly = 1) { h.store.saveInventoryTransaction(match { it.collected?.forestryLeafLoot != null }) }
+            verify(exactly = 1) { h.store.markConsumedItems(match { it.collected?.ground?.single()?.entityId == item.uniqueId }) }
+            storage.debug(before.id)["total"] shouldBe 0
+        }
+    }
+})
+
+
+
+class CivsNativeProductionParityTest : FunSpec({
+    for (type in listOf(BuildingType.BUILDER_HUT, BuildingType.WAREHOUSE, BuildingType.FORESTER))
+    test("native workers can drain existing items while another migration reserve waits type=$type") {
+        serviceScenario { h ->
+            val building = h.city.buildings.last().copy(type = type)
+            val worker = h.city.workers.first().copy(assignment = building.id, nextDeliveryAt = 1)
+            val physical = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), building), workers = listOf(worker))
+            val automatic = CivsRules.validate(physical.copy(autonomy = CivAutonomy(),
+                inventory = physical.inventory!!.copy(materials = mapOf("OAK_LOG" to 64L))))
+            CivsAutoStorageMigration.ready(automatic) shouldBe false
+            h.service.productionReady(automatic, worker) shouldBe h.service.productionReady(physical, worker)
+            h.service.workInputsReady(automatic, worker) shouldBe h.service.workInputsReady(physical, worker)
+            h.service.productionReady(automatic, worker) shouldBe true
+            h.service.workInputsReady(automatic, worker) shouldBe true
+        }
+    }
+})
+
+class CivsProducerReturnRecoveryTest : FunSpec({
+    for (nativeAfter in listOf(false, true)) test("accepted workplace return recovers without an actor nativeAfter=$nativeAfter") {
+        lateinit var storage: CivsStorage
+        serviceScenario(storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() }.also { storage = it } }) { h ->
+            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER, control = CivPosition(10, 63, 0))
+            val worker = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1,
+                items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("OAK_LOG", 64) else null })
+            val before = CivsRules.validate(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                buildings = listOf(h.city.buildings.first(), forester), workers = listOf(worker)))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+            barrel.setItem(0, ItemStack(Material.OAK_LOG, 60))
+            val id = UUID.randomUUID()
+            storage.reserve(before, id)
+            val prepared = storage.prepareResidentReturn(before, worker.id, forester.id)
+            val receipt = CivInventoryTransaction(id, before.id, before.revision,
+                before.copy(workers = listOf(prepared.worker), inventory = prepared.plan.inventoryAfter,
+                    revision = before.revision + 1), prepared.plan.changes).validated()
+            storage.seal(receipt)
+            storage.unlock(id)
+            if (nativeAfter) barrel.setItem(0, ItemStack(Material.OAK_LOG, 64))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(receipt))
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            every { h.citizens.courierSupplySources(any(), any()) } returns emptyMap()
+            h.start()
+            h.tickUntil("recovered workplace return") { h.saves.isNotEmpty() }
+            h.saves.single().first shouldBe receipt.after
+            barrel.getItem(0)!!.amount shouldBe 64
+            h.commit()
+            val recovered = h.service.city(h.player)!!
+            recovered shouldBe receipt.after
+            CivsEquipment.plainCount(recovered.workers.single(), "OAK_LOG") shouldBe 60
+            recovered.workers.single().completedCycles shouldBe worker.completedCycles
+            recovered.stock shouldBe Stock()
+            verify(exactly = 0) { h.citizens.requireStorageArrival(any(), any(), any()) }
+            verify(exactly = 1) { h.store.deleteInventoryTransaction(receipt.id) }
+        }
+    }
+})
+
 class CivsAutonomousDepotFreshnessTest : FunSpec({
     test("unload rejects a changed earlier warehouse before saving goods at an unchanged destination") {
         lateinit var storage: CivsStorage
@@ -94,117 +286,207 @@ class CivsAutonomousDepotFreshnessTest : FunSpec({
 })
 
 class CivsAutonomousStorageRuntimeTest : FunSpec({
-    test("a bounded native workplace observation survives async save and stale space never admits new production") {
-        lateinit var storage: CivsStorage
-        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
-            CivsStorage(plugin) { emptyArray() }.also { storage = it }
-        }) { h ->
+    for (initiallyFull in listOf(false, true)) test("legacy Auto migrates once after startup and retries native full storage=$initiallyFull") {
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() } }) { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
-            val mill = h.city.buildings.last().copy(type = BuildingType.FORESTER, control = CivPosition(10, 64, 0))
-            val warehouse = mill.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
-                anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, -2), control = CivPosition(20, 64, 0),
-                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)))
-            val worker = h.city.workers.first().copy(assignment = mill.id, nextDeliveryAt = 1)
-            val courier = h.city.workers[1].copy(assignment = warehouse.id, nextDeliveryAt = 1)
-            val before = CivsRules.validate(h.city.copy(buildings = listOf(hall, mill, warehouse),
-                workers = listOf(worker, courier), inventory = null, autonomy = CivAutonomy(), stock = Stock(384, 3, 382)))
-            h.world.loadChunk(1, 0)
-            for (x in listOf(0, 10, 20)) h.world.getBlockAt(x, 64, 0).type = Material.BARREL
+            val before = CivsRules.validate(h.city.copy(buildings = listOf(hall), workers = emptyList(),
+                inventory = null, autonomy = CivAutonomy(paused = true), stock = Stock(5, 3, 2)))
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+            if (initiallyFull) repeat(barrel.size) { barrel.setItem(it, org.bukkit.inventory.ItemStack(Material.STONE, 64)) }
+            h.paper.addPlayer("MigrationWitness").teleport(Location(h.world, 1.5, 65.0, .5))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val capture = CivsService::class.java.getDeclaredMethod("captureSupply", UUID::class.java, Map::class.java)
-                .also { it.isAccessible = true }
-            @Suppress("UNCHECKED_CAST")
-            fun nextCapture() = capture.invoke(h.service, before.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
-            val first = nextCapture()
-            repeat(6) { first() }
+            h.service.ready() shouldBe true
+            val migrate = CivsService::class.java.getDeclaredMethod("pulseAutoStorage").also { it.isAccessible = true }
+            val flush = CivsService::class.java.getDeclaredMethod("pulseStorage").also { it.isAccessible = true }
+            migrate.invoke(h.service)
             h.saves.size shouldBe 1
-            h.saves.single().first.autonomy!!.storage!![mill.id.toString()]!!.emptySlots shouldBe 27
-            val barrel = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
-            for (slot in 0 until 27) barrel.setItem(slot, ItemStack(Material.COBBLESTONE, 64))
-            storage.supplyPickup(mockk {
-                every { inventory } returns barrel
-            })
+            val migrated = h.saves.single().first
+            migrated.stock shouldBe Stock()
+            migrated.inventory!!.materials shouldBe mapOf("OAK_LOG" to 5L, "COBBLESTONE" to 3L, "BREAD" to 2L)
+            h.time += 6_000
+            h.paper.performTicks(100)
+            h.saves.size shouldBe 1 // An unknown migration save cannot issue another copy.
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             h.commit()
-            val stale = h.service.settlements().single()
-            storage.autonomousCapacityCurrent(stale, mill.id) shouldBe false
-            h.service.productionReady(stale, stale.workers.first()) shouldBe false
-            val second = nextCapture()
-            repeat(6) { second() }
+            flush.invoke(h.service); h.tick()
+            if (initiallyFull) {
+                h.saves.size shouldBe 1
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                barrel.clear()
+                h.time += 6_000
+                flush.invoke(h.service); h.tick()
+            }
             h.saves.size shouldBe 2
-            h.saves.last().first.autonomy!!.storage!![mill.id.toString()]!!.emptySlots shouldBe 0
+            fun count(material: Material) = barrel.contents.filterNotNull().filter { it.type == material }.sumOf { it.amount }
+            count(Material.OAK_LOG) shouldBe 5
+            count(Material.COBBLESTONE) shouldBe 3
+            count(Material.BREAD) shouldBe 2
+            h.time += 6_000
+            h.paper.performTicks(100)
+            h.saves.size shouldBe 2 // The same accepted slot receipt fences another flush.
+            count(Material.BREAD) shouldBe 2
             h.commit()
-            requireNotNull(second()).cityId shouldBe before.id
-            val observed = h.service.settlements().single()
-            storage.autonomousCapacityCurrent(observed, mill.id) shouldBe true
-            CivsAutonomousLogistics.room(observed, Resource.WOOD, worker.id) shouldBe 0L
-            observed.stock shouldBe before.stock
-            observed.workers shouldBe before.workers
+            val flushed = h.saves.last().first
+            CivsAutoStorageMigration.ready(flushed) shouldBe true
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(flushed))
+            h.await(h.service.reload(h.player)) shouldBe Unit
+            h.time += 6_000
+            h.tick()
+            h.saves.size shouldBe 2
+            count(Material.OAK_LOG) shouldBe 5
+            count(Material.COBBLESTONE) shouldBe 3
+            count(Material.BREAD) shouldBe 2
         }
     }
 })
 
 class CivsResidentFoodFairnessTest : FunSpec({
-    for (firstBuffer in listOf("full", "unavailable"))
-    test("food buffers rotate past a $firstBuffer first Auto city to a hungry second city") {
-        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
-            CivsStorage(plugin) { emptyArray() }.also {
-                it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
-            }
-        }) { h ->
+    for (firstBuffer in listOf("full", "unavailable")) test("native Auto food rotates past $firstBuffer storage without a second grant") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
-            val firstWorker = h.city.workers.first().copy(hunger = 20)
+            val firstWorker = h.city.workers.first().copy(hunger = 0, homeId = hall.id)
             val first = CivsRules.validate(h.city.copy(name = "First", buildings = listOf(hall), workers = listOf(firstWorker),
-                inventory = null, autonomy = CivAutonomy(storage = mapOf(hall.id.toString() to
-                    if (firstBuffer == "full") CivAutonomousStore(26, 27, 1) else CivAutonomousStore(0, 0, 1, 1))),
-                stock = Stock(food = 20)))
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), autonomy = CivAutonomy()))
             val secondHall = hall.copy(id = UUID.randomUUID(), anchor = CivPosition(64, 64, 0),
                 bounds = CivBox(CivPosition(62, 63, -2), CivPosition(66, 68, 2)),
                 entrance = CivPosition(64, 64, -2), control = CivPosition(64, 64, 0))
-            val secondWorker = firstWorker.copy(id = UUID.randomUUID(), name = "Hungry", hunger = 0)
+            val secondWorker = firstWorker.copy(id = UUID.randomUUID(), name = "Hungry", homeId = secondHall.id)
             val second = CivsRules.validate(first.copy(id = UUID.randomUUID(), name = "Second", center = CivPosition(64, 64, 0),
-                buildings = listOf(secondHall), workers = listOf(secondWorker), autonomy = CivAutonomy(storage =
-                    mapOf(secondHall.id.toString() to CivAutonomousStore(27, 27, 1)))))
+                buildings = listOf(secondHall), workers = listOf(secondWorker)))
             h.world.loadChunk(4, 0)
             h.world.getBlockAt(0, 64, 0).type = Material.BARREL
             h.world.getBlockAt(64, 64, 0).type = Material.BARREL
             val firstBarrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
             val secondBarrel = (h.world.getBlockAt(64, 64, 0).state as org.bukkit.block.Barrel).inventory
-            if (firstBuffer == "full") firstBarrel.setItem(0, ItemStack(Material.BREAD, 4))
+            if (firstBuffer == "full") repeat(firstBarrel.size) { firstBarrel.setItem(it, ItemStack(Material.STONE, 64)) }
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(first, second))
             every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
-            every { h.citizens.residentFeet(firstWorker.id) } returns Location(h.world, 1.5, 64.0, .5)
-            every { h.citizens.residentFeet(secondWorker.id) } returns Location(h.world, 65.5, 64.0, .5)
+            h.paper.addPlayer("NativeFoodWitness").teleport(Location(h.world, 1.5, 65.0, .5))
             h.start()
-            val top = mockk<org.bukkit.inventory.Inventory> { every { holder } returns null }
-            val view = mockk<org.bukkit.inventory.InventoryView> {
-                every { topInventory } returns top
-                every { type } returns InventoryType.CRAFTING
-            }
-            val witness = object : org.mockbukkit.mockbukkit.entity.PlayerMock(h.paper.server, "FoodBufferWitness") {
-                override fun getOpenInventory(): org.bukkit.inventory.InventoryView = view
-            }
-            h.paper.server.addPlayer(witness)
-            witness.teleport(Location(h.world, 1.5, 65.0, .5))
             if (firstBuffer == "unavailable") h.world.unloadChunk(0, 0)
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseResidentFood").also { it.isAccessible = true }
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
             pulse.invoke(h.service)
-            h.tick()
             h.saves shouldBe emptyList()
-            h.time += 5_000
+            h.time += 1_000
             pulse.invoke(h.service)
-            h.tickUntil("second city food receipt") { h.saves.isNotEmpty() }
+            h.tickUntil("second town native food receipt") { h.saves.isNotEmpty() }
             h.saves.single().first.id shouldBe second.id
-            h.saves.single().first.stock.food shouldBe 16L
-            secondBarrel.getItem(0)!!.type shouldBe Material.BREAD
-            secondBarrel.getItem(0)!!.amount shouldBe 4
+            h.saves.single().first.stock shouldBe Stock()
+            secondBarrel.contents.filterNotNull().filter { it.type == Material.BREAD }.sumOf { it.amount } shouldBe 4
+            repeat(3) { h.time += 1_000; pulse.invoke(h.service) }
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             h.commit()
-            h.service.settlements().first { it.id == first.id }.stock.food shouldBe 20L
+            h.service.settlements().first { it.id == first.id }.stock shouldBe Stock()
+        }
+    }
+})
+
+class CivsAutoSupplyAckAuthorityTest : FunSpec({
+    test("a revoked Lands grant after the journal ACK issues no native items and preserves recovery ownership") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 64, 0))
+            val worker = h.city.workers.first().copy(homeId = hall.id, hunger = 0)
+            val city = CivsRules.validate(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                autonomy = CivAutonomy(), buildings = listOf(hall), workers = listOf(worker)))
+            h.world.getBlockAt(0, 64, 0).type = Material.BARREL
+            val barrel = (h.world.getBlockAt(0, 64, 0).state as org.bukkit.block.Barrel).inventory
+            var allowed = true
+            every { h.worldAdapter.canModify(any(), any(), any()) } answers { allowed }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            val ack = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); ack }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.paper.addPlayer("GrantWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+            h.start()
+            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            pulse.invoke(h.service)
+            receipt!!.autoSupplyBuildingId shouldBe hall.id
+            barrel.isEmpty shouldBe true
+            allowed = false
+            ack.complete(receipt!!)
+            h.tickUntil("blocked grant recovery") { h.service.debugState("overview", city.id, null)["blocked_recovery_total"] == 1 }
+            barrel.isEmpty shouldBe true
+            h.saves shouldBe emptyList()
+            h.service.settlements().single() shouldBe city
+            h.time += 10_000; pulse.invoke(h.service)
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
+})
+
+class CivsNativeRoadUpkeepTest : FunSpec({
+    test("physical Auto builder repairs only after its carried native payment journal is acknowledged") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true, cobblestone = 1)
+            val ack = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); ack }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start(); upkeep.publish()
+            h.service.upkeepRequirements(upkeep.city) shouldBe emptyMap()
+            val result = upkeep.deliver()
+            val tx = requireNotNull(receipt)
+            tx.upkeep!!.work.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            tx.changes shouldBe emptyList()
+            tx.after.stock shouldBe Stock()
+            CivsEquipment.usableCount(tx.after.workers.single(), "COBBLESTONE") shouldBe 0
+            CivsEquipment.usableCount(h.service.settlements().single().workers.single(), "COBBLESTONE") shouldBe 1
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            h.saves shouldBe emptyList()
+            ack.complete(tx)
+            h.tickUntil("native paid road patch") { h.saves.isNotEmpty() }
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.COBBLESTONE
+            h.commit()
+            result.join().stock shouldBe Stock()
+            CivsEquipment.usableCount(h.service.settlements().single().workers.single(), "COBBLESTONE") shouldBe 0
+            upkeep.deliver().isCompletedExceptionally shouldBe true
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
         }
     }
 
+    test("a captured native road job requests one real hut input and waits for payment without closed stone") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true)
+            val own = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
+            val ack = CompletableFuture<CivInventoryTransaction>()
+            var receipt: CivInventoryTransaction? = null
+            every { h.store.saveInventoryTransaction(any()) } answers { receipt = firstArg(); ack }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start(); upkeep.publish()
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { upkeep.deliver().join() })?.reason shouldBe "materials-missing"
+            receipt shouldBe null
+            h.service.upkeepRequirements(upkeep.city) shouldBe mapOf(upkeep.worker.id to mapOf("COBBLESTONE" to 1L))
+            h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe false
+            h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() } shouldBe
+                listOf(CivSupplyRequest(upkeep.worker.assignment!!, "COBBLESTONE", 1, 0))
+            own.setItem(0, ItemStack(Material.COBBLESTONE, 2))
+            h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe true
+            val result = upkeep.deliver()
+            val tx = requireNotNull(receipt)
+            tx.changes.single() shouldBe CivInventorySlotChange(CivPosition(10, 64, 0), "BARREL", 0,
+                CivPlainItem("COBBLESTONE", 2), CivPlainItem("COBBLESTONE", 1))
+            tx.after.stock shouldBe Stock()
+            own.getItem(0)!!.amount shouldBe 2
+            var allowed = true
+            every { h.worldAdapter.canModify(any(), any(), any()) } answers { allowed }
+            allowed = false
+            ack.complete(tx)
+            h.tickUntil("native road hut authority conflict") { result.isDone }
+            CivsDiagnostics.rejection(shouldThrow<CompletionException> { result.join() })?.reason shouldBe "inventory-conflict"
+            own.getItem(0)!!.amount shouldBe 2
+            h.world.getBlockAt(20, 63, 0).type shouldBe Material.DIRT
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
+        }
+    }
 })
 
 class CivsServiceTest : FunSpec({
@@ -957,7 +1239,7 @@ class CivsServiceTest : FunSpec({
 
     test("historical access repair precedes growth with empty stock and publishes no construction or resource credit") {
         serviceScenario { h ->
-            val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), workers = emptyList())
+            val city = h.city.copy(autonomy = CivAutonomy(), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList())
             val older = city.buildings.first()
             val offender = city.buildings.last()
             val write = CivPlanBlock(older.entrance, "minecraft:air", "minecraft:coarse_dirt")
@@ -1006,8 +1288,8 @@ class CivsServiceTest : FunSpec({
                     CivBuilding(UUID.randomUUID(), BuildingType.WALL, 1, at, 0, "civs/infrastructure/v1/wall/fixture",
                         CivBox(at, at.copy(y = 67)), at.copy(z = at.z - 1), BuildingPhase.ACTIVE)
                 }
-                val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), workers = emptyList(),
-                    buildings = h.city.buildings + oldWalls))
+                val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), workers = emptyList(), stock = Stock(),
+                    inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = h.city.buildings + oldWalls))
                 every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
                 h.start()
                 h.paper.addPlayer("GrowthObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
@@ -1232,11 +1514,11 @@ class CivsServiceTest : FunSpec({
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(personal,
                 before.copy(autonomy = requireNotNull(before.autonomy).copy(paused = true))))
             h.start()
-            h.tickUntil("ordinary receipt still follows inventory recovery") { h.saves.isNotEmpty() }
-            h.saves.single().first shouldBe ordinary.after
+            h.tickUntil("ordinary receipt still follows inventory recovery") { h.saves.any { it.first.id == personal.id } }
+            h.saves.single { it.first.id == personal.id }.first shouldBe ordinary.after
             verify(exactly = 1) { h.store.deleteInventoryTransaction(cosmetic.id) }
             verify(exactly = 0) { h.store.deleteInventoryTransaction(ordinary.id) }
-            h.commit()
+            h.saves.single { it.first.id == personal.id }.let { it.second.complete(it.first) }; h.tick()
             verify(exactly = 1) { h.store.deleteInventoryTransaction(ordinary.id) }
         }
     }
@@ -1379,8 +1661,8 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             val queued = h.queuedUpgrade()
             val site = queued.city.buildings.last()
-            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = null,
-                stock = h.city.stock, constructionQueue = emptyList())
+            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                stock = Stock(), constructionQueue = emptyList())
             val target = site.copy(phase = BuildingPhase.CONSTRUCTING)
             val design = queued.design.copy(id = site.id, building = target, terrain = null, adminPlacement = true)
             val captured = design.copy(id = UUID.randomUUID())
@@ -1450,7 +1732,7 @@ class CivsServiceTest : FunSpec({
             proposed.constructionQueue shouldBe listOf(board.blueprint.building.id)
             proposed.revision shouldBe board.city.revision + 1
             proposed.stock shouldBe board.city.stock
-            proposed.inventory shouldBe null
+            proposed.inventory shouldBe board.city.inventory
             proposed.workers shouldBe board.city.workers
             proposed.immigration shouldBe board.city.immigration
             proposed.forestrySeeded shouldBe board.city.forestrySeeded
@@ -2583,116 +2865,101 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("worker-bag cargo accepts source movement then waits for both journals and moves once through the real courier inventory") {
+    test("producer returns fitting native output after its journal and a courier then reads the workplace") {
         serviceScenario { h ->
             val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
-            val quarry = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.QUARRY, anchor = CivPosition(20, 64, 0),
+            val forester = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, anchor = CivPosition(20, 64, 0),
                 entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
                 bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)))
-            val producer = h.city.workers[1].copy(assignment = quarry.id, nextDeliveryAt = 1,
+            val producer = h.city.workers[1].copy(assignment = forester.id, nextDeliveryAt = 1,
                 items = List(CivsEquipment.SLOTS) { when (it) {
-                    4 -> CivResidentItem("IRON_PICKAXE", 1)
-                    6 -> CivResidentItem("COAL", 64)
-                    7 -> CivResidentItem("COBBLESTONE", 32)
-                    8 -> CivResidentItem("BREAD", 4)
+                    4 -> CivResidentItem("IRON_AXE", 1)
+                    6 -> CivResidentItem("OAK_LOG", 64)
+                    7 -> CivResidentItem("OAK_SAPLING", 4)
+                    8 -> CivResidentItem("BREAD", 16)
                     else -> null
                 } })
             val ready = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-                buildings = listOf(h.city.buildings.first(), warehouse, quarry),
+                buildings = listOf(h.city.buildings.first(), warehouse, forester),
                 workers = listOf(h.city.workers.first().copy(assignment = warehouse.id, nextDeliveryAt = 1), producer))
-            val meeting = CivPosition(20, 64, 3)
-            val moved = CivPosition(25, 64, 3)
-            var sourceObservations = 0
-            every { h.citizens.courierSupplySources(ready.id, any()) } answers {
-                sourceObservations++
-                mapOf(producer.id to if (sourceObservations == 1) meeting else moved)
-            }
-            every { h.citizens.courierSourceCurrent(ready.id, any()) } answers {
-                val cargo = secondArg<CivCargo>()
-                cargo.sourceWorkerId shouldBe producer.id
-                cargo.sourceBuildingId shouldBe quarry.id
-                cargo.material shouldBe "COAL"
-                cargo.amount shouldBe 64L
-                cargo.sourceEntrance shouldBe meeting
-                true
-            }
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
             h.world.loadChunk(1, 0)
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
             h.world.getBlockAt(20, 63, 0).type = Material.BARREL
+            val source = (h.world.getBlockAt(20, 63, 0).state as org.bukkit.block.Barrel).inventory
             val target = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory
+            repeat(source.size) { source.setItem(it, ItemStack(Material.STONE, 64).apply {
+                editMeta { meta -> meta.displayName(Component.text("Reserved fixture cargo")) }
+            }) }
+            source.setItem(0, ItemStack(Material.OAK_LOG, 60))
             val journals = mutableListOf<Pair<CivInventoryTransaction, CompletableFuture<CivInventoryTransaction>>>()
             every { h.store.saveInventoryTransaction(any()) } answers {
                 CompletableFuture<CivInventoryTransaction>().also { journals += firstArg<CivInventoryTransaction>() to it }
             }
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
-            val plan = h.supplyPlan(ready.workers.first().id)
-            plan.cargo.sourceEntrance shouldBe meeting
-            verify(atLeast = 1) { h.citizens.courierSourceCurrent(ready.id, plan.cargo) }
-            val rejected = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
+            val failed = h.service.returnResidentOutputs(ready.id, producer.id, forester.id)
             journals.single().second.completeExceptionally(CivsRejection("storage-transaction-too-large")); h.tick()
-            rejected.isCompletedExceptionally shouldBe true
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "COAL") shouldBe 64
-            h.service.city(h.player)!!.workers.first().cargo shouldBe null
-            val pickup = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
+            failed.isCompletedExceptionally shouldBe true
+            source.getItem(0)!!.amount shouldBe 60
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "OAK_LOG") shouldBe 64
+            val returning = h.service.returnResidentOutputs(ready.id, producer.id, forester.id)
             val receipt = journals.last().first
-            receipt.changes shouldBe emptyList()
-            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "COAL") shouldBe 64
+            receipt.changes.single().container shouldBe forester.control
+            source.getItem(0)!!.amount shouldBe 60
             journals.last().second.complete(receipt); h.tick()
-            target.isEmpty shouldBe true
-            h.service.city(h.player)!!.workers.first().cargo shouldBe null
+            source.getItem(0)!!.amount shouldBe 64
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.last(), "OAK_LOG") shouldBe 64
+            h.commit(); returning.join()
+            val deposited = h.service.city(h.player)!!
+            CivsEquipment.plainCount(deposited.workers.last(), "OAK_LOG") shouldBe 60
+            deposited.workers.last().items!!.take(6) shouldBe producer.items!!.take(6)
+            deposited.workers.last().completedCycles shouldBe producer.completedCycles
+            deposited.workers.last().nextDeliveryAt shouldBe producer.nextDeliveryAt
+            val plan = h.supplyPlan(ready.workers.first().id)
+            plan.cargo.sourceBuildingId shouldBe forester.id
+            plan.cargo.sourceWorkerId shouldBe null
+            plan.cargo.sourceEntrance shouldBe forester.entrance
+            val pickup = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
+            journals.last().let { it.second.complete(it.first) }; h.tick()
             h.commit(); pickup.join()
             val carried = h.service.city(h.player)!!
-            CivsEquipment.plainCount(carried.workers.first(), "COAL") shouldBe 64
-            CivsEquipment.plainCount(carried.workers.last(), "COAL") shouldBe 0
-            CivsEquipment.plainCount(carried.workers.last(), "COBBLESTONE") shouldBe 32
-            CivsEquipment.plainCount(carried.workers.last(), "BREAD") shouldBe 4
-            h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo).join()
-            journals.size shouldBe 2
+            CivsEquipment.plainCount(carried.workers.last(), "OAK_LOG") shouldBe 60
+            CivsEquipment.plainCount(carried.workers.first(), "OAK_LOG") shouldBe plan.cargo.amount.toInt()
             val dropoff = h.service.dropoffCargo(ready.id, ready.workers.first().id, plan.cargo, warehouse.id)
-            target.isEmpty shouldBe true
             journals.last().let { it.second.complete(it.first) }; h.tick()
-            target.getItem(0)!!.amount shouldBe 64
-            h.service.city(h.player)!!.workers.first().cargo!!.id shouldBe plan.cargo.id
             h.commit(); dropoff.join()
             val finished = h.service.city(h.player)!!
             finished.workers.first().cargo shouldBe null
-            CivsEquipment.plainCount(finished.workers.first(), "COAL") shouldBe 0
-            finished.workers.first().completedCycles shouldBe 1L
-            verify(exactly = 2) { h.citizens.requireCargoPickupArrival(ready.id, ready.workers.first().id, plan.cargo) }
+            CivsEquipment.plainCount(finished.workers.first(), "OAK_LOG") shouldBe 0
+            target.getItem(0)!!.amount shouldBe plan.cargo.amount.toInt()
+            source.getItem(0)?.amount shouldBe (64 - plan.cargo.amount).toInt().takeIf { it > 0 }
+            verify(exactly = 0) { h.citizens.courierSupplySources(ready.id, any()) }
+            verify(exactly = 0) { h.citizens.requireCargoPickupArrival(any(), any(), any()) }
+            verify(atLeast = 1) { h.citizens.requireStorageArrival(ready.id, producer.id, forester.id) }
+            verify(atLeast = 1) { h.citizens.requireStorageArrival(ready.id, ready.workers.first().id, forester.id) }
         }
     }
 
-    test("a worker-bag pickup rechecks the physical meeting after waiting for another city commit") {
+    test("a workplace return rechecks producer arrival after another city commit before its journal") {
         serviceScenario { h ->
-            val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
-            val quarry = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.QUARRY, anchor = CivPosition(20, 64, 0),
-                entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
-                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)))
-            val producer = h.city.workers[1].copy(assignment = quarry.id, nextDeliveryAt = 1,
-                items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COAL", 64) else null })
+            val forester = h.city.buildings.last().copy(type = BuildingType.FORESTER, control = CivPosition(10, 63, 0))
+            val producer = h.city.workers.first().copy(assignment = forester.id, nextDeliveryAt = 1,
+                items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("OAK_LOG", 64) else null })
             val ready = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
-                buildings = listOf(h.city.buildings.first(), warehouse, quarry),
-                workers = listOf(h.city.workers.first().copy(assignment = warehouse.id, nextDeliveryAt = 1), producer))
+                buildings = listOf(h.city.buildings.first(), forester), workers = listOf(producer))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
-            h.world.loadChunk(1, 0)
             h.world.getBlockAt(10, 63, 0).type = Material.BARREL
-            h.world.getBlockAt(20, 63, 0).type = Material.BARREL
-            every { h.citizens.courierSupplySources(ready.id, any()) } returns mapOf(producer.id to CivPosition(20, 64, 3))
-            every { h.citizens.courierSourceCurrent(ready.id, any()) } returns true
             h.start()
-            val plan = h.supplyPlan(ready.workers.first().id)
-            val member = h.paper.addPlayer("CargoWaitMember")
+            val member = h.paper.addPlayer("ReturnWaitMember")
             val membership = h.service.addMember(h.player, member.name)
-            val pickup = h.service.pickupCargo(ready.id, ready.workers.first().id, plan.cargo)
-            pickup.isDone shouldBe false
-            every { h.citizens.requireCargoPickupArrival(ready.id, ready.workers.first().id, plan.cargo) } throws CivsRejection("route-unreachable")
+            val returning = h.service.returnResidentOutputs(ready.id, producer.id, forester.id)
+            returning.isDone shouldBe false
+            every { h.citizens.requireStorageArrival(ready.id, producer.id, forester.id) } throws CivsRejection("route-unreachable")
             h.commit(); membership.join(); h.tick()
-            pickup.isCompletedExceptionally shouldBe true
-            val current = h.service.city(h.player)!!
-            CivsEquipment.plainCount(current.workers.last(), "COAL") shouldBe 64
-            current.workers.first().cargo shouldBe null
+            returning.isCompletedExceptionally shouldBe true
+            CivsEquipment.plainCount(h.service.city(h.player)!!.workers.single(), "OAK_LOG") shouldBe 64
+            (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Barrel).inventory.isEmpty shouldBe true
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
         }
     }
@@ -4091,13 +4358,13 @@ class CivsServiceTest : FunSpec({
     }
 
     for ((autonomous, earthworks) in listOf(true to true, true to false, false to false))
-    test("order admission refreshes only autonomous terrain captures before reserving stock autonomous=$autonomous terrain=$earthworks") {
+    test("order admission refreshes only autonomous terrain captures before reserving native material payments autonomous=$autonomous terrain=$earthworks") {
         serviceScenario { h ->
             val queued = h.queuedUpgrade()
             val existing = queued.building.copy(phase = if (earthworks) BuildingPhase.SITE else BuildingPhase.ACTIVE)
             val city = queued.city.copy(autonomy = if (autonomous) CivAutonomy(paused = true) else null,
-                inventory = if (autonomous) null else queued.city.inventory,
-                stock = if (autonomous) h.city.stock else Stock(),
+                inventory = if (autonomous) CivInventory(CivStorageMode.PHYSICAL) else queued.city.inventory,
+                stock = Stock(),
                 buildings = queued.city.buildings.map { if (it.id == existing.id) existing else it })
             val terrain = CivTerraformPlan(CivBox(CivPosition(4, 63, -1), CivPosition(10, 64, 3)),
                 listOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air")),
@@ -4141,7 +4408,8 @@ class CivsServiceTest : FunSpec({
             val reserved = h.saves.single().first
             reserved.construction!!.id shouldBe plan.id
             reserved.construction!!.plannedBuilding shouldBe target
-            val cost = if (autonomous) CivsAutonomy.cost(target.type, target.level) else Stock()
+            val cost = Stock()
+            reserved.construction!!.payment shouldBe CivConstructionPayment()
             reserved.construction!!.cost shouldBe cost
             reserved.stock shouldBe city.stock - cost
             h.service.settlements().single().stock shouldBe city.stock
@@ -4156,7 +4424,7 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             val queued = h.queuedUpgrade()
             val existing = queued.building.copy(phase = BuildingPhase.SITE)
-            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = null, stock = h.city.stock,
+            val city = queued.city.copy(autonomy = CivAutonomy(paused = true), inventory = CivInventory(CivStorageMode.PHYSICAL), stock = Stock(),
                 buildings = queued.city.buildings.map { if (it.id == existing.id) existing else it })
             val terrain = CivTerraformPlan(CivBox(CivPosition(4, 63, -1), CivPosition(10, 64, 3)),
                 listOf(CivPlanBlock(CivPosition(5, 64, 0), "minecraft:dirt", "minecraft:air")),
@@ -5834,23 +6102,32 @@ private fun constructionRuntime(service: CivsService): CivsConstructionRuntime =
     CivsService::class.java.getDeclaredField("construction").also { it.isAccessible = true }
         .get(service) as CivsConstructionRuntime
 
-private class ServiceRoadUpkeep(private val h: ServiceScenario) {
-    private val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT)
+private class ServiceRoadUpkeep(private val h: ServiceScenario, physical: Boolean = false, cobblestone: Int = 0) {
+    private val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT,
+        control = CivPosition(10, 64, 0).takeIf { physical })
     private val floor = CivPosition(20, 63, 0)
     private val road = CivBuilding(UUID.randomUUID(), BuildingType.ROAD, 1, floor, 0, "civs/infrastructure/test-road",
         CivBox(floor, floor.copy(y = 65)), floor.copy(y = 64), BuildingPhase.ACTIVE,
         transit = listOf(floor.copy(y = 64)))
-    val worker = h.city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1)
-    val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null,
+    val worker = h.city.workers.first().copy(assignment = hut.id, nextDeliveryAt = 1).let { worker ->
+        if (cobblestone == 0) worker else CivsEquipment.replace(worker,
+            MutableList<CivResidentItem?>(CivsEquipment.SLOTS) { null }.also {
+                it[CivsEquipment.BAG] = CivResidentItem("COBBLESTONE", cobblestone)
+            })
+    }
+    val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(),
+        inventory = CivInventory(CivStorageMode.PHYSICAL).takeIf { physical }, stock = if (physical) Stock() else h.city.stock,
         buildings = listOf(h.city.buildings.first(), hut, road), workers = listOf(worker)))
     val work = CivWorldWork(worker.id, worker.completedCycles, hut.id, floor.copy(x = 19, y = 64),
-        listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone")), status = "repairing-road", focus = floor,
+        listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone")),
+        inputs = if (physical) mapOf("COBBLESTONE" to 1L) else emptyMap(), status = "repairing-road", focus = floor,
         upkeep = CivRoadUpkeep(city.id, city.worldId, city.owner, road.id, road, floor, "minecraft:cobblestone", null, emptyList()))
     private val plan = CivPlacementPlan(road.id, city.id, city.worldId, road,
         listOf(CivPlanBlock(floor, "minecraft:dirt", "minecraft:cobblestone")), "a".repeat(64))
 
     init {
         h.world.loadChunk(1, 0)
+        if (physical) h.world.getBlockAt(10, 64, 0).type = Material.BARREL
         h.world.getBlockAt(20, 63, 0).type = Material.DIRT
         h.world.getBlockAt(20, 62, 0).type = Material.STONE
         every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
@@ -5886,7 +6163,7 @@ private class ServiceAutoBoard(private val h: ServiceScenario) {
     init {
         fun shifted(point: CivPosition) = point.copy(x = point.x + 256)
         city = CivsRules.validate(h.city.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), name = "Auto Board Town",
-            center = shifted(h.city.center), inventory = null, workers = emptyList(), memberNames = null,
+            center = shifted(h.city.center), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), workers = emptyList(), memberNames = null,
             autonomy = CivAutonomy(paused = true), immigration = CivImmigration(0, h.time),
             buildings = h.city.buildings.map { it.copy(id = UUID.randomUUID(), anchor = shifted(it.anchor), entrance = shifted(it.entrance),
                 bounds = CivBox(shifted(it.bounds.min), shifted(it.bounds.max)), control = it.control?.let(::shifted)) }))

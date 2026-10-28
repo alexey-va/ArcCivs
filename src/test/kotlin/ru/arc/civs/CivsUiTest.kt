@@ -878,6 +878,24 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("physical Auto inspection shows only the selected building items instead of legacy resource counters") {
+        withUi { h ->
+            h.player.setLocale(Locale.forLanguageTag("ru"))
+            val base = autonomousSettlement(h.player, "Auto")
+            val hall = base.buildings.first { it.type == BuildingType.TOWN_HALL }
+            val village = base.copy(owner = UUID.randomUUID(), stock = Stock(999, 998, 997),
+                inventory = CivInventory(CivStorageMode.PHYSICAL))
+            every { h.host.inspectBuilding(h.player, village.id, hall.id) } returns village
+            every { h.host.inspectionMaterials(h.player, village.id, hall.id) } returns mapOf("OAK_LOG" to 64L)
+            h.ui.openBuildingInspection(h.player, village.id, hall.id)
+            h.body() shouldContain "Припасы в этом здании"
+            h.body() shouldContain "64"
+            listOf("999", "998", "997", "Общий запас деревни").forEach { h.body().contains(it) shouldBe false }
+            verify(exactly = 1) { h.host.inspectionMaterials(h.player, village.id, hall.id) }
+            verify(exactly = 0) { h.host.availableMaterials(any()) }
+        }
+    }
+
     test("Auto admin barrel details retain native failure and recheck inspection when reopened") {
         withUi { h ->
             h.player.setLocale(Locale.forLanguageTag("ru"))

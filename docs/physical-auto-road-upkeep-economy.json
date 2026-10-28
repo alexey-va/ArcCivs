@@ -1,0 +1,195 @@
+{
+  "version": 1,
+  "title": "ArcCivs physical Auto road-upkeep input continuation",
+  "assumptions": [
+    "Parent authorized physical Auto upkeep to continue at the existing one-column payment, paid by one real plain COBBLESTONE from the builder bag first or its own hut. Already sealed legacy receipts retain one abstract STONE debit. Ordinary towns do not gain automatic road maintenance.",
+    "Sensitivity assumptions: 1/10/500 active Auto towns, one builder each, 0.25/1/4 active hours per day. Ideal loop 3000ms work plus existing 1000ms next-delivery guard gives at most 900 repairs per worker-hour before movement, scan budget, real damage, construction priority, missing supplies, permissions, full or unloaded storage. This is a loose ceiling, not observed activity.",
+    "A native cobblestone inventory unit and an old abstract STONE unit are distinct units. A repair consumes an inventory unit to change existing owned road geometry; world blocks are not counted as a second inventory output. No new work output, equipment yield, resident skill grant, player XP or monetary API is added.",
+    "An upkeep supply request exists only for a captured damaged-road job with current worker cycle and assignment. The parent-owned AutoSupplies hook must subtract bag, own hut, incoming goods and globally available native goods before considering a grant. At most one missing COBBLESTONE per request may then be issued through the existing shared 1000ms supply journal loop; this is within the previously assessed shared controller envelope, not a second emission loop.",
+    "Auto grants remain administrator-controlled items. Native upkeep checks road authority and all still-before hut debits after durable journal acknowledgement; exact receipt replay cannot debit twice. Existing physical work may drain migration reserves; this patch does not reinstate the removed global production gate.",
+    "Direct changes to Vault, tokens and player XP are individually zero. No item-to-currency exchange is assumed. Current SELL and the future SELL-to-contract transition remain unchanged. This is source-only evidence; runtime activity and player extraction or sales were not observed."
+  ],
+  "participants": [
+    1,
+    10,
+    500
+  ],
+  "currencies": {
+    "legacy_abstract_stone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "legacy_upkeep_inventory_cost",
+          "kind": "burn",
+          "source": "CivsRoadMaintenance.complete legacyStock branch",
+          "basis": "Ideal repair count in each independent low/base/high scenario",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          }
+        }
+      ]
+    },
+    "native_cobblestone": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "physical_upkeep_input",
+          "kind": "burn",
+          "source": "CivsRoadMaintenance.complete and exact own-hut upkeep receipt",
+          "basis": "One real input per repair; no output credit",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          }
+        }
+      ]
+    },
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "No monetary API in road upkeep",
+          "basis": "Direct delta only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "No token API in road upkeep",
+          "basis": "Direct delta only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "No player XP API in road upkeep",
+          "basis": "Direct delta only",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              225,
+              900,
+              3600
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

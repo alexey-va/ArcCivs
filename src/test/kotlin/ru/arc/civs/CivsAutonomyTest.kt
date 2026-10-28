@@ -483,6 +483,7 @@ class CivsAutonomyTest : FunSpec({
 
 private fun autonomyCity(): Settlement = CivsAutonomy.found(UUID.randomUUID(), UUID.randomUUID(), "Autonomous village",
     UUID.randomUUID(), CivPosition(0, 64, 0), 128, "medievaloak", autonomyBuilding(BuildingType.TOWN_HALL), 1_000)
+    .copy(stock = CivsRules.STARTING_STOCK, inventory = null)
 
 private fun autonomyBuilding(type: BuildingType, level: Int = 1, phase: BuildingPhase = BuildingPhase.SITE,
     occurrence: Int = 0): CivBuilding {
