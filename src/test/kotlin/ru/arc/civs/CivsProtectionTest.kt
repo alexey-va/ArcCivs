@@ -17,6 +17,9 @@ import org.bukkit.block.DoubleChest
 import org.bukkit.block.data.Ageable
 import org.bukkit.block.data.type.Farmland
 import org.bukkit.entity.Player
+import org.bukkit.entity.EntityType
+import org.bukkit.entity.LivingEntity
+import org.bukkit.event.entity.CreatureSpawnEvent
 import org.bukkit.event.Event
 import org.bukkit.event.block.Action
 import org.bukkit.event.block.BlockBreakEvent
@@ -52,6 +55,74 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsProtectionTest : FunSpec({
+    test("pillagers cannot spawn anywhere in ordinary or Auto territory for patrol raid or other reasons") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("pillager-villages")
+            val otherWorld = paper.addSimpleWorld("pillager-other-world")
+            val ordinary = protectionCity(world.uid, UUID.randomUUID(), protectionBuilding(0, 2))
+            val auto = ordinary.copy(id = UUID.randomUUID(), center = CivPosition(500, 64, 0), autonomy = CivAutonomy())
+            var cities = listOf(ordinary, auto)
+            val listener = CivsProtection({ cities })
+            paper.server.pluginManager.registerEvents(listener, paper.createSimplePlugin("PillagerTerritoryProtection"))
+            fun spawn(at: Location, reason: CreatureSpawnEvent.SpawnReason, type: EntityType = EntityType.PILLAGER,
+                cancelled: Boolean = false): CreatureSpawnEvent {
+                val entity = mockk<LivingEntity> { every { location } returns at; every { this@mockk.type } returns type }
+                return paper.callEvent(CreatureSpawnEvent(entity, reason).also { it.isCancelled = cancelled })
+            }
+            for (reason in CreatureSpawnEvent.SpawnReason.entries) {
+                spawn(Location(world, 75.5, 70.0, 75.5), reason).isCancelled shouldBe true
+                spawn(Location(world, 600.0, 70.0, 100.0), reason).isCancelled shouldBe true
+                spawn(Location(world, 601.0, 70.0, 100.0), reason).isCancelled shouldBe false
+                spawn(Location(otherWorld, 75.5, 70.0, 75.5), reason).isCancelled shouldBe false
+            }
+            spawn(Location(world, .5, 64.0, .5), CreatureSpawnEvent.SpawnReason.NATURAL, EntityType.VILLAGER).isCancelled shouldBe false
+            spawn(Location(world, 250.0, 64.0, 0.0), CreatureSpawnEvent.SpawnReason.PATROL, cancelled = true).isCancelled shouldBe true
+            cities = emptyList()
+            spawn(Location(world, .5, 64.0, .5), CreatureSpawnEvent.SpawnReason.PATROL).isCancelled shouldBe false
+        }
+    }
+
+    test("administrator edits an unrelated Auto building and worksite while exact locks remain protected") {
+        protectionScenario { paper ->
+            val world = paper.addSimpleWorld("auto-admin-edit")
+            val plugin = paper.createSimplePlugin("AdminEditProtection")
+            val owner = paper.addPlayer("AutoOwner")
+            val admin = paper.addPlayer("AutoAdmin").apply { addAttachment(plugin, "arccivs.admin", true) }
+            val visitor = paper.addPlayer("AutoVisitor")
+            val control = CivPosition(0, 64, 0)
+            val hall = protectionBuilding(0, 2).copy(control = control)
+            val farm = hall.copy(id = UUID.randomUUID(), type = BuildingType.FARM,
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.FARM, 1), control = null)
+            var city = protectionCity(world.uid, owner.uniqueId, hall).copy(autonomy = CivAutonomy(), buildings = listOf(hall, farm))
+            var available = true
+            val locked = CivPosition(1, 64, 1)
+            val listener = CivsProtection({ listOf(city) }, { available }, setOf(world.name),
+                worldLocked = { worldId, at -> worldId == world.uid && at == locked })
+            paper.server.pluginManager.registerEvents(listener, plugin)
+            CivsAutonomousWorksites.supports(city, farm) shouldBe true
+            val worksite = CivsAutonomousWorksites.protectionBounds(farm).first().min
+            for (point in listOf(CivPosition(2, 65, 2), worksite)) {
+                val block = world.getBlockAt(point.x, point.y, point.z).apply { type = Material.STONE }
+                paper.callEvent(BlockBreakEvent(block, visitor)).isCancelled shouldBe true
+                paper.callEvent(BlockBreakEvent(block, admin)).isCancelled shouldBe false
+                paper.callEvent(BlockDropItemEvent(block, block.state, admin, mutableListOf())).isCancelled shouldBe false
+                paper.callEvent(BlockPlaceEvent(block, block.state, block.getRelative(BlockFace.DOWN),
+                    ItemStack(Material.STONE), admin, true, EquipmentSlot.HAND)).isCancelled shouldBe false
+            }
+            for (point in listOf(control, locked)) {
+                paper.callEvent(BlockBreakEvent(world.getBlockAt(point.x, point.y, point.z), admin)).isCancelled shouldBe true
+            }
+            val target = world.getBlockAt(2, 65, 2)
+            val cancelled = BlockBreakEvent(target, admin).also { it.isCancelled = true }
+            paper.callEvent(cancelled).isCancelled shouldBe true
+            available = false
+            paper.callEvent(BlockBreakEvent(target, admin)).isCancelled shouldBe true
+            available = true
+            city = city.copy(pendingDeletion = CivDeletion(null)); listener.refresh()
+            paper.callEvent(BlockBreakEvent(target, admin)).isCancelled shouldBe true
+        }
+    }
+
     test("automatic decoration keeps native blocks and container withdrawals protected from ordinary visitors") {
         protectionScenario { paper ->
             val world = paper.addSimpleWorld("auto-decoration-protection")

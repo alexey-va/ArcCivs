@@ -137,6 +137,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         var selected: String? = null, var cursor: Int = 0, var ordinal: Int = 0, var checkedExcavation: Boolean = false,
         val retryAt: MutableMap<String, Long> = hashMapOf(), var lastDenial: Need? = null,
         var lastDeniedSection: String? = null,
+        val blockedSections: MutableMap<String, Need> = linkedMapOf(),
         var unsealedExcavation: CivPosition? = null,
         val legacyBlocks: Map<CivPosition, String?> = emptyMap())
     private val mineExecutions = hashMapOf<UUID, MineExecution>()
@@ -202,6 +203,17 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 "lastStatusAgeTicks" to reportedNeeds[id]?.let { (tick - it.tick).coerceAtLeast(0) },
                 "mineSearch" to mineSearches[id]?.let { mapOf("activeTicks" to it.activeTicks, "activeMillis" to it.activeTicks * 50,
                     "lastWarningActiveMillis" to it.warnedAt?.times(50), "lastSampleTick" to it.sampledAt) },
+                "mineSections" to workplaces[id]?.second?.let { mineExecutions[it.id] }?.let { execution ->
+                    val plan = requireNotNull(CivsMinePlan.forBuilding(execution.building))
+                    val ready = plan.sections.keys.filter { section ->
+                        plan.sectionCount(section, execution.prefix, execution.sections) < plan.sections.getValue(section).size &&
+                            plan.sectionReady(section, execution.prefix, execution.sections)
+                    }
+                    mapOf("exhausted" to (ready.isNotEmpty() && ready.all { it in execution.blockedSections }),
+                        "blockedCount" to execution.blockedSections.size,
+                        "blocked" to sample(execution.blockedSections.entries) { (section, denial) ->
+                            mapOf("section" to section, "reason" to denial.reason, "point" to point(denial.point)) })
+                },
                 "discovery" to mineSearches[id]?.let { mapOf("beganTick" to it.beganTick,
                     "elapsedTicks" to (tick - it.beganTick), "activeTicks" to it.activeTicks,
                     "ownerAdmissions" to it.admissions, "targetSwitches" to it.targetSwitches, "target" to point(it.target)) },
@@ -249,6 +261,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 mineExecutions[building.id]?.let { execution ->
                     execution.lastDeniedSection?.takeIf { it in CivsMinePlan.forBuilding(building)?.sections.orEmpty() }?.let { section ->
                         execution.retryAt.remove(section)
+                        execution.blockedSections.remove(section)
                         execution.selected = section
                     }
                 }
@@ -283,11 +296,20 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         workplaces.forEach { (workerId, place) ->
             if (place.first != worldId) return@forEach
             val building = place.second
-            if (mineBounds[building.id]?.contains(point.x, point.y, point.z) == true)
-                mineExecutions[building.id]?.let { execution ->
+            mineExecutions[building.id]?.let { execution ->
+                if (mineBounds[building.id]?.contains(point.x, point.y, point.z) == true) {
                     // Reopen deferred sections without preempting an admitted safe branch.
                     execution.retryAt.clear()
+                    execution.blockedSections.clear()
+                } else {
+                    // Terrain added above the mine envelope can make a previously shallow column safe.
+                    execution.blockedSections.entries.removeIf { (_, denial) ->
+                        denial.reason == "mine-thin-cover" && denial.point?.let {
+                            point.x == it.x && point.z == it.z && point.y >= it.y
+                        } == true
+                    }
                 }
+            }
             farmScans[workerId]?.changed(point)
             forestry.changed(workerId, point)
             mineSafety[workerId]?.let { scan ->
@@ -347,6 +369,9 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 changedPaths.any { (x, z) -> kotlin.math.abs(x.toLong() - point.x) <= margin && kotlin.math.abs(z.toLong() - point.z) <= margin }
         }
         for (workerId in workerIds) {
+            workplaces[workerId]?.second?.let { mineExecutions[it.id] }?.blockedSections?.entries?.removeIf { (_, denial) ->
+                denial.point?.let { affected(it, 0) } == true
+            }
             farmScans[workerId]?.protectionChanged { affected(it, 0) }
             forestry.protectionChanged(workerId, ::affected)
             refreshRejected(workerId) { rejected -> affected(rejected.lastFocus, 6) || rejected.positions.keys.any { affected(it, 1) } }
@@ -850,7 +875,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (building.type == BuildingType.QUARRY && work.miningStep != null) validateMineReceiptNative(city, work)
         // A wall can change during the real two-second action while its target
         // remains unchanged. Recheck the same bounded frontier at receipt admission.
-        if (work.miningPlanVersion == CivsMinePlan.VERSION && work.changes.any {
+        if (work.miningPlanVersion == CivsMinePlan.VERSION && !CivsMineSafety.clearingLava(work) && work.changes.any {
                 Bukkit.createBlockData(it.after).material.isAir && !Bukkit.createBlockData(it.before).material.isAir
             }) {
             val geometry = CivsMinePlan.forBuilding(building) ?: throw CivsRejection("stale-worksite")
@@ -1152,6 +1177,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (old.seals?.get(CivsMineProgress.key(at)) == data || CivsMinePlan.forBuilding(mine, 5)?.expectedAt(
                         at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation) == data) return true
             }
+            CivsMineProgress.v6State(proof)?.let { old ->
+                if (old.seals?.get(CivsMineProgress.key(at)) == data || CivsMinePlan.forBuilding(mine, 6)?.expectedAt(
+                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation) == data) return true
+            }
             val legacy = current?.legacyCompleted(legacyProgress ?: 0L)?.get(at)
             if (legacy != null && Bukkit.createBlockData(legacy).also { value ->
                 value.rotate(when (Math.floorMod(mine.rotation / 90, 4)) {
@@ -1177,7 +1206,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     /** Same pending-mutation authority at selection, admission, saved receipt and recovery. */
     private fun mineMutationAllowed(city: Settlement, building: CivBuilding, world: World, cell: CivPlanBlock,
         ordinal: Int, worker: CivWorker? = null, budgeted: Boolean = false, generator: Boolean = false,
-        sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION): Boolean? {
+        sealing: Boolean = false, planVersion: Int = CivsMinePlan.VERSION, clearingLava: Boolean = false): Boolean? {
         fun denied(reason: String): Boolean {
             if (worker == null) throw CivsRejection(reason)
             blocked(worker, "worksite-protected", point = cell.position, reason = reason,
@@ -1196,7 +1225,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             city.minePlans?.get(building.id.toString())?.nextStep == plan.steps.size.toLong() &&
             before in setOf(Material.STONE, Material.COBBLESTONE)
         val paidLiquidSeal = sealing && cell.after == "minecraft:cobblestone" && before in setOf(Material.WATER, Material.LAVA)
-        if (!before.isAir && before !in WEEDS && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal &&
+        val lavaClearance = clearingLava && before == Material.LAVA && cell.after == "minecraft:air" && local in plan.positions
+        if (!before.isAir && before !in WEEDS && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal && !lavaClearance &&
             !mineOwnedBlock(city, building, local, cell.before)) return denied("mine-foreign-block")
         val saved = city.minePlans?.get(building.id.toString())
         val restoredSolid = Bukkit.createBlockData(cell.after).material.isSolid && saved?.let {
@@ -1271,6 +1301,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val ordinal = work.miningOrdinal ?: work.focus?.let { focus ->
             plan.steps.indexOfFirst { it.point == CivsMinePlan.localPoint(building, focus) }.takeIf { it >= 0 }
         } ?: 0
+        val clearingLava = CivsMineSafety.clearingLava(work)
         pending.forEach { cell ->
             val block = read(city, building, world, cell.position, reserved = reserved) ?: throw CivsRejection("protected-area")
             requireCivs(worldAccess.canModify(city.owner, block, Bukkit.createBlockData(cell.after).material), "lands-denied")
@@ -1280,15 +1311,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     plan.steps.getOrNull((work.miningAccessStep ?: work.miningStep ?: 0).toInt())?.point,
                     plan.steps.getOrNull((work.miningAccessStep ?: work.miningStep ?: 0).toInt() - 1)?.point)
                 val local = CivsMinePlan.localPoint(building, cell.position)
-                requireCivs(origins.any { origin -> mineFrontier(city, building, world, plan, origin,
+                requireCivs(origins.any { origin -> clearingLava && local == origin && local in plan.positions ||
+                    mineFrontier(city, building, world, plan, origin,
                     work.miningExcavation?.let(::setOf).orEmpty(), accessStep = work.miningAccessStep ?: work.miningStep ?: 0,
                     reserved = reserved, sectionSteps = work.miningAccessSections.orEmpty())?.any {
-                        it.block == local && it.material?.createBlockData()?.asString == cell.after
+                        it.block == local && (it.material?.createBlockData()?.asString == cell.after ||
+                            clearingLava && it.material == null && local in plan.positions)
                     } == true }, "stale-worksite")
             }
             requireCivs(mineMutationAllowed(city, building, world, cell, ordinal, generator = work.miningGenerator,
-                sealing = sealing, planVersion = plan.version) == true, "protected-area")
+                sealing = sealing, planVersion = plan.version, clearingLava = clearingLava) == true, "protected-area")
         }
+        // Removing liquid opens no new rock face; adjacent flows may drain after this exact source is removed.
+        if (clearingLava) return
         val excavations = pending.filter { Bukkit.createBlockData(it.after).material.isAir }
             .mapTo(hashSetOf()) { CivsMinePlan.localPoint(building, it.position) }
         if (excavations.isEmpty()) return
@@ -1317,7 +1352,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             mineExecutions[building.id]?.let { execution -> execution.selected?.let { section ->
                 execution.lastDenial = currentNeed(city, worker)
                 execution.lastDeniedSection = section
-                execution.retryAt[section] = Bukkit.getCurrentTick().toLong() + 100
+                val denial = requireNotNull(execution.lastDenial)
+                if (denial.reason in setOf("mine-thin-cover", "liquid", "adjacent-liquid")) {
+                    // Native safety cannot improve with time. World/protection changes and explicit invalidation reopen it.
+                    execution.blockedSections[section] = denial
+                } else execution.retryAt[section] = Bukkit.getCurrentTick().toLong() + 100
                 execution.selected = null
             } }
         }
@@ -1377,6 +1416,11 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                     .filter { plan.completed(it.index, old.nextStep, old.sectionSteps.orEmpty()) }
                     .associate { it.value.point to it.value.after } }
             }.orEmpty()
+            val v6 = CivsMineProgress.v6State(state)?.let { old ->
+                requireNotNull(CivsMinePlan.forBuilding(building, 6)).let { plan -> plan.steps.withIndex()
+                    .filter { plan.completed(it.index, old.nextStep, old.sectionSteps.orEmpty()) }
+                    .associate { it.value.point to it.value.after } }
+            }.orEmpty()
             val initial = geometry.normalizedProgress(progress,
                 if (state?.version == geometry.version) state.sectionSteps.orEmpty()
                 else CivsMineProgress.retainedSpine(building, state))
@@ -1384,7 +1428,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 initial.second.toMutableMap(),
                 selected = previous?.selected, cursor = previous?.cursor ?: 0,
                 retryAt = previous?.retryAt?.toMutableMap() ?: hashMapOf(), lastDenial = previous?.lastDenial,
-                lastDeniedSection = previous?.lastDeniedSection, legacyBlocks = v1 + v2 + v3 + v4 + v5)
+                lastDeniedSection = previous?.lastDeniedSection, legacyBlocks = v1 + v2 + v3 + v4 + v5 + v6)
                 .also { mineExecutions[building.id] = it }
         }
         val legacy = execution.legacyBlocks
@@ -1392,13 +1436,14 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         fun nextOrdinal(section: String): Int? = geometry.sections.getValue(section)
             .getOrNull(geometry.sectionCount(section, execution.prefix, execution.sections).toInt())
         if (nextOrdinal("spine") != null) execution.selected = "spine"
-        if (execution.selected?.let { nextOrdinal(it) == null ||
+        if (execution.selected?.let { nextOrdinal(it) == null || it in execution.blockedSections ||
                 execution.retryAt.getOrDefault(it, 0) > Bukkit.getCurrentTick() } == true) execution.selected = null
         if (execution.selected == null) {
             for (offset in sectionKeys.indices) {
                 val index = Math.floorMod(execution.cursor + offset, sectionKeys.size)
                 val key = sectionKeys[index]
-                if (nextOrdinal(key) == null || execution.retryAt.getOrDefault(key, 0) > Bukkit.getCurrentTick() ||
+                if (nextOrdinal(key) == null || key in execution.blockedSections ||
+                    execution.retryAt.getOrDefault(key, 0) > Bukkit.getCurrentTick() ||
                     !geometry.sectionReady(key, execution.prefix, execution.sections)) continue
                 execution.selected = key
                 execution.cursor = (index + 1) % sectionKeys.size
@@ -1477,7 +1522,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             // A legacy completed cell that now contains a new solid object is not a
             // license to remodel it. Gravity falls and missing supports use real repairs.
             val previousMaterial = legacy[local]?.let { Bukkit.createBlockData(it).material }
-            if (legacy.containsKey(local) && !block.type.isAir && !block.type.hasGravity() && block.type != Material.TORCH &&
+            if (legacy.containsKey(local) && !block.type.isAir && !block.type.hasGravity() && block.type != Material.TORCH && block.type != Material.LAVA &&
                 block.type != previousMaterial) {
                 // V2 could retain a sound native wall instead of placing its planned
                 // cobblestone. Only that final completed support step carries this
@@ -1491,6 +1536,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                 if (!mineLining && (previousV2?.shaftSupport != true || previousV2.after != "minecraft:cobblestone" || !soundSupport))
                     return blocked(worker, "worksite-obstacle", point = point, reason = "legacy-cell-changed", blockMaterial = block.type.name)
             }
+            if (block.type == Material.LAVA) return clearMineLava(city, worker, building, world, geometry, step, block)
             if (block.isLiquid) return blocked(worker, "worksite-liquid", point = point,
                 reason = "liquid", blockMaterial = block.type.name)
             if (block.type in UNBREAKABLE) return blocked(worker, "worksite-unbreakable", point = point,
@@ -1610,9 +1656,13 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val landings = listOfNotNull(geometry.entranceLanding) + geometry.floors
         // Deep access is a narrow ladder until its spine is paid; enclose that passage locally.
         // The frozen V5 rows retain their wider frontier, including the upper boundary row.
-        val oldLowest = geometry.takeIf { it.version == 6 &&
-            it.sectionCount("spine", accessStep, sectionSteps) < it.sections.getValue("spine").size }
-            ?.forVersion(5)?.lowest
+        val spineCount = geometry.sectionCount("spine", accessStep, sectionSteps)
+        val oldLowest = geometry.takeIf { it.version >= 6 && spineCount < it.sections.getValue("spine").size }?.let {
+            // An interrupted V6 spine retains its own narrow frontier while V7 finishes it.
+            val predecessor = if (it.version == 7 && spineCount < requireNotNull(it.forVersion(6)).sections.getValue("spine").size)
+                5 else it.version - 1
+            requireNotNull(it.forVersion(predecessor)).lowest
+        }
         val narrowColumns = geometry.ladderAt(effect.y).let { setOf(it.x to it.z) }
         fun columnsAt(y: Int) = if (oldLowest != null && y < oldLowest) narrowColumns else geometry.shaftColumns
         if ((effect.x to effect.z) in geometry.shaftColumns) {
@@ -1671,10 +1721,20 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
                         for ((dx, dz) in sides) {
                             val wall = CivPosition(x + dx, y, z + dz)
                             if ((wall.x to wall.z) in columnsAt(y)) continue
-                            if (landings.any { floor -> floor.cells.any {
+                            val landingOpening = landings.any { floor -> floor.cells.any {
                                     it.x == wall.x && it.z == wall.z && wall.y in it.y + 1..it.y + floor.height
-                                } } && (geometry.builtStanding(wall, accessStep, sectionSteps) ||
+                                } }
+                            if (landingOpening && (geometry.builtStanding(wall, accessStep, sectionSteps) ||
                                     geometry.builtStanding(wall.copy(y = wall.y - 1), accessStep, sectionSteps))) continue
+                            if (landingOpening && geometry.version == 7 && CivsMineProgress.v6State(city.minePlans?.get(building.id.toString())) != null &&
+                                (CivsMineProgress.priorStanding(building, city.minePlans?.get(building.id.toString()),
+                                    CivsWorksiteLayouts.point(building, wall)) ||
+                                    CivsMineProgress.priorStanding(building, city.minePlans?.get(building.id.toString()),
+                                        CivsWorksiteLayouts.point(building, wall.copy(y = wall.y - 1))))) {
+                                // Retain a paid predecessor opening; native liquid still blocks, never becomes an inner seal.
+                                add(MineProtection(CivPosition(x, y, z), wall, null))
+                                continue
+                            }
                             add(MineProtection(CivPosition(x, y, z), wall, Material.COBBLESTONE))
                         }
                     }
@@ -1721,6 +1781,21 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         return !safe && (block.type.isAir || block.isLiquid || block.type in WEEDS)
     }
 
+    private fun clearMineLava(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        geometry: CivsMinePlan, step: CivsMinePlan.Step, block: Block): CivWorldWork? {
+        val point = position(block)
+        if (block.type != Material.LAVA || CivsMinePlan.localPoint(building, point) !in geometry.positions)
+            return blocked(worker, "worksite-liquid", point = point, reason = "adjacent-liquid", blockMaterial = block.type.name)
+        val cell = change(block, "minecraft:air")
+        val ordinal = mineExecutions[building.id]?.ordinal ?: return null
+        if (mineMutationAllowed(city, building, world, cell, ordinal, worker, budgeted = true, clearingLava = true) != true) return null
+        val progress = city.minePlans?.get(building.id.toString())?.takeIf { it.version == geometry.version }?.nextStep ?: 0
+        val standing = beside(city, worker, building, world, point, ladder = true, miningStep = progress,
+            preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }) ?: return null
+        return work(worker, building, standing, listOf(cell), status = "securing-mine", duration = 2_000, miningStep = progress)
+            .copy(equipmentAfter = null, miningFrontier = step.point, miningExcavation = step.point)
+    }
+
     /** Repair only this frontier. Earlier completed columns never enter another branch's work. */
     private fun secureMine(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         geometry: CivsMinePlan, step: CivsMinePlan.Step, progress: Long, excavations: Set<CivPosition>,
@@ -1754,8 +1829,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             }
             if (task.transferFooting && !block.type.isAir) { scan.next++; return@repeat }
             if (!mineProtectionNeeded(block, task.material)) { scan.next++; return@repeat }
-            if (task.material == null) return blocked(worker, "worksite-liquid", point = point,
-                reason = "adjacent-liquid", blockMaterial = block.type.name)
+            if (task.material == null) {
+                if (block.type == Material.LAVA) return clearMineLava(city, worker, building, world, geometry, step, block)
+                return blocked(worker, "worksite-liquid", point = point, reason = "adjacent-liquid", blockMaterial = block.type.name)
+            }
             if (read(city, building, world, point, worker = worker) == null) return null
             if (!CivsAutonomousWorksites.supports(city, building) && CivsEquipment.plainCount(worker, task.material.name) == 0)
                 return prepareQuarry(city, worker, building, world)

@@ -27,6 +27,12 @@ internal object CivsMineSafety {
     const val COMPACT_COVER = 6
     const val FULL_COVER = 16
 
+    /** Explicit hazard removal, never an item, equipment or completed excavation receipt. */
+    fun clearingLava(work: CivWorldWork): Boolean = work.miningPlanVersion == 7 && work.status == "securing-mine" &&
+        !work.miningGenerator && work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null &&
+        work.miningSections != null && work.miningAccessSections != null && work.miningOrdinal != null &&
+        work.changes.singleOrNull()?.let { it.before.substringBefore('[') == "minecraft:lava" && it.after == "minecraft:air" } == true
+
     fun natural(material: Material): Boolean = material in GROUND || material.name.endsWith("_ORE")
 
     /** Existing ladder/backing access stays narrow; broad landings and arms need real terrain cover. */

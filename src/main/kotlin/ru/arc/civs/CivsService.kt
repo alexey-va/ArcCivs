@@ -167,6 +167,7 @@ class CivsService(
     @Volatile private var health = RuntimeHealthContribution(state = RuntimeHealthState.STARTING)
     private val supply = CivsSupplyDispatcher(tasks, nativeWork, ::captureSupply, ::validateSupply, supplyExecutor, clock)
     private val supplyObservations = mutableMapOf<UUID, Pair<Long, Long>>()
+    private val capacityWrites = mutableSetOf<UUID>()
 
     private val construction: CivsConstructionRuntime = CivsConstructionRuntime(plugin, tasks, world,
         blueprints, store, executor, physics, storage, citizens, footTraffic, { cities }, busy, unhealthy,
@@ -369,6 +370,7 @@ class CivsService(
             "resources" -> rows { city ->
                 val workers = city.workers.filter { workerId == null || it.id == workerId }
                 mapOf("city" to city.id, "revision" to city.revision, "mode" to city.inventory?.mode,
+                    "autonomous_storage" to city.autonomy?.storage,
                     "stock" to city.stock, "total_workers" to workers.size, "truncated_workers" to (workers.size > 8),
                     "workers" to workers.take(8).map { worker -> mapOf("worker" to worker.id,
                         "assignment" to worker.assignment, "shipment" to worker.cargo?.id, "pending_stock" to worker.pendingStock,
@@ -1743,10 +1745,13 @@ class CivsService(
             val building = city.building(assignment) ?: throw CivsRejection("building-not-found")
             if (citizens.pendingStockDelivery(cityId, workerId) != null) {
                 val token = CitizenToken(assignment, cycle, nextAt, constructionId)
-                val pending = citizens.requirePendingStockDelivery(cityId, workerId, token)
+                val delivered = citizens.requirePendingStockDelivery(cityId, workerId, token)
+                val pending = delivered.stock
                 return@afterCityAvailable mutate(cityId) { current ->
-                    citizens.requirePendingStockDelivery(cityId, workerId, token)
-                    CivsAutonomousLogistics.unloadPending(current, workerId, assignment, cycle, nextAt, pending, at)
+                    rejectIf(citizens.requirePendingStockDelivery(cityId, workerId, token) != delivered, "stale-delivery")
+                    requireAutonomousStorage(current)
+                    CivsAutonomousLogistics.unloadPending(current, workerId, assignment, cycle, nextAt, pending, at,
+                        delivered.destinationBuildingId)
                 }.thenApply { saved ->
                     CivsDiagnostics.event("autonomous_pending_stock_delivered", "city" to cityId, "worker" to workerId,
                         "pending_before" to pending, "pending_after" to saved.workers.first { it.id == workerId }.pendingStock,
@@ -1811,7 +1816,10 @@ class CivsService(
                         saved
                     }
                 }
-                mutate(cityId) { CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at) }.thenApply { saved ->
+                mutate(cityId) {
+                    requireAutonomousStorage(it, assignment)
+                    CivsRules.deliver(it, it.owner, workerId, assignment, cycle, nextAt, at)
+                }.thenApply { saved ->
                     CivsDiagnostics.event("autonomous_resource_delivered", "city" to cityId, "worker" to workerId,
                         "cycle" to cycle, "resource" to CivsRules.resource(building.type),
                         "amount" to CivsRules.deliveryAmount(building), "stock" to saved.stock,
@@ -1881,6 +1889,7 @@ class CivsService(
 
     /** Auto forestry uses the same native journal while retaining its nontransferable stock contract. */
     private fun autonomousForestryMutation(city: Settlement, work: CivWorldWork, at: Long): CompletableFuture<Settlement> {
+        requireAutonomousStorage(city, work.buildingId)
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         val tx = try {
@@ -2038,6 +2047,8 @@ class CivsService(
     /** Local stock permits the trip to storage; work still requires the subsequent physical pickup. */
     internal fun productionReady(city: Settlement, worker: CivWorker): Boolean {
         val building = worker.assignment?.let(city::building) ?: return true
+        if (city.autonomy != null && CivsRules.resource(building.type) != null &&
+            !storage.autonomousCapacityCurrent(city, building.id)) return false
         if (building.type == BuildingType.UNIVERSITY) return CivsRules.productionAvailable(city, building)
         if (city.autonomy != null) return (citizens.acceptedIndustryWork(city, worker) ?: CivsIndustry.autonomousWork(city, building))
             ?.let { CivsIndustry.inputsReady(city, it) && CivsIndustry.room(city, it) }
@@ -2047,6 +2058,14 @@ class CivsService(
         val inputs = craftPlan(city, worker)?.inputs ?: if (building.type == BuildingType.SAWMILL) return false
             else CivsProduction.inputs(city, building)
         return CivsEquipment.inputsReady(worker, inputs, localStocks(city)(building.id))
+    }
+
+    private fun requireAutonomousStorage(city: Settlement, buildingId: UUID? = null) {
+        rejectIf(city.autonomy != null && !storage.autonomousCapacityCurrent(city, buildingId), "storage-observation-stale")
+    }
+
+    private fun requireAutonomousDepotStorage(city: Settlement) {
+        CivsAutonomousStorage.depots(city).forEach { requireAutonomousStorage(city, it.id) }
     }
 
     internal fun workInputsReady(city: Settlement, worker: CivWorker): Boolean {
@@ -2200,11 +2219,15 @@ class CivsService(
     private fun pulseSupply() {
         val relevant = cities.values.filter { city -> city.pendingDeletion == null &&
             (city.inventory != null || city.autonomy?.paused == false) &&
-            city.id !in unhealthy && city.workers.any { worker ->
+            city.id !in unhealthy && (if (city.autonomy != null) settlementActive(city) && city.workers.any { worker ->
+                worker.cargo != null || worker.pendingStock != null || worker.assignment?.let(city::building)?.let {
+                    it.type == BuildingType.WAREHOUSE || CivsRules.resource(it.type) != null
+                } == true
+            } else city.workers.any { worker ->
                 worker.cargo != null || worker.assignment?.let(city::building)?.type.let {
                     it == BuildingType.WAREHOUSE || it in CivsCarpentry.workshops
                 }
-            } }
+            }) }
         val ids = relevant.mapTo(hashSetOf(), Settlement::id)
         // An unknown receipt outcome keeps its accepted batch reserved until the existing
         // recovery owner publishes or definitively rejects that receipt.
@@ -2225,12 +2248,39 @@ class CivsService(
             (it.inventory != null || it.autonomy?.paused == false) }
             ?: throw CivsRejection("storage-unavailable")
         if (cityId in busy) throw CivsRejection("city-busy")
-        if (city.autonomy != null) return {
-            if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
-            if (cityId in busy) throw CivsRejection("city-busy")
-            CivsAutonomousLogistics.snapshot(city, retained, { citizens.courierPosition(cityId, it) },
-                citizens.courierSupplySources(cityId, retained.values.mapNotNullTo(hashSetOf()) { it.cargo.sourceWorkerId }),
-                { citizens.courierUnavailable(cityId, it) })
+        if (city.autonomy != null) {
+            val capture = storage.startSupplyCapture(city)
+            return capture@{
+                if (!ready() || cityId in unhealthy) throw CivsRejection("storage-unavailable")
+                if (cityId in capacityWrites) return@capture null
+                if (cityId in busy) throw CivsRejection("city-busy")
+                if (!capture.step()) return@capture null
+                val observed = requireNotNull(capture.result)
+                val current = cities[cityId] ?: throw CivsRejection("storage-unavailable")
+                if (!storage.supplyCaptureCurrent(current, observed)) throw CivsRejection("storage-observation-stale")
+                val stores = CivsAutonomousStorage.stores(observed)
+                if (current.autonomy?.storage != stores) {
+                    capacityWrites += cityId
+                    runCatching { mutate(cityId) { live ->
+                        if (!storage.supplyCaptureCurrent(live, observed)) throw CivsRejection("storage-observation-stale")
+                        val auto = live.autonomy ?: throw CivsRejection("storage-unavailable")
+                        CivsRules.validate(live.copy(autonomy = auto.copy(storage = stores), revision = Math.addExact(live.revision, 1)))
+                    } }.getOrElse { CompletableFuture.failedFuture(it) }.whenCompleteSync(tasks) { saved, failure ->
+                        capacityWrites -= cityId
+                        if (failure == null && saved != null) storage.rememberAutonomousCapacity(saved, observed)
+                        if (failure == null) CivsDiagnostics.event("autonomous_storage_observed", "city" to cityId,
+                            "stores" to stores.size, "empty_slots" to stores.values.sumOf { it.emptySlots },
+                            "containers" to stores.values.sumOf { it.containers }, "revision" to saved?.revision)
+                        else if (CivsDiagnostics.rejection(failure)?.reason !in setOf("city-busy", "storage-observation-stale"))
+                            log("observe autonomous storage $cityId", failure, cityId)
+                    }
+                    return@capture null
+                }
+                storage.rememberAutonomousCapacity(current, observed)
+                CivsAutonomousLogistics.snapshot(current, retained, { citizens.courierPosition(cityId, it) },
+                    citizens.courierSupplySources(cityId, retained.values.mapNotNullTo(hashSetOf()) { it.cargo.sourceWorkerId }),
+                    observed, { citizens.courierUnavailable(cityId, it) })
+            }
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
             { citizens.courierPosition(cityId, it) }, { citizens.courierSupplySources(cityId,
@@ -2248,6 +2298,7 @@ class CivsService(
         if (snapshot.autonomousStock) {
             val observation = snapshot.inputKey as? CivAutonomousSupplyObservation ?: return false
             return city.autonomy?.paused == false && observation.inputs == civSupplyInputs(city) &&
+                (observation.capture == null || storage.supplyCaptureCurrent(city, observation.capture)) &&
                 plans.all { (workerId, plan) -> plan.carrying ||
                     !citizens.courierUnavailable(city.id, workerId) && citizens.courierSourceCurrent(city.id, plan.cargo) }
         }
@@ -2358,6 +2409,7 @@ class CivsService(
                     return@afterCityAvailable mutate(cityId) { current ->
                         citizens.requireStorageArrival(cityId, workerId, destinationId)
                         rejectIf(CivsLogistics.destination(current, cargo)?.id != destinationId, "stale-delivery")
+                        requireAutonomousDepotStorage(current)
                         CivsLogistics.unload(current, workerId, cargo.id, now())
                     }.thenApply { saved ->
                         supply.release(cityId, workerId)

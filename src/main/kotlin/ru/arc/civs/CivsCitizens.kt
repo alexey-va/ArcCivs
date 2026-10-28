@@ -1011,21 +1011,22 @@ class CivsCitizens(
     }
 
     /** Saved goods need an actual depot arrival, but never another observed production session. */
-    internal fun requirePendingStockDelivery(cityId: UUID, workerId: UUID, token: CitizenToken): Stock {
+    internal fun requirePendingStockDelivery(cityId: UUID, workerId: UUID, token: CitizenToken): CivPendingStockDelivery {
         checkMainThread()
         val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid }
             ?: throw CivsRejection("route-unreachable")
         val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         val pending = actor.plan.pendingStockDelivery ?: throw CivsRejection("stale-delivery")
+        val destination = city.buildings.firstOrNull { CivsRules.isDepot(it) && it.entrance == actor.plan.storage }
+            ?: throw CivsRejection("stale-delivery")
         if (city.autonomy?.paused != false || city.inventory != null || city.pendingDeletion != null ||
             actor.plan.token != token || worker.assignment != token.assignmentId || worker.completedCycles != token.completedCycles ||
-            worker.nextDeliveryAt != token.nextDeliveryAt || worker.pendingStock != pending || pending == Stock() ||
-            city.buildings.none { CivsRules.isDepot(it) && it.entrance == actor.plan.storage }) throw CivsRejection("stale-delivery")
+            worker.nextDeliveryAt != token.nextDeliveryAt || worker.pendingStock != pending || pending == Stock()) throw CivsRejection("stale-delivery")
         if (closed.get() || actor.sheltering || workerId in pendingHarm || actor.cycle.phase != CitizenPhase.DELIVERING ||
             actor.npc.world.uid != city.worldId || !arrivedAt(actor, city, actor.npc.world, actor.plan.storage))
             throw CivsRejection("route-unreachable")
-        return pending
+        return CivPendingStockDelivery(pending, destination.id)
     }
 
     internal fun requireAutonomousObservedSession(cityId: UUID, workerId: UUID) {
@@ -1231,8 +1232,15 @@ class CivsCitizens(
         if (now < courier.courierTargetAfter) return courier.plan.workplace?.let(courier.targets::containsKey) == true
         courier.courierTargetAfter = now + 1_000L
         val at = source.npc.location.point()
-        if (courier.route != null && courier.courierSourceObserved?.distanceSquared(at)?.let { it <= 1.0 } == true &&
-            courier.route?.motion?.navigating == true) return true
+        val approach = courier.route
+        if (approach?.motion?.navigating == true) {
+            val nearby = navigationSettings.closeRouteDistance * navigationSettings.closeRouteDistance
+            // Keep a distant approach while the source stays in its destination area.
+            // Repeated local motion must not cancel capture before the courier can walk.
+            if (courier.courierSourceObserved?.distanceSquared(at)?.let { it <= 1.0 } == true ||
+                courier.npc.location.point().distanceSquared(approach.target.point()) > nearby &&
+                at.distanceSquared(approach.target.point()) <= nearby) return true
+        }
         val target = courierInterceptTarget(courier, source, city) ?: run {
             cancelRoute(courier)
             courier.cycle.deferWork(now)
@@ -3947,6 +3955,8 @@ class CivsCitizens(
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainFlow(event: org.bukkit.event.block.BlockFromToEvent) = invalidateTerrain(event.toBlock)
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    fun onTerrainFluid(event: org.bukkit.event.block.FluidLevelChangeEvent) = invalidateTerrain(event.block)
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainEntity(event: org.bukkit.event.entity.EntityChangeBlockEvent) = invalidateTerrain(event.block)
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     fun onTerrainTree(event: org.bukkit.event.world.StructureGrowEvent) {
@@ -4280,9 +4290,10 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         .minByOrNull { (if (autonomous) it.entrance else it.control ?: it.entrance).point()
             .distanceSquared((workplace ?: city.center).point()) }
     if (autonomous && assigned != null && !CivsAutonomousLogistics.staffed(city)) {
-        worker.pendingStock?.takeUnless { it == Stock() }?.let { pending ->
+        worker.pendingStock?.takeUnless { it == Stock() || !CivsAutonomousLogistics.pendingRoom(city, it) }?.let { pending ->
+            val destination = CivsAutonomousStorage.pendingDestination(city, pending, workplace ?: city.center) ?: return null
             return CitizenPlan(CitizenToken(assigned.id, worker.completedCycles, worker.nextDeliveryAt, null),
-                depot?.entrance ?: return null, assigned.entrance, workType, 0,
+                destination.entrance, assigned.entrance, workType, 0,
                 if (city.autonomy?.paused == true) "autonomy-paused" else null, pendingStockDelivery = pending)
         }
     }
@@ -4352,7 +4363,8 @@ private fun hasCapacity(city: Settlement, plan: CitizenPlan): Boolean {
     if (city.inventory != null) return true
     val building = plan.token.assignmentId?.let(city::building) ?: return true
     val resource = CivsRules.resource(building.type) ?: return true
-    return (if (city.autonomy != null) CivsAutonomousLogistics.room(city, resource)
+    return (if (city.autonomy != null) CivsAutonomousLogistics.room(city, resource,
+        city.workers.firstOrNull { it.assignment == building.id }?.id)
         else CivsRules.capacity(city) - city.stock[resource]) >= CivsRules.deliveryAmount(building)
 }
 

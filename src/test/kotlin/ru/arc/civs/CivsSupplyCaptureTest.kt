@@ -27,6 +27,43 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsSupplyCaptureTest : FunSpec({
+    test("Auto captures actual slots separately for the producer and warehouse without counting an outside chest half") {
+        supplyCaptureScenario { h ->
+            h.city = h.city.copy(inventory = null, autonomy = CivAutonomy())
+            h.storage.foodCanModify = { _, _ -> true }
+            val first = h.capture()
+            val producer = first.stores.getValue(h.producer.id)
+            producer.containers shouldBe 1
+            producer.slots shouldBe 27
+            producer.capacity.emptySlots shouldBe 27
+            first.stores.getValue(h.warehouse.id).slots shouldBe 54
+            h.city = h.city.copy(autonomy = h.city.autonomy!!.copy(storage = CivsAutonomousStorage.stores(first)))
+            h.storage.rememberAutonomousCapacity(h.city, first)
+            h.storage.autonomousCapacityCurrent(h.city, h.producer.id) shouldBe true
+            h.nodes.getValue(CivPosition(3, 64, 0)).reads shouldBe 0
+            val local = h.nodes.getValue(h.producer.control!!)
+            local.contents.indices.forEach { local.contents[it] = ItemStack(Material.COBBLESTONE, 64) }
+            h.storage.supplyPickup(h.pickup(h.producer.control!!))
+            h.storage.autonomousCapacityCurrent(h.city, h.producer.id) shouldBe false
+            // A save finishing after this inventory event must not republish its old positive capacity as current.
+            h.storage.rememberAutonomousCapacity(h.city, first)
+            h.storage.autonomousCapacityCurrent(h.city, h.producer.id) shouldBe false
+            val full = h.capture()
+            full.stores.getValue(h.producer.id).capacity.emptySlots shouldBe 0
+            full.stores.getValue(h.warehouse.id).capacity.emptySlots shouldBe 54
+            h.city = h.city.copy(autonomy = h.city.autonomy!!.copy(storage = CivsAutonomousStorage.stores(full)))
+            h.storage.rememberAutonomousCapacity(h.city, full)
+            h.storage.autonomousCapacityCurrent(h.city, h.producer.id) shouldBe true
+            h.storage.supplyCaptureCurrent(h.city, first, setOf(h.producer.id)) shouldBe false
+            h.storage.supplyCaptureCurrent(h.city, full) shouldBe true
+            h.storage.foodCanModify = { _, position -> position != h.producer.control }
+            val denied = h.capture().stores.getValue(h.producer.id)
+            denied.slots shouldBe 0
+            denied.unavailable shouldBe 1
+            denied.capacity.emptySlots shouldBe 0
+        }
+    }
+
     test("one step reads one chest half and capacity shares empty slots while excluding custom items") {
         supplyCaptureScenario { h ->
             val barrel = h.nodes.getValue(h.warehouse.control!!)

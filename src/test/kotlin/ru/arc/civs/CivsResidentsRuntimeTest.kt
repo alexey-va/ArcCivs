@@ -3942,11 +3942,11 @@ class CivsResidentsRuntimeTest : FunSpec({
                 workerId shouldBe original.id
                 deliveredToken shouldBe token
                 h.owner.autonomousVisualWork(h.city.id, workerId) shouldBe null
-                val goods = h.owner.requirePendingStockDelivery(h.city.id, workerId, token)
-                goods shouldBe Stock(food = 384)
+                val delivered = h.owner.requirePendingStockDelivery(h.city.id, workerId, token)
+                delivered shouldBe CivPendingStockDelivery(Stock(food = 384), warehouse.id)
                 citizenNearEndpoint(CitizenPoint(actor.location.x, actor.location.y, actor.location.z), warehouse.entrance) shouldBe true
                 committed = CivsAutonomousLogistics.unloadPending(h.city, workerId, farm.id, token.completedCycles,
-                    token.nextDeliveryAt, goods, requireNotNull(h.navigationNow))
+                    token.nextDeliveryAt, delivered.stock, requireNotNull(h.navigationNow), delivered.destinationBuildingId)
                 pending
             }
             h.navigationNow = 2_000

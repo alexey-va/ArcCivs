@@ -55,7 +55,7 @@ class Auto2MineCoverScenarioTest : FunSpec({
             withAuto2MineCoverModel(requireNotNull(savedState)) {
                 var current = city
                 var runtime = worksites
-                val currentPlan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
+                val currentPlan = requireNotNull(CivsMinePlan.forBuilding(mine))
                 val key = mine.id.toString()
                 val frozen = CivMineV5Proof(before.nextStep, before.sectionSteps, before.excavation, before.seals)
                 val retainedSpine = plan.sections.getValue("spine").filter {
@@ -99,7 +99,7 @@ class Auto2MineCoverScenarioTest : FunSpec({
                                         "deepestLandingCover=${mineLandingCover(world, mine, currentPlan)}; " +
                                         "deniedSections=$deniedSections; debug=${runtime.debug(setOf(worker.id))}"
                                 }
-                                accepted.miningPlanVersion shouldBe 6
+                                accepted.miningPlanVersion shouldBe CivsMinePlan.VERSION
                                 accepted.miningGenerator shouldBe false
                                 accepted.autonomousVisual shouldBe true
                                 accepted.inputs shouldBe emptyMap()

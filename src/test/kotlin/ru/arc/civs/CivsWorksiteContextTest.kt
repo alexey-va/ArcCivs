@@ -24,11 +24,11 @@ class CivsWorksiteContextTest : FunSpec({
             val worker = spatialWorker(mine, "IRON_PICKAXE")
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
             val physicalTarget = CivPosition(19, -9, -10)
-            // V6 extends the shaft before the galleries; preserve this physical hazard,
+            // Current plans extend the shaft before the galleries; preserve this physical hazard,
             // not the historical V5 ordinal of the excavation.
             val targetOrdinal = geometry.steps.indexOfFirst { it.point == physicalTarget && it.after == null }
             check(targetOrdinal >= 0) { "Current mine plan lost the protected-neighbour target $physicalTarget" }
-            val city = spatialCity(world.uid, listOf(mine, forest), worker).copy(
+            var city = spatialCity(world.uid, listOf(mine, forest), worker).copy(
                 center = mine.anchor, radius = 80,
                 minePlans = mapOf(mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, targetOrdinal.toLong())))
             access(city)
@@ -38,6 +38,10 @@ class CivsWorksiteContextTest : FunSpec({
             // sparse-section regression retains the live shallow surface and defers it.
             seedMineNaturalCover(world, mine)
             seedContextMine(world, mine, targetOrdinal)
+            // This hazard fixture supplies the completed access in both its proof and native cells.
+            city = city.copy(minePlans = mapOf(mine.id.toString() to seedMinePaidSpine(world, mine,
+                city.minePlans!!.getValue(mine.id.toString()))))
+            access(city)
             val target = CivPosition(-1863, 61, -2686)
             val neighbour = CivPosition(-1864, 61, -2686)
             world.getBlockAt(neighbour.x, neighbour.y, neighbour.z).type = Material.STONE

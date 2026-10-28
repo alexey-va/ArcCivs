@@ -60,7 +60,8 @@ internal object CivsAutonomousWorksites {
             requireWork(work.changes.all { cell -> material(cell.after) in allowed ||
                 work.miningGenerator && material(cell.after) == "STONE" && local(building, cell.position) == plan.generator })
             requireWork(work.changes.none { material(it.after) == "AIR" && material(it.before) in
-                setOf("WATER", "LAVA", "BEDROCK", "BARRIER", "END_PORTAL_FRAME", "END_PORTAL", "NETHER_PORTAL") })
+                setOf("WATER", "LAVA", "BEDROCK", "BARRIER", "END_PORTAL_FRAME", "END_PORTAL", "NETHER_PORTAL") &&
+                !(material(it.before) == "LAVA" && CivsMineSafety.clearingLava(work)) })
         }
     }
 

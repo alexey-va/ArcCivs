@@ -1,0 +1,262 @@
+{
+  "version": 1,
+  "title": "ArcCivs Auto producer-local closed-stock capacity assessment, 2026-10-28",
+  "assumptions": [
+    "The Auto2 runtime stock values wood=384, stone=3, food=382 come from `civs debug resources` /storage CITY, revision 32256, observed 2026-10-28 13:39:56-13:40:04 UTC. They are a point-in-time snapshot, not a production-rate observation. The reported 30-container city count is not used as producer-local capacity.",
+    "Before a successful native-storage capture, the Auto2 city-level cap is 128 base plus 256 for its active level-1 Warehouse, or 384 units per resource. Other profiles differ: an active level-2 Warehouse yields 640 under the old formula; that value is not substituted for Auto2.",
+    "New capacity scenarios are hypothetical counts of empty native slots in one producer workplace: low=1, base=27, high=54. They are sensitivities, not measured slot counts. At 64 closed-stock units per empty slot, a single resource alone fits 64, 1728, or 3456 units respectively.",
+    "Wood, stone, and food share each producer's local empty slots. One stack uses ceil(count/64) slots. Capacity for one resource therefore depends on the slots already reserved by the other resources; do not multiply the single-resource-alone values by three.",
+    "A normal barrel or chest half has 27 slots; a double chest has 54 across its two halves. These are theoretical empty-slot ceilings before accounting for physical contents. Captured native items occupy their actual slots and are not copied into closed abstract stock.",
+    "The runtime capture records active buildings separately. Producer work is bounded by that assigned building's own observed free slots; city-wide count of all containers is not a producer-local count. Courier transfer moves already-saved pendingStock to the warehouse and does not produce another unit.",
+    "Warehouse stock uses one shared slot pool across wood, stone, and food. Each resource's ceil(count/64) occupies the same depot slots; 27 empty warehouse slots provide at most 1728 units when one resource alone occupies them, not 1728 units per resource.",
+    "Accepted cargo keeps a stable capacity reservation across later plans until delivery or cancellation. This records the invariant only; the internal reservation algorithm is deliberately not described here.",
+    "Freshness is owner-generation scoped: production relies on the assigned producer building's own captured generation; unloading relies on all active depot generations. A save based on a stale capture never authorizes production or unloading. These are target-.113 contracts; source integration, build, delivery, and live confirmation are pending.",
+    "The existing per-cycle yields and production interval remain unchanged. A larger local buffer may allow more existing production to remain buffered before storage-full; the realized additional throughput, cycle count, sales, and net accumulation are unknown and are not fabricated here.",
+    "Abstract Auto wood, stone, and food remain closed internal stock. This change creates no native log items. The existing native-food bridge may convert one already-earned abstract FOOD into one ordinary BREAD through its existing receipt, up to the existing four-item batch; it adds no food production or new direct currency flow.",
+    "Direct Vault, premium tokens, and player XP are each modeled as zero before and after. Prices and progression costs are unchanged and no redemption price is assigned to abstract resources or to the empty-slot sensitivities.",
+    "The read-only 168-hour economy observation is network-wide context only and cannot be attributed to ArcCivs or Auto2. Current SELL activity and the contract target are kept separate; neither is counted as income from the capacity change."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "autonomous_local_storage_direct_vault",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:63-68,652-720; CivsAutonomousLogistics.kt:1-150",
+          "basis": "Storage capacity and closed-stock delivery do not call Vault. The feature changes no payment, reward, or price.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_local_storage_direct_tokens",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:63-68,652-720; CivsAutonomousLogistics.kt:1-150",
+          "basis": "Storage capacity and closed-stock delivery do not issue or burn premium tokens. The feature changes no token price.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "autonomous_local_storage_direct_player_xp",
+          "kind": "mint",
+          "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:63-68,652-720; CivsAutonomousLogistics.kt:1-150",
+          "basis": "Storage capacity and courier transfer do not grant Minecraft player XP. Production yield and worker progression are unchanged.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "0",
+              "0",
+              "0"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "storage_capacity_sensitivity": {
+    "scope": "One producer workplace's own closed-stock buffer after its native slots have been successfully captured. This is not a city-wide count or a measured current capacity.",
+    "legacy_city_capacity_before_capture": {
+      "formula": "128 base + 256 active level-1 Warehouse",
+      "units_per_resource": 384,
+      "source": "ArcCivs/src/main/kotlin/ru/arc/civs/CivsRules.kt:63-68"
+    },
+    "owner_runtime_snapshot": {
+      "revision": 32256,
+      "observed_at_utc": "2026-10-28 13:39:56-13:40:04",
+      "stock_units": {
+        "wood": 384,
+        "stone": 3,
+        "food": 382
+      },
+      "reported_city_container_count": 30,
+      "source": "civs debug resources /storage CITY owner runtime snapshot, revision 32256, 2026-10-28 13:39:56-13:40:04 UTC.",
+      "qualification": "Point-in-time values; the 30 city containers are not treated as producer-local stores or used to calculate the scenarios."
+    },
+    "units_per_empty_slot": 64,
+    "shared_slot_rule": "room(r) = max(0, 64 * max(0, empty_slots - sum(ceil(stock(other_resource)/64))) - stock(r)); each resource shares the same empty slots.",
+    "scenarios": [
+      {
+        "scenario": "low",
+        "producer_empty_slots": 1,
+        "units_if_only_one_resource_uses_slots": 64
+      },
+      {
+        "scenario": "base",
+        "producer_empty_slots": 27,
+        "units_if_only_one_resource_uses_slots": 1728
+      },
+      {
+        "scenario": "high",
+        "producer_empty_slots": 54,
+        "units_if_only_one_resource_uses_slots": 3456
+      }
+    ],
+    "measurement_status": "No actual per-building empty-slot count is claimed. The scenario counts are sensitivity inputs only."
+  },
+  "warehouse_capacity_contract": {
+    "packing": "All active warehouse depot slots are a shared pool across WOOD, STONE, and FOOD. One resource's stacks consume slots unavailable to the others.",
+    "accepted_cargo_reservations": "Stable across replanning until delivery or cancellation; internal algorithm omitted.",
+    "owner_generation_freshness": {
+      "producer": "The producer's own assigned-building capture generation must be current.",
+      "unload": "All active depot capture generations must be current.",
+      "stale_save": "Saving a result from an obsolete generation cannot authorize the associated action."
+    },
+    "target_version": "0.1.113",
+    "status": {
+      "source": "pending",
+      "build": "pending",
+      "delivery": "pending",
+      "live": "pending"
+    }
+  },
+  "production_and_item_boundaries": {
+    "current_cycle_ms": 60000,
+    "current_delivery_amount_by_level": {
+      "wood": [
+        4,
+        8,
+        12
+      ],
+      "stone": [
+        3,
+        6,
+        9
+      ],
+      "food": [
+        3,
+        6,
+        9
+      ]
+    },
+    "rate_and_yield_change": "none",
+    "buffered_production_effect": "A larger worksite-local pendingStock buffer could hold more already-earned internal goods before storage-full. Actual extra cycles, accumulation, exports, and sales are unmeasured.",
+    "new_native_log_outputs": 0,
+    "native_food_bridge": {
+      "already_exists": true,
+      "conversion": "1 abstract FOOD to 1 ordinary BREAD",
+      "existing_batch_limit": 4,
+      "changed_by_this_storage_assessment": false
+    }
+  },
+  "market_context": {
+    "observation": {
+      "source": "Read-only arc_ops_server(economy_hours=168, economy_limit=100, economy_server=all, economy_shop_materials=OAK_LOG,COBBLESTONE,BREAD)",
+      "window_utc": "2026-10-21T14:02:22.317Z to 2026-10-28T14:02:22.317Z",
+      "exact": true,
+      "coverage": {
+        "records": 2736,
+        "operations": 16885,
+        "players": 23
+      },
+      "current_shop_sell": {
+        "currency": "vault",
+        "income": "58121.28",
+        "transactions": 28,
+        "players": 2,
+        "attribution": "network-wide, not attributable to ArcCivs or Auto2"
+      },
+      "selected_material_rows": [
+        {
+          "material": "COBBLESTONE",
+          "quantity": 218,
+          "income": "10.85004456161785",
+          "transactions": 4
+        },
+        {
+          "material": "BREAD",
+          "rows": 0
+        },
+        {
+          "material": "OAK_LOG",
+          "rows": 0
+        }
+      ],
+      "selected_material_completeness": "complete=true and truncated=false; no matched rows for BREAD or OAK_LOG in this window",
+      "current_resource_contracts": {
+        "currency": "vault",
+        "income": "4822.56",
+        "transactions": 10,
+        "players": 2,
+        "attribution": "network-wide and not a replacement amount for SELL"
+      }
+    },
+    "sell_current": "EconomyShopGUI SELL remains a current conversion path; observed network-wide sales are context only.",
+    "contract_target": "The planned SELL-to-contract transition is a separate future scenario. Current contract receipts are not added to SELL or attributed to Auto2; no new contract, item redemption, or SELL-off is part of this assessment."
+  }
+}

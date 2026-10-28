@@ -60,7 +60,8 @@ object CivsRules {
         return Stock(base.wood * multiplier, base.stone * multiplier, base.food * multiplier)
     }
 
-    fun capacity(city: Settlement): Long = 128L + city.buildings.sumOf {
+    fun capacity(city: Settlement): Long = if (CivsAutonomousStorage.observed(city))
+        CivsAutonomousStorage.citySlots(city) * 64L else 128L + city.buildings.sumOf {
         if (it.phase == BuildingPhase.ACTIVE && it.type == BuildingType.WAREHOUSE) {
             when (it.level) { 1 -> 256L; 2 -> 512L; 3 -> 1024L; else -> 0L }
         } else 0L
@@ -798,6 +799,9 @@ object CivsRules {
                 snapshot(city.inventory == null && city.members.isEmpty() &&
                     autonomy.recruitmentMinutes in 0..CivsAutonomy.RECRUITMENT_MINUTES)
                 snapshot(autonomy.layoutHalfWidth?.let { it in 24..56 } != false)
+                autonomy.storage?.let { stores -> snapshot(stores.size <= MAX_SITES && stores.all { (id, store) ->
+                    UUID.fromString(id).toString() == id && store.valid()
+                }) }
                 snapshot(city.buildings.all { it.type in CivsAutonomy.allowedTypes })
             }
             city.memberNames?.let { names ->
@@ -912,7 +916,7 @@ object CivsRules {
                 CivsResidents.validated(worker)
                 present(worker.id) && validText(worker.name, 32) && worker.completedCycles >= 0 && worker.nextDeliveryAt >= 0 &&
                     (worker.pendingStock?.let { pending -> city.autonomy != null &&
-                        Resource.entries.all { pending[it] in 0..(128L + (MAX_BUILDINGS - 1) * 1024L) } } != false) &&
+                        Resource.entries.all { pending[it] in 0..CivInventory.MAX_AMOUNT } } != false) &&
                     CivsLogistics.validCargo(city, worker.cargo) &&
                     (worker.cargo?.takeIf { it.inventoryBacked }?.let {
                         CivsEquipment.plainCount(worker, it.material) >= it.amount
@@ -928,9 +932,10 @@ object CivsRules {
             })
             // Retiring housing/storage does not evict residents or erase stock. New intake still checks current capacity.
             snapshot(city.workers.size <= populationLimit(city))
-            snapshot(Resource.entries.all { city.stock[it] in 0..(128L + (MAX_BUILDINGS - 1) * 1024L) })
+            snapshot(Resource.entries.all { city.stock[it] in 0..(if (city.autonomy != null) CivInventory.MAX_AMOUNT
+                else (128L + (MAX_BUILDINGS - 1) * 1024L)) })
             if (city.autonomy != null) snapshot(Resource.entries.all {
-                CivsAutonomousLogistics.held(city, it) in 0..(128L + (MAX_BUILDINGS - 1) * 1024L)
+                CivsAutonomousLogistics.held(city, it) in 0..CivInventory.MAX_AMOUNT
             })
             city.inventory?.let { inventory ->
                 inventory.validated()

@@ -11,6 +11,7 @@ import org.bukkit.block.BlockState
 import org.bukkit.block.DoubleChest
 import org.bukkit.block.data.Directional
 import org.bukkit.block.data.Openable
+import org.bukkit.entity.EntityType
 import org.bukkit.event.Event
 import org.bukkit.event.EventHandler
 import org.bukkit.event.EventPriority
@@ -19,6 +20,7 @@ import org.bukkit.event.block.*
 import org.bukkit.event.entity.EntityChangeBlockEvent
 import org.bukkit.event.entity.EntityExplodeEvent
 import org.bukkit.event.entity.EntityInteractEvent
+import org.bukkit.event.entity.CreatureSpawnEvent
 import org.bukkit.event.inventory.InventoryClickEvent
 import org.bukkit.event.inventory.InventoryDragEvent
 import org.bukkit.event.inventory.InventoryMoveItemEvent
@@ -48,17 +50,18 @@ class CivsProtection(
     private val citizenCollision: (UUID, CivPosition) -> Boolean = { _, _ -> false },
 ) : Listener {
     internal data class Footprint(val worldId: UUID, val bounds: CivBox, val editors: Set<UUID>,
-        val barrelRestorers: Set<UUID> = emptySet())
+        val barrelRestorers: Set<UUID> = emptySet(), val adminEditable: Boolean = false)
     internal data class Snapshot(val geometry: List<Footprint>, val worlds: Map<UUID, IndexNode>,
         val controlEditors: Map<Pair<UUID, CivPosition>, Set<UUID>>,
         val cropCells: Set<Pair<UUID, CivPosition>>,
         val autonomousControls: Map<Pair<UUID, CivPosition>, Boolean> = emptyMap(),
         val growthWorlds: Map<UUID, IndexNode> = emptyMap(), val growthGeometry: List<Footprint> = emptyList())
     internal class IndexNode(val bounds: CivBox, val boxes: List<Footprint>, val left: IndexNode? = null, val right: IndexNode? = null) {
-        fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false): Boolean = bounds.contains(x, y, z) &&
+        fun contains(x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean = false, admin: Boolean = false): Boolean = bounds.contains(x, y, z) &&
             (boxes.any { it.bounds.contains(x, y, z) &&
+                !(admin && it.adminEditable) &&
                 (actor == null || actor !in it.editors && (!restoringBarrel || actor !in it.barrelRestorers)) } ||
-                left?.contains(x, y, z, actor, restoringBarrel) == true || right?.contains(x, y, z, actor, restoringBarrel) == true)
+                left?.contains(x, y, z, actor, restoringBarrel, admin) == true || right?.contains(x, y, z, actor, restoringBarrel, admin) == true)
 
         fun lockedPhysics(x: Int, y: Int, z: Int): Boolean = bounds.contains(x, y, z) &&
             (boxes.any { it.editors.isEmpty() && it.bounds.contains(x, y, z) } ||
@@ -93,24 +96,26 @@ class CivsProtection(
                     city.pendingControls.orEmpty().flatMap { it.approach.orEmpty() }.forEach { cell ->
                         add(Footprint(city.worldId, CivBox(cell.position, cell.position), emptySet()))
                     }
-                    city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors)) }
+                    city.inventory?.containers?.forEach { point -> add(Footprint(city.worldId, CivBox(point, point), editors,
+                        adminEditable = city.pendingDeletion == null)) }
                     city.buildings.forEach { building ->
                         val locked = city.pendingDeletion != null
-                        add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors))
+                        add(Footprint(city.worldId, building.bounds, if (locked) emptySet() else editors, adminEditable = !locked))
                         if (CivsAutonomousWorksites.supports(city, building) && building.phase == BuildingPhase.ACTIVE)
                             CivsAutonomousWorksites.protectionBounds(building).forEach {
-                                add(Footprint(city.worldId, it, emptySet()))
+                                add(Footprint(city.worldId, it, emptySet(), adminEditable = !locked))
                             }
                         if (building.type == BuildingType.FARM && building.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null) {
                             CivsWorksiteLayouts.field(building).forEach { soil ->
                                 val crop = soil.copy(y = soil.y + 1)
                                 crops += city.worldId to crop
-                                add(Footprint(city.worldId, CivBox(soil, crop), editors))
+                                add(Footprint(city.worldId, CivBox(soil, crop), editors, adminEditable = true))
                             }
                         }
                     }
                     city.construction?.plannedBuilding?.let {
-                        add(Footprint(city.worldId, it.bounds, if (city.pendingDeletion != null) emptySet() else editors))
+                        add(Footprint(city.worldId, it.bounds, if (city.pendingDeletion != null) emptySet() else editors,
+                            adminEditable = city.pendingDeletion == null))
                     }
                     civsProtectedBuildings(city).forEach { building ->
                         val point = building.control ?: return@forEach
@@ -148,9 +153,13 @@ class CivsProtection(
     fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID? = null): Boolean =
         isProtected(worldId, x, y, z, actor, false)
 
-    private fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean): Boolean =
-        (!available() && Bukkit.getWorld(worldId)?.name in protectedWorlds) ||
-            snapshot.worlds[worldId]?.contains(x, y, z, actor, restoringBarrel) == true
+    private fun isProtected(worldId: UUID, x: Int, y: Int, z: Int, actor: UUID?, restoringBarrel: Boolean): Boolean {
+        // Permission lookup stays on the owning thread; actorless/asynchronous protection remains immutable geometry.
+        val admin = actor != null && Bukkit.isPrimaryThread() && Bukkit.getPlayer(actor)?.hasPermission("arccivs.admin") == true
+        return (!available() && Bukkit.getWorld(worldId)?.name in protectedWorlds) ||
+            admin && worldLocked(worldId, CivPosition(x, y, z)) ||
+            snapshot.worlds[worldId]?.contains(x, y, z, actor, restoringBarrel, admin) == true
+    }
 
     private fun protected(block: Block): Boolean = isProtected(block.world.uid, block.x, block.y, block.z)
     private fun protected(location: Location?): Boolean = location?.world?.let {
@@ -198,6 +207,14 @@ class CivsProtection(
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun breakBlock(event: BlockBreakEvent) { if (protected(event.block, event.player.uniqueId)) event.isCancelled = true }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    fun pillagerSpawn(event: CreatureSpawnEvent) {
+        if (event.entityType != EntityType.PILLAGER) return
+        val at = event.location
+        val worldId = at.world?.uid ?: return
+        if (cities().any { it.worldId == worldId && it.contains(at.blockX, at.blockZ) }) event.isCancelled = true
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     fun placeBlock(event: BlockPlaceEvent) {

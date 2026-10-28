@@ -283,6 +283,7 @@ class CivsStorage(private val plugin: Plugin,
         city.buildings.associate { it.id to selectBuildingPositions(city, it.id, positions) }
     }, ::captureSupplyContainer)
     private val materializationCursors = mutableMapOf<UUID, Int>()
+    private val autonomousCaptures = mutableMapOf<UUID, CivSupplyCaptureResult>()
     private val debitSearches = mutableMapOf<UUID, DebitSearch>()
     private var consumedItems = CivConsumedItemIndex.EMPTY
     private var consumedWarning = false
@@ -374,6 +375,7 @@ class CivsStorage(private val plugin: Plugin,
         materializationCursors.clear()
         debitSearches.clear()
         supplyCaptures.clear()
+        autonomousCaptures.clear()
         index.replace(cities)
     }
     fun updateCity(city: Settlement) { checkMain(); requireOpen(); index.update(city); supplyCaptures.update(city) }
@@ -382,6 +384,7 @@ class CivsStorage(private val plugin: Plugin,
         materializationCursors.remove(cityId)
         debitSearches.remove(cityId)
         supplyCaptures.remove(cityId)
+        autonomousCaptures.remove(cityId)
         index.remove(cityId)
     }
     fun refreshBuilding(city: Settlement, building: CivBuilding? = null) {
@@ -401,6 +404,21 @@ class CivsStorage(private val plugin: Plugin,
     }
 
     internal fun supplyRevision(cityId: UUID): Long { checkMain(); requireOpen(); return supplyCaptures.revision(cityId) }
+
+    internal fun rememberAutonomousCapacity(city: Settlement, result: CivSupplyCaptureResult) {
+        checkMain(); requireOpen()
+        if (city.autonomy?.storage == CivsAutonomousStorage.stores(result) && supplyCaptureCurrent(city, result))
+            autonomousCaptures[city.id] = result
+        else autonomousCaptures.remove(city.id)
+    }
+
+    internal fun autonomousCapacityCurrent(city: Settlement, buildingId: UUID? = null): Boolean {
+        checkMain(); requireOpen()
+        if (!CivsAutonomousStorage.observed(city)) return true
+        val result = autonomousCaptures[city.id] ?: return false
+        return city.autonomy?.storage == CivsAutonomousStorage.stores(result) &&
+            supplyCaptureCurrent(city, result, buildingId?.let(::setOf))
+    }
 
     internal fun invalidateSupply(cityId: UUID, buildingIds: Set<UUID>? = null) {
         checkMain(); requireOpen(); supplyCaptures.invalidate(cityId, buildingIds)
@@ -1689,6 +1707,7 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun captureSupplyContainer(city: Settlement, position: CivPosition, expectedType: String?): CivSupplyCapturedContainer? {
         checkMain(); requireOpen()
+        if (city.autonomy != null && !foodCanModify(city, position)) return null
         val source = try { resolve(city, position, expectedType) } catch (failure: CivsRejection) {
             if (failure.reason in setOf("storage-unavailable", "storage-container-invalid")) return null else throw failure
         }
@@ -1923,6 +1942,7 @@ class CivsStorage(private val plugin: Plugin,
         debitSearches.clear()
         homeCursors.clear()
         supplyCaptures.clear()
+        autonomousCaptures.clear()
     }
     private fun requireOpen() = check(!closed) { "CivsStorage is closed" }
     private fun checkMain() = check(Bukkit.isPrimaryThread()) { "CivsStorage requires Paper's main thread" }

@@ -13,12 +13,20 @@ internal object CivsMineProgress {
     }
 
     private fun CivMineV5Proof.detached() = copy(sectionSteps = sectionSteps?.toMap(), seals = seals?.toMap())
+    private fun CivMineV6Proof.detached() = copy(sectionSteps = sectionSteps?.toMap(), seals = seals?.toMap())
+
+    fun v6State(state: CivMinePlanState?): CivMinePlanState? = state?.let { saved ->
+        if (saved.version == 6) saved else saved.v6Proof?.let { old ->
+            CivMinePlanState(6, old.nextStep, saved.legacyStep, saved.v2Step, saved.v3Step, saved.v4Step,
+                old.sectionSteps, old.excavation, old.seals, saved.v5Step, saved.levels, saved.v5Proof)
+        }
+    }
 
     /** Import only paid, contiguous actions of the same narrow spine; no ordinal or gallery translation. */
-    fun retainedSpine(building: CivBuilding, previous: CivMinePlanState?): Map<String, Long> {
-        if (previous?.version != 5) return emptyMap()
-        val current = requireNotNull(CivsMinePlan.forBuilding(building, 6))
-        val old = requireNotNull(current.forVersion(5))
+    fun retainedSpine(building: CivBuilding, previous: CivMinePlanState?, version: Int = CivsMinePlan.VERSION): Map<String, Long> {
+        if (previous == null || previous.version !in 5 until version) return emptyMap()
+        val current = requireNotNull(CivsMinePlan.forBuilding(building, version))
+        val old = requireNotNull(current.forVersion(previous.version))
         require(valid(old, previous, building))
         val paid = old.sections.getValue("spine").takeWhile {
             old.completed(it, previous.nextStep, previous.sectionSteps.orEmpty())
@@ -34,13 +42,14 @@ internal object CivsMineProgress {
 
     /** Additional initial access is never trusted as paid: its exact native cells must pass the receipt gate. */
     fun initialSpineAccess(building: CivBuilding, previous: CivMinePlanState?, work: CivWorldWork): List<Int> {
-        if (previous?.version != 5 || work.miningPlanVersion != 6) return emptyList()
-        val plan = requireNotNull(CivsMinePlan.forBuilding(building, 6))
+        val version = work.miningPlanVersion ?: return emptyList()
+        if (previous == null || previous.version !in 5 until version) return emptyList()
+        val plan = requireNotNull(CivsMinePlan.forBuilding(building, version))
         val access = requireNotNull(work.miningAccessSections)
         val ordinal = requireNotNull(work.miningOrdinal)
         require(plan.sectionValid(access) && ordinal in plan.steps.indices && plan.section(ordinal) == "spine")
         require(plan.sections.keys.all { it == "spine" || plan.sectionCount(it, 0, access) == 0L })
-        val proven = retainedSpine(building, previous)["spine"] ?: 0
+        val proven = retainedSpine(building, previous, version)["spine"] ?: 0
         val spine = plan.sections.getValue("spine")
         val claimed = plan.sectionCount("spine", 0, access)
         require(claimed in proven..spine.size.toLong() && claimed == spine.indexOf(ordinal).toLong())
@@ -58,7 +67,7 @@ internal object CivsMineProgress {
         val witness = CivMineLevelWitness(previous.copy(transit = previous.transit?.toList()), state?.version,
             state?.nextStep ?: 0, state?.legacyStep, state?.v2Step, state?.v3Step, state?.v4Step,
             state?.sectionSteps?.toMap(), state?.excavation, state?.seals?.toMap(), state?.v5Step, legacy,
-            state?.v5Proof?.detached())
+            state?.v5Proof?.detached(), state?.v6Proof?.detached())
         val plan = requireNotNull(CivsMinePlan.forBuilding(finished))
         val excavation = state?.excavation?.let { old -> CivsMinePlan.localPoint(finished,
             CivsWorksiteLayouts.point(previous, old)) }?.takeIf { it in plan.positions }
@@ -77,7 +86,8 @@ internal object CivsMineProgress {
                 witness.legacyProgress?.let { it !in 0..100_000 } == true) return@all false
             val previous = witness.state() ?: return@all witness.nextStep == 0L && witness.legacyStep == null &&
                 witness.v2Step == null && witness.v3Step == null && witness.v4Step == null && witness.v5Step == null &&
-                witness.sectionSteps == null && witness.seals == null && witness.excavation == null && witness.v5Proof == null && witness.legacyProgress != null
+                witness.sectionSteps == null && witness.seals == null && witness.excavation == null && witness.v5Proof == null &&
+                witness.v6Proof == null && witness.legacyProgress != null
             val plan = CivsMinePlan.forBuilding(old, previous.version) ?: return@all false
             fun bounded(version: Int, prefix: Long?) = prefix == null || previous.version >= version + 1 &&
                 CivsMinePlan.forBuilding(old, version)?.steps?.size?.let { prefix in 0..it.toLong() } == true
@@ -87,9 +97,11 @@ internal object CivsMineProgress {
     }
 
     fun detached(state: CivMinePlanState): CivMinePlanState = state.copy(
-        sectionSteps = state.sectionSteps?.toMap(), seals = state.seals?.toMap(), v5Proof = state.v5Proof?.detached(), levels = state.levels?.map {
+        sectionSteps = state.sectionSteps?.toMap(), seals = state.seals?.toMap(), v5Proof = state.v5Proof?.detached(),
+        v6Proof = state.v6Proof?.detached(), levels = state.levels?.map {
             it.copy(building = it.building.copy(transit = it.building.transit?.toList()),
-                sectionSteps = it.sectionSteps?.toMap(), seals = it.seals?.toMap(), v5Proof = it.v5Proof?.detached())
+                sectionSteps = it.sectionSteps?.toMap(), seals = it.seals?.toMap(), v5Proof = it.v5Proof?.detached(),
+                v6Proof = it.v6Proof?.detached())
         })
 
     fun priorStanding(building: CivBuilding, state: CivMinePlanState?, world: CivPosition): Boolean {
@@ -99,27 +111,33 @@ internal object CivsMineProgress {
                 3 to (old?.takeIf { it.version == 3 }?.nextStep ?: old?.v3Step),
                 4 to (old?.takeIf { it.version == 4 }?.nextStep ?: old?.v4Step),
                 5 to (old?.takeIf { it.version == 5 }?.nextStep ?: old?.v5Proof?.nextStep ?: old?.v5Step),
-                6 to old?.takeIf { it.version == 6 }?.nextStep)
+                6 to (old?.takeIf { it.version == 6 }?.nextStep ?: old?.v6Proof?.nextStep),
+                7 to old?.takeIf { it.version == 7 }?.nextStep)
             return versions.any { (version, prefix) -> prefix != null && CivsMinePlan.forBuilding(mine, version)?.builtStanding(
                 local, prefix, if (version == old?.version) old?.sectionSteps.orEmpty()
-                else if (version == 5) old?.v5Proof?.sectionSteps.orEmpty() else emptyMap()) == true } ||
+                else if (version == 5) old?.v5Proof?.sectionSteps.orEmpty()
+                else if (version == 6) old?.v6Proof?.sectionSteps.orEmpty() else emptyMap()) == true } ||
                 CivsMinePlan.forBuilding(mine)?.legacyCompleted(legacyProgress ?: 0)?.let { cells ->
                     fun open(p: CivPosition) = p in cells && cells[p].let { it == null || it.startsWith("minecraft:ladder[") || it == "minecraft:torch" }
                     open(local) && open(local.copy(y = local.y + 1))
                 } == true
         }
-        val predecessor = if (state?.version != CivsMinePlan.VERSION) state else v5State(state)
+        val predecessor = if (state?.version != CivsMinePlan.VERSION) state else v6State(state) ?: v5State(state)
         return predecessor?.let { known(building, it, it.legacyStep) } == true || state?.levels.orEmpty().any {
             known(it.building, it.state(), it.legacyProgress)
         }
     }
 
     fun valid(plan: CivsMinePlan, state: CivMinePlanState, building: CivBuilding? = null): Boolean {
-        if (state.version != plan.version || state.nextStep !in 0..plan.steps.size.toLong() || state.v5Proof != null && state.version != 6 ||
-            state.version == 6 && state.v5Step != null && state.v5Proof == null) return false
+        if (state.version != plan.version || state.nextStep !in 0..plan.steps.size.toLong() ||
+            state.v5Proof != null && state.version !in 6..7 || state.v6Proof != null && state.version != 7 ||
+            state.version >= 6 && state.v5Step != null && state.v5Proof == null) return false
         val predecessor = state.v5Proof?.let { v5State(state) ?: return false }
         if (predecessor != null && !valid(requireNotNull(plan.forVersion(5)), predecessor, building)) return false
-        if (state.sectionSteps == null) return state.excavation == null && state.seals == null && state.v5Step == null && state.v5Proof == null
+        val v6 = state.v6Proof?.let { v6State(state) ?: return false }
+        if (v6 != null && !valid(requireNotNull(plan.forVersion(6)), v6, building)) return false
+        if (state.sectionSteps == null) return state.excavation == null && state.seals == null && state.v5Step == null &&
+            state.v5Proof == null && state.v6Proof == null
         if (state.version !in 5..CivsMinePlan.VERSION || !plan.sectionValid(state.sectionSteps)) return false
         val normalized = plan.normalizedProgress(state.nextStep, state.sectionSteps)
         val sealPositions = building?.let { CivsMinePlan.sealPositions(it, plan.version) } ?: plan.plannedCuts
@@ -142,7 +160,7 @@ internal object CivsMineProgress {
         val sections = work.miningSections
         initialSpineAccess(building, previous, work)
         var normalized: Map<String, Long>? = null
-        var excavation = old?.excavation ?: previous?.takeIf { version == 6 && it.version == 5 }?.excavation
+        var excavation = old?.excavation ?: previous?.takeIf { version >= 6 && it.version in 5 until version }?.excavation
         var seals = old?.seals
         if (sections != null) {
             require(version in 5..CivsMinePlan.VERSION && work.changes.size == 1 && plan.sectionValid(sections))
@@ -157,6 +175,9 @@ internal object CivsMineProgress {
             })
             val ordinal = requireNotNull(work.miningOrdinal)
             val cell = work.changes.single()
+            val clearingLava = CivsMineSafety.clearingLava(work)
+            if (cell.before.substringBefore('[') == "minecraft:lava" && cell.after == "minecraft:air")
+                require(clearingLava && CivsMinePlan.localPoint(building, cell.position) in plan.positions)
             val completes = work.status == "digging-mine" && !work.miningGenerator &&
                 cell.position == CivsWorksiteLayouts.point(building, plan.steps[ordinal].point) &&
                 cell.after == plan.expectedAfter(ordinal, building.rotation)
@@ -171,7 +192,7 @@ internal object CivsMineProgress {
                 val local = CivsMinePlan.localPoint(building, cell.position)
                 val key = key(local)
                 if (proof[key] == cell.before) proof.remove(key)
-                if (cell.after == "minecraft:air") excavation = work.miningExcavation?.takeIf { it == excavation } ?: local
+                if (cell.after == "minecraft:air" && !clearingLava) excavation = work.miningExcavation?.takeIf { it == excavation } ?: local
                 if (work.status == "securing-mine" && cell.after == "minecraft:cobblestone" && (local in futurePositions || plan.pendingMutationAt(local, next, requireNotNull(normalized)))) proof[key] = cell.after
             }
             // A cut may already be AIR when its exact native section is inspected.
@@ -189,8 +210,10 @@ internal object CivsMineProgress {
             normalized, excavation, seals,
             previous?.takeIf { it.version == 5 && version == 5 && it.sectionSteps == null && sections != null }?.nextStep ?: previous?.v5Step,
             previous?.levels,
-            if (version == 6 && previous?.version == 5) CivMineV5Proof(previous.nextStep,
-                previous.sectionSteps?.toMap(), previous.excavation, previous.seals?.toMap()) else previous?.v5Proof?.detached())
+            if (version >= 6 && previous?.version == 5) CivMineV5Proof(previous.nextStep,
+                previous.sectionSteps?.toMap(), previous.excavation, previous.seals?.toMap()) else previous?.v5Proof?.detached(),
+            if (version == 7 && previous?.version == 6) CivMineV6Proof(previous.nextStep,
+                previous.sectionSteps?.toMap(), previous.excavation, previous.seals?.toMap()) else previous?.v6Proof?.detached())
             .also { require(valid(plan, it, building) && validLevels(building, it)) }
     }
 }

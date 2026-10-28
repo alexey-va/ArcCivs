@@ -3,7 +3,7 @@ package ru.arc.civs
 import com.google.gson.JsonObject
 import java.util.concurrent.ConcurrentHashMap
 
-/** Versioned, schematic-local geometry. V2 through V5 orders stay pinned for saved receipts. */
+/** Versioned, schematic-local geometry. V2 through V6 orders stay pinned for saved receipts. */
 internal class CivsMinePlan private constructor(private val layout: JsonObject, val version: Int,
     private val timber: String, private val schematicId: String) {
     data class Step(val point: CivPosition, val after: String?, val stage: String,
@@ -46,7 +46,8 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         2 -> oldFloors
         3 -> alignedFloors(oldFloors.size + 2)
         4, 5 -> networkFloors(oldFloors.size + 2)
-        else -> networkFloors(oldFloors.size + 5)
+        6 -> networkFloors(oldFloors.size + 5)
+        else -> networkFloors(oldFloors.size + 6)
     }
     /** Entry vestibule is two high, below the untouched authored ceiling. */
     val entranceLanding = if (version >= 4) Floor(0, transferFeetY,
@@ -180,7 +181,14 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         openingColumns.forEach { (x, z) -> add(Step(CivPosition(x, lowest - 1, z),
             "minecraft:cobblestone", "shaft", floors.last().index, "bottom")) }
         add(Step(requireNotNull(generator), "minecraft:cobblestone", "gallery", floors.last().index, "generator"))
-    } else if (version == 4) buildNetworkSteps() else buildFramedNetworkSteps()
+    } else if (version == 4) buildNetworkSteps() else if (version <= 6) buildFramedNetworkSteps() else {
+        // V6 receipts keep every ordinal. The independent continuation reuses the
+        // same bounded ladder/floor recipe without crediting an unfinished branch.
+        val old = requireNotNull(forVersion(6))
+        old.steps + buildFramedNetworkSteps().filter { step ->
+            step.floor == floors.last().index || step.stage == "shaft" && step.branch == null && step.point.y < old.lowest
+        }
+    }
 
     /** Exact native items required by the new frame steps; quantities remain ordinary receipts. */
     val structuralMaterials: Set<String> = if (version >= 5)
@@ -204,7 +212,7 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
 
     private val passageHistory = steps.withIndex().groupBy({ it.value.point }, { it.index + 1 to it.value.after })
 
-    /** Scheduling views only. Every V2..V5 ordinal and block remains immutable. */
+    /** Scheduling views only. Every V2..V6 ordinal and block remains immutable. */
     val sections: Map<String, List<Int>> = steps.indices.groupBy { index ->
         val step = steps[index]
         if (step.stage == "shaft" && step.branch == null) "spine"
@@ -271,7 +279,11 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
             first.stage == "shaft" && first.branch in setOf("railing", "lining", "frame") -> done("$floor/shaft/opening") &&
                 (first.branch != "railing" || floor != floors.last().index || done("$floor/shaft/bottom"))
             first.branch == "bottom" -> done("$floor/shaft/opening")
-            first.branch == "generator" -> sections.keys.filter { it != key }.all(::done)
+            first.branch == "generator" -> sections.keys.filter { other ->
+                other != key && steps[sections.getValue(other).first()].let { step ->
+                    step.branch != "generator" || requireNotNull(step.floor) < floor
+                }
+            }.all(::done)
             first.stage == "gallery" -> done("$floor/shaft/$landing") && when {
                 first.branch == "frame" -> sections.keys.filter { it.startsWith("$floor/gallery/") && it != key &&
                     !it.endsWith("/generator") }.all(::done)
@@ -628,7 +640,7 @@ internal class CivsMinePlan private constructor(private val layout: JsonObject, 
         plans.computeIfAbsent("$schematicId:$version") { CivsMinePlan(layout, version, timber, schematicId) }
 
     companion object {
-        const val VERSION = 6
+        const val VERSION = 7
         private val plans = ConcurrentHashMap<String, CivsMinePlan>()
         private data class SealLineage(val all: Set<CivPosition>, val higher: Set<CivPosition>)
         private val sealLineages = object : LinkedHashMap<String, SealLineage>(16, .75f, true) {

@@ -58,7 +58,7 @@ class CivsMinePlanTest : FunSpec({
         }
     }
 
-    for (missingBacking in listOf(false, true)) test("central shaft excavation refuses internal liquid with missing backing $missingBacking") {
+    for (missingBacking in listOf(false, true)) test("central shaft refuses water and inaccessible lava with missing backing $missingBacking") {
         failOnUnsupportedMockBukkitOperation {
             MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
                 val world = CivsWorksiteWorldFixture("mine-inner-liquid-$missingBacking").also(paper.server::addWorld)
@@ -76,7 +76,7 @@ class CivsMinePlanTest : FunSpec({
                     for (y in bottom.y..65) world.getBlockAt(bottom.x, y, bottom.z).blockData =
                         Bukkit.createBlockData("minecraft:ladder[facing=${plan.facing},waterlogged=false]")
                     if (missingBacking) world.getBlockAt(backing.x, backing.y, backing.z).type = Material.AIR
-                    world.getBlockAt(liquid.x, liquid.y, liquid.z).type = Material.LAVA
+                    world.getBlockAt(liquid.x, liquid.y, liquid.z).type = Material.WATER
                     CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                         val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
                         repeat(16) { runtime.pulse(listOf(city)) }
@@ -84,6 +84,15 @@ class CivsMinePlanTest : FunSpec({
                         runtime.idleReason(city, city.workers.single()) shouldBe "worksite-liquid"
                         city.minePlans shouldBe null
                         city.workers.single().completedCycles shouldBe 0L
+                        world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
+                        // Lava clearance is authorized, but this source has no reachable native face.
+                        world.getBlockAt(liquid.x, liquid.y, liquid.z).type = Material.LAVA
+                        runtime.changed(world.uid, liquid)
+                        runtime.invalidate(city.workers.single().id)
+                        repeat(256) { runtime.pulse(listOf(city)) }
+                        runtime.plan(city, city.workers.single()) shouldBe null
+                        runtime.idleReason(city, city.workers.single()) shouldBe "worksite-no-access"
+                        world.getBlockAt(liquid.x, liquid.y, liquid.z).type shouldBe Material.LAVA
                         world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
                         world.getBlockAt(liquid.x, liquid.y, liquid.z).type = Material.STONE
                         runtime.changed(world.uid, liquid)

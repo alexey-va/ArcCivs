@@ -147,7 +147,7 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     val v3Step: Long? = null,
     /** Completed V4 geometry remains an escape/protection prefix after V5 starts. */
     val v4Step: Long? = null,
-    /** Exact V5/V6 section-local prefixes outside nextStep; missing keeps old receipts unchanged. */
+    /** Exact section-local prefixes outside nextStep; missing keeps old receipts unchanged. */
     val sectionSteps: Map<String, Long>? = null,
     /** Last real excavation, rechecked after restart before another opening. Schematic-local. */
     val excavation: CivPosition? = null,
@@ -158,20 +158,27 @@ data class CivMinePlanState(val version: Int, val nextStep: Long, val legacyStep
     /** Exact paid geometry from at most two lower building levels; never a current-level prefix. */
     val levels: List<CivMineLevelWitness>? = null,
     /** Exact same-level V5 authority, frozen only by the first real V6 receipt. */
-    val v5Proof: CivMineV5Proof? = null)
+    val v5Proof: CivMineV5Proof? = null,
+    /** Exact same-level V6 authority; V7 appends a lower floor without claiming its unfinished branches. */
+    val v6Proof: CivMineV6Proof? = null)
 
 /** One bounded predecessor, never a recursive plan history or another building level. */
 data class CivMineV5Proof(val nextStep: Long, val sectionSteps: Map<String, Long>? = null,
     val excavation: CivPosition? = null, val seals: Map<String, String>? = null)
 
-/** Nonrecursive old-level proof, including at most one flat V5 version witness. */
+/** Flat predecessor; older V5 authority remains in its existing sibling field. */
+data class CivMineV6Proof(val nextStep: Long, val sectionSteps: Map<String, Long>? = null,
+    val excavation: CivPosition? = null, val seals: Map<String, String>? = null)
+
+/** Nonrecursive old-level proof, including the bounded flat V5 and V6 version witnesses. */
 data class CivMineLevelWitness(val building: CivBuilding, val version: Int?, val nextStep: Long,
     val legacyStep: Long? = null, val v2Step: Long? = null, val v3Step: Long? = null, val v4Step: Long? = null,
     val sectionSteps: Map<String, Long>? = null, val excavation: CivPosition? = null,
     val seals: Map<String, String>? = null, val v5Step: Long? = null, val legacyProgress: Long? = null,
-    val v5Proof: CivMineV5Proof? = null) {
+    val v5Proof: CivMineV5Proof? = null, val v6Proof: CivMineV6Proof? = null) {
     fun state(): CivMinePlanState? = version?.let {
-        CivMinePlanState(it, nextStep, legacyStep, v2Step, v3Step, v4Step, sectionSteps, excavation, seals, v5Step, v5Proof = v5Proof)
+        CivMinePlanState(it, nextStep, legacyStep, v2Step, v3Step, v4Step, sectionSteps, excavation, seals, v5Step,
+            v5Proof = v5Proof, v6Proof = v6Proof)
     }
 }
 

@@ -12,6 +12,7 @@ internal data class CivSupplyStorageKey(
 
 internal data class CivSupplyCapturedStore(
     val stock: Map<String, Long>, val capacity: CivSupplyCapacity, val key: CivSupplyStorageKey,
+    val slots: Int = 0, val containers: Int = 0, val unavailable: Int = 0,
 )
 
 internal data class CivSupplyCaptureResult(val cityId: UUID, val stores: Map<UUID, CivSupplyCapturedStore>)
@@ -79,15 +80,18 @@ internal class CivsSupplyCaptures(
 
     /** Metadata/index reads only; no inventory scans are added to city publication. */
     fun update(city: Settlement): Map<UUID, CivSupplyStorageKey> {
-        val inventory = city.inventory?.validated() ?: run { if (city.id in cities) remove(city.id); return emptyMap() }
-        val positions = if (inventory.mode == CivStorageMode.PHYSICAL) layout(city) else emptyMap()
+        val inventory = city.inventory?.validated()
+        val mode = inventory?.mode ?: if (city.autonomy != null) CivStorageMode.PHYSICAL else
+            run { if (city.id in cities) remove(city.id); return emptyMap() }
+        val positions = if (mode == CivStorageMode.PHYSICAL) layout(city) else emptyMap()
         val previous = cities[city.id].orEmpty()
-        val next = city.buildings.associate { building ->
+        val buildings = if (city.autonomy != null) city.buildings.filter { it.phase == BuildingPhase.ACTIVE } else city.buildings
+        val next = buildings.associate { building ->
             val old = previous[building.id]
-            val key = CivSupplyStorageKey(city.id, city.worldId, city.owner, inventory.mode,
+            val key = CivSupplyStorageKey(city.id, city.worldId, city.owner, mode,
                 building.id, building.type, building.phase, building.level, building.bounds, building.control,
                 positions[building.id].orEmpty().toMap(),
-                if (inventory.mode == CivStorageMode.VIRTUAL) inventory.buildingStock(building.id).toMap() else emptyMap(),
+                if (mode == CivStorageMode.VIRTUAL) requireNotNull(inventory).buildingStock(building.id).toMap() else emptyMap(),
                 old?.key?.generation ?: 0L)
             val store = if (old != null && old.key == key) old else Store(key).also { dirty(city.id, it) }
             building.id to store
@@ -192,7 +196,8 @@ internal class CivsSupplyCapture(
             val capacity = if (virtual) CivSupplyCapacity(0, emptyMap(),
                 (27L * 64L * key.level - stock.values.sum()).coerceAtLeast(0))
                 else CivSupplyCapacity(sum.emptySlots, sum.partialRoom.toMap())
-            CivSupplyCapturedStore(stock, capacity, finish(key, sum.contents))
+            CivSupplyCapturedStore(stock, capacity, finish(key, sum.contents),
+                sum.contents.values.sumOf { it?.slots?.size ?: 0 }, sum.contents.size, sum.contents.values.count { it == null })
         })
         return true
     }

@@ -16,25 +16,35 @@ internal object CivsAutonomousLogistics {
             (worker.cargo?.takeIf { it.stockResource == resource }?.amount ?: 0L)
         }
 
-    fun room(city: Settlement, resource: Resource): Long = (CivsRules.capacity(city) - held(city, resource)).coerceAtLeast(0)
+    fun room(city: Settlement, resource: Resource, workerId: UUID? = null): Long {
+        if (CivsAutonomousStorage.observed(city)) {
+            val worker = workerId?.let { id -> city.workers.firstOrNull { it.id == id } }
+            val room = worker?.let { CivsAutonomousStorage.room(city, it, resource) }
+                ?: CivsAutonomousStorage.cityRoom(city, resource)
+            return minOf(room, (CivInventory.MAX_AMOUNT - held(city, resource)).coerceAtLeast(0))
+        }
+        return (CivsRules.capacity(city) - held(city, resource)).coerceAtLeast(0)
+    }
 
     fun pendingRoom(city: Settlement, pending: Stock): Boolean = Resource.entries.any {
-        pending[it] > 0 && city.stock[it] < CivsRules.capacity(city)
+        pending[it] > 0 && stockRoom(city, it) > 0
     }
 
     /** An observed return transfers already-earned goods, independently of room for another production batch. */
     fun unloadPending(city: Settlement, workerId: UUID, assignment: UUID, cycle: Long, nextAt: Long,
-        pending: Stock, at: Long): Settlement {
+        pending: Stock, at: Long, destinationId: UUID? = null): Settlement {
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         if (city.autonomy?.paused != false || city.inventory != null || city.pendingDeletion != null || at < 0 ||
             CivsResidents.isChild(worker) || worker.cargo != null || worker.assignment != assignment ||
             worker.completedCycles != cycle || worker.nextDeliveryAt != nextAt || worker.pendingStock != pending ||
             pending == Stock()) throw CivsRejection("stale-delivery")
-        if (!pendingRoom(city, pending)) throw CivsRejection("storage-full")
+        val accepted = destinationId?.takeIf { CivsAutonomousStorage.observed(city) }
+            ?.let { CivsAutonomousStorage.pendingTransfer(city, pending, it) }
+        if (accepted == Stock() || accepted == null && !pendingRoom(city, pending)) throw CivsRejection("storage-full")
         var stock = city.stock
         var remaining = pending
         for (resource in Resource.entries) {
-            val amount = minOf(pending[resource], (CivsRules.capacity(city) - stock[resource]).coerceAtLeast(0))
+            val amount = accepted?.get(resource) ?: minOf(pending[resource], stockRoom(city.copy(stock = stock), resource))
             stock = stock.with(resource, Math.addExact(stock[resource], amount))
             remaining = remaining.with(resource, pending[resource] - amount)
         }
@@ -47,13 +57,14 @@ internal object CivsAutonomousLogistics {
 
     /** Before a warehouse is staffed the existing observed self-delivery also retires old queued goods. */
     fun produce(city: Settlement, worker: CivWorker, resource: Resource, amount: Long): Pair<Stock, Stock?> {
-        if (amount < 0 || room(city, resource) < amount) throw CivsRejection("storage-full")
+        if (amount < 0 || room(city, resource, worker.id) < amount) throw CivsRejection("storage-full")
         val pending = worker.pendingStock ?: Stock()
-        if (staffed(city)) return city.stock to pending.with(resource, Math.addExact(pending[resource], amount)).takeUnless { it == Stock() }
+        if (staffed(city) || CivsAutonomousStorage.observed(city)) return city.stock to
+            pending.with(resource, Math.addExact(pending[resource], amount)).takeUnless { it == Stock() }
         var stock = city.stock
         for (kind in Resource.entries) {
             val count = Math.addExact(stock[kind], Math.addExact(pending[kind], if (kind == resource) amount else 0L))
-            if (count > CivsRules.capacity(city)) throw CivsRejection("storage-full")
+            if (!CivsAutonomousStorage.observed(city) && count > CivsRules.capacity(city)) throw CivsRejection("storage-full")
             stock = stock.with(kind, count)
         }
         return stock to null
@@ -84,9 +95,10 @@ internal object CivsAutonomousLogistics {
 
     fun unload(city: Settlement, worker: CivWorker, cargo: CivCargo, at: Long): Settlement {
         val resource = requireNotNull(cargo.stockResource)
-        if (!CivsLogistics.validCargo(city, cargo) || city.pendingDeletion != null ||
-            CivsLogistics.destination(city, cargo) == null) throw CivsRejection("stale-delivery")
-        if (CivsRules.capacity(city) - city.stock[resource] < cargo.amount) throw CivsRejection("storage-full")
+        if (!CivsLogistics.validCargo(city, cargo) || city.pendingDeletion != null) throw CivsRejection("stale-delivery")
+        val destination = CivsLogistics.destination(city, cargo) ?: throw CivsRejection("stale-delivery")
+        if ((if (CivsAutonomousStorage.observed(city)) CivsAutonomousStorage.destinationRoom(city, destination.id, resource, cargo.id)
+            else stockRoom(city, resource)) < cargo.amount) throw CivsRejection("storage-full")
         val updated = CivsResidents.trained(worker.copy(cargo = null,
             completedCycles = Math.addExact(worker.completedCycles, 1),
             nextDeliveryAt = Math.addExact(at, CivsRules.BUILDER_SESSION_INTERVAL)), BuildingType.WAREHOUSE, city)
@@ -95,13 +107,16 @@ internal object CivsAutonomousLogistics {
     }
 
     fun snapshot(city: Settlement, retained: Map<UUID, CivCourierPlan>, positions: (UUID) -> CivPosition?,
-        sources: Map<UUID, CivPosition>, unavailable: (UUID) -> Boolean): CivSupplySnapshot {
+        sources: Map<UUID, CivPosition>, capture: CivSupplyCaptureResult? = null,
+        unavailable: (UUID) -> Boolean): CivSupplySnapshot {
         val materials = Resource.entries.associate { it.name to CivsLogistics.MAX_CARGO }
-        val capacity = Resource.entries.associate { resource -> resource.name to
-            (CivsRules.capacity(city) - city.stock[resource]).coerceAtLeast(0) }
+        val observedCapacity = if (CivsAutonomousStorage.observed(city)) CivsAutonomousStorage.capacities(city) else null
         val stores = city.buildings.filter { it.control != null }.associate { building ->
+            val capacity = observedCapacity?.get(building.id) ?: if (observedCapacity != null)
+                CivSupplyCapacity(0, emptyMap()) else CivSupplyCapacity(0,
+                    Resource.entries.associate { resource -> resource.name to stockRoom(city, resource) })
             building.id to CivSupplyStore(building.id, building.entrance, requireNotNull(building.control),
-                emptyMap(), emptyMap(), null, CivSupplyCapacity(0, capacity), building.type)
+                emptyMap(), emptyMap(), null, capacity, building.type)
         }
         val couriers = city.workers.mapNotNull { worker ->
             val building = worker.assignment?.let(city::building) ?: return@mapNotNull null
@@ -129,10 +144,14 @@ internal object CivsAutonomousLogistics {
                 existing[worker.id] = CivCourierPlan(cargo, target.id, target.entrance, true)
             }
         } }
-        return CivSupplySnapshot(city.id, CivAutonomousSupplyObservation(civSupplyInputs(city)), stores, emptyList(),
+        return CivSupplySnapshot(city.id, CivAutonomousSupplyObservation(civSupplyInputs(city), capture), stores, emptyList(),
             couriers, workers, existing, materials.mapValues { it.value.toInt() }, autonomousStock = true,
             maximumTransferDistance = CivsLogistics.maximumTransferDistance(city))
     }
+
+    private fun stockRoom(city: Settlement, resource: Resource): Long = if (CivsAutonomousStorage.observed(city))
+        CivsAutonomousStorage.cityRoom(city, resource)
+        else (CivsRules.capacity(city) - city.stock[resource]).coerceAtLeast(0)
 }
 
-internal data class CivAutonomousSupplyObservation(val inputs: Any)
+internal data class CivAutonomousSupplyObservation(val inputs: Any, val capture: CivSupplyCaptureResult? = null)

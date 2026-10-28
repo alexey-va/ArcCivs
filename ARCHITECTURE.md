@@ -5,7 +5,14 @@ and preview a town hall site, welcome gradual pioneers, assign a hut builder, bu
 recruit residents, and upgrade buildings/town hall through three levels.
 The settlement survives reload/restart. Owner-managed membership grants city
 management. Owners and members may remodel their structures, including construction
-footprints at every phase; unrelated players and environmental changes remain guarded.
+footprints at every phase. `arccivs.admin` also permits editing another settlement's
+ordinary structure and worksite cells. Control blocks, pending deletion and exact
+accepted transaction cells retain their locks; earlier event cancellations remain effective.
+Unrelated players and environmental changes remain guarded.
+Pillager spawning is cancelled inside the full inclusive territory of both
+ordinary and autonomous villages, for every spawn reason including patrols and
+raids. The territory guard is separate from building footprints and stops when
+the settlement record is retired; it does not remove already-existing entities.
 
 ## Autonomous village variation
 
@@ -25,9 +32,10 @@ to native item stores excludes this mode. Complete schematic details are covered
 by a one-time wood/stone/food price at `reserveBuild`. FARM and QUARRY perform
 input-free native work with visual receipts, then one observed production session
 earns the unchanged abstract batch and profession experience. With a staffed
-warehouse, this receipt saves `CivWorker.pendingStock` at the worksite and the
-producer continues working. Before a courier is available, a newly earned batch
-still requires the existing real depot trip. No elapsed
+warehouse or a current native capacity observation, this receipt saves
+`CivWorker.pendingStock` at the worksite and the producer continues working.
+Without a courier, saved goods take the existing real depot trip when a depot
+has room. No elapsed
 time, teleport recovery or forecast alone credits a delivery.
 
 After a courier disappears, already-earned pending goods take a separate direct
@@ -51,16 +59,32 @@ The first active warehouse is automatically staffed after the builder and three
 raw professions. The existing supply dispatcher collects pending stock from the
 actual moving producer. Atomic city saves move it into `CivCargo.stockResource`
 at pickup and into spendable city stock only after real depot arrival. The usual
-64-unit shipment limit and per-resource city capacity apply to stock, queued goods
-and cargo together; neither transfer earns another producer reward. Warehouse
+64-unit shipment limit applies; neither transfer earns another producer reward. Warehouse
 experience still advances once per completed trip. Internal goods never become
 native items: the resident inventory has a separate read-only quantity badge.
 Pending goods and cargo survive restart and reassignment; a removed warehouse
 uses the existing reachable-depot fallback. Death retains closed goods until the
 existing corpse expiry or resurrection, without adding native loot. Native-tree
 receipts keep their existing seed debit and yield, queuing only the positive net
-gain when a courier is staffed. Physical-item settlements retain their existing
+gain when a courier is staffed or local native capacity has been observed.
+Physical-item settlements retain their existing
 barrel reach and inventory receipt requirements.
+
+Auto storage observations use the same bounded native container capture as ordinary
+logistics. Producers reserve only empty slots in their assigned workplace's own
+containers; another workplace or the shared village stock cannot fill that buffer.
+Closed goods use 64-unit stacks, with different resources sharing the slots.
+Spendable stock occupies active warehouse space, falling back to the hall when no
+warehouse exists. Durable cargo reserves its actual destination before existing
+stock is packed, so another arrival cannot steal its space. Native items are never
+counted again as closed goods. Shrinking or losing storage retains earned goods
+and blocks new intake rather than deleting them. Before the first successful
+observation, legacy snapshots retain their existing capacity rule.
+Observations persist only when counts change. Owner-thread generation checks
+authorize a producer against its own workplace and a depot admission against all
+participating depots; a stale observation saved asynchronously cannot authorize
+new production. Events invalidate relevant generations, and bounded periodic
+captures detect external writers without clearing the worksite's search context.
 
 The service submits the selected SITE or upgrade through the existing captured
 schematic store, pending control receipt, queue, builder work credit and batch
@@ -1030,3 +1054,13 @@ and accepted receipt indices remain immutable. Native work uses the committed pr
 for standing admission rather than the finished mine mask, so future railings do not
 reject a currently safe construction stance. Timber is collected with other supplies
 when available; its absence stops only a step that actually consumes it.
+
+Mine V7 retains the exact V6 step prefix and appends a finite lower floor. Frozen
+V6 and V5 witnesses preserve prior paid openings during upgrade and restart;
+unfinished predecessor branches never become completed by migration. Stable
+cover/liquid denials remain cached until relevant terrain or protection changes,
+including a draining `FluidLevelChangeEvent`, rather than repeated blind scans.
+Inside its mine plan the worker may clear an interfering LAVA cell through a
+single-cell securing receipt. That receipt grants no items, equipment changes or
+excavation ordinal; owner/Lands, loaded chunks, reach and native receipt checks
+remain required. WATER remains an ordinary hazard boundary.

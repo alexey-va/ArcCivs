@@ -7,6 +7,8 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+internal data class CivPendingStockDelivery(val stock: Stock, val destinationBuildingId: UUID)
+
 internal enum class CitizenPhase { IDLE, TO_STORAGE, TO_WORK, WORKING, PICKUP_READY, PICKING_UP, RETURNING, READY, DELIVERING, PAUSED, CLOSED }
 
 internal data class CitizenToken(val assignmentId: UUID?, val completedCycles: Long, val nextDeliveryAt: Long, val constructionId: UUID?,
@@ -343,7 +345,8 @@ internal fun citizenRouteBuildings(city: Settlement, plan: CitizenPlan, target: 
             val access = saved?.takeIf { it.version == CivsMinePlan.VERSION }?.nextStep ?: 0
             citizenMineRoutePassage(building, access, saved).completed(from.point())
         } else false
-        building.bounds.contains(from.x, from.y, from.z) || mineDeparture || building.bounds.contains(target.x, target.y, target.z) ||
+        building.bounds.contains(from.x, from.y, from.z) || CivsWorksiteLayouts.isField(building, from.x, from.z) ||
+            mineDeparture || building.bounds.contains(target.x, target.y, target.z) ||
             building.control == target ||
             (target == plan.workplace || target == plan.storage) && building.id == plan.token.assignmentId
     }.mapTo(hashSetOf()) { it.id }.also { allowed ->

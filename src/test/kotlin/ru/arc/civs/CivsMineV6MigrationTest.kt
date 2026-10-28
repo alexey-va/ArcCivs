@@ -43,7 +43,7 @@ class CivsMineV6MigrationTest : FunSpec({
     test("same-level import contains only contiguous fully matching paid V5 spine descriptors") {
         val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(-1844, 70, -2696), 180)
         val old = requireNotNull(CivsMinePlan.forBuilding(mine, 5))
-        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
         val before = sparseV5Progress()
         val retained = CivsMineProgress.retainedSpine(mine, before)
         val count = retained.getValue("spine").toInt()
@@ -69,7 +69,7 @@ class CivsMineV6MigrationTest : FunSpec({
 
     test("the first V6 receipt cannot claim a future spine action or an unrelated gallery") {
         val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(0, 70, 0))
-        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
         val before = sparseV5Progress()
         val spine = plan.sections.getValue("spine")
         val count = CivsMineProgress.retainedSpine(mine, before).getValue("spine").toInt()
@@ -91,7 +91,7 @@ class CivsMineV6MigrationTest : FunSpec({
             val worker = spatialWorker(mine, "IRON_PICKAXE")
             val before = sparseV5Progress()
             val city = spatialCity(world.uid, listOf(mine), worker).copy(minePlans = mapOf(mine.id.toString() to before))
-            val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+            val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
             val spine = plan.sections.getValue("spine")
             val count = CivsMineProgress.retainedSpine(mine, before).getValue("spine").toInt()
             val ordinal = spine[count + 1]
@@ -212,7 +212,7 @@ class CivsMineV6MigrationTest : FunSpec({
     test("the first real V6 receipt freezes exact sparse V5 authority once without reusing its ordinal") {
         val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(-1844, 70, -2696), 180)
         val oldPlan = requireNotNull(CivsMinePlan.forBuilding(mine, 5))
-        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
         plan.version shouldBe 6
         plan.floors.map { mine.anchor.y + it.feetY } shouldBe listOf(59, 55, 51, 47, 43, 39)
         CivsMineSafety.FULL_COVER shouldBe 16
@@ -249,7 +249,7 @@ class CivsMineV6MigrationTest : FunSpec({
 
     test("V5 predecessor maps detach through the real store codec and survive a later building-level upgrade") {
         val mine = spatialBuilding("caledonia", "miner", 1, CivPosition(0, 70, 0))
-        val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
         val ordinal = plan.sections.getValue("spine")[CivsMineProgress.retainedSpine(mine, sparseV5Progress()).getValue("spine").toInt() + 1]
         val migrated = CivsMineProgress.after(mine, sparseV5Progress(), null, v6SpineReceipt(mine, ordinal))
         val sections = migrated.v5Proof!!.sectionSteps!!.toMutableMap()
@@ -336,7 +336,7 @@ class CivsMineV6MigrationTest : FunSpec({
         after.minePlans!!.getValue(mine.id.toString()).version shouldBe 5
         after.workers shouldBe city.workers
         after.stock shouldBe city.stock
-        val current = requireNotNull(CivsMinePlan.forBuilding(mine))
+        val current = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
         val deep = current.steps.first { it.point.y < requireNotNull(CivsMinePlan.forBuilding(mine, 5)).lowest - 1 }
         shouldThrow<IllegalArgumentException> {
             CivsAutonomousWorksites.validate(city, work.copy(changes = listOf(CivPlanBlock(
@@ -353,7 +353,7 @@ private fun sparseV5Progress() = CivMinePlanState(5, 1818, sectionSteps = mapOf(
 
 private fun v6SpineReceipt(mine: CivBuilding, ordinal: Int, before: Map<String, Long> = emptyMap(),
     prefix: Long = 0): CivWorldWork {
-    val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
+    val plan = requireNotNull(CivsMinePlan.forBuilding(mine, 6))
     val spine = plan.sections.getValue("spine")
     val offset = spine.indexOf(ordinal)
     val access = before + ("spine" to maxOf(before["spine"] ?: 0, offset.toLong()))

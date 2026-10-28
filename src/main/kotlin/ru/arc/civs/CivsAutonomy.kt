@@ -8,7 +8,9 @@ data class CivAutonomy(val paused: Boolean = false, val recruitmentMinutes: Int 
     /** Closed abstract city products; these quantities never become native inventory items. */
     val products: Map<CivIndustryProduct, Long>? = null,
     /** Adopted geometry only; unpaid plots are not sites, stock, workers or construction receipts. */
-    val plan: CivSettlementPlan? = null)
+    val plan: CivSettlementPlan? = null,
+    /** Last bounded native observation, separately for each building's own containers. */
+    val storage: Map<String, CivAutonomousStore>? = null)
 
 data class CivAutonomyGoal(
     val type: BuildingType,

@@ -1818,11 +1818,13 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         block.type shouldBe Material.WATER
                         paper.performTicks(100)
                         block.type = Material.BEDROCK
+                        runtime.changed(world.uid, target)
                         runtime.pulse(listOf(city))
                         runtime.idleReason(city, worker) shouldBe "worksite-unbreakable"
                         messages.any { "unbreakable" in it && "BEDROCK" in it } shouldBe true
                         paper.performTicks(100)
                         locked = true
+                        runtime.invalidate(worker.id)
                         runtime.pulse(listOf(city))
                         runtime.idleReason(city, worker) shouldBe "worksite-protected"
                         messages.any { "world-operation-locked" in it && target.toString() in it } shouldBe true
@@ -1841,7 +1843,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
 
     for ((style, legacy) in listOf("nordic" to false, "medievaloak" to false, "caledonia" to false, "medievaloak" to true)) {
         val scenario = if (legacy) "$style legacy miner physically migrates V3 step83 and completes its first current level"
-            else "$style miner physically completes six then seven then eight aligned floors"
+            else "$style miner physically completes seven then eight then nine aligned floors"
         test(scenario) {
             failOnUnsupportedMockBukkitOperation {
                 MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
@@ -1925,6 +1927,14 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         }
                     }
                     var actions = 0
+                    // The original cumulative budget also covers each V7 appended floor and its rung clearances.
+                    val actionLimit = 20_000 + (1..(if (legacy) 1 else 3)).sumOf { level ->
+                        val building = mine.copy(level = level, schematicId = mine.schematicId.dropLast(1) + level)
+                        val current = requireNotNull(CivsMinePlan.forBuilding(building))
+                        val previous = requireNotNull(CivsMinePlan.forBuilding(building, 6))
+                        val added = current.steps.drop(previous.steps.size)
+                        added.size + added.count { it.after?.startsWith("minecraft:ladder[") == true }
+                    }
                     var placedTorches = 0L
                     var boundaryCut = false
                     var boundarySealed = false
@@ -1993,7 +2003,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                             val sectionOrdinals = mutableMapOf<String, Int>()
                             var finished = false
                             var emptyPulses = 0
-                            while (actions < 20_000 && emptyPulses < geometry.steps.size + 32) {
+                            while (actions < actionLimit && emptyPulses < geometry.steps.size + 32) {
                                 if (city.minePlans?.get(mine.id.toString())?.nextStep == geometry.steps.size.toLong()) {
                                     finished = true
                                     break
@@ -2105,9 +2115,9 @@ class CivsSpatialWorkReviewTest : FunSpec({
                                 }
                             }
                         }
-                        // Eight floors retain fifty side lights each, plus ten at the entrance;
+                        // Nine floors retain fifty side lights each, plus ten at the entrance;
                         // upgrades preserve those native lights rather than paying for them again.
-                        if (!legacy) placedTorches shouldBe 410L
+                        if (!legacy) placedTorches shouldBe 460L
                     }
                     tasks.close()
                 }

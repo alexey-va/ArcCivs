@@ -181,18 +181,23 @@ class CivsAutonomyTest : FunSpec({
         autonomyReject("autonomy-paused") { CivsRules.immigrate(fresh, fresh.owner, UUID.randomUUID(), "Resident", Long.MAX_VALUE) }
     }
 
-    test("active minutes never feed remotely and observed meals consume one abstract food without native items") {
+    test("active minutes and abstract food never feed remotely while observed meals consume carried bread") {
         val base = autonomyImmigrants(autonomyCity())
         val hungry = base.copy(stock = Stock(food = 2), workers = base.workers.map { it.copy(hunger = 14) })
         val minute = CivsAutonomy.activeMinute(hungry)
         minute.stock shouldBe hungry.stock
         minute.workers shouldBe hungry.workers
-        var fed = minute
-        for (worker in minute.workers.take(2))
+        minute.workers.forEach { CivsResidentLife.mealPlan(minute, it) shouldBe null }
+        var fed = minute.copy(workers = minute.workers.mapIndexed { index, worker ->
+            if (index < 2) worker.copy(items = List(CivsEquipment.SLOTS) { slot ->
+                if (slot == 6) CivResidentItem("BREAD", 1) else null
+            }) else worker
+        })
+        for (worker in fed.workers.take(2))
             fed = CivsResidentLife.finishMeal(fed, requireNotNull(CivsResidentLife.mealPlan(fed, worker)))
-        fed.stock shouldBe Stock()
+        fed.stock shouldBe hungry.stock
         fed.workers.map(CivsResidents::hunger) shouldBe listOf(20, 20, 14, 14, 14)
-        fed.workers.all { it.items == null && it.inventory == null } shouldBe true
+        fed.workers.all { CivsEquipment.slots(it).all { item -> item == null } && it.inventory == null } shouldBe true
         CivsAutonomy.activeMinute(fed) shouldBe fed
         val paused = CivsAutonomy.setPaused(hungry, true)
         CivsAutonomy.activeMinute(paused) shouldBe paused

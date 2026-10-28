@@ -108,10 +108,25 @@ private fun restartJourney(test: (RestartJourney) -> Unit) = residentRuntime(ser
     // Unlike Paper's player view, the pinned mock has no top inventory until one is opened.
     h.paper.server.onlinePlayers.forEach { it.openInventory(Bukkit.createInventory(null, 9)) }
     for (x in -4..4) for (z in -4..4) h.world.loadChunk(x, z)
-    val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(30, 63, 14)).copy(control = null, production = "OAK_LOG")
+    val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(30, 63, 14)).copy(production = "OAK_LOG")
+    val hall = h.city.buildings.single { it.type == BuildingType.TOWN_HALL }.copy(control = CivPosition(-1, 64, -1))
+    for (building in listOf(hall, mill)) requireNotNull(building.control).let {
+        h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL
+    }
     h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(), inventory = null, stock = Stock(wood = 4),
-        buildings = h.city.buildings + mill, forestrySeeded = setOf(mill.id.toString()),
+        buildings = listOf(hall, mill), forestrySeeded = setOf(mill.id.toString()),
         workers = h.city.workers.map { it.copy(assignment = mill.id, nextDeliveryAt = 1) }))
+    // Persist the real empty-container observation before the journey's single work receipt.
+    CivsStorage(h.paper.createSimplePlugin("RestartCapacity")) { emptyArray() }.use { storage ->
+        storage.foodCanModify = { _, _ -> true }
+        storage.replaceCities(listOf(h.city))
+        val capture = storage.startSupplyCapture(h.city)
+        repeat(3) { if (capture.result == null) capture.step() }
+        val stores = CivsAutonomousStorage.stores(requireNotNull(capture.result))
+        stores.getValue(mill.id.toString()) shouldBe CivAutonomousStore(27, 27, 1)
+        stores.getValue(hall.id.toString()) shouldBe CivAutonomousStore(27, 27, 1)
+        h.city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(storage = stores)))
+    }
     h.world.getBlockAt(16, 63, 0).type = Material.DIRT
     for (y in 64..66) h.world.getBlockAt(16, y, 0).blockData = Bukkit.createBlockData("minecraft:oak_log[axis=y]")
     h.world.getBlockAt(16, 67, 0).blockData = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
@@ -191,8 +206,11 @@ private class RestartJourney(val h: ResidentRuntime, val run: SettlementScenario
         val accepted = requireNotNull(work)
         accepted.forestry!!.next shouldBe accepted.forestry.job.cells.size
         after.workers.single().completedCycles shouldBe before.workers.single().completedCycles + 1
-        after.stock shouldBe before.stock.copy(wood = before.stock.wood + CivsRules.deliveryAmount(requireNotNull(before.building(accepted.buildingId))) -
-            if (accepted.inputs.isEmpty()) 0L else 1L)
+        val earned = CivsRules.deliveryAmount(requireNotNull(before.building(accepted.buildingId))) -
+            if (accepted.inputs.isEmpty()) 0L else 1L
+        after.stock shouldBe before.stock
+        after.workers.single().pendingStock shouldBe Stock(wood = earned)
+        CivsAutonomousLogistics.held(after, Resource.WOOD) shouldBe CivsAutonomousLogistics.held(before, Resource.WOOD) + earned
         after.revision shouldBe before.revision + 1
         run.savedCity() shouldBe after
         run.receipts() shouldBe emptyList()
