@@ -24,6 +24,48 @@ class CivsResidentFoodReceiptTest : FunSpec({
     beforeEach { h = ResidentFoodFixture() }
     afterEach { h.close() }
 
+    for (automatic in listOf(false, true)) test("an unstaffed native tavern is preferred over a nearer hall and its pickup replays once Auto=$automatic") {
+        val hall = h.city.buildings.single()
+        val point = CivPosition(8, 64, 0)
+        val tavern = hall.copy(id = UUID.randomUUID(), type = BuildingType.TAVERN, anchor = point, control = point,
+            bounds = CivBox(CivPosition(7, 64, -1), CivPosition(10, 68, 2)), entrance = CivPosition(8, 64, -2))
+        h.city = h.city.copy(buildings = listOf(hall, tavern), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+            autonomy = CivAutonomy().takeIf { automatic })
+        h.world.getBlockAt(8, 64, 0).type = Material.BARREL
+        val venue = (h.world.getBlockAt(8, 64, 0).state as Barrel).inventory
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 20))
+        venue.setItem(0, ItemStack(Material.BREAD, 20))
+        val source = requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet))
+        source.buildingId shouldBe tavern.id
+        h.feet.x = source.standing.x + .5; h.feet.y = source.standing.y.toDouble(); h.feet.z = source.standing.z + .5
+        val tx = h.pickup(source)
+        h.barrel.getItem(0)!!.amount shouldBe 20
+        venue.getItem(0)!!.amount shouldBe 20
+        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        h.barrel.getItem(0)!!.amount shouldBe 20
+        venue.getItem(0)!!.amount shouldBe 16
+        CivsEquipment.usableCount(tx.after.workers.single(), "BREAD") shouldBe 4
+        tx.after.workers.single().hunger shouldBe 14 // A real pickup does not silently feed the resident.
+        h.storage.unlock(tx.id)
+    }
+
+    test("a large empty tavern does not hide real emergency hall food behind the native read window") {
+        val hall = h.city.buildings.single()
+        val point = CivPosition(8, 64, 0)
+        val extra = (4..15).flatMap { x -> (2..4).map { z -> CivPosition(x, 64, z) } }.take(20)
+        val tavern = hall.copy(id = UUID.randomUUID(), type = BuildingType.TAVERN, anchor = point, control = point,
+            bounds = CivBox(CivPosition(4, 64, -1), CivPosition(15, 68, 5)), entrance = CivPosition(8, 64, -2))
+        (extra + point).forEach { h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL }
+        h.city = h.city.copy(buildings = listOf(hall, tavern), stock = Stock(),
+            inventory = CivInventory(CivStorageMode.PHYSICAL, containers = extra))
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
+        h.storage.residentFoodSource(h.city, h.worker, h.feet) shouldBe null
+        requireNotNull(h.storage.residentFoodSource(h.city, h.worker, h.feet)).buildingId shouldBe hall.id
+        h.barrel.getItem(0)!!.amount shouldBe 4
+        h.worker.hunger shouldBe 14
+    }
+
     test("Auto materialization debits one existing FOOD per real bread and pickup only transfers that bread") {
         val initial = h.city
         val tx = h.materialize()

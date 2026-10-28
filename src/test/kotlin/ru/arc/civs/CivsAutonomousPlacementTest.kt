@@ -407,7 +407,7 @@ class CivsAutonomousPlacementTest : FunSpec({
 
             val drifted = s.worldAccess.revalidate(accepted.join(), s.city.owner)
             s.finish(drifted)
-            spatialFailure(drifted) shouldBe "autonomy-terrain"
+            spatialFailure(drifted) shouldBe "container-not-empty"
         }
     }
 

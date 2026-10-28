@@ -88,6 +88,7 @@ internal fun citizenAtStorage(world: World, from: CitizenPoint, control: CivPosi
 
 /** Batched actions keep one actual reachable focus (for example the trunk's lowest cut). */
 internal fun citizenWorkFocus(work: CivWorldWork): CivPosition? {
+    CivsMineSafety.adjacentLavaFrontier(work)?.let { return it }
     // A prepaid tree keeps its reachable root until the final batch, while earlier batches clear its crown.
     work.forestry?.let { progress ->
         val job = progress.job
@@ -197,9 +198,9 @@ internal fun citizenLookDirection(eye: Location, focus: Location): Pair<Float, F
     it.yaw to it.pitch
 }
 
-internal fun citizenWorkingTravel(plan: CitizenPlan, phase: CitizenPhase, sheltering: Boolean): Boolean =
-    plan.idleReason in listOf(null, "placing") && !sheltering &&
-        phase in setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING)
+internal fun citizenWorkingTravel(plan: CitizenPlan, phase: CitizenPhase, sheltering: Boolean, purposefulDetour: Boolean = false): Boolean =
+    !sheltering && (purposefulDetour || plan.idleReason in listOf(null, "placing") &&
+        phase in setOf(CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
 
 /** A cart belongs to an observed shipment, never to the resident's profession or idle wandering. */
 internal fun citizenCourierCart(plan: CitizenPlan, phase: CitizenPhase, sheltering: Boolean): Boolean =

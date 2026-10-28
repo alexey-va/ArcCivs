@@ -42,6 +42,8 @@ data class CivWorldWork(
     /** Exact local origin of a paid frontier seal, independent of the currently selected section. */
     val miningFrontier: CivPosition? = null,
     val miningExcavation: CivPosition? = null,
+    /** Exact untouched reachable rock face for an authorized one-cell adjacent lava clearance. */
+    val miningFrontierBefore: String? = null,
 ) {
     val cropCare: Boolean get() = status == "watering" || status == "fertilizing"
 
@@ -1321,6 +1323,24 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
             plan.steps.indexOfFirst { it.point == CivsMinePlan.localPoint(building, focus) }.takeIf { it >= 0 }
         } ?: 0
         val clearingLava = CivsMineSafety.clearingLava(work)
+        CivsMineSafety.adjacentLavaFrontier(work)?.let { focus ->
+            val local = requireNotNull(work.miningFrontier)
+            val step = plan.steps.getOrNull(ordinal) ?: throw CivsRejection("stale-worksite")
+            val access = requireNotNull(work.miningAccessStep)
+            val sections = work.miningAccessSections.orEmpty()
+            val section = plan.section(ordinal)
+            requireCivs(step.point == local && step.after == null &&
+                focus == CivsWorksiteLayouts.point(building, local) &&
+                plan.sectionReady(section, access, sections) &&
+                plan.sections.getValue(section).getOrNull(plan.sectionCount(section, access, sections).toInt()) == ordinal,
+                "stale-worksite")
+            val frontier = read(city, building, world, focus) ?: throw CivsRejection("protected-area")
+            requireCivs(frontier.blockData.asString == work.miningFrontierBefore, "stale-worksite")
+            requireCivs(mineMutationAllowed(city, building, world, change(frontier, "minecraft:air"), ordinal,
+                planVersion = plan.version) == true, "protected-area")
+            requireCivs(workStandingAllowed(city, building, world, work, focus) && workAccessible(city, building, world, work) == true,
+                "stale-worksite")
+        }
         pending.forEach { cell ->
             val block = read(city, building, world, cell.position, reserved = reserved) ?: throw CivsRejection("protected-area")
             requireCivs(worldAccess.canModify(city.owner, block, Bukkit.createBlockData(cell.after).material), "lands-denied")
@@ -1390,8 +1410,15 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         if (execution != null && CivsMineFallback.eligible(city, building, worker)) {
             execution.discoveryAdmissions++
             val denial = currentNeed(city, worker)
+            val geometry = requireNotNull(CivsMinePlan.forBuilding(building))
+            val ready = geometry.sections.keys.filter { section ->
+                geometry.sectionCount(section, execution.prefix, execution.sections) < geometry.sections.getValue(section).size &&
+                    geometry.sectionReady(section, execution.prefix, execution.sections)
+            }
+            val alternativesRefused = ready.all { it in execution.blockedSections ||
+                execution.retryAt.getOrDefault(it, 0) > Bukkit.getCurrentTick() }
             val refused = !spotSearchPending && denial?.status in setOf("worksite-protected", "worksite-liquid",
-                "worksite-no-access", "worksite-obstacle", "worksite-unbreakable")
+                "worksite-no-access", "worksite-obstacle", "worksite-unbreakable") && alternativesRefused
             if (refused || execution.discoveryAdmissions >= CivsMineFallback.DISCOVERY_ADMISSIONS) {
                 val standing = citizenStorageTarget(city, building, world) {
                     mineFallbackStanding(city, worker, building, world, it)
@@ -1850,10 +1877,19 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val ordinal = mineExecutions[building.id]?.ordinal ?: return null
         if (mineMutationAllowed(city, building, world, cell, ordinal, worker, budgeted = true, clearingLava = true) != true) return null
         val progress = city.minePlans?.get(building.id.toString())?.takeIf { it.version == geometry.version }?.nextStep ?: 0
-        val standing = beside(city, worker, building, world, point, ladder = true, miningStep = progress,
-            preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }) ?: return null
-        return work(worker, building, standing, listOf(cell), status = "securing-mine", duration = 2_000, miningStep = progress)
-            .copy(equipmentAfter = null, miningFrontier = step.point, miningExcavation = step.point)
+        val frontierPoint = CivsWorksiteLayouts.point(building, step.point)
+        val adjacent = kotlin.math.abs(point.x.toLong() - frontierPoint.x) + kotlin.math.abs(point.y.toLong() - frontierPoint.y) +
+            kotlin.math.abs(point.z.toLong() - frontierPoint.z) == 1L &&
+            geometry.steps[ordinal].point == step.point && geometry.steps[ordinal].after == null
+        val frontier = if (adjacent) read(city, building, world, frontierPoint, worker = worker) ?: return null else null
+        val frontierBefore = frontier?.takeIf { CivsMineSafety.natural(it.type) && it.type.isOccluding && !it.type.hasGravity() }?.blockData?.asString
+        if (frontierBefore != null && mineMutationAllowed(city, building, world, change(requireNotNull(frontier), "minecraft:air"),
+                ordinal, worker, budgeted = true) != true) return null
+        val focus = if (frontierBefore != null) frontierPoint else point
+        val standing = beside(city, worker, building, world, focus, ladder = true, miningStep = progress,
+            preferred = step.approach?.let { CivsWorksiteLayouts.point(building, it) }, allowRemote = frontierBefore == null) ?: return null
+        return work(worker, building, standing, listOf(cell), status = "securing-mine", duration = 2_000, miningStep = progress, focus = focus)
+            .copy(equipmentAfter = null, miningFrontier = step.point, miningExcavation = step.point, miningFrontierBefore = frontierBefore)
     }
 
     /** Repair only this frontier. Earlier completed columns never enter another branch's work. */
@@ -2029,7 +2065,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
     private fun beside(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, target: CivPosition,
                        allowOwn: Boolean = true, ladder: Boolean = false, miningStep: Long? = null,
                        preferred: CivPosition? = null, miningAccessStep: Long? = miningStep,
-                       capture: (() -> CivWorldWork?)? = null): CivWorkApproach? {
+                       capture: (() -> CivWorldWork?)? = null, allowRemote: Boolean = true): CivWorkApproach? {
         val rejected = rejectedWorkSpots[worker.id]?.takeIf {
             it.key == standingKey(worker, building, miningStep, target, mineExecutions[building.id]?.ordinal)
         }
@@ -2074,7 +2110,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         val connectedHeights = hashMapOf<Int, Boolean>()
         // Worksite pulses can precede NPC creation. No actor is not a failed
         // approach: keep ordinary progress and reserve the remote probe for spawn.
-        val remoteAvailable = residentFeet(worker.id)?.world == world
+        val remoteAvailable = allowRemote && residentFeet(worker.id)?.world == world
         fun pending(): CivWorkApproach? {
             spotSearchPending = true
             blocked(worker, "searching-work")

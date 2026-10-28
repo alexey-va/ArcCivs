@@ -28,10 +28,25 @@ internal object CivsMineSafety {
     const val FULL_COVER = 16
 
     /** Explicit hazard removal, never an item, equipment or completed excavation receipt. */
-    fun clearingLava(work: CivWorldWork): Boolean = work.miningPlanVersion == 7 && work.status == "securing-mine" &&
+    private fun lavaClearanceShape(work: CivWorldWork): Boolean = work.miningPlanVersion == 7 && work.status == "securing-mine" &&
         !work.miningGenerator && work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null &&
         work.miningSections != null && work.miningAccessSections != null && work.miningOrdinal != null &&
         work.changes.singleOrNull()?.let { it.before.substringBefore('[') == "minecraft:lava" && it.after == "minecraft:air" } == true
+
+    fun clearingLava(work: CivWorldWork): Boolean = lavaClearanceShape(work) &&
+        (work.focus == null || work.focus == work.changes.single().position || adjacentLavaFrontier(work) != null)
+
+    /** The owner permits deleting lava immediately behind the exact reachable, untouched rock face. */
+    fun adjacentLavaFrontier(work: CivWorldWork): CivPosition? {
+        if (!lavaClearanceShape(work) || work.remoteWork || work.miningFrontier == null ||
+            work.miningExcavation != work.miningFrontier) return null
+        val focus = work.focus ?: return null
+        val liquid = work.changes.single().position
+        if (kotlin.math.abs(focus.x.toLong() - liquid.x) + kotlin.math.abs(focus.y.toLong() - liquid.y) +
+            kotlin.math.abs(focus.z.toLong() - liquid.z) != 1L) return null
+        val material = work.miningFrontierBefore?.substringBefore('[')?.let(Material::matchMaterial) ?: return null
+        return focus.takeIf { natural(material) && material.isOccluding && !material.hasGravity() }
+    }
 
     fun natural(material: Material): Boolean = material in GROUND || material.name.endsWith("_ORE")
 

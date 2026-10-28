@@ -2116,8 +2116,8 @@ class CivsService(
         if (city.inventory?.mode != CivStorageMode.VIRTUAL) return null
         if (city.inventory == null || CivsResidents.hunger(worker) > 14 || CivsEquipment.usableCount(worker, "BREAD") > 0 ||
             CivsEquipment.supplyRoom(worker, Material.BREAD) == 0) return null
-        return city.buildings.sortedBy { if (CivsRules.staffedTavern(city, it)) 0 else 1 }.firstOrNull {
-            (it.type == BuildingType.TOWN_HALL || CivsRules.staffedTavern(city, it)) && it.control != null &&
+        return city.buildings.sortedBy { if (it.type == BuildingType.TAVERN) 0 else 1 }.firstOrNull {
+            (it.type == BuildingType.TOWN_HALL || it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE) && it.control != null &&
             (localStocks(city)(it.id)["BREAD"] ?: 0L) > 0L }?.id
     }
 
@@ -2186,7 +2186,7 @@ class CivsService(
                     val source = city.building(buildingId) ?: throw CivsRejection("building-not-found")
                     citizens.requireStorageArrival(cityId, workerId, buildingId)
                     carriedBefore = CivsEquipment.available(worker, emptyMap())
-                    val food = (source.type == BuildingType.TOWN_HALL || CivsRules.staffedTavern(city, source)) && CivsResidents.hunger(worker) <= 14 &&
+                    val food = (source.type == BuildingType.TOWN_HALL || source.type == BuildingType.TAVERN && source.phase == BuildingPhase.ACTIVE) && CivsResidents.hunger(worker) <= 14 &&
                         CivsEquipment.usableCount(worker, "BREAD") == 0
                     val builder = !food && CivsRules.isBuilder(city, source)
                     reportSupply = worker.assignment?.let(city::building)?.let { CivsRules.isBuilder(city, it) } == true

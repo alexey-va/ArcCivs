@@ -761,10 +761,11 @@ class CivsCitizens(
                 if (actor?.alarmSheltering == true) return "workers.status.alarm-shelter"
                 if (actor?.sheltering == true) return "workers.status.${if (actor.sleeping) "sleeping" else "sheltering"}"
                 if (actor != null && collectedPending(actor)) return "workers.status.loading-cargo"
+                actor?.mealVisit?.let { return "workers.status.${if (it.arrivedAt == null) "moving-to-tavern" else "eating"}" }
                 if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
                 if (actor?.collectionSeek != null) return "workers.status.walking"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
-                if (actor?.outputReturn != null) return "workers.status.${if (actor.supplyPickup != null) "loading-cargo" else "moving-to-storage"}"
+                if (actor?.outputReturn != null) return "workers.status.${if (actor.supplyPickup != null) "loading-cargo" else "returning-output"}"
                 actor?.social?.visit?.let {
                     return "workers.status.${if (it.partnerId != null) {
                         if (it.conversationAt == null) "meeting" else "talking"
@@ -895,9 +896,6 @@ class CivsCitizens(
             actor.route == null && actor.workDetour == null
         return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper) &&
             !residentLifePending(actor) && actor.mealVisit == null && actor.mentorVisit == null &&
-            (actor.plan.type != BuildingType.TAVERN || actors.values.none {
-                it.cityId == cityId && it.mealVisit?.plan?.buildingId == actor.plan.token.assignmentId
-            }) &&
             actor.plan.worldWork == null && actor.plan.courier == null && actor.plan.autonomousWork == null &&
             actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
             actor.supplyPickup == null && actor.foodSource == null &&
@@ -1550,7 +1548,7 @@ class CivsCitizens(
                 CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> actor.plan.travelTarget(actor.cycle.phase)
                 else -> null
             }
-            if (travelTarget != null && !actor.sheltering && actor.collectionSeek == null && actor.collectionHome == null &&
+            if (travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
                 arrivedAt(actor, city, npc.world, travelTarget)) {
                 motion.cancel()
@@ -1594,7 +1592,7 @@ class CivsCitizens(
             }
             val before = npc.location
             val working = actor.attacker == null && actor.collectionSeek == null && actor.collectionHome == null &&
-                (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))
+                workingTravel(actor)
             val speed = if (actor.attacker != null) 1.1 else if (working)
                 .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
             actor.collisionResident = null
@@ -1698,8 +1696,8 @@ class CivsCitizens(
     private fun update(actor: Actor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         actor.mealVisit?.let { visit ->
-            if (!lifeActorReady(actor) || visit.seat == null &&
-                !arrived(actor.npc.location, visit.target.location(world))) stopMeal(actor)
+            if (visit.arrivedAt != null && (!lifeActorReady(actor) || visit.seat == null &&
+                !arrived(actor.npc.location, visit.target.location(world)))) stopMeal(actor)
         }
         if (world.time in 12_000L..23_000L) {
             stopMeal(actor)
@@ -2069,6 +2067,11 @@ class CivsCitizens(
     private fun workActivityStatus(actor: Actor, plan: CitizenPlan): String? = citizenWorkActivityStatus(plan, actor.cycle.phase,
         actor.npc.location.point(), actor.workHandoff, navigationTick)
 
+    private fun workingTravel(actor: Actor): Boolean = !actor.sheltering &&
+        (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, false,
+            purposefulDetour = actor.outputReturn != null || actor.foodSource != null || actor.workDetour != null ||
+                actor.mealVisit != null || actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.idleReason == "waiting-materials"))
+
     private fun navigationFailed(actor: Actor): Boolean = actor.route?.let {
         it.motion.failure != null || it.completion?.cancelReason != null ||
             it.motion.navigating && !it.motion.searching && navigationTick - it.progressTick >= 40
@@ -2218,9 +2221,11 @@ class CivsCitizens(
             return true
         }
         if (now < actor.lifeRetryAt) return false
-        val plan = CivsResidentLife.mealPlan(city, worker, actor.mealVisit?.plan?.buildingId, residentFoods)
+        val fallback = city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL }?.id
+        val preferred = actor.mealVisit?.plan?.buildingId ?: fallback.takeIf { now < actor.mealVenueRetryAt }
+        var plan = CivsResidentLife.mealPlan(city, worker, preferred, residentFoods)
             ?: run { stopMeal(actor); return false }
-        val building = city.building(plan.buildingId) ?: run { stopMeal(actor); return false }
+        var building = city.building(plan.buildingId) ?: run { stopMeal(actor); return false }
         var visit = actor.mealVisit
         if (visit == null || visit.plan.copy(cityRevision = plan.cityRevision) != plan) {
             val at = actor.npc.location
@@ -2228,22 +2233,40 @@ class CivsCitizens(
                 stopMeal(actor)
                 return false
             }
+            var target = if (building.type == BuildingType.TAVERN) citizenStorageTarget(city, building, world) { point ->
+                citizenStandable(world, point) && citizenPacketBodyClear(world, point.point(), false) &&
+                    actors.values.none { other -> other !== actor && other.cityId == city.id && other.mealVisit?.target == point }
+            } else CivPosition(at.blockX, at.blockY, at.blockZ)
+            if (target == null) {
+                actor.mealVenueRetryAt = now + 30_000
+                plan = CivsResidentLife.mealPlan(city, worker, fallback, residentFoods) ?: run { stopMeal(actor); return false }
+                building = city.building(plan.buildingId) ?: run { stopMeal(actor); return false }
+                target = CivPosition(at.blockX, at.blockY, at.blockZ)
+            }
             rememberWorkDetour(actor)
             stopMeal(actor)
             cancelRoute(actor)
             stopCamp(actor, "meal")
             val hand = CivsEquipment.slots(worker)[4]?.stack() ?: ItemStack(citizenTool(actor.plan) ?: Material.AIR)
-            visit = ResidentMealVisit(plan, CivPosition(at.blockX, at.blockY, at.blockZ), now, building, hand)
+            visit = ResidentMealVisit(plan, target, now, building, hand)
             actor.mealVisit = visit
         }
         val session = requireNotNull(visit)
         actor.cycle.deferWork(now)
         if (now - session.startedAt > 60_000 || !citizenStandable(world, session.target) ||
             session.seat?.let { !citizenDiningSeatClear(world, it) } == true) {
+            if (session.building.type == BuildingType.TAVERN) actor.mealVenueRetryAt = now + 30_000
             return retryMeal(actor, now, "session-unavailable")
         }
-        if (!arrived(actor.npc.location, session.target.location(world)))
-            return retryMeal(actor, now, "meal-interrupted")
+        if (!arrived(actor.npc.location, session.target.location(world))) {
+            statuses[worker.id] = "moving-to-tavern"
+            if (actor.route?.let { it.completion != null || it.timedOut(now) } == true ||
+                actor.route == null && !startRoute(actor, world, session.target, now)) {
+                actor.mealVenueRetryAt = now + 30_000
+                return retryMeal(actor, now, "tavern-unavailable")
+            }
+            return true
+        }
         if (session.arrivedAt == null || now - session.observedAt > 2_000) {
             if (session.seat == null) cancelRoute(actor)
             session.arrivedAt = now
@@ -2428,7 +2451,7 @@ class CivsCitizens(
 
     private fun travelForSupplies(actor: Actor, city: Settlement, world: World, target: CivPosition, now: Long,
                                   resumeWork: Boolean = false) {
-        statuses[actor.workerId] = "moving-to-storage"
+        statuses[actor.workerId] = if (actor.outputReturn != null) "returning-output" else "moving-to-storage"
         if (now < actor.supplyRetryAt) { statuses[actor.workerId] = "waiting-materials"; return }
         if (arrivedAt(actor, city, world, target)) {
             cancelRoute(actor)
@@ -3294,7 +3317,9 @@ class CivsCitizens(
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
-            (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, actor.sheltering))) paths.begin(city) else null
+            workingTravel(actor)) paths.begin(city) else null
+        // Even leisure and interrupted work prefer the existing streets; only working trips teach new corridors.
+        val routeCosts = trip ?: paths.begin(city)
         // Only the outside leg to the real entrance is ordinary city travel. Internal
         // shaft/gallery waypoints must retain the same completed-prefix restrictions.
         val routeMine = mine.takeIf { entrance == null }
@@ -3304,7 +3329,7 @@ class CivsCitizens(
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
             (entrance != null || minePassage == null || minePassage.allows(second)) },
-            { ground -> trip?.cost(ground, surfaceSpeed) ?: 1.0 })
+            { ground -> routeCosts.cost(ground, surfaceSpeed) })
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = Route(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
@@ -4158,6 +4183,7 @@ class CivsCitizens(
         var foodPickupSource: CivResidentFoodSource? = null
         var workDetour: CitizenToken? = null
         var mealVisit: ResidentMealVisit? = null
+        var mealVenueRetryAt = 0L
         var mealOutcome: Pair<String, Long>? = null
         var diningSearchIndex = 0
         var mentorVisit: ResidentMentorVisit? = null

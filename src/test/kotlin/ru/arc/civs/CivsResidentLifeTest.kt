@@ -57,7 +57,7 @@ class CivsResidentLifeTest : FunSpec({
         CivsEquipment.plainCount(fed, "BREAD") shouldBe 0
         shouldThrow<CivsRejection> { CivsResidentLife.finishMeal(after, plan) }.reason shouldBe "stale-meal"
         val unstaffed = before.copy(workers = listOf(worker) + before.workers.drop(1).map { it.copy(assignment = null) })
-        unstaffed.building(requireNotNull(CivsResidentLife.mealPlan(unstaffed, worker)).buildingId)!!.type shouldBe BuildingType.TOWN_HALL
+        unstaffed.building(requireNotNull(CivsResidentLife.mealPlan(unstaffed, worker)).buildingId)!!.type shouldBe BuildingType.TAVERN
         CivsResidentLife.mealPlan(before.copy(workers = before.workers.map {
             if (it.id == worker.id) it.copy(hunger = 15) else it
         }), worker.copy(hunger = 15)) shouldBe null

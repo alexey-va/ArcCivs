@@ -54,8 +54,14 @@ internal object CivsResidentFood {
     // Retain the existing four-bread supply batch; no new hunger, reward or production rate.
     const val BATCH = 4
 
+    fun tavern(city: Settlement): CivBuilding? = city.buildings.firstOrNull {
+        it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE && it.control != null
+    }
+
+    fun tavernStock(city: Settlement): Long = (city.workers.size.toLong() * BATCH).coerceIn(BATCH.toLong(), 64L)
+
     fun reserveBuilding(city: Settlement, building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
-        (building.type == BuildingType.TOWN_HALL || building.type == BuildingType.WAREHOUSE || CivsRules.staffedTavern(city, building))
+        building.type in setOf(BuildingType.TOWN_HALL, BuildingType.WAREHOUSE, BuildingType.TAVERN)
 
     fun eligible(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean =
         city.pendingDeletion == null && city.autonomy?.paused != true && city.workers.any { it.id == worker.id } &&

@@ -62,9 +62,9 @@ object CivsResidentLife {
         val amount = minOf((15 - CivsResidents.hunger(worker) + food.nutrition - 1) / food.nutrition,
             foods.available(city, worker, material))
         val building = if (preferredBuildingId != null) city.building(preferredBuildingId)?.takeIf {
-            it.type == BuildingType.TOWN_HALL || CivsRules.staffedTavern(city, it)
+            it.type == BuildingType.TOWN_HALL || it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE && it.control != null
         } ?: return null
-        else city.buildings.firstOrNull { CivsRules.staffedTavern(city, it) }
+        else CivsResidentFood.tavern(city)
             ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL } ?: return null
         return CivResidentMeal(city.revision, worker.id, building.id, worker.life?.meals ?: 0,
             if (material == "BREAD") CivResidentMealSource.CARRIED_BREAD else CivResidentMealSource.CARRIED_FOOD,

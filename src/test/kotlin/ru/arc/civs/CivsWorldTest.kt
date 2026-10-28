@@ -173,7 +173,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("autonomous construction tolerates only neighbour-derived stair shape and reports real drift") {
+    test("autonomous revalidation accepts changed stair states without mutating terrain") {
         worldScenario { s ->
             val position = CivPosition(0, 64, 0)
             val before = "minecraft:oak_stairs[facing=north,half=top,shape=straight,waterlogged=false]"
@@ -195,15 +195,13 @@ class CivsWorldTest : FunSpec({
                 s.world.getBlockAt(0, 64, 0).blockData = Bukkit.createBlockData(state)
                 val result = s.subject.revalidate(plan, city.owner)
                 s.scheduler.tick()
-                val failure = rejection(result)
-                failure.reason shouldBe "autonomy-terrain"
-                failure.values["actual"] shouldBe state
-                failure.values["before"] shouldBe before
+                completed(result) shouldBe Unit
+                s.world.getBlockAt(0, 64, 0).blockData.asString shouldBe state
             }
         }
     }
 
-    test("autonomous revalidation accepts the observed fence connections before a trapdoor upgrade without accepting real drift") {
+    test("autonomous revalidation accepts changed fence states without mutating terrain") {
         worldScenario { s ->
             val position = CivPosition(0, 64, 0)
             val before = "minecraft:spruce_fence[east=true,north=false,south=false,waterlogged=false,west=true]"
@@ -230,18 +228,14 @@ class CivsWorldTest : FunSpec({
                 block.blockData = Bukkit.createBlockData(state)
                 val result = s.subject.revalidate(plan, city.owner)
                 s.scheduler.tick()
-                val failure = rejection(result)
-                failure.reason shouldBe "autonomy-terrain"
-                failure.values["actual"] shouldBe state
-                failure.values["before"] shouldBe before
-                failure.values["after"] shouldBe after
+                completed(result) shouldBe Unit
                 block.blockData.asString shouldBe state
             }
         }
     }
 
     for (passage in listOf("door", "fence_gate"))
-    test("autonomous revalidation tolerates only $passage opening during an oak-to-spruce upgrade") {
+    test("autonomous revalidation accepts changed $passage states without mutating terrain") {
         worldScenario { s ->
             val position = CivPosition(0, 64, 0)
             val before = if (passage == "door") "minecraft:oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]"
@@ -272,11 +266,7 @@ class CivsWorldTest : FunSpec({
                 block.blockData = Bukkit.createBlockData(state)
                 val result = s.subject.revalidate(plan, city.owner)
                 s.scheduler.tick()
-                val failure = rejection(result)
-                failure.reason shouldBe "autonomy-terrain"
-                failure.values["actual"] shouldBe state
-                failure.values["before"] shouldBe before
-                failure.values["after"] shouldBe after
+                completed(result) shouldBe Unit
                 block.blockData.asString shouldBe state
             }
         }
@@ -1189,7 +1179,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("terrain restart accepts a completed prefix but preserves a later manual natural edit") {
+    test("terrain restart accepts a completed prefix and applies its pending cell over natural drift") {
         worldScenario { s ->
             val cells = listOf(
                 CivPlanBlock(CivPosition(0, 64, 0), "minecraft:air", "minecraft:dirt"),
@@ -1201,11 +1191,11 @@ class CivsWorldTest : FunSpec({
             s.world.getBlockAt(1, 64, 0).type = Material.COARSE_DIRT
             val placed = mutableListOf<CivPlanBlock>()
             val apply = s.subject.applyTerraform(plan, city.owner, cells, 0, { true }, placed::add)
-            s.scheduler.tick()
-            failureReason(apply) shouldBe "world-changed"
-            placed shouldBe cells.take(1)
+            s.scheduler.tick(2)
+            completed(apply) shouldBe Unit
+            placed shouldBe cells
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
-            s.world.getBlockAt(1, 64, 0).type shouldBe Material.COARSE_DIRT
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.STONE
         }
     }
 
@@ -1230,9 +1220,10 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    for ((material, reason) in listOf(Material.CHEST to "protected-terrain", Material.WATER to "autonomy-terrain",
-        Material.BEDROCK to "protected-terrain", Material.OAK_PLANKS to "autonomy-terrain")) {
-        test("terrain writes preserve protected $material even when its before image matches") {
+    for (material in listOf(Material.CHEST, Material.WATER, Material.BEDROCK, Material.OAK_PLANKS)) {
+        val protected = material == Material.CHEST || material == Material.BEDROCK
+        test(if (protected) "terrain writes preserve protected $material even when its before image matches"
+            else "accepted terrain writes clear captured $material") {
             worldScenario { s ->
                 val block = s.world.getBlockAt(0, 64, 0).also { it.type = material }
                 val cell = CivPlanBlock(CivPosition(0, 64, 0), block.blockData.asString, "minecraft:air")
@@ -1240,8 +1231,13 @@ class CivsWorldTest : FunSpec({
                 val city = worldTerraformCity(s, plan)
                 val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
                 s.scheduler.tick()
-                failureReason(apply) shouldBe reason
-                block.type shouldBe material
+                if (protected) {
+                    failureReason(apply) shouldBe "protected-terrain"
+                    block.type shouldBe material
+                } else {
+                    completed(apply) shouldBe Unit
+                    block.type shouldBe Material.AIR
+                }
             }
         }
     }
@@ -1962,7 +1958,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("tree restart uses the original removed canopy proof and preserves a changed pending log") {
+    test("tree restart uses the original canopy proof and clears a changed pending log") {
         worldScenario(collisionWorld = true) { s ->
             val leaves = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]").asString
             val log = Bukkit.createBlockData("minecraft:oak_log[axis=y]").asString
@@ -1983,13 +1979,8 @@ class CivsWorldTest : FunSpec({
             s.world.getBlockAt(0, 65, 0).type shouldBe Material.AIR
             s.world.getBlockAt(0, 64, 0).type = Material.BIRCH_LOG
             s.scheduler.tick()
-            failureReason(resumed) shouldBe "world-changed"
-            s.world.getBlockAt(0, 64, 0).type shouldBe Material.BIRCH_LOG
-
-            s.world.getBlockAt(0, 64, 0).type = Material.OAK_LOG
-            val remaining = s.subject.applyTerraform(plan, city.owner, cells.takeLast(1), 2, { true }, {})
-            s.scheduler.tick()
-            completed(remaining) shouldBe Unit
+            completed(resumed) shouldBe Unit
+            placed shouldBe cells.subList(1, 3)
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.AIR
         }
     }
@@ -2017,7 +2008,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("an uncommitted dirt fill replays after grass growth without rewriting the grown ground") {
+    test("an uncommitted dirt fill preserves grass growth but replaces other ground drift") {
         worldScenario(collisionWorld = true) { s ->
             val point = CivPosition(0, 64, 0)
             val cell = CivPlanBlock(point, "minecraft:air", "minecraft:dirt")
@@ -2036,15 +2027,15 @@ class CivsWorldTest : FunSpec({
             }
             for (material in listOf(Material.MYCELIUM, Material.PODZOL, Material.COARSE_DIRT)) {
                 block.type = material
-                val rejected = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                val replay = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
                 s.scheduler.tick()
-                failureReason(rejected) shouldBe "world-changed"
-                block.type shouldBe material
+                completed(replay) shouldBe Unit
+                block.type shouldBe Material.DIRT
             }
         }
     }
 
-    test("retained dirt earthwork accepts natural grass without accepting other ground substitutions") {
+    test("retained dirt earthwork replaces other natural ground substitutions") {
         worldScenario(collisionWorld = true) { s ->
             val point = CivPosition(0, 64, 0)
             val cell = CivPlanBlock(point, "minecraft:dirt", "minecraft:coarse_dirt")
@@ -2060,15 +2051,15 @@ class CivsWorldTest : FunSpec({
             }
             for (material in listOf(Material.MYCELIUM, Material.PODZOL, Material.ROOTED_DIRT)) {
                 block.type = material
-                val guarded = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
                 s.scheduler.tick()
-                failureReason(guarded) shouldBe "world-changed"
-                block.type shouldBe material
+                completed(apply) shouldBe Unit
+                block.type shouldBe Material.COARSE_DIRT
             }
         }
     }
 
-    test("natural leaf distance drift is recaptured and applied but material persistent and wet edits stay protected") {
+    test("accepted leaf cuts clear changed material persistent and wet leaves while capture records originals") {
         worldScenario(collisionWorld = true) { s ->
             val point = CivPosition(0, 65, 0)
             val original = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]").asString
@@ -2083,16 +2074,16 @@ class CivsWorldTest : FunSpec({
             completed(apply) shouldBe Unit
             block.type shouldBe Material.AIR
 
-            for ((data, reason) in listOf(
-                "minecraft:birch_leaves[distance=7,persistent=false,waterlogged=false]" to "world-changed",
-                "minecraft:oak_leaves[distance=7,persistent=true,waterlogged=false]" to "autonomy-terrain",
-                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=true]" to "autonomy-terrain",
+            for (data in listOf(
+                "minecraft:birch_leaves[distance=7,persistent=false,waterlogged=false]",
+                "minecraft:oak_leaves[distance=7,persistent=true,waterlogged=false]",
+                "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=true]",
             )) {
                 block.blockData = Bukkit.createBlockData(data)
-                val guarded = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
+                val applyChanged = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
                 s.scheduler.tick()
-                failureReason(guarded) shouldBe reason
-                block.blockData.asString shouldBe Bukkit.createBlockData(data).asString
+                completed(applyChanged) shouldBe Unit
+                block.type shouldBe Material.AIR
             }
 
             s.cities.clear(); s.cities += city.copy(buildings = emptyList(), construction = null)
@@ -2104,7 +2095,7 @@ class CivsWorldTest : FunSpec({
         }
     }
 
-    test("bare logs and persistent leaves cannot be cleared as natural trees") {
+    test("accepted terrain cuts clear bare logs and persistent leaves without creating items") {
         for (data in listOf("minecraft:oak_log[axis=y]",
             "minecraft:oak_leaves[distance=1,persistent=true,waterlogged=false]")) worldScenario { s ->
             val block = s.world.getBlockAt(0, 64, 0)
@@ -2114,8 +2105,9 @@ class CivsWorldTest : FunSpec({
             val city = worldTerraformCity(s, plan)
             val apply = s.subject.applyTerraform(plan, city.owner, listOf(cell), 0, { true }, {})
             s.scheduler.tick()
-            failureReason(apply) shouldBe "autonomy-terrain"
-            block.blockData.asString shouldBe Bukkit.createBlockData(data).asString
+            completed(apply) shouldBe Unit
+            block.type shouldBe Material.AIR
+            s.world.entities.filterIsInstance<org.bukkit.entity.Item>() shouldBe emptyList()
         }
     }
 

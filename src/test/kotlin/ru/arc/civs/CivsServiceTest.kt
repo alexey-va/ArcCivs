@@ -652,7 +652,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("a staffed tavern serves existing bread through the ordinary pickup receipt with a hall fallback") {
+    test("an active tavern serves existing bread without staff and falls back to a stocked hall when empty") {
         serviceScenario { h ->
             val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
             val tavern = h.city.buildings.last().copy(type = BuildingType.TAVERN, control = CivPosition(10, 63, 0))
@@ -667,7 +667,9 @@ class CivsServiceTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             h.service.residentSupplySource(ready, guest) shouldBe tavern.id
-            h.service.residentSupplySource(ready.copy(workers = listOf(guest)), guest) shouldBe hall.id
+            h.service.residentSupplySource(ready.copy(workers = listOf(guest)), guest) shouldBe tavern.id
+            h.service.residentSupplySource(ready.copy(workers = listOf(guest), inventory = ready.inventory!!.copy(
+                buildingMaterials = mapOf(hall.id.toString() to mapOf("BREAD" to 8L)))), guest) shouldBe hall.id
             val pickup = h.service.prepareResidentSupplies(ready.id, guest.id, tavern.id)
             h.tick(); h.commit()
             val after = pickup.join()
@@ -5852,7 +5854,7 @@ class CivsServiceTest : FunSpec({
     }
 
     for (stairState in listOf("before", "after"))
-    test("autonomous final write gate tolerates only neighbour-derived $stairState stair shape") {
+    test("autonomous final write gate allows changed terrain for a $stairState stair plan") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
             val order = requireNotNull(placement.city.construction)
@@ -5884,7 +5886,7 @@ class CivsServiceTest : FunSpec({
             for (state in listOf(stair.replace("north", "south"), stair.replace("top", "bottom"),
                 stair.replace("false", "true"), stair.replace("oak_stairs", "stone_brick_stairs"), "minecraft:air")) {
                 block.blockData = Bukkit.createBlockData(state)
-                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
                 block.blockData.asString shouldBe state
             }
             block.blockData = Bukkit.createBlockData(stair.replace("straight", "outer_right"))
@@ -5895,7 +5897,7 @@ class CivsServiceTest : FunSpec({
     }
 
     for (fenceState in listOf("before", "after"))
-    test("autonomous final write gate tolerates only neighbour-derived $fenceState fence connections") {
+    test("autonomous final write gate allows changed terrain for a $fenceState fence plan") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
             val order = requireNotNull(placement.city.construction)
@@ -5933,7 +5935,7 @@ class CivsServiceTest : FunSpec({
                 trapdoor.replace("powered=false", "powered=true"), trapdoor.replace("half=bottom", "half=top"),
                 trapdoor.replace("waterlogged=false", "waterlogged=true"))) {
                 block.blockData = Bukkit.createBlockData(state)
-                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
                 block.blockData.asString shouldBe state
             }
             block.blockData = Bukkit.createBlockData(observed)
@@ -5944,7 +5946,7 @@ class CivsServiceTest : FunSpec({
     }
 
     for (passage in listOf("door", "fence_gate"))
-    test("autonomous final write gate tolerates only $passage opening during an oak-to-spruce upgrade") {
+    test("autonomous final write gate allows changed $passage terrain during an oak-to-spruce upgrade") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
             val order = requireNotNull(placement.city.construction)
@@ -5984,7 +5986,7 @@ class CivsServiceTest : FunSpec({
                 else emptyList()) + listOf(before.replace("oak_", "birch_"), "minecraft:air")
             for (state in drifted) {
                 block.blockData = Bukkit.createBlockData(state)
-                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+                protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
                 block.blockData.asString shouldBe state
             }
             block.blockData = Bukkit.createBlockData(before.replace("open=false", "open=true"))
@@ -5994,7 +5996,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("autonomous construction preserves a foreign block placed during its delayed begin save") {
+    test("accepted autonomous construction overwrites late terrain edits but preserves bedrock and stored items") {
         serviceScenario { h ->
             val placement = h.incrementalPlacement(paid = true)
             val order = requireNotNull(placement.city.construction)
@@ -6009,8 +6011,13 @@ class CivsServiceTest : FunSpec({
             block.type = Material.BRICKS
             h.commit()
             val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
-            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
             block.type shouldBe Material.BRICKS
+            block.type = Material.BEDROCK
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
+            block.type = Material.BARREL
+            (block.state as org.bukkit.block.Barrel).inventory.setItem(0, ItemStack(Material.BREAD))
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe false
             block.type = Material.AIR
             protection.permitsSchematicMutation("arccivs-construction", h.world.uid, 15, 64, 0) shouldBe true
             block.type = Material.STONE

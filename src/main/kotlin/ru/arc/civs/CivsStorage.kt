@@ -280,6 +280,7 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedWorld = mutableMapOf<Key, UUID>()
     private val lockedGround = mutableMapOf<UUID, UUID>()
     private val homeCursors = mutableMapOf<UUID, Int>()
+    private val foodCursors = mutableMapOf<UUID, MutableMap<UUID, Int>>()
     private val residentReturnCursors = mutableMapOf<UUID, MutableMap<UUID, ResidentReturnCursor>>()
     internal var residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY
     internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
@@ -398,6 +399,7 @@ class CivsStorage(private val plugin: Plugin,
         checkMain(); requireOpen()
         materializationCursors.clear()
         residentReturnCursors.clear()
+        foodCursors.clear()
         debitSearches.clear()
         supplyCaptures.clear()
         autonomousCaptures.clear()
@@ -410,11 +412,13 @@ class CivsStorage(private val plugin: Plugin,
             cursors.entries.removeIf { (id, cursor) -> assignments[id] != cursor.buildingId }
             if (cursors.isEmpty()) residentReturnCursors.remove(city.id)
         }
+        foodCursors[city.id]?.keys?.retainAll(city.workers.mapTo(hashSetOf(), CivWorker::id))
     }
     fun removeCity(cityId: UUID) {
         checkMain(); requireOpen()
         materializationCursors.remove(cityId)
         residentReturnCursors.remove(cityId)
+        foodCursors.remove(cityId)
         debitSearches.remove(cityId)
         supplyCaptures.remove(cityId)
         autonomousCaptures.remove(cityId)
@@ -725,12 +729,23 @@ class CivsStorage(private val plugin: Plugin,
             (!reserve || CivsResidentFood.reserveBuilding(city, it)) }.flatMap { building ->
             buildingPositions(city, building.id).map { (point, type) -> Triple(building, point, type) }
         }.distinctBy { it.second }.sortedWith(compareBy<Triple<CivBuilding, CivPosition, String?>> { (building, _, _) ->
-            if (!reserve) 0 else when (building.type) { BuildingType.TAVERN -> 0; BuildingType.WAREHOUSE -> 1; else -> 2 }
+            when { building.type == BuildingType.TAVERN -> 0; !reserve -> 1; building.type == BuildingType.WAREHOUSE -> 1; else -> 2 }
         }.thenBy { (_, point, _) ->
             val dx = point.x + .5 - from.x; val dy = point.y - from.y; val dz = point.z + .5 - from.z
             dx * dx + dy * dy + dz * dz
-        }).take(16)
-        return positions.asSequence().mapNotNull { (building, point, type) ->
+        })
+        val first = positions.firstOrNull() ?: return emptySequence()
+        val rest = positions.drop(1)
+        val cursors = foodCursors.getOrPut(city.id, ::mutableMapOf)
+        val cursor = if (rest.isEmpty()) 0 else Math.floorMod(cursors[worker.id] ?: 0, rest.size)
+        val count = minOf(15, rest.size)
+        if (rest.isNotEmpty()) cursors[worker.id] = (cursor + count) % rest.size
+        // Keep the preferred venue fast while empty large venues cannot hide all emergency holders.
+        val window = sequence {
+            yield(first)
+            repeat(count) { offset -> yield(rest[(cursor + offset) % rest.size]) }
+        }
+        return window.mapNotNull { (building, point, type) ->
             if (!foodCanModify(city, point)) null
             else resolveSources(city, sequenceOf(point to type)).firstOrNull()?.let { building to it }
         }
@@ -2132,6 +2147,7 @@ class CivsStorage(private val plugin: Plugin,
         materializationCursors.clear()
         debitSearches.clear()
         homeCursors.clear()
+        foodCursors.clear()
         residentReturnCursors.clear()
         supplyCaptures.clear()
         autonomousCaptures.clear()

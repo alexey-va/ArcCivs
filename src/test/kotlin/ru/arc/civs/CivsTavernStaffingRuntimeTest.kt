@@ -48,14 +48,14 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
     }
 
     for (pendingReceipt in listOf(false, true))
-    test("accepted building waits for an existing tavern guest including pending receipt=$pendingReceipt") {
+    test("accepted building borrows an idle keeper while its self-service guest continues pending receipt=$pendingReceipt") {
         residentRuntime { h ->
             try {
                 val keeper = h.standingTavernkeeper()
+                for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
                 val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
                 val guest = h.owner.collisionActors().first { it.uniqueId == h.workerId }
-                if (!pendingReceipt) guest.teleport(Location(h.world, 10.5, 64.0, .5))
-                val mealAt = guest.location
+                guest.teleport(Location(h.world, .5, 64.0, .5))
                 val pending = CompletableFuture<Settlement>()
                 var proof: CivResidentMeal? = null
                 var meals = 0
@@ -67,34 +67,23 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
                 }
                 h.owner.residentLifeEnabled = true
                 h.owner.pulse(5_000)
-                if (pendingReceipt) for (now in 6_000L..9_000L step 1_000) {
+                meals shouldBe 0
+                guest.teleport(requireNotNull(h.routeTarget()))
+                val mealAt = guest.location
+                h.owner.pulse(6_000)
+                if (pendingReceipt) for (now in 7_000L..10_000L step 1_000) {
                     h.owner.pulse(now)
-                    meals shouldBe if (now < 9_000) 0 else 1
+                    meals shouldBe if (now < 10_000) 0 else 1
                 }
                 h.mealState()["building"] shouldBe tavern.id
                 h.mealState()["pending"] shouldBe pendingReceipt
-                // Carried food is eaten at the guest's actual position, without a dining trip.
-                h.mealState()["arrived_at"] shouldBe 5_000L
+                h.mealState()["arrived_at"] shouldBe 6_000L
                 h.mealState()["source"] shouldBe CivResidentMealSource.CARRIED_BREAD
                 guest.location shouldBe mealAt
                 h.usingMainHand shouldBe true
                 h.displayedHand shouldBe Material.BREAD
                 CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "BREAD") shouldBe 2
                 val hut = h.acceptTavernConstruction()
-                h.owner.canReassign(h.city.id, keeper) shouldBe false
-                CivsAutonomy.criticalAssignment(h.city) { it == keeper && h.owner.canReassign(h.city.id, it) } shouldBe null
-                val now = if (pendingReceipt) 10_000L else 6_000L
-                h.owner.pulse(now)
-                h.mealState()["building"] shouldBe tavern.id
-                h.city.stock.food shouldBe 2L
-                h.owner.canReassign(h.city.id, keeper) shouldBe false
-                if (!pendingReceipt) for (later in 7_000L..9_000L step 1_000) {
-                    h.owner.pulse(later)
-                    meals shouldBe if (later < 9_000) 0 else 1
-                }
-                h.city = CivsResidentLife.finishMeal(h.city, requireNotNull(proof))
-                pending.complete(h.city) shouldBe true
-                h.owner.pulse(11_000)
                 h.owner.canReassign(h.city.id, keeper) shouldBe true
                 CivsAutonomy.criticalAssignment(h.city) { it == keeper && h.owner.canReassign(h.city.id, it) } shouldBe (keeper to hut.id)
                 val assigned = CivsRules.autoAssign(h.city, h.city.owner, 11_000) {
@@ -103,6 +92,14 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
                 assigned.workers.first { it.id == keeper }.assignment shouldBe hut.id
                 assigned.constructionQueue shouldBe h.city.constructionQueue
                 assigned.stock shouldBe h.city.stock
+                h.city = assigned
+                if (!pendingReceipt) for (later in 7_000L..10_000L step 1_000) {
+                    h.owner.pulse(later)
+                    meals shouldBe if (later < 10_000) 0 else 1
+                }
+                h.city = CivsResidentLife.finishMeal(h.city, requireNotNull(proof))
+                pending.complete(h.city) shouldBe true
+                h.owner.pulse(11_000)
                 h.city.stock.food shouldBe 2L
                 CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "BREAD") shouldBe 1
                 h.usingMainHand shouldBe false

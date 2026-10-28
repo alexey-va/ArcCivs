@@ -60,10 +60,22 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    fun prepareCarriedMealAtTavern(h: ResidentRuntime, guard: Boolean = false): PacketPlayerNpc {
+        val npc = h.prepareDiningSeat(guard)
+        val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+        val target = requireNotNull(citizenStorageTarget(h.city, tavern, h.world) {
+            citizenStandable(h.world, it) && citizenPacketBodyClear(h.world, it.point(), false)
+        })
+        npc.teleport(Location(h.world, target.x + .5, target.y.toDouble(), target.z + .5))
+        civsCanReachContainer(npc.location, requireNotNull(tavern.control)) shouldBe true
+        return npc
+    }
+
     test("a carried meal stays at its actual position through navigation ticks and spends one item after four observed seconds") {
         residentRuntime { h ->
             try {
-                val npc = h.prepareDiningSeat()
+                val npc = prepareCarriedMealAtTavern(h)
+                val mealAt = npc.location
                 var meals = 0
                 h.owner.finishResidentMeal = { cityId, plan ->
                     h.owner.validateResidentMeal(cityId, plan)
@@ -78,7 +90,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 val seatedAt = npc.location
                 seatedAt.y shouldBe 64.0
                 val origin = requireNotNull(h.owner.residentFeet(h.workerId))
-                origin shouldBe Location(h.world, 5.5, 64.0, .5)
+                origin shouldBe mealAt
                 repeat(60) { h.navigate() }
                 npc.isSeated shouldBe false
                 h.usingMainHand shouldBe true
@@ -124,7 +136,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("$interruption cancels a carried meal and its retained payment proof") {
         residentRuntime { h ->
             try {
-                val npc = h.prepareDiningSeat(guard = interruption == "night-guard")
+                val npc = prepareCarriedMealAtTavern(h, guard = interruption == "night-guard")
                 val pending = CompletableFuture<Settlement>()
                 var proof: CivResidentMeal? = null
                 h.owner.finishResidentMeal = { cityId, plan ->
@@ -161,7 +173,7 @@ class CivsResidentsRuntimeTest : FunSpec({
     test("a newly enclosed meal position cancels eating without spending food or making a distant recovery jump") {
         residentRuntime { h ->
             try {
-                val npc = h.prepareDiningSeat()
+                val npc = prepareCarriedMealAtTavern(h)
                 h.owner.pulse(3_000)
                 h.usingMainHand shouldBe true
                 val at = npc.location
@@ -1582,7 +1594,7 @@ class CivsResidentsRuntimeTest : FunSpec({
                 returned
             }
             h.owner.pulse(3_500)
-            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
+            h.owner.status(h.workerId) shouldBe "workers.status.returning-output"
             h.city.workers.single().items shouldBe fullBag
             h.deliveries shouldBe 0
             actor.teleport(Location(h.world, 21.5, 64.0, .5))

@@ -186,7 +186,11 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
     fun pause(reason: String, now: Long, retainWork: Boolean) {
         if (phase == CitizenPhase.CLOSED) return
         this.reason = reason
-        resumePhase = if (retainWork) CitizenPhase.READY else travelStart()
+        resumePhase = when {
+            retainWork -> CitizenPhase.READY
+            phase == CitizenPhase.RETURNING -> CitizenPhase.RETURNING
+            else -> travelStart()
+        }
         ticket = null
         deliveryRetryAt = null
         retries.fail(now)

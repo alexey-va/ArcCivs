@@ -632,14 +632,14 @@ class CivsWorld(
         }
 
         protected fun checkTerraformBlock(block: Block, after: BlockData, tree: Boolean = false,
-            allowUnpublished: Boolean = false) {
+            allowUnpublished: Boolean = false, acceptedPlan: Boolean = false) {
             checkTerrainOwnership(CivPosition(block.x, block.y, block.z), allowUnpublished = allowUnpublished)
             val state = if (block.type.isAir) null else block.state
             if ((state as? InventoryHolder)?.inventory?.any { it != null && !it.type.isAir } == true)
                 rejectAt("container-not-empty", block)
             if (block.type == Material.BEDROCK || state is TileState) rejectAt("protected-terrain", block)
-            if (!naturalTerraform(block, tree)) rejectAt("autonomy-terrain", block)
-            if (Tag.LOGS.isTagged(block.type)) {
+            if (!acceptedPlan && !naturalTerraform(block, tree)) rejectAt("autonomy-terrain", block)
+            if (!acceptedPlan && Tag.LOGS.isTagged(block.type)) {
                 val support = treeSupports[civsTerrainKey(block.x, block.z)] ?: rejectAt("autonomy-terrain", block)
                 val ground = read(support)
                 if (ground.type !in TREE_GROUND || !naturalTerraform(ground) || !fullTerraformSupport(ground))
@@ -669,13 +669,7 @@ class CivsWorld(
         protected fun matchesTerraformBefore(expected: String, current: BlockData): Boolean {
             if (expected == current.asString) return true
             if (expected == "minecraft:dirt" && current.material == Material.GRASS_BLOCK) return true
-            val before = parse(expected) as? Leaves ?: return false
-            val leaves = current as? Leaves ?: return false
-            if (before.material != leaves.material || before.isPersistent || leaves.isPersistent ||
-                (before as? Waterlogged)?.isWaterlogged == true || (leaves as? Waterlogged)?.isWaterlogged == true) return false
-            val normalized = leaves.clone() as Leaves
-            normalized.distance = before.distance
-            return normalized.asString == before.asString
+            return sameNaturalLeafState(current, parse(expected))
         }
 
         /** One support probe per queue unit; no downward native loop on a write. */
@@ -1485,14 +1479,11 @@ class CivsWorld(
             validateContext()
             checkPreservedControl()
             val cell = cells[index]
-            val tree = treeLedgerProof(terraform.blocks, terrainStart + index)
-            if (tree && !treeSupportReady(cell.position)) return
             checkTerraformCell(cell, terraform)
             val block = read(cell.position)
             val after = parse(cell.after)
-            checkTerraformBlock(block, after, tree)
+            checkTerraformBlock(block, after, acceptedPlan = true)
             val applied = sameConstructionState(block.blockData, after)
-            if (!applied && !matchesTerraformBefore(cell.before, block.blockData)) rejectAt("world-changed", block)
             if (!applied) {
                 // No breakNaturally, inventory transfer or physics: earthwork never drops items.
                 writeObservedBlock(block, after)
@@ -1512,12 +1503,10 @@ class CivsWorld(
 
     private inner class Revalidation(private val plan: CivPlacementPlan, owner: UUID) :
         Scan<Unit>(plan.cityId, owner, plan.worldId, plan.building) {
-        private var autonomous = false
         init {
             requireCivs(!CivsBlueprints.hasAuthoredControl(building) || plan.blocks.none { it.position == building.control }, "invalid-plan")
         }
         override fun validateIdentity(city: Settlement?) {
-            autonomous = city?.autonomy != null
             val current = city?.building(building.id)
             requireCivs(current == null || current == building || current.type == building.type &&
                 current.entrance == building.entrance && current.rotation == building.rotation &&
@@ -1538,9 +1527,6 @@ class CivsWorld(
             val cell = plan.blocks[index++]
             checkCell(cell.position)
             val block = read(cell.position)
-            val actual = block.blockData
-            if (autonomous && !sameConstructionState(actual, parse(cell.before)) && !sameConstructionState(actual, parse(cell.after)))
-                rejectAt("autonomy-terrain", block, mapOf("before" to cell.before, "after" to cell.after, "actual" to actual.asString))
             if (block.type == Material.BEDROCK) rejectAt("protected-terrain", block)
             if ((block.state as? org.bukkit.block.Container)?.inventory?.isEmpty == false) rejectAt("container-not-empty", block)
             // Players may clear or remodel a cell before this one-pass construction batch reaches it.
@@ -1556,6 +1542,7 @@ class CivsWorld(
             if (actual.asString == expected.asString) return true
             if (expected.material == Material.DIRT && actual.material == Material.GRASS_BLOCK) return true
             if (actual.material != expected.material) return false
+            if (sameNaturalLeafState(actual, expected)) return true
             if (actual is Door && expected is Door)
                 return (actual.clone() as Door).apply { isOpen = expected.isOpen }.asString == expected.asString
             if (actual is Gate && expected is Gate)
@@ -1568,6 +1555,15 @@ class CivsWorld(
                         setFace(face, expected.hasFace(face))
                 }.asString == expected.asString
             return false
+        }
+
+        /** Only natural dry leaves may change their neighbour-distance metadata without changing ownership. */
+        private fun sameNaturalLeafState(actual: BlockData, expected: BlockData): Boolean {
+            val leaves = actual as? Leaves ?: return false
+            val before = expected as? Leaves ?: return false
+            if (before.material != leaves.material || before.isPersistent || leaves.isPersistent ||
+                (before as? Waterlogged)?.isWaterlogged == true || (leaves as? Waterlogged)?.isWaterlogged == true) return false
+            return (leaves.clone() as Leaves).apply { distance = before.distance }.asString == before.asString
         }
 
         const val CELLS_PER_TICK = 2048

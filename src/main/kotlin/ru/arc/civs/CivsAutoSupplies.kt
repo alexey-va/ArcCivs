@@ -48,6 +48,18 @@ internal class CivsAutoSupplies {
                 !observed(city, observation))
                 return emptyList()
             val snapshot = requireNotNull(observation)
+            val active = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.mapTo(hashSetOf(), CivBuilding::id)
+            val maximumDistance = snapshot.maximumTransferDistance.toDouble() * snapshot.maximumTransferDistance
+            fun distance(from: CivPosition, to: CivPosition): Double =
+                (from.x.toDouble() - to.x).let { it * it } + (from.y.toDouble() - to.y).let { it * it } +
+                    (from.z.toDouble() - to.z).let { it * it }
+            fun reachable(from: CivPosition, to: CivPosition) = distance(from, to) <= maximumDistance
+            val relays = city.workers.filterNot(CivsResidents::isChild).mapNotNull { worker ->
+                worker.assignment?.let(snapshot.stores::get)?.takeIf { it.type == BuildingType.WAREHOUSE && it.id in active }
+            }.distinctBy(CivSupplyStore::id)
+            val dining = CivsResidentFood.tavern(city)
+            val suppliedDining = dining?.control?.let { target -> relays.any { reachable(it.control, target) &&
+                ((it.stock["BREAD"] ?: 0L) > 0 || CivSupplyRoom(it.capacity, snapshot.stackSizes).fits("BREAD") > 0) } } == true
             val crafts = jobs.filter { (id, job) -> city.workers.firstOrNull { it.id == id }
                 ?.let { CivsCarpentry.valid(city, it, job) } == true }
             val craftReserves = linkedMapOf<UUID, MutableMap<String, Long>>()
@@ -74,7 +86,8 @@ internal class CivsAutoSupplies {
             city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.control != null && !CivsRules.isBuilder(city, it) }
                 .forEach { building ->
                     val workers = city.workers.filter { it.assignment == building.id && it.cargo == null && !CivsResidents.isChild(it) }
-                    if (building.type == BuildingType.UNIVERSITY) require(building.id, CivsResearch.inputs(city, building))
+                    if (building.type == BuildingType.TAVERN) require(building.id, CivsLogistics.desiredStock(city, building))
+                    else if (building.type == BuildingType.UNIVERSITY) require(building.id, CivsResearch.inputs(city, building))
                     else if (workers.isNotEmpty() && building.type in CivsCarpentry.workshops) {
                         val required = linkedMapOf<String, Long>()
                         workers.forEach { worker ->
@@ -105,7 +118,7 @@ internal class CivsAutoSupplies {
                 }
             }
             selected.forEach { (id, inputs) -> require(id, inputs) }
-            city.workers.filter { CivsResidents.hunger(it) <= 14 && foods.carried(city, it) == null }.forEach { worker ->
+            city.workers.filter { !suppliedDining && CivsResidents.hunger(it) <= 14 && foods.carried(city, it) == null }.forEach { worker ->
                 val home = worker.homeId?.let(city::building)?.takeIf { it.control != null }
                     ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL && it.control != null }
                 if (home != null) require(home.id, mapOf("BREAD" to CivsResidentFood.BATCH.toLong()))
@@ -123,16 +136,8 @@ internal class CivsAutoSupplies {
                     returning.getOrPut(id, ::linkedMapOf).merge(material, count, Math::addExact)
                 }
             } }
-            val active = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.mapTo(hashSetOf(), CivBuilding::id)
             val exporters = snapshot.stores.values.filter { it.id in active &&
                 (it.type == BuildingType.WAREHOUSE || it.outputMaterial != null) }
-            val maximumDistance = snapshot.maximumTransferDistance.toDouble() * snapshot.maximumTransferDistance
-            fun reachable(from: CivPosition, to: CivPosition): Boolean =
-                (from.x.toDouble() - to.x).let { it * it } + (from.y.toDouble() - to.y).let { it * it } +
-                    (from.z.toDouble() - to.z).let { it * it } <= maximumDistance
-            val relays = city.workers.filterNot(CivsResidents::isChild).mapNotNull { worker ->
-                worker.assignment?.let(snapshot.stores::get)?.takeIf { it.type == BuildingType.WAREHOUSE && it.id in active }
-            }.distinctBy(CivSupplyStore::id)
             fun elsewhere(targetId: UUID, to: CivPosition, material: String): Long =
                 exporters.sumOf { source ->
                     if (source.id == targetId || relays.none { reachable(source.control, it.control) && reachable(it.control, to) }) 0L
@@ -142,14 +147,28 @@ internal class CivsAutoSupplies {
                             (returning[source.id]?.get(material) ?: 0L)
                     }
                 }
-            return desired.flatMap { (buildingId, materials) ->
-                val target = city.building(buildingId)?.control ?: return@flatMap emptyList()
+            val grants = linkedMapOf<UUID, MutableMap<String, Long>>()
+            desired.forEach { (buildingId, materials) ->
+                val building = city.building(buildingId) ?: return@forEach
+                val target = building.control ?: return@forEach
                 val local = snapshot.stores[buildingId]?.stock.orEmpty()
-                materials.toSortedMap().mapNotNull { (material, count) ->
-                    (count - (incoming[buildingId]?.get(material) ?: 0L) - elsewhere(buildingId, target, material)).coerceIn(0, BUFFER_PER_MATERIAL)
-                        .takeIf { it > (local[material] ?: 0L) }?.let { material to it }
-                }.chunked(MATERIALS_PER_RECEIPT).map { CivAutoSupplyDemand(buildingId, it.toMap()) }
+                materials.toSortedMap().forEach material@{ (material, count) ->
+                    val required = (count - (incoming[buildingId]?.get(material) ?: 0L) - elsewhere(buildingId, target, material))
+                        .coerceIn(0, BUFFER_PER_MATERIAL)
+                    val present = local[material] ?: 0L
+                    if (required <= present) return@material
+                    // Food enters a real depot; the ordinary tavern request owns its physical courier delivery.
+                    val depot = if (building.type == BuildingType.TAVERN && material == "BREAD") relays.filter {
+                        reachable(it.control, target) && CivSupplyRoom(it.capacity, snapshot.stackSizes).fits(material) > 0
+                    }.minByOrNull { distance(it.control, target) } ?: return@material else null
+                    val destination = depot?.id ?: buildingId
+                    val total = if (depot == null) required else ((depot.stock[material] ?: 0L) + required - present)
+                        .coerceAtMost(BUFFER_PER_MATERIAL)
+                    grants.getOrPut(destination, ::linkedMapOf).merge(material, total, Math::max)
+                }
             }
+            return grants.flatMap { (id, materials) -> materials.entries.map { it.key to it.value }
+                .chunked(MATERIALS_PER_RECEIPT).map { CivAutoSupplyDemand(id, it.toMap()) } }
         }
     }
 }

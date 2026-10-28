@@ -45,7 +45,6 @@ internal class CivsConstructionRuntime(
     private val closed get() = isClosed()
     private class PlacementAccess(val plan: CivPlacementPlan, val materials: Map<CivPosition, Material>,
                                   val containersChanged: Boolean, val physicsCells: List<CivPlanBlock>,
-                                  val expectedCells: Map<CivPosition, CivPlanBlock>,
                                   val batch: CivBuildBatch? = null, val nextWorkplace: CivPosition? = null,
                                   val roadSurfaces: Set<CivPosition> = emptySet()) {
         var repairing = false
@@ -134,20 +133,9 @@ internal class CivsConstructionRuntime(
         val targetWorld = plugin.server.getWorld(worldId) ?: return false
         if (y !in targetWorld.minHeight until targetWorld.maxHeight || !targetWorld.isChunkLoaded(x shr 4, z shr 4)) return false
         val block = targetWorld.getBlockAt(x, y, z)
+        if (block.type == Material.BEDROCK) return false
         if (!access.repairing &&
             (block.getState(false) as? org.bukkit.block.Container)?.inventory?.isEmpty == false) return false
-        if (!access.repairing && city.autonomy != null) {
-            val expected = access.expectedCells[position] ?: return false
-            val current = block.blockData
-            if (!CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.before)) &&
-                !CivsWorld.sameConstructionState(current, Bukkit.createBlockData(expected.after))) {
-                CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line("construction_write_denied", "city" to city.id,
-                    "order" to access.plan.id, "batch" to city.construction?.workDone, "reason" to "autonomy-terrain",
-                    "world" to worldId, "x" to x, "y" to y, "z" to z,
-                    "before" to expected.before, "after" to expected.after, "actual" to current.asString), plugin.logger)
-                return false
-            }
-        }
         // Preflight can precede this write by many ticks; Lands authority must still be current.
         return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))
     }
@@ -281,7 +269,7 @@ internal class CivsConstructionRuntime(
                 val containersChanged = cells.any { it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes }
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y && p.z in batch.minimum.z..batch.maximum.z
-                }, containersChanged, cells.filter { it.before != it.after }, cells.associateBy(CivPlanBlock::position),
+                }, containersChanged, cells.filter { it.before != it.after },
                     batch, batches?.getOrNull(order.workDone + 1)?.workplace,
                     plan.terrain?.preparedRouteSurfaces()?.mapTo(hashSetOf(), CivPlanBlock::position).orEmpty()), batch, plan.copy(blocks = cells))
             }, executor)

@@ -98,7 +98,7 @@ class CivsProducerReturnTest : FunSpec({
             }
             h.owner.pulse(2_000)
             requests shouldBe 0
-            h.owner.status(h.workerId) shouldBe "workers.status.moving-to-storage"
+            h.owner.status(h.workerId) shouldBe "workers.status.returning-output"
             npc.teleport(org.bukkit.Location(h.world, 21.5, 64.0, .5))
             h.owner.pulse(3_000)
             requests shouldBe 1
