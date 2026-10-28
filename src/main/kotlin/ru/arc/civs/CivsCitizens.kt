@@ -149,9 +149,9 @@ class CivsCitizens(
     private val voices = CivsCitizenVoices(plugin.config)
     private val pendingHarm = mutableSetOf<UUID>()
     private val harmCompletions = ConcurrentLinkedQueue<HarmCompletion>()
-    private val lifeCompletions = ConcurrentLinkedQueue<ResidentLifeCompletion>()
+    private val lifeRequests = CivsCitizenRequests<Boolean>(closed::get)
     private val supplyCompletions = ConcurrentLinkedQueue<SupplyCompletion>()
-    private val collectedCompletions = ConcurrentLinkedQueue<CollectedCompletion>()
+    private val collectedRequests = CivsCitizenRequests<Unit>(closed::get)
     private var harmEpoch = 0L
     private var navigationTick = 0L
     private var navigationAt = 0L
@@ -234,7 +234,7 @@ class CivsCitizens(
 
     private fun canYield(actor: Actor): Boolean = actor.npc.isValid && !actor.npc.isSeated && !actor.sleeping &&
         actor.route?.let { it.completion != null || it.motion.finished || it.motion.failure != null } != true &&
-        actor.attacker == null && actor.supplyPickup == null && actor.collectedPending == null &&
+        actor.attacker == null && actor.supplyPickup == null && !collectedPending(actor) &&
         actor.workerId !in pendingHarm &&
         (if (actor.sheltering) actor.route != null else actor.cycle.phase in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED,
             CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING))
@@ -375,7 +375,7 @@ class CivsCitizens(
     private fun recoverTerrainOverlap(actor: Actor, city: Settlement, now: Long): Boolean {
         val clock = recoveryClock()
         if (recoveryBudget == 0 || actor.nextRecoveryAt?.let { clock < it } == true ||
-            actor.lifePending != null || actor.supplyPickup != null || actor.collectedPending != null ||
+            residentLifePending(actor) || actor.supplyPickup != null || collectedPending(actor) ||
             actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return false
         recoveryBudget--
         actor.nextRecoveryAt = clock + 5_000L
@@ -620,7 +620,11 @@ class CivsCitizens(
                     "worker" to workerId, "type" to "PACKET_PLAYER",
                     "skin" to skin.name, "tool" to (CivsEquipment.slots(worker)[4]?.material ?: citizenTool(plan)?.name))
             } catch (error: Exception) {
-                actors.remove(workerId)?.cycle?.close()
+                actors.remove(workerId)?.let { actor ->
+                    lifeRequests.cancel(actor.workerId, actor.instanceId)
+                    collectedRequests.cancel(actor.workerId, actor.instanceId)
+                    actor.cycle.close()
+                }
                 runCatching { npc?.remove() }.onFailure { CivsDiagnostics.record(plugin.logger, Level.WARNING, city.id,
                     "ArcCivs failed to remove rejected NPC city=${city.id} worker=$workerId", it) }
                 admission.failed(workerId, plan, retry, nowMillis)
@@ -672,7 +676,7 @@ class CivsCitizens(
         // Work handoffs retain all eight slots; at most four idle actors share the normal wander budget.
         val idle = actors.values.filter { it.plan.idleReason == "unassigned" && it.workerId !in pendingHarm &&
             it.npc.isValid && !it.sleeping && !it.sheltering && it.attacker == null && it.foodSource == null &&
-            it.supplyPickup == null && it.collectedPending == null && it.social.visit == null }.take(4)
+            it.supplyPickup == null && !collectedPending(it) && it.social.visit == null }.take(4)
         for (actor in idle) {
             citizenRotateAfterAdmission(actors, actor.workerId)
             val city = cities[actor.cityId]?.takeIf { it.pendingDeletion == null } ?: continue
@@ -697,7 +701,7 @@ class CivsCitizens(
     private fun currentPlan(actor: Actor, city: Settlement, worker: CivWorker): CitizenPlan? {
         val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null) &&
             worker.assignment == actor.plan.token.assignmentId && worker.completedCycles == actor.plan.token.completedCycles
-        return if (actor.supplyPickup != null || actor.collectedPending != null || acceptedDetour) actor.plan
+        return if (actor.supplyPickup != null || collectedPending(actor) || acceptedDetour) actor.plan
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
     }
 
@@ -751,7 +755,7 @@ class CivsCitizens(
                 actor?.combatStatus?.let { return "workers.status.$it" }
                 if (actor?.alarmSheltering == true) return "workers.status.alarm-shelter"
                 if (actor?.sheltering == true) return "workers.status.${if (actor.sleeping) "sleeping" else "sheltering"}"
-                if (actor?.collectedPending != null) return "workers.status.loading-cargo"
+                if (actor != null && collectedPending(actor)) return "workers.status.loading-cargo"
                 if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
                 if (actor?.collectionSeek != null) return "workers.status.walking"
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
@@ -844,7 +848,7 @@ class CivsCitizens(
                     "meal" to mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
                         "target" to actor.mealVisit?.target, "started_at" to actor.mealVisit?.startedAt,
                         "arrived_at" to actor.mealVisit?.arrivedAt, "observed_at" to actor.mealVisit?.observedAt,
-                        "pending" to (actor.lifePending != null && actor.mealOutcome?.first == "pending"), "retry_at" to actor.lifeRetryAt,
+                        "pending" to (residentLifePending(actor) && actor.mealOutcome?.first == "pending"), "retry_at" to actor.lifeRetryAt,
                         "last_outcome" to actor.mealOutcome?.first, "last_outcome_at" to actor.mealOutcome?.second),
                     "social" to mapOf("visit" to (actor.social.visit != null), "arrived_at" to actor.social.visit?.arrivedAt,
                         "partner" to actor.social.visit?.partnerId, "seat" to actor.social.visit?.seat,
@@ -884,7 +888,7 @@ class CivsCitizens(
             actor.attacker == null && actor.residentYield == null && actor.social.visit == null &&
             actor.route == null && actor.workDetour == null
         return actor.cityId == cityId && (actor.cycle.phase == CitizenPhase.IDLE || idleTavernkeeper) &&
-            actor.lifePending == null && actor.mealVisit == null && actor.mentorVisit == null &&
+            !residentLifePending(actor) && actor.mealVisit == null && actor.mentorVisit == null &&
             (actor.plan.type != BuildingType.TAVERN || actors.values.none {
                 it.cityId == cityId && it.mealVisit?.plan?.buildingId == actor.plan.token.assignmentId
             }) &&
@@ -892,7 +896,7 @@ class CivsCitizens(
             actor.plan.token.constructionId == null && actor.plan.token.craftJobId == null &&
             actor.supplyPickup == null && actor.foodSource == null &&
             actor.courierPickupStartedAt == null && !actor.returningToWarehouse &&
-            actor.collectedPending == null && actor.collectionSeek == null && actor.collectionHome == null &&
+            !collectedPending(actor) && actor.collectionSeek == null && actor.collectionHome == null &&
             actor.collectionCycle == null && actor.terrainObstructedAt == null
     }
 
@@ -1137,7 +1141,7 @@ class CivsCitizens(
             actor.plan.pendingStockDelivery != null ||
             !actor.npc.isValid || actor.npc.world.uid != city.worldId || actor.sleeping || actor.sheltering ||
             actor.attacker != null || actor.workerId in pendingHarm || actor.supplyPickup != null || actor.foodSource != null ||
-            actor.collectedPending != null || actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
+            collectedPending(actor) || actor.social.visit != null || actor.npc.world.time in 12_000L..23_000L ||
             actor.cycle.phase in setOf(CitizenPhase.READY, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED)) return false
         val feet = actor.npc.location
         // Actual collision/support follows fractional farm paths and stair steps; it is not an integer floor test.
@@ -1424,7 +1428,7 @@ class CivsCitizens(
             if (npc.isSeated) { actor.footsteps.reset(); continue }
             var separationAdmitted = false
             if (separationBudget > 0 && npc.isValid && !actor.sleeping && actor.supplyPickup == null &&
-                actor.collectedPending == null &&
+                !collectedPending(actor) &&
                 actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) &&
                 activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers)) {
                 separationBudget--
@@ -1464,7 +1468,7 @@ class CivsCitizens(
             if (route == null && !actor.sleeping && actor.workerId !in pendingHarm && npc.isValid) {
                 actor.lookYaw?.let { citizenFace(npc, it, actor.lookPitch, if (actor.attacker != null) 16f else CITIZEN_TURN_PER_TICK) }
             }
-            if (route == null || actor.collectedPending != null || actor.workerId in pendingHarm || !npc.isValid ||
+            if (route == null || collectedPending(actor) || actor.workerId in pendingHarm || !npc.isValid ||
                 !activeAt(actor.cityId, actor.worldId, npc.location.point(), viewers) ||
                 !route.chunks.ready(npc.world)) {
                 actor.footsteps.reset()
@@ -1695,7 +1699,7 @@ class CivsCitizens(
             releaseCourierSource(actor, now)
             return
         }
-        if (actor.collectedPending != null) { statuses[actor.workerId] = "loading-cargo"; return }
+        if (collectedPending(actor)) { statuses[actor.workerId] = "loading-cargo"; return }
         if (world.time !in 12_000L..23_000L && eatMeal(actor, city, worker, world, now)) return
         if (supplyFood(actor, city, worker, world, now)) {
             actor.mineRouteEpisode.retain(null)
@@ -2155,7 +2159,7 @@ class CivsCitizens(
     private fun eatMeal(actor: Actor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
         if (!residentLifeEnabled || actor.cycle.phase in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING) ||
             worker.cargo != null || actor.plan.courier?.carrying == true) { stopMeal(actor); return false }
-        if (actor.lifePending != null) {
+        if (residentLifePending(actor)) {
             actor.cycle.deferWork(now)
             statuses[worker.id] = if (actor.mealVisit != null) "eating" else if (actor.mentorVisit != null) "learning" else "campfire"
             return true
@@ -2223,27 +2227,24 @@ class CivsCitizens(
         else citizenPacketSupported(actor.npc.world, actor.npc.location.point()) &&
             citizenPacketBodyClear(actor.npc.world, actor.npc.location.point(), false))
 
+    private fun residentLifePending(actor: Actor): Boolean = lifeRequests.pending(actor.workerId, actor.instanceId)
+    private fun collectedPending(actor: Actor): Boolean = collectedRequests.pending(actor.workerId, actor.instanceId)
+
     private fun submitResidentLife(actor: Actor, meal: Boolean = false, action: () -> CompletableFuture<Settlement>) {
-        if (actor.lifePending != null) return
-        val ticket = UUID.randomUUID()
-        actor.lifePending = ticket
-        if (meal) actor.mealOutcome = "pending" to residentObservedAt
-        val future = try { action() } catch (error: Exception) { CompletableFuture.failedFuture(error) }
-        future.whenComplete { _, error -> if (!closed.get())
-            lifeCompletions.add(ResidentLifeCompletion(actor.workerId, actor.instanceId, ticket, error, meal)) }
+        if (residentLifePending(actor)) return
+        lifeRequests.start(actor.workerId, actor.instanceId, meal) {
+            if (meal) actor.mealOutcome = "pending" to residentObservedAt
+            action()
+        }
     }
 
     private fun drainResidentLife(now: Long) {
-        while (true) {
-            val completion = lifeCompletions.poll() ?: return
-            val actor = actors[completion.workerId]?.takeIf {
-                it.instanceId == completion.actorId && it.lifePending == completion.ticket
-            } ?: continue
-            actor.lifePending = null
+        lifeRequests.tick({ actors[it]?.instanceId }) { completion ->
+            val actor = actors.getValue(completion.workerId)
             stopMeal(actor)
             actor.mentorVisit = null
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
-            if (completion.meal) actor.mealOutcome =
+            if (completion.payload) actor.mealOutcome =
                 (if (error == null) "accepted" else (error as? CivsRejection)?.reason ?: "failed") to now
             if (error != null) {
                 actor.lifeRetryAt = now + 5_000
@@ -2254,7 +2255,7 @@ class CivsCitizens(
 
     /** A child follows one nearby experienced resident; no work or inventory is credited. */
     private fun mentor(actor: Actor, city: Settlement, child: CivWorker, world: World, now: Long): Boolean {
-        if (!residentLifeEnabled || now < actor.lifeRetryAt || actor.lifePending != null ||
+        if (!residentLifeEnabled || now < actor.lifeRetryAt || residentLifePending(actor) ||
             child.life?.education.orEmpty().values.sum() >= CivsResidentLife.MAX_EDUCATION_XP) return false
         val age = child.childMinutes ?: return false
         val interval = if (CivsResidentLife.needs(city, child).happiness >= 70) 3 else 5
@@ -2553,23 +2554,16 @@ class CivsCitizens(
     }
 
     private fun beginCollected(actor: Actor, now: Long, operation: () -> CompletableFuture<Settlement>) {
-        val ticket = UUID.randomUUID()
-        actor.collectedPending = ticket
-        actor.collectionRetryAt = now + 5_000
-        statuses[actor.workerId] = "loading-cargo"
-        val future = try { operation() } catch (failure: Exception) { CompletableFuture.failedFuture(failure) }
-        future.whenComplete { city, failure ->
-            if (!closed.get()) collectedCompletions.add(CollectedCompletion(actor.workerId, actor.instanceId, ticket, city, failure))
+        collectedRequests.start(actor.workerId, actor.instanceId, Unit) {
+            actor.collectionRetryAt = now + 5_000
+            statuses[actor.workerId] = "loading-cargo"
+            operation()
         }
     }
 
     private fun drainCollected(now: Long) {
-        while (true) {
-            val completion = collectedCompletions.poll() ?: return
-            val actor = actors[completion.workerId]?.takeIf {
-                it.instanceId == completion.actorId && it.collectedPending == completion.ticket
-            } ?: continue
-            actor.collectedPending = null
+        collectedRequests.tick({ actors[it]?.instanceId }) { completion ->
+            val actor = actors.getValue(completion.workerId)
             actor.collectionRetryAt = now + 5_000
             if (actor.collectionHome != null) cancelRoute(actor)
             actor.collectionSeek = null
@@ -2839,7 +2833,7 @@ class CivsCitizens(
         fun free(other: Actor): Boolean = other.cityId == city.id && other.worldId == city.worldId &&
             other.npc.isValid && other.npc.world == world && !other.sleeping &&
             !other.sheltering && other.attacker == null && other.foodSource == null && other.supplyPickup == null &&
-            other.collectedPending == null && other.collectionSeek == null && other.collectionHome == null &&
+            !collectedPending(other) && other.collectionSeek == null && other.collectionHome == null &&
             !other.returningToWarehouse && other.workerId !in pendingHarm && other.route == null &&
             other.plan.idleReason in setOf("unassigned", "no-construction", "waiting-growth", "waiting-tool", "construction-paused") &&
             citizenCampEligible(other.plan, other.cycle.phase, world.time) &&
@@ -2934,7 +2928,7 @@ class CivsCitizens(
     }
 
     private fun creditRest(actor: Actor, city: Settlement, worker: CivWorker, tick: Int) {
-        if (!residentLifeEnabled || actor.lifePending != null) return
+        if (!residentLifeEnabled || residentLifePending(actor)) return
         val visit = actor.social.visit ?: return
         val began = visit.conversationAt ?: visit.arrivedAt ?: return
         if (tick - began < 100 || actor.restVisit == visit.startedAt || !lifeActorReady(actor)) return
@@ -3544,7 +3538,7 @@ class CivsCitizens(
         // A stalled planner or denied passage may expire; player and resident obstruction remain authoritative.
         if (failed.motion.searching && !timedOut || failed.motion.waitingForCollision || failed.nativeCollisionTicks > 0 ||
             actor.nextRecoveryAt?.let { recoveryClock() < it } == true || actor.attacker != null ||
-            actor.workerId in pendingHarm || actor.lifePending != null || actor.supplyPickup != null || actor.collectedPending != null) return false
+            actor.workerId in pendingHarm || residentLifePending(actor) || actor.supplyPickup != null || collectedPending(actor)) return false
         if (failed.motion.failure in PREPARATION_FAILURES && (!timedOut || failed.motion.failure in setOf("chunk-unloaded", "cancelled"))) return false
         if (failed.motion.failure == null && failed.completion == null && !failed.timedOut(now) && !timedOut) return false
         if (recoveryBudget == 0 || recoveryAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
@@ -3994,6 +3988,8 @@ class CivsCitizens(
         releaseCourierSource(actor, residentObservedAt)
         runCatching { stopMeal(actor) }.onFailure { logFailure(actor, "stop-meal", it) }
         actors.remove(actor.workerId)
+        lifeRequests.cancel(actor.workerId, actor.instanceId)
+        collectedRequests.cancel(actor.workerId, actor.instanceId)
         actor.cycle.close()
         runCatching { stopCamp(actor, reason); cancelRoute(actor) }.onFailure { logFailure(actor, "cancel", it) }
         runCatching { threats.remove(actor.workerId) }.onFailure { logFailure(actor, "threat-retirement", it) }
@@ -4026,8 +4022,8 @@ class CivsCitizens(
         completions.clear()
         harmCompletions.clear()
         supplyCompletions.clear()
-        lifeCompletions.clear()
-        collectedCompletions.clear()
+        lifeRequests.close()
+        collectedRequests.close()
         pendingHarm.clear()
         admission.clear()
         constructionWorkplaces.clear()
@@ -4096,7 +4092,6 @@ class CivsCitizens(
         var supplyPickup: SupplyPickup? = null
         var supplyFailure: Pair<UUID, String>? = null
         var supplyRetryAt = 0L
-        var collectedPending: UUID? = null
         var collectionCycle: Long? = null
         var collectionRetryAt = 0L
         var collectionSeek: UUID? = null
@@ -4108,7 +4103,6 @@ class CivsCitizens(
         var mealOutcome: Pair<String, Long>? = null
         var diningSearchIndex = 0
         var mentorVisit: ResidentMentorVisit? = null
-        var lifePending: UUID? = null
         var lifeRetryAt = 0L
         var restVisit: Int? = null
         var nextRecoveryAt: Long? = null
@@ -4175,15 +4169,12 @@ class CivsCitizens(
         val seat: CitizenDiningSeat? = null, var seatedFrom: Location? = null)
     private data class ResidentMentorVisit(val teacherId: UUID, val age: Int, val target: CivPosition, val startedAt: Long,
         var arrivedAt: Long? = null, var observedAt: Long = 0)
-    private data class ResidentLifeCompletion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val error: Throwable?, val meal: Boolean)
 
     private data class Completion(val workerId: UUID, val actorId: UUID, val ticket: UUID, val token: CitizenToken,
         val city: Settlement?, val error: Throwable?, val pickup: Boolean = false, val visualWork: CivWorldWork? = null)
     private data class HarmCompletion(val workerId: UUID, val city: Settlement?, val error: Throwable?, val epoch: Long)
     private data class SupplyPickup(val ticket: UUID, val buildingId: UUID, val resumeWork: Boolean)
     private data class SupplyCompletion(val workerId: UUID, val actorId: UUID, val pickup: SupplyPickup,
-        val city: Settlement?, val error: Throwable?)
-    private data class CollectedCompletion(val workerId: UUID, val actorId: UUID, val ticket: UUID,
         val city: Settlement?, val error: Throwable?)
 
     private companion object {
