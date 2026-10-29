@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.plugin.Plugin
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.core.whenCompleteSync
+import ru.arc.paper.chunk.PaperChunkKey
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.logging.Level
@@ -38,6 +39,28 @@ internal class CivsInventoryJournal(
     fun pending(cityId: UUID): Boolean = cityId in inventoryRecovery
     fun pendingCount(cityId: UUID): Int = inventoryRecovery.values.count { it.cityId == cityId }
     fun pendingCityIds(): Set<UUID> = inventoryRecovery.keys.toSet()
+
+    /** Validated durable receipts own bounded native reads even while their city is quarantined. */
+    fun pendingNativeChunks(): List<Set<PaperChunkKey>> = inventoryRecovery.values.filter { it.cityId in cities }.map { tx ->
+        val positions = tx.changes.map(CivInventorySlotChange::container) + tx.worldChanges.orEmpty().map(CivPlanBlock::position) +
+            tx.collected?.containers.orEmpty().map(CivNativeContainerChange::container) +
+            tx.collected?.ground.orEmpty().map(CivGroundItemChange::position) +
+            tx.collected?.forestryLeafLoot?.sources.orEmpty().map(CivForestryLeafSource::leaf) +
+            tx.containerRelocation?.containers.orEmpty().map(CivRelocatedContainer::position)
+        val keys = positions.mapTo(linkedSetOf()) { PaperChunkKey(tx.after.worldId, it.x shr 4, it.z shr 4) }
+        tx.upkeep?.work?.let { work ->
+            val upkeep = requireNotNull(work.upkeep)
+            val repair = upkeep.routeOverride ?: tx.after.roadRouteOverrides?.get(upkeep.source.id.toString())
+            val cut = repair?.let { saved -> saved.runs().map { run -> saved.route.subList(run.first - 1, run.last + 2) }
+                .filter { section -> section.any {
+                    kotlin.math.abs(it.x.toLong() - upkeep.floor.x) <= 1 && kotlin.math.abs(it.z.toLong() - upkeep.floor.z) <= 1
+                } }.flatten() }.orEmpty()
+            val floors = listOf(upkeep.floor, work.standing) + upkeep.neighbours + cut
+            for (floor in floors) for (x in ((floor.x - 2) shr 4)..((floor.x + 2) shr 4))
+                for (z in ((floor.z - 2) shr 4)..((floor.z + 2) shr 4)) keys += PaperChunkKey(tx.after.worldId, x, z)
+        }
+        keys
+    }
 
     fun collectionAvailable(worldId: UUID): Boolean = worldId !in collectedWorldBusy &&
         now() >= (collectedNextAt[worldId] ?: 0L) &&

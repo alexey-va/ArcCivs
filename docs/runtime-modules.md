@@ -91,6 +91,17 @@ when the current city exactly equals its after-snapshot and storage proves all
 locked native endpoints already applied. The existing authority fence still
 covers fresh and partially applied effects.
 
+Pending validated receipts supply their exact native read footprint to the
+existing chunk loader, including road validation neighbours and source leaves.
+These chunks share its capacity, asynchronous load and acquisition budgets.
+Receipt demand cannot activate a quarantined city or its residents; retiring
+the receipt releases that demand while ordinary city leases remain shared.
+
+A definite `storage-full` rejection of a resident's own output return releases
+that detour so fresh useful work can be selected. The carried items and cycle
+stay unchanged. Pending or ambiguous transfers retain the accepted detour until
+the existing journal resolves them.
+
 `CivsRules` remains the pure domain entrypoint. `CivsConstructionRules` owns
 construction and payment transitions; `CivsSnapshotValidation` owns immutable
 saved-state integrity. World observations are not snapshot-integrity checks.

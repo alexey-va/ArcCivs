@@ -8,6 +8,7 @@ import org.bukkit.Chunk
 import org.bukkit.Server
 import org.bukkit.World
 import org.bukkit.configuration.file.YamlConfiguration
+import org.bukkit.event.world.ChunkUnloadEvent
 import org.bukkit.plugin.Plugin
 import ru.arc.paper.chunk.PaperChunkKey
 import ru.arc.paper.chunk.PaperChunkTicketAddResult
@@ -203,6 +204,113 @@ class CivsChunkLoadingTest : FunSpec({
         }
         warnings.size shouldBe 3
     }
+
+    test("a cold receipt retains only its footprint and retirement releases it without city activation") {
+        chunkRuntime { h ->
+            val city = chunkCity(h.world.uid)
+            val keys = setOf(PaperChunkKey(h.world.uid, -119, -173), PaperChunkKey(h.world.uid, -116, -172))
+            h.recoveryChunks = listOf(keys)
+            h.pulse()
+            h.loads.keys shouldBe keys
+            h.added shouldBe emptyList()
+            h.runtime.active(city.id) shouldBe false
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            h.loads.values.forEach { it.complete(h.chunk) }
+            h.pulse()
+            h.added.toSet() shouldBe keys
+            h.runtime.retainedChunks shouldBe 2
+            h.runtime.active(city.id) shouldBe false
+            h.runtime.debug(null)["total"] shouldBe 0
+            h.recoveryChunks = emptyList()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.removed.toSet() shouldBe keys
+        }
+    }
+
+    test("receipt bundles share the global cap and existing four loads and two acquisitions per pulse") {
+        chunkRuntime(limit = 6) { h ->
+            val first = (0..4).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) }
+            val second = (10..11).mapTo(linkedSetOf()) { PaperChunkKey(h.world.uid, it, 20) }
+            h.recoveryChunks = listOf(first, second)
+            repeat(10) { h.pulse() }
+            h.loads.size shouldBe 4
+            h.runtime.debug(null)["wantedChunks"] shouldBe 5 // No partial admission of the second receipt.
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            h.loads.values.forEach { it.complete(h.chunk) }
+            repeat(4) {
+                val before = h.added.size
+                h.pulse()
+                (h.added.size - before <= 2) shouldBe true
+                (h.runtime.retainedChunks <= 6) shouldBe true
+            }
+            h.added.toSet() shouldBe first
+            h.recoveryChunks = listOf(second)
+            repeat(4) { h.pulse() }
+            h.runtime.retainedChunks shouldBe 2
+            h.added.takeLast(2).toSet() shouldBe second
+            h.removed.toSet() shouldBe first
+        }
+    }
+
+    test("ordinary and receipt demand share one lease until the last owner releases it") {
+        chunkRuntime(limit = 16) { h ->
+            val city = chunkCity(h.world.uid, radius = 1)
+            val key = CivsChunkArea.of(city).keys().first()
+            h.cities = listOf(city)
+            h.recoveryChunks = listOf(setOf(key))
+            h.loaded = true
+            h.level = Chunk.LoadLevel.ENTITY_TICKING
+            repeat(25) { h.pulse() }
+            h.runtime.active(city.id) shouldBe true
+            h.added.size shouldBe 16
+            h.cities = emptyList()
+            h.pulse()
+            h.runtime.active(city.id) shouldBe false
+            h.runtime.retainedChunks shouldBe 1
+            h.recoveryChunks = emptyList()
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 0
+            h.removed.count { it == key } shouldBe 1
+            h.removed.size shouldBe 16
+        }
+    }
+
+    test("receipt demand retries unavailable and unloaded chunks but stale completions acquire no lease") {
+        chunkRuntime { h ->
+            val key = PaperChunkKey(h.world.uid, 2, 3)
+            h.recoveryChunks = listOf(setOf(key))
+            h.pulse()
+            h.loads.getValue(key).complete(null)
+            h.pulse()
+            val missing = h.loads.getValue(key)
+            h.now += 30_000
+            h.pulse()
+            (h.loads.getValue(key) !== missing) shouldBe true
+            h.loaded = true
+            h.loads.getValue(key).complete(h.chunk)
+            h.pulse()
+            h.runtime.retainedChunks shouldBe 1
+            val unload = mockk<ChunkUnloadEvent>()
+            every { unload.world } returns h.world
+            every { unload.chunk } returns h.chunk
+            every { h.chunk.x } returns key.x
+            every { h.chunk.z } returns key.z
+            h.loaded = false
+            h.runtime.chunkUnloading(unload)
+            h.pulse()
+            val waiting = h.loads.getValue(key)
+            h.runtime.retainedChunks shouldBe 0
+            h.recoveryChunks = emptyList()
+            h.loaded = true
+            waiting.complete(h.chunk)
+            h.pulse()
+            h.added shouldBe listOf(key)
+            h.runtime.retainedChunks shouldBe 0
+        }
+    }
 })
 
 private fun chunkCity(world: UUID, radius: Int = 96) = Settlement(UUID.randomUUID(), UUID.randomUUID(), "Town", world,
@@ -226,6 +334,7 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
     var loaded = false
     var level = Chunk.LoadLevel.TICKING
     var cities = emptyList<Settlement>()
+    var recoveryChunks = emptyList<Set<PaperChunkKey>>()
     val added = mutableListOf<PaperChunkKey>()
     val removed = mutableListOf<PaperChunkKey>()
     var failRelease: PaperChunkKey? = null
@@ -260,5 +369,5 @@ private class ChunkRuntime(paper: MockBukkitTestRuntime, limit: Int) {
             { w, x, z -> CompletableFuture<Chunk?>().also { loads[PaperChunkKey(w.uid, x, z)] = it } }, { now }, { 0L })
     }
 
-    fun pulse() { runtime.pulse(cities) }
+    fun pulse() { runtime.pulse(cities, recoveryChunks) }
 }

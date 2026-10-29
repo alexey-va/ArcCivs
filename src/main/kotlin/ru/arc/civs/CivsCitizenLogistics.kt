@@ -149,6 +149,12 @@ internal class CivsCitizenLogistics(
                 actor.foodSource = null
                 actor.supplyRetryAt = now + 1_000
                 val reason = CivsDiagnostics.rejection(error)?.reason ?: "unexpected-failure"
+                if (completion.pickup.returnOutputs && error is CivsRejection && reason == "storage-full" &&
+                    actor.outputReturn == completion.pickup.buildingId) {
+                    // No transfer was admitted; allow fresh useful work to replace an idle detour plan.
+                    actor.outputReturn = null
+                    routes.cancelRoute(actor)
+                }
                 val failure = completion.pickup.buildingId to reason
                 if (actor.plan.type == BuildingType.BUILDER_HUT && actor.supplyFailure != failure) CivsDiagnostics.event("citizen_supplies_blocked",
                     "city" to actor.cityId, "worker" to actor.workerId, "source" to completion.pickup.buildingId,

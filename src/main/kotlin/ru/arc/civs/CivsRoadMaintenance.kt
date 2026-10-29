@@ -407,18 +407,28 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             return null
         }
 
-        internal fun humpOverride(city: Settlement, source: CivBuilding, route: List<CivPosition>): CivRoadRouteOverride? {
+        internal fun humpOverride(city: Settlement, source: CivBuilding, route: List<CivPosition>): CivRoadRouteOverride? =
+            humpOverrides(city, source, route).firstOrNull()
+
+        private fun humpOverrides(city: Settlement, source: CivBuilding, route: List<CivPosition>): List<CivRoadRouteOverride> {
+            if (route.size > CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH) return emptyList()
             val original = city.roadRouteOverrides?.get(source.id.toString())?.originalRoute ?: route
+            val repairs = mutableListOf<CivRoadRouteOverride>()
+            var nextStart = 1
             for (at in 1 until route.lastIndex) {
+                if (at < nextStart) continue
                 val level = route[at - 1].y
                 if (route[at].y != level + 1) continue
                 val end = (at..minOf(route.lastIndex, at + 9)).firstOrNull { route[it].y <= level } ?: continue
                 if (end == at || route[end].y != level) continue
                 val lowered = route.mapIndexed { index, point -> if (index in at until end) point.copy(y = level) else point }
                 val repair = CivRoadRouteOverride(original, lowered)
-                if (repair.hump(at until end) && runCatching { repair.validated(city, source) }.isSuccess) return repair
+                if (repair.hump(at until end) && runCatching { repair.validated(city, source) }.isSuccess) {
+                    repairs += repair
+                    nextStart = end // Nested elevations are the same cut, not independent alternatives.
+                }
             }
-            return null
+            return repairs
         }
 
         /** At most the retained three-wide old road finish, at its exact old height. */
@@ -427,12 +437,33 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             val old = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
             val final = CivsAutonomousTerraform.roadProfile(repair.route)
             val profile = old.mapValues { it.value.y }
+            val repairs = if (upkeep.routeOverride != null) upkeep.overrides() else city.roadRouteOverrides.orEmpty()
+            val shared = repairs.filter { (id, other) ->
+                id == upkeep.source.id.toString() || repair.runs().any { run ->
+                    val before = repair.originalRoute.subList(run.first - 1, run.last + 2)
+                    val after = repair.route.subList(run.first - 1, run.last + 2)
+                    val at = other.originalRoute.windowed(before.size).indexOfFirst { it == before || it == before.asReversed() }
+                    at >= 0 && other.route.subList(at, at + before.size) ==
+                        if (other.originalRoute[at] == before.first()) after else after.asReversed()
+                }
+            }
+            val prior = city.buildings.mapNotNull { building -> shared[building.id.toString()]?.let { value ->
+                upkeep.previousRouteOverrides?.get(building.id.toString())?.route ?: value.originalRoute
+            } }
+            // The accepted centreline owns its height before any overlapping shoulder, as in prepare().
+            val priorProfile = linkedMapOf<Long, Int>()
+            prior.forEach { route -> route.forEach { p -> priorProfile.putIfAbsent(civsTerrainKey(p.x, p.z), p.y - 1) } }
+            prior.forEach { route -> CivsAutonomousTerraform.roadProfile(route).forEach { (key, p) -> priorProfile.putIfAbsent(key, p.y) } }
             return old.filter { (key, floor) -> final[key]?.y?.let { it < floor.y } == true }.values.associateWith { floor ->
                 setOf(CivsSettlementLayout.pavement(floor, profile),
                     CivsSettlementLayout.pathPavement(floor, profile, city.style, legacyStairAtTurn = true),
                     CivsSettlementLayout.pathPavement(floor, profile, city.style,
                         atTurn = floor in CivsSettlementLayout.turnFloors(repair.originalRoute),
-                        downhill = CivsSettlementLayout.routeDownhill(floor, repair.originalRoute)))
+                        downhill = CivsSettlementLayout.routeDownhill(floor, repair.originalRoute))) +
+                    listOfNotNull(priorProfile[civsTerrainKey(floor.x, floor.z)]?.takeIf { it == floor.y }?.let {
+                        CivsSettlementLayout.pathPavement(floor, priorProfile, city.style,
+                            atTurn = floor in CivsSettlementLayout.turnFloors(repair.originalRoute))
+                    })
             }
         }
 
@@ -521,6 +552,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
         /** Capture order owns crossings; incompatible grades and authored entrances remain untouched. */
         fun prepare(city: Settlement, plans: List<CivPlacementPlan>): CivRoadUpkeepNetwork {
             val access = CivAutonomousAccess.from(city, plans)
+            val routeProfiles = access.routes.mapValues { CivsAutonomousTerraform.roadProfile(it.value) }
             val floors = linkedMapOf<Long, CivPosition>()
             val ambiguous = hashSetOf<Long>()
             fun remember(p: CivPosition) {
@@ -571,53 +603,62 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             }
             val held = hashSetOf<Long>()
             val gradeTargets = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure }
-                .mapNotNull { source ->
+                .flatMap { source ->
                     val current = access.routes[source.id].orEmpty()
-                    val repair = humpOverride(city, source, current) ?: turnOverride(city, source, current) ?: return@mapNotNull null
-                    val changes = current.indices.filter { current[it] != repair.route[it] }
-                    val from = changes.first() - 1
-                    val until = changes.last() + 2
-                    val beforeSection = current.subList(from, until)
-                    val afterSection = repair.route.subList(from, until)
-                    val oldProfile = CivsAutonomousTerraform.roadProfile(current)
-                    val corrected = CivsAutonomousTerraform.roadProfile(repair.route)
-                    val altered = corrected.filter { (key, point) -> oldProfile[key] != point && !excluded(point) }
-                    // Hold the unfinished cut until its first native receipt can safely admit the full section.
-                    altered.keys.forEach(held::add)
-                    if (changes.any { excluded(repair.route[it]) } ||
-                        altered.any { (key, _) -> key in ambiguous || key in roadColumns })
-                        return@mapNotNull null
-                    val linked = linkedMapOf<String, CivRoadRouteOverride>()
-                    for ((id, otherRoute) in access.routes) {
-                        if (id == source.id) continue
-                        val otherProfile = CivsAutonomousTerraform.roadProfile(otherRoute)
-                        if (altered.none { (key, point) -> otherProfile[key]?.let { it.y != point.y } == true }) continue
-                        val index = otherRoute.windowed(beforeSection.size).indexOfFirst {
-                            it == beforeSection || it == beforeSection.asReversed()
+                    val repairs = humpOverrides(city, source, current).ifEmpty { listOfNotNull(turnOverride(city, source, current)) }
+                    repairs.mapNotNull candidate@ { repair ->
+                        val changes = current.indices.filter { current[it] != repair.route[it] }
+                        val from = changes.first() - 1
+                        val until = changes.last() + 2
+                        val beforeSection = current.subList(from, until)
+                        val afterSection = repair.route.subList(from, until)
+                        val oldProfile = routeProfiles[source.id].orEmpty()
+                        val corrected = CivsAutonomousTerraform.roadProfile(repair.route)
+                        val altered = corrected.filter { (key, point) -> oldProfile[key] != point && !excluded(point) }
+                        // Hold the unfinished cut until its first native receipt can safely admit the full section.
+                        altered.keys.forEach(held::add)
+                        if (changes.any { excluded(repair.route[it]) } ||
+                            altered.any { (key, _) -> key in ambiguous || key in roadColumns || routeProfiles.any { (id, profile) ->
+                                city.building(id)?.type == BuildingType.ROAD && key in profile
+                            } }) return@candidate null
+                        val linked = linkedMapOf<String, CivRoadRouteOverride>()
+                        for ((id, otherRoute) in access.routes) {
+                            if (id == source.id) continue
+                            val otherProfile = routeProfiles.getValue(id)
+                            if (altered.none { (key, point) -> otherProfile[key]?.let { it.y != point.y } == true }) continue
+                            val index = otherRoute.windowed(beforeSection.size).indexOfFirst {
+                                it == beforeSection || it == beforeSection.asReversed()
+                            }
+                            if (index < 0) return@candidate null // Crossing or a different paid grade.
+                            val replacement = if (otherRoute[index] == beforeSection.first()) afterSection else afterSection.asReversed()
+                            val next = otherRoute.toMutableList().also { replacement.forEachIndexed { i, point -> it[index + i] = point } }
+                            val other = requireNotNull(city.building(id))
+                            val value = CivRoadRouteOverride(city.roadRouteOverrides?.get(id.toString())?.originalRoute ?: otherRoute, next)
+                            if (runCatching { value.validated(city, other) }.isFailure) return@candidate null
+                            linked[id.toString()] = value
                         }
-                        if (index < 0) return@mapNotNull null // Crossing or a different paid grade.
-                        val replacement = if (otherRoute[index] == beforeSection.first()) afterSection else afterSection.asReversed()
-                        val next = otherRoute.toMutableList().also { replacement.forEachIndexed { i, point -> it[index + i] = point } }
-                        val other = requireNotNull(city.building(id))
-                        val value = CivRoadRouteOverride(city.roadRouteOverrides?.get(id.toString())?.originalRoute ?: otherRoute, next)
-                        if (runCatching { value.validated(city, other) }.isFailure) return@mapNotNull null
-                        linked[id.toString()] = value
+                        val finalAccess = access.copy(routes = access.routes + linked.mapKeys { UUID.fromString(it.key) }.mapValues { it.value.route })
+                        val finalProfiles = finalAccess.routes.filterKeys { it != source.id }.map { (id, route) ->
+                            if (id.toString() in linked) CivsAutonomousTerraform.roadProfile(route) else routeProfiles.getValue(id)
+                        }
+                        // A shared shoulder is safe only when every exact retained owner agrees after replacement.
+                        if (altered.any { (key, point) -> finalProfiles.any { it[key]?.y?.let { y -> y != point.y } == true } })
+                            return@candidate null
+                        val retained = finalAccess.standing(city, source.id)
+                        if (altered.any { (key, point) -> retained[key]?.let { it.y - 1 != point.y } == true }) return@candidate null
+                        val floor = repair.route[changes.first()].let { it.copy(y = it.y - 1) }
+                        val neighbours = directions.mapNotNull { (dx, dz) -> corrected[civsTerrainKey(floor.x + dx, floor.z + dz)] }
+                            .filter { abs(it.y.toLong() - floor.y) <= 1L && !excluded(it) }
+                        val profile = (neighbours + floor).associate { civsTerrainKey(it.x, it.z) to it.y }
+                        val finish = CivsSettlementLayout.pathPavement(floor, profile, city.style,
+                            atTurn = floor in CivsSettlementLayout.turnFloors(repair.route),
+                            downhill = CivsSettlementLayout.routeDownhill(floor, repair.route))
+                        val touched = linked.keys + source.id.toString()
+                        CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor,
+                            finish, repair.route, neighbours, repair, linkedRouteOverrides = linked.takeIf { it.isNotEmpty() },
+                            previousRouteOverrides = city.roadRouteOverrides?.filterKeys { it in touched }?.takeIf { it.isNotEmpty() })
+                            .also { it.validated(city) }
                     }
-                    val finalAccess = access.copy(routes = access.routes + linked.mapKeys { UUID.fromString(it.key) }.mapValues { it.value.route })
-                    val retained = finalAccess.standing(city, source.id)
-                    if (altered.any { (key, point) -> retained[key]?.let { it.y - 1 != point.y } == true }) return@mapNotNull null
-                    val floor = repair.route[changes.first()].let { it.copy(y = it.y - 1) }
-                    val neighbours = directions.mapNotNull { (dx, dz) -> corrected[civsTerrainKey(floor.x + dx, floor.z + dz)] }
-                        .filter { abs(it.y.toLong() - floor.y) <= 1L && !excluded(it) }
-                    val profile = (neighbours + floor).associate { civsTerrainKey(it.x, it.z) to it.y }
-                    val finish = CivsSettlementLayout.pathPavement(floor, profile, city.style,
-                        atTurn = floor in CivsSettlementLayout.turnFloors(repair.route),
-                        downhill = CivsSettlementLayout.routeDownhill(floor, repair.route))
-                    val touched = linked.keys + source.id.toString()
-                    CivRoadUpkeep(city.id, city.worldId, city.owner, source.id, source, floor,
-                        finish, repair.route, neighbours, repair, linkedRouteOverrides = linked.takeIf { it.isNotEmpty() },
-                        previousRouteOverrides = city.roadRouteOverrides?.filterKeys { it in touched }?.takeIf { it.isNotEmpty() })
-                        .also { it.validated(city) }
                 }.distinctBy { it.floor }
 
             val targets = candidates.mapNotNull { (key, candidate) ->

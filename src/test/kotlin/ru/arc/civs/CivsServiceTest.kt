@@ -35,6 +35,7 @@ import ru.arc.network.BackendServerId
 import ru.arc.paper.network.BackendTransfer
 import ru.arc.paper.network.BackendTransferResult
 import ru.arc.paper.api.*
+import ru.arc.paper.chunk.PaperChunkKey
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.menu.PaperDialogRuntime
@@ -849,6 +850,203 @@ class CivsMineFallbackAuthorityTest : FunSpec({
             storage.reserve(fixture.city, receipt.id)
             shouldThrow<IllegalArgumentException> { storage.seal(receipt.copy(after = receipt.after.copy(name = "Changed"))) }
             storage.unlock(receipt.id)
+        }
+    }
+})
+
+class CivsRecoveryChunkAdmissionTest : FunSpec({
+    test("a quarantined cold road receipt loads its bounded proof footprint without ordinary city admission") {
+        mockkConstructor(CivsChunkLoading::class)
+        try {
+            serviceScenario { h ->
+                val upkeep = ServiceRoadUpkeep(h, physical = true)
+                val before = upkeep.city
+                val after = CivsRoadMaintenance.complete(before, upkeep.work, h.time, nativePaid = true)
+                val control = requireNotNull(before.building(upkeep.work.buildingId)?.control)
+                val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
+                    listOf(CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("COBBLESTONE", 1), null)),
+                    worldChanges = upkeep.work.changes,
+                    upkeep = CivRoadUpkeepReceipt(upkeep.worker, before.stock, upkeep.work, h.time)).validated()
+                h.world.getBlockAt(20, 63, 0).type = Material.COBBLESTONE
+                h.world.unloadChunk(0, 0)
+                h.world.unloadChunk(1, 0)
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(after))
+                every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+                every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+                every { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) } throws CivsRejection("lands-denied")
+                var loadRecovery = false
+                var demand = emptySet<PaperChunkKey>()
+                val loader = CivsService::class.java.getDeclaredField("chunkLoading").also { it.isAccessible = true }
+                    .get(h.service) as CivsChunkLoading
+                every { loader.pulse(any(), any()) } answers {
+                    val receipts = secondArg<Collection<Set<PaperChunkKey>>>()
+                    demand = receipts.flatten().toSet()
+                    if (receipts.isNotEmpty()) {
+                        firstArg<Collection<Settlement>>().any { it.id == before.id } shouldBe false
+                        if (loadRecovery) demand.forEach { h.world.loadChunk(it.x, it.z) }
+                    }
+                }
+                every { loader.active(any()) } returns false
+                h.start()
+                h.service.ready() shouldBe true
+                h.service.debugState("overview", before.id, null)["inventory_recovery_total"] shouldBe 1
+                val journal = CivsService::class.java.getDeclaredField("inventoryJournal").also { it.isAccessible = true }
+                    .get(h.service) as CivsInventoryJournal
+                journal.pendingNativeChunks().flatten().toSet() shouldBe setOf(PaperChunkKey(h.world.uid, 0, 0),
+                    PaperChunkKey(h.world.uid, 1, 0), PaperChunkKey(h.world.uid, 1, -1))
+                h.tickUntil("quarantined road receipt chunk demand after startup") { demand.isNotEmpty() }
+                verify(atLeast = 1) { loader.pulse(any(), any()) }
+                h.world.isChunkLoaded(0, 0) shouldBe false
+                h.world.isChunkLoaded(1, 0) shouldBe false
+                demand shouldBe setOf(PaperChunkKey(h.world.uid, 0, 0),
+                    PaperChunkKey(h.world.uid, 1, 0), PaperChunkKey(h.world.uid, 1, -1))
+                h.service.debugState("overview", before.id, null)["inventory_recovery_total"] shouldBe 1
+                loadRecovery = true
+                h.tickUntil("cold accepted receipt reaches its applied native proof") {
+                    h.service.debugState("overview", before.id, null)["inventory_recovery_total"] == 0
+                }
+                h.tick()
+                demand shouldBe emptySet()
+                h.service.settlements().single() shouldBe after
+                h.saves shouldBe emptyList()
+                h.world.getBlockAt(20, 63, 0).type shouldBe Material.COBBLESTONE
+                (h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Container)
+                    .inventory.getItem(0) shouldBe null
+                verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
+                verify(exactly = 0) { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) }
+            }
+        } finally { unmockkConstructor(CivsChunkLoading::class) }
+    }
+
+    test("an unfinished leaf receipt loads its original cold authority chunk after the drop crosses a chunk edge") {
+        mockkConstructor(CivsChunkLoading::class)
+        try {
+            serviceScenario(nativeGeometry = true, storageFactory = { plugin -> CivsStorage(plugin) { emptyArray() }.also {
+                it.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            } }) { h ->
+                val mill = spatialBuilding("nordic", "lumberjack", 1, CivPosition(23, 63, 20))
+                val worker = spatialWorker(mill, "IRON_AXE")
+                val before = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), mill),
+                    workers = listOf(worker), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+                val control = requireNotNull(mill.control)
+                for (x in 1..3) h.world.loadChunk(x, 1)
+                h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+                val holder = (h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Container).inventory
+                val leaf = CivPosition(47, 67, 30)
+                val ground = CivPosition(48, 64, 30)
+                val item = LeafItemFixture(h.paper.server, UUID.randomUUID(), ItemStack(Material.APPLE, 1)).apply {
+                    setLocation(Location(h.world, ground.x + .5, ground.y.toDouble(), ground.z + .5))
+                    setOnGround(true)
+                    pickupDelay = 0
+                    h.paper.server.registerEntity(this)
+                }
+                val proof = CivForestryLeafLootProof(before.id, before.owner, before.worldId, mill.id,
+                    listOf(CivForestryLeafSource(item.uniqueId, leaf)))
+                CivsForestryLeafLoot.mark(item, proof)
+                val transfer = CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
+                    ground = listOf(CivGroundItemChange(item.uniqueId, ground, CivResidentItem("APPLE", 1), null)),
+                    containers = listOf(CivNativeContainerChange(control, "BARREL", 0, null, CivResidentItem("APPLE", 1))),
+                    forestryLeafLoot = proof)
+                val after = before.copy(revision = before.revision + 1)
+                val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, emptyList(),
+                    collected = transfer).validated()
+                every { h.store.load() } returns CompletableFuture.completedFuture(listOf(after))
+                every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+                every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+                h.world.unloadChunk(leaf.x shr 4, leaf.z shr 4)
+                var loadRecovery = false
+                var demand = emptySet<PaperChunkKey>()
+                val loader = CivsService::class.java.getDeclaredField("chunkLoading").also { it.isAccessible = true }
+                    .get(h.service) as CivsChunkLoading
+                every { loader.pulse(any(), any()) } answers {
+                    demand = secondArg<Collection<Set<PaperChunkKey>>>().flatten().toSet()
+                    if (loadRecovery) demand.forEach { h.world.loadChunk(it.x, it.z) }
+                }
+                every { loader.active(any()) } returns false
+                h.start()
+                h.service.ready() shouldBe true
+                h.service.debugState("overview", before.id, null)["inventory_recovery_total"] shouldBe 1
+                val journal = CivsService::class.java.getDeclaredField("inventoryJournal").also { it.isAccessible = true }
+                    .get(h.service) as CivsInventoryJournal
+                journal.pendingNativeChunks().flatten().toSet() shouldBe setOf(PaperChunkKey(h.world.uid, 1, 1),
+                    PaperChunkKey(h.world.uid, 2, 1), PaperChunkKey(h.world.uid, 3, 1))
+                h.tickUntil("cold leaf authority chunk demand after startup") { demand.isNotEmpty() }
+                verify(atLeast = 1) { loader.pulse(any(), any()) }
+                h.world.isChunkLoaded(2, 1) shouldBe false
+                demand shouldBe setOf(PaperChunkKey(h.world.uid, 1, 1), PaperChunkKey(h.world.uid, 2, 1),
+                    PaperChunkKey(h.world.uid, 3, 1))
+                loadRecovery = true
+                h.tickUntil("leaf source authority and exact native receipt retirement") {
+                    h.service.debugState("overview", before.id, null)["inventory_recovery_total"] == 0
+                }
+                h.tick()
+                demand shouldBe emptySet()
+                item.isValid shouldBe false
+                holder.getItem(0) shouldBe ItemStack(Material.APPLE, 1)
+                h.service.settlements().single() shouldBe after
+                h.saves shouldBe emptyList()
+                verify(exactly = 1) { h.store.deleteInventoryTransaction(tx.id) }
+                verify(exactly = 1) { h.store.markConsumedItems(tx) }
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            }
+        } finally { unmockkConstructor(CivsChunkLoading::class) }
+    }
+})
+
+class CivsRoadGradeRecoveryServiceTest : FunSpec({
+    for (state in listOf("before", "mixed", "lands-denied", "unrelated-model"))
+    test("a committed grade receipt rechecks its before witness and current native authority for $state") {
+        serviceScenario { h ->
+            val base = roadAdmissionCity().copy(worldId = h.world.uid, owner = h.owner)
+            val route = listOf(64, 64, 64, 65, 66, 67, 67, 67, 66, 65, 64, 64, 64)
+                .mapIndexed { z, y -> CivPosition(0, y, z) }
+            val source = base.buildings.last().copy(type = BuildingType.HOUSE, anchor = CivPosition(0, 63, 40),
+                bounds = CivBox(CivPosition(0, 63, 40), CivPosition(5, 72, 45)), entrance = route.last(), transit = null)
+            val before = CivsRules.validate(base.copy(buildings = base.buildings.dropLast(1) + source))
+            val plan = CivPlacementPlan(source.id, before.id, before.worldId, source, emptyList(), terrain = CivTerraformPlan(
+                CivBox(CivPosition(0, 63, 0), CivPosition(0, 68, 12)), emptyList(), route, 63, 0, 0))
+            val target = CivsRoadMaintenance.prepare(before, listOf(plan)).targets.single { it.routeOverride != null }
+            val worker = before.workers.single()
+            val upper = target.floor.copy(y = target.floor.y + 1)
+            val work = CivWorldWork(worker.id, worker.completedCycles, requireNotNull(worker.assignment),
+                target.floor.copy(x = 1, y = 64), listOf(CivPlanBlock(target.floor, "minecraft:dirt", target.after),
+                    CivPlanBlock(upper, "minecraft:dirt", "minecraft:air")), inputs = mapOf("COBBLESTONE" to 1L),
+                status = "repairing-road", focus = target.floor, upkeep = target)
+            val after = CivsRoadMaintenance.complete(before, work, h.time)
+            val receipt = CivRoadUpkeepReceipt(worker, before.stock, work, h.time)
+            val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, emptyList(),
+                worldChanges = work.changes, upkeep = receipt).validated()
+            val loaded = if (state == "unrelated-model") after.copy(name = "Different committed model") else after
+            for (x in -1..0) for (z in -1..0) h.world.loadChunk(x, z)
+            h.world.getBlockAt(target.floor.x, target.floor.y, target.floor.z).blockData =
+                Bukkit.createBlockData(if (state == "mixed") target.after else "minecraft:dirt")
+            h.world.getBlockAt(upper.x, upper.y, upper.z).type = Material.DIRT
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+            every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+            every { h.worldAdapter.validateRoadUpkeep(any(), work) } answers {
+                val witness = firstArg<Settlement>()
+                try { target.validated(witness) }
+                catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
+                witness shouldBe before
+                if (state == "lands-denied") throw CivsRejection("lands-denied")
+            }
+            h.start()
+            val succeeds = state in setOf("before", "mixed")
+            h.tickUntil("grade receipt recovery or its retained authority fence") {
+                val debug = h.service.debugState("overview", before.id, null)
+                if (succeeds) debug["inventory_recovery_total"] == 0 else debug["blocked_recovery_total"] == 1
+            }
+            h.tick()
+            h.service.settlements().single() shouldBe loaded
+            h.saves shouldBe emptyList()
+            h.service.settlements().single().workers shouldBe after.workers
+            h.world.getBlockAt(target.floor.x, target.floor.y, target.floor.z).blockData.asString shouldBe
+                if (succeeds) target.after else "minecraft:dirt"
+            h.world.getBlockAt(upper.x, upper.y, upper.z).type shouldBe if (succeeds) Material.AIR else Material.DIRT
+            verify(exactly = if (succeeds) 1 else 0) { h.store.deleteInventoryTransaction(tx.id) }
+            verify(exactly = if (state == "unrelated-model") 0 else 1) { h.worldAdapter.validateRoadUpkeep(any(), work) }
+            verify(exactly = 0) { h.citizens.requireWorldWorkArrival(any(), any(), any()) }
         }
     }
 })
@@ -2514,7 +2712,7 @@ class CivsServiceTest : FunSpec({
                 h.service.settlements().single().workers.single().completedCycles shouldBe 1L
                 h.saves shouldBe emptyList()
                 verify(exactly = 0) { h.citizens.requireWorldWorkArrival(any(), any(), any()) }
-                verify(exactly = 1) { h.worldAdapter.validateRoadUpkeep(after, upkeep.work) }
+                verify(exactly = 1) { h.worldAdapter.validateRoadUpkeep(before, upkeep.work) }
                 verify(exactly = 1) { anyConstructed<CivsFootTraffic>().registerSurface(after.id, upkeep.work.changes.single().position) }
             }
         } finally { unmockkConstructor(CivsFootTraffic::class) }

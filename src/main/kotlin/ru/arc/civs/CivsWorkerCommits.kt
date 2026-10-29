@@ -230,7 +230,7 @@ internal class CivsWorkerCommits(
         val current = cities[tx.cityId] ?: return CivInventoryApplyResult.Conflict(mapOf("reason" to "city-unavailable"))
         if (current == tx.after && storage.upkeepNativeApplied(tx)) return null
         return try {
-            world.validateRoadUpkeep(current, receipt.work)
+            world.validateRoadUpkeep(if (current == tx.after) receipt.before(tx.after) else current, receipt.work)
             null
         } catch (failure: CivsRejection) {
             val details = failure.values + ("reason" to failure.reason)

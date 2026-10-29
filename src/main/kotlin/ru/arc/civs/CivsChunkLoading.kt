@@ -51,6 +51,7 @@ internal class CivsChunkLoading(
     private var registry = registryFactory()
     private val cities = linkedMapOf<UUID, City>()
     private val wanted = linkedMapOf<PaperChunkKey, Int>()
+    private var recoveryWanted = false
     private val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
     private val ready = hashSetOf<PaperChunkKey>()
     private val observedLevels = mutableMapOf<PaperChunkKey, Pair<Long, Chunk.LoadLevel?>>()
@@ -121,7 +122,7 @@ internal class CivsChunkLoading(
             "permissions" to permissions.debug(owners))
     }
 
-    fun pulse(settlements: Collection<Settlement>) {
+    fun pulse(settlements: Collection<Settlement>, recoveryChunks: Collection<Set<PaperChunkKey>> = emptyList()) {
         if (closed || failed) return
         val available = settlements.filter { it.pendingDeletion == null && it.worldId !in unloading && it.settings?.chunkLoading != false }
             .mapNotNull { city -> plugin.server.getWorld(city.worldId)?.let { city to it.name } }
@@ -133,6 +134,21 @@ internal class CivsChunkLoading(
                 !permissions.allowed(state.owner, state.worldName)) retire(id)
         }
         statuses.keys.retainAll(byId.keys)
+        if (recoveryChunks.isNotEmpty() || recoveryWanted) {
+            // Receipt reads share existing demand counts without creating a City or enabling resident activity.
+            val nextWanted = linkedMapOf<PaperChunkKey, Int>()
+            cities.values.forEach { city -> city.chunks.forEach { key -> nextWanted[key] = (nextWanted[key] ?: 0) + 1 } }
+            recoveryWanted = false
+            for (receipt in recoveryChunks) {
+                if (receipt.any { it.worldId in unloading || plugin.server.getWorld(it.worldId) == null } ||
+                    nextWanted.size + receipt.count { it !in nextWanted } > maximumChunks) continue
+                receipt.forEach { key -> nextWanted[key] = (nextWanted[key] ?: 0) + 1 }
+                if (receipt.isNotEmpty()) recoveryWanted = true
+            }
+            wanted.clear(); wanted.putAll(nextWanted)
+            ready.retainAll(wanted.keys)
+            observedLevels.keys.retainAll(wanted.keys)
+        }
         val candidates = available.filter { (city, name) -> city.id !in cities && permissions.allowed(city.owner, name) }
         if (candidates.isNotEmpty()) {
             val (city, name) = candidates[Math.floorMod(admissionCursor++, candidates.size)]
@@ -240,6 +256,7 @@ internal class CivsChunkLoading(
         generation++
         permissions.reset()
         cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); retryAt.clear(); statuses.clear()
+        recoveryWanted = false
         failed = runCatching { registry.close() }.onFailure {
             plugin.logger.log(Level.SEVERE, "ArcCivs settlement chunk cleanup failed; background activity remains stopped", it)
         }.isFailure
@@ -275,6 +292,7 @@ internal class CivsChunkLoading(
         HandlerList.unregisterAll(this)
         permissions.close()
         cities.clear(); wanted.clear(); ready.clear(); observedLevels.clear(); replies.clear()
+        recoveryWanted = false
         registry.close()
         leases.clear()
     }

@@ -336,7 +336,8 @@ class CivsService(
         plugin.server.pluginManager.registerEvents(forestryLeafLoot, plugin)
         plugin.server.servicesManager.register(ArcBlockProtectionService::class.java, sharedProtection, plugin, ServicePriority.Normal)
         tasks.runTimer(1, 1) {
-            chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList())
+            chunkLoading.pulse(if (ready()) cities.values.filter { it.id !in unhealthy } else emptyList(),
+                if (ready()) inventoryJournal.pendingNativeChunks() else emptyList())
             testingPermissions.pulse(if (ready()) cities.values.filter { it.pendingDeletion == null }.mapNotNull { city ->
                 plugin.server.getWorld(city.worldId)?.let { city.owner to it.name }
             } else emptyList())
