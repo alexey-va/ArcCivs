@@ -319,8 +319,10 @@ internal class CitizenNavigationCapture(
         completed += CitizenSearchCapture(probe, blocks, admitted.toList())
         if (prefetch && (probeIndex < requestedCount || route.prefetchConnectedFrontier())) for (edge in admitted) {
             if (probes.size >= maximumProbes) break
-            if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false && seen.add(edge.node))
-                probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor)
+            // Clip only speculative centres; complete edges remain reusable when the worker widens its search.
+            if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false &&
+                probe.bounds?.contains(edge.node.point()) != false && seen.add(edge.node))
+                probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor, bounds = probe.bounds)
         }
         admitted.clear()
         probeIndex++

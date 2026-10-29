@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.130: preserve actual checked yield motion and bounded warehouse access",
+  "assumptions": [
+    "Under0.1.129 the first two forester visits improved to2.001–2.294seconds arrival-to-ready. A later real1.25m resident-yield movement was not observed by the inbound prefix, so its continuity guard discarded the hint and ordinary return preparation took14.292seconds. These observations are not a guaranteed earning rate.",
+    "After an existing body/route/control/native-approved resident nudge, notify the existing one-shipment observation with actual before/after points. No generic continuity threshold, teleport recovery, permission, route progress, arrival proof, work credit or cargo receipt is relaxed. No new walked cells are invented or taught to roads by this notification.",
+    "The hint is pinned to the exact currently resolved native warehouse standing point. Its warehouse-side fresh-search access tube is bounded to64blocks from the nearest observed cell, half-width2columns. The source-side bound remains12blocks. Larger, disconnected, overflowing, moved, interrupted or unsafe observations skip the hint.",
+    "This is only a search preference. Native blocks, body collision, permissions, building/control restrictions and road costs are freshly checked by the existing A*; the original search cap, wider-search fallback and movement validation remain. No unchecked reversed path or teleport is introduced.",
+    "The warehouse-side access bound changes32→64blocks after an observed valid source leg began32.301m from its exact warehouse return. Other actual deliveries reach a tavern about56m away. Only this bounded fresh-search preference changes; source-side bound12, observed cells256, native search caps and wider fallback remain.",
+    "Exact item quantities, metadata, receipt fences, accepted cargo, work timers, production headroom, Trails multiplier, recipes and payment remain unchanged. Direct changes are separately0Vault,0premiumtokens,0playerXP,0newitemgrants.",
+    "The default initial A* rectangle already bounds worker search. Carry the same immutable inclusive bounds to speculative native prefetch centre admission. Capture actual edge/stencil data unchanged; deferred edges remain available for existing wider search, whose prefetch has no initial bound. This removes out-of-window speculative work rather than increasing any node, native-shape, capture or shared wall-time cap.",
+    "The current network SELL prohibition and separate contracts remain unchanged. Faster physical logistics is not a sale or a measured income increase. Actual latency and realized throughput require independent runtime observation."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "item_conservation": {
+    "recovery_grants_before": 0,
+    "recovery_grants_after": 0,
+    "extra_item_mint": 0,
+    "extra_item_burn": 0,
+    "accepted_cargo_quantity_change": 0,
+    "native_receipts_and_acknowledgements_preserved": true
+  },
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "search_limits": {
+    "retained_observed_cells": 256,
+    "new_search_budget": false,
+    "source_anchor_blocks": 12,
+    "warehouse_destination_anchor_blocks": 64,
+    "access_tube_half_width_columns": 2,
+    "fixed_native_destination_exact": true,
+    "default_rectangle_propagated_to_native_speculation": true,
+    "native_boundary_edges_and_stencil_unchanged": true,
+    "wider_search_bounds": null
+  },
+  "realized_throughput_delta": null,
+  "conclusion": "No direct currency, grant, output quantity or payment change. Faster route preparation is verified separately and must not be converted into assumed income."
+}

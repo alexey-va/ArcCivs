@@ -15,7 +15,7 @@ internal class CitizenSearchCorridor private constructor(
 
     companion object {
         private const val ANCHOR_DISTANCE = 12
-        private const val WAREHOUSE_ANCHOR_DISTANCE = 32
+        private const val WAREHOUSE_ANCHOR_DISTANCE = 64
         fun fromWalked(walked: Set<CivPosition>, from: CitizenPoint, to: CitizenPoint,
                        warehouseAccess: Boolean = false): CitizenSearchCorridor? {
             if (walked.size !in 2..CivsPaths.MAX_TRIP_CELLS) return null
