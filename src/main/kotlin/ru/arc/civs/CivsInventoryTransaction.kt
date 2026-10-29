@@ -195,4 +195,3 @@ internal fun storagePositionAllowed(city: Settlement, position: CivPosition, typ
         kotlin.math.abs(position.x.toLong()) <= 30_000_000 && kotlin.math.abs(position.z.toLong()) <= 30_000_000 &&
         (if (city.buildings.any { it.control == position }) type == "BARREL" else
             position in city.inventory?.containers.orEmpty() || city.buildings.any { it.bounds.contains(position.x, position.y, position.z) })
-
