@@ -15,7 +15,9 @@ internal class CitizenSearchCorridor private constructor(
 
     companion object {
         private const val ANCHOR_DISTANCE = 12
-        fun fromWalked(walked: Set<CivPosition>, from: CitizenPoint, to: CitizenPoint): CitizenSearchCorridor? {
+        private const val WAREHOUSE_ANCHOR_DISTANCE = 32
+        fun fromWalked(walked: Set<CivPosition>, from: CitizenPoint, to: CitizenPoint,
+                       warehouseAccess: Boolean = false): CitizenSearchCorridor? {
             if (walked.size !in 2..CivsPaths.MAX_TRIP_CELLS) return null
             val columns = hashSetOf<Long>()
             fun add(x: Int, z: Int, radius: Int) {
@@ -23,10 +25,11 @@ internal class CitizenSearchCorridor private constructor(
                     columns += civsTerrainKey(x + dx, z + dz)
             }
             walked.forEach { add(it.x, it.z, 1) }
-            for (endpoint in listOf(from, to)) {
+            for ((index, endpoint) in listOf(from, to).withIndex()) {
                 val nearest = walked.minByOrNull { it.copy(y = it.y + 1).point().distanceSquared(endpoint) } ?: return null
                 val target = nearest.copy(y = nearest.y + 1).point()
-                if (target.distanceSquared(endpoint) > ANCHOR_DISTANCE * ANCHOR_DISTANCE) return null
+                val access = if (warehouseAccess && index == 1) WAREHOUSE_ANCHOR_DISTANCE else ANCHOR_DISTANCE
+                if (target.distanceSquared(endpoint) > access * access) return null
                 val dx = target.x - endpoint.x
                 val dz = target.z - endpoint.z
                 val steps = ceil(max(abs(dx), abs(dz))).toInt().coerceAtLeast(1)
@@ -36,7 +39,8 @@ internal class CitizenSearchCorridor private constructor(
                 }
             }
             // Outdoor observation omits building interiors. Only the two bounded
-            // access tubes may bridge those omissions; unrelated gaps skip the hint.
+            // access tubes may bridge those omissions; the warehouse side may
+            // also connect a recent nearby delivery. All cells still need fresh A*.
             val start = civsTerrainKey(floor(from.x).toInt(), floor(from.z).toInt())
             val goal = civsTerrainKey(floor(to.x).toInt(), floor(to.z).toInt())
             val remaining = columns.toMutableSet()
@@ -64,22 +68,31 @@ internal class CitizenCourierReturnHint private constructor(
     private val cityId: UUID, private val worldId: UUID, private val shipmentId: UUID,
     private val geometry: CivsPaths.Geometry, private val overrides: Map<String, CivRoadRouteOverride>,
     private val start: CitizenPoint, private val arrived: CitizenPoint, private val walked: Set<CivPosition>,
+    private val warehouseAccess: Boolean,
 ) {
     fun corridor(city: Settlement, cargo: CivCargo, from: CitizenPoint, to: CitizenPoint): CitizenSearchCorridor? {
         if (city.id != cityId || city.worldId != worldId || cargo.id != shipmentId || !geometry.matches(city) ||
             city.roadRouteOverrides.orEmpty() != overrides || from.distanceSquared(arrived) > 4.0 ||
-            to.distanceSquared(start) > 16.0) return null
-        return CitizenSearchCorridor.fromWalked(walked, from, to)
+            (if (warehouseAccess) to != start else to.distanceSquared(start) > 16.0)) return null
+        return CitizenSearchCorridor.fromWalked(walked, from, to, warehouseAccess)
     }
 
     companion object {
         fun capture(city: Settlement, cargo: CivCargo, trip: CivsPaths.Trip,
                     start: CitizenPoint, arrived: CitizenPoint,
-                    walked: Set<CivPosition> = trip.walked): CitizenCourierReturnHint? {
+                    walked: Set<CivPosition> = trip.walked, warehouseAccess: Boolean = false): CitizenCourierReturnHint? {
+            if (warehouseAccess) {
+                if (city.inventory?.mode != CivStorageMode.PHYSICAL || cargo.sourceWorkerId != null) return null
+                val control = city.building(cargo.warehouseId)?.takeIf { it.type == BuildingType.WAREHOUSE }?.control ?: return null
+                val dx = start.x - control.x - .5; val dz = start.z - control.z - .5
+                if (cargo.targetBuildingId != cargo.warehouseId || abs(start.y - control.y) > 1.5 || dx * dx + dz * dz > 1.75 * 1.75 ||
+                    floor(start.x).toInt() == control.x && floor(start.z).toInt() == control.z)
+                    return null
+            }
             if (!trip.validFor(city) || walked.size !in 2..CivsPaths.MAX_TRIP_CELLS ||
-                CitizenSearchCorridor.fromWalked(walked, arrived, start) == null) return null
+                CitizenSearchCorridor.fromWalked(walked, arrived, start, warehouseAccess) == null) return null
             return CitizenCourierReturnHint(city.id, city.worldId, cargo.id, trip.network.geometry,
-                city.roadRouteOverrides.orEmpty(), start, arrived, walked.toSet())
+                city.roadRouteOverrides.orEmpty(), start, arrived, walked.toSet(), warehouseAccess)
         }
     }
 }
@@ -123,10 +136,11 @@ internal class CitizenCourierInboundPrefix private constructor(
     }
 
     fun finish(city: Settlement, cargo: CivCargo, destination: UUID, trip: CivsPaths.Trip,
-               at: CitizenPoint): CitizenCourierReturnHint? {
+               at: CitizenPoint, returnTarget: CitizenPoint? = null): CitizenCourierReturnHint? {
         if (!trip.validFor(city)) return null
         append(city, cargo, destination, trip, at)
-        return walked?.let { CitizenCourierReturnHint.capture(city, cargo, trip, origin, at, it) }
+        return walked?.let { CitizenCourierReturnHint.capture(city, cargo, trip, returnTarget ?: origin, at, it,
+            warehouseAccess = returnTarget != null) }
     }
 
     companion object {

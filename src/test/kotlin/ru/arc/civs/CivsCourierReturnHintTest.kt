@@ -10,11 +10,29 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCourierReturnHintTest : FunSpec({
-    for (completeUnrelated in listOf(false, true)) test("a real walked courier source leg survives unrelated completion=$completeUnrelated and its pending pickup") {
+    for (startAtBuilder in listOf(false, true)) for (completeUnrelated in listOf(false, true))
+        test("a real walked courier source leg from builder=$startAtBuilder survives unrelated completion=$completeUnrelated and its pending pickup") {
         residentRuntime { h ->
             val (source, courierId) = h.courierSource(material = "WHEAT", amount = 1)
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
             h.city.inventory!!.mode shouldBe CivStorageMode.PHYSICAL
+            val builder = source.copy(id = UUID(0, 136), type = BuildingType.BUILDER_HUT, production = null,
+                schematicId = "builder1", anchor = CivPosition(-5, 64, 0), control = CivPosition(-5, 64, 0),
+                entrance = CivPosition(-5, 64, -1), bounds = CivBox(CivPosition(-7, 63, -2), CivPosition(-3, 68, 2)))
+            if (startAtBuilder) {
+                val warehouse = h.city.buildings.single { it.type == BuildingType.WAREHOUSE }
+                h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                    if (it.id == warehouse.id) it.copy(anchor = CivPosition(-25, 64, 0), control = CivPosition(-25, 64, 0),
+                        entrance = CivPosition(-25, 64, -1), bounds = CivBox(CivPosition(-27, 63, -2), CivPosition(-23, 68, 2))) else it
+                } + builder))
+                // Even an idle physical warehouse plan validates its one-chunk
+                // search margin before admission; load the full native leg.
+                for (x in -3..2) for (z in -2..2) h.world.loadChunk(x, z)
+                h.world.getBlockAt(-25, 64, 0).type = Material.BARREL
+                h.world.getBlockAt(-24, 63, 0).type = Material.STONE
+                h.world.getBlockAt(-5, 64, 0).type = Material.BARREL
+                h.world.getBlockAt(-4, 63, 0).type = Material.STONE
+            }
             val unrelated = source.copy(id = UUID(0, 128), type = BuildingType.UNIVERSITY,
                 anchor = CivPosition(-25, 64, 25), entrance = CivPosition(-25, 64, 24), control = CivPosition(-25, 64, 25),
                 bounds = CivBox(CivPosition(-27, 63, 23), CivPosition(-23, 68, 27)), phase = BuildingPhase.CONSTRUCTING,
@@ -31,16 +49,21 @@ class CivsCourierReturnHintTest : FunSpec({
             h.courierProvider = { _, worker -> if (worker.id != courierId || !offersEnabled) null else
                 worker.cargo?.let { offered.copy(cargo = it, carrying = true) } ?: offered }
             h.onPickup = { cityId, workerId, _ -> h.owner.requireStorageArrival(cityId, workerId, source.id) }
+            requireNotNull(citizenPlan(h.city, h.city.workers.single { it.id == courierId })).chunksReady(h.world) shouldBe true
             h.owner.pulse(2_000)
-            val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            val courier = withClue(h.owner.debug(h.city.id, courierId)) {
+                h.owner.collisionActors().single { it.uniqueId == courierId }
+            }
             // An initial offered plan would legitimately spawn at its source. Admit
             // the idle warehouse actor first, then require an actual source walk.
             h.world.getBlockAt(11, 63, 0).type = Material.STONE
-            val warehouseFeet = Location(h.world, 11.5, 64.0, .5)
-            courier.teleport(warehouseFeet)
-            citizenPacketSupported(h.world, warehouseFeet.point()) shouldBe true
-            citizenAtStorage(h.world, warehouseFeet.point(),
+            val departure = Location(h.world, if (startAtBuilder) -3.5 else 11.5, 64.0, .5)
+            courier.teleport(departure)
+            citizenPacketSupported(h.world, departure.point()) shouldBe true
+            citizenAtStorage(h.world, departure.point(), if (startAtBuilder) requireNotNull(builder.control) else
                 requireNotNull(h.city.building(offered.cargo.warehouseId)?.control)) shouldBe true
+            if (startAtBuilder) citizenAtStorage(h.world, departure.point(),
+                requireNotNull(h.city.building(offered.cargo.warehouseId)?.control)) shouldBe false
             offersEnabled = true
             h.navigationNow = 3_000
             h.owner.pulse(3_000)
@@ -51,7 +74,7 @@ class CivsCourierReturnHintTest : FunSpec({
             var now = 3_000L
             for (tick in 1..600) {
                 h.navigate(); now = requireNotNull(h.navigationNow)
-                if (completeUnrelated && !completed && actor.npc.location.distance(warehouseFeet) >= 5.0 && h.pickups == 0) {
+                if (completeUnrelated && !completed && actor.npc.location.distance(departure) >= 5.0 && h.pickups == 0) {
                     val oldRoute = requireNotNull(actor.route)
                     val oldTrip = requireNotNull(oldRoute.trip)
                     (oldTrip.walked.size >= 2) shouldBe true
@@ -60,8 +83,19 @@ class CivsCourierReturnHintTest : FunSpec({
                     }, construction = null))
                     h.navigate(); now = requireNotNull(h.navigationNow)
                     actor.route shouldBe null // Real Motion geometry fence cancelled the old navigation.
-                    h.owner.pulseFieldWork(now)
-                    val fresh = requireNotNull(actor.route)
+                    val sourceControl = requireNotNull(source.control)
+                    withClue("fresh native leg from ${actor.npc.location.point()}") {
+                        CitizenChunks.between(actor.npc.location.blockX, actor.npc.location.blockZ,
+                            sourceControl.x, sourceControl.z).ready(h.world) shouldBe true
+                    }
+                    for (admission in 1..20) {
+                        h.owner.pulseFieldWork(now)
+                        if (actor.route != null) break
+                        h.navigate(); now = requireNotNull(h.navigationNow)
+                    }
+                    val fresh = withClue("${h.navigationState(courierId)} ${h.owner.debug(h.city.id, courierId)}") {
+                        requireNotNull(actor.route)
+                    }
                     (fresh !== oldRoute) shouldBe true
                     (fresh.trip !== oldTrip) shouldBe true
                     fresh.trip?.validFor(h.city) shouldBe true
@@ -74,7 +108,7 @@ class CivsCourierReturnHintTest : FunSpec({
             }
             withClue(h.navigationState(courierId)) { h.pickups shouldBe 1 }
             completed shouldBe completeUnrelated
-            (actor.npc.location.distance(warehouseFeet) >= 5.0) shouldBe true
+            (actor.npc.location.distance(departure) >= 5.0) shouldBe true
             val hint = requireNotNull(actor.courierReturnHint)
             val sourceFeet = actor.npc.location
             h.city = CivsLogistics.pickup(h.city, courierId, offered.cargo)
@@ -89,6 +123,7 @@ class CivsCourierReturnHintTest : FunSpec({
             actor.courierReturnHint shouldBe null
             val route = requireNotNull(actor.route)
             route.motion.hasCourierCorridorHint shouldBe true
+            hint.corridor(h.city, offered.cargo, sourceFeet.point(), route.target.point().copy(z = route.target.z + 1)) shouldBe null
             h.pickups shouldBe 1
             h.unloads shouldBe 0
         }
@@ -209,20 +244,35 @@ class CivsCourierReturnHintTest : FunSpec({
         connected.contains(CitizenPoint(20.5, 64.0, 5.5)) shouldBe false
     }
 
-    for (obstruction in listOf("forbidden", "water", "changed-step"))
-    test("a $obstruction across the hinted corridor uses the same ordinary-search fallback and budgets") {
+    test("only a warehouse destination may bridge thirty-two blocks while source access stays twelve") {
+        val walked = (20..40).mapTo(hashSetOf()) { CivPosition(it, 63, 0) }
+        val from = CitizenPoint(40.5, 64.0, .5)
+        val warehouse = CitizenPoint(-11.5, 64.0, .5)
+        CitizenSearchCorridor.fromWalked(walked, from, warehouse) shouldBe null
+        val bridged = requireNotNull(CitizenSearchCorridor.fromWalked(walked, from, warehouse, warehouseAccess = true))
+        bridged.contains(warehouse) shouldBe true
+        bridged.contains(CitizenPoint(.5, 64.0, 2.5)) shouldBe true
+        bridged.contains(CitizenPoint(.5, 64.0, 3.5)) shouldBe false
+        CitizenSearchCorridor.fromWalked(walked, from, warehouse.copy(x = warehouse.x - .001), warehouseAccess = true) shouldBe null
+        (CitizenSearchCorridor.fromWalked(walked, from.copy(x = 52.5), warehouse, warehouseAccess = true) != null) shouldBe true
+        CitizenSearchCorridor.fromWalked(walked, from.copy(x = 52.501), warehouse, warehouseAccess = true) shouldBe null
+    }
+
+    for (warehouseAccess in listOf(false, true)) for (obstruction in listOf("forbidden", "water", "changed-step"))
+    test("a $obstruction across the hinted corridor with warehouse access=$warehouseAccess uses the same ordinary-search fallback and budgets") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("courier-corridor-$obstruction").also(paper.server::addWorld)
             for (x in -1..3) for (z in -1..1) world.loadChunk(x, z)
             val start = CitizenPoint(.5, 64.0, .5)
             val target = CitizenPoint(40.5, 64.0, .5)
-            val corridor = requireNotNull(CitizenSearchCorridor.fromWalked((0..40).mapTo(hashSetOf()) {
-                CivPosition(it, 63, 0) }, start, target))
-            if (obstruction != "forbidden") for (x in 19..21) for (z in -1..1) for (y in 64..65)
+            val corridor = requireNotNull(CitizenSearchCorridor.fromWalked((if (warehouseAccess) 0..20 else 0..40).mapTo(hashSetOf()) {
+                CivPosition(it, 63, 0) }, start, target, warehouseAccess))
+            val obstructionWidth = if (warehouseAccess) 2 else 1
+            if (obstruction != "forbidden") for (x in 19..21) for (z in -obstructionWidth..obstructionWidth) for (y in 64..65)
                 world.getBlockAt(x, y, z).type = if (obstruction == "water") Material.WATER else Material.STONE
             val route = CitizenPacketRoute(world, start.location(world), target.location(world),
                 { it.y == 64 && it.x in -2..42 && it.z in -5..5 &&
-                    (obstruction != "forbidden" || it.x !in 19..21 || it.z !in -1..1) },
+                    (obstruction != "forbidden" || it.x !in 19..21 || it.z !in -obstructionWidth..obstructionWidth) },
                 { _, _ -> true }, { 1.0 }, corridor = corridor)
             prepareHintRoute(route)
             route.failure shouldBe null
@@ -234,7 +284,7 @@ class CivsCourierReturnHintTest : FunSpec({
             var leftHint = false
             repeat(600) {
                 if (!route.finished) route.move(at, 1.0) { true }?.let { next ->
-                    if (next.x in 18.0..23.0 && kotlin.math.abs(next.z - .5) > 1.5) leftHint = true
+                    if (next.x in 18.0..23.0 && kotlin.math.abs(next.z - .5) > obstructionWidth + .5) leftHint = true
                     at = next
                 }
             }

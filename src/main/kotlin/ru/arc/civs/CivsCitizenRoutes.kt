@@ -64,11 +64,7 @@ internal class CivsCitizenRoutes(
         }
         val storage = storageForTarget(actor, city, target)
         if (storage != null) {
-            val control = requireNotNull(storage.control)
-            val cached = actor.targets[target]?.takeIf { idleAnchor == null && citizenAtStorage(world, it.point(), control) && citizenStandable(world, it) }
-            val standing = cached ?: citizenStorageTarget(city, storage, world)
-                ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
-                    ?.entrance?.takeIf { citizenStandable(world, it) }
+            val standing = storageStanding(actor, city, world, target, storage, idleAnchor == null)
             if (standing == null) {
                 actor.targets.remove(target)
                 pause(actor, "storage-unavailable", now)
@@ -117,8 +113,7 @@ internal class CivsCitizenRoutes(
         if (inbound == null || trip == null) actor.courierInboundPrefix = null
         else {
             actor.courierInboundPrefix?.start(city, inbound.cargo, inbound.destinationBuildingId, from.point())
-            if (actor.courierInboundPrefix == null && city.building(inbound.destinationBuildingId)?.control?.let {
-                    citizenAtStorage(world, from.point(), it) } == true)
+            if (actor.courierInboundPrefix == null)
                 actor.courierInboundPrefix = CitizenCourierInboundPrefix.begin(city, inbound.cargo, inbound.destinationBuildingId, from.point())
         }
         // Even leisure and interrupted work prefer the existing streets; only working trips teach new corridors.
@@ -166,6 +161,15 @@ internal class CivsCitizenRoutes(
         return true
     }
 
+    private fun storageStanding(actor: CitizenActor, city: Settlement, world: World, target: CivPosition,
+                                storage: CivBuilding, allowCached: Boolean): CivPosition? {
+        val control = requireNotNull(storage.control)
+        val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && citizenStandable(world, it) }
+        return cached ?: citizenStorageTarget(city, storage, world)
+            ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
+                ?.entrance?.takeIf { citizenStandable(world, it) }
+    }
+
     /** Called only after the owner's ordinary arrival proof, before cancelling its route. */
     fun captureCourierReturnHint(actor: CitizenActor, city: Settlement) {
         actor.courierReturnHint = null
@@ -181,10 +185,17 @@ internal class CivsCitizenRoutes(
         val destination = city.building(courier.destinationBuildingId)?.control ?: return
         val trip = route.trip ?: return
         val prefix = actor.courierInboundPrefix
-        if (!citizenAtStorage(actor.npc.world, prefix?.origin ?: route.from, destination)) return
-        actor.courierReturnHint = if (prefix != null) prefix.finish(city, courier.cargo, courier.destinationBuildingId,
-            trip, actor.npc.location.point())
-        else CitizenCourierReturnHint.capture(city, courier.cargo, trip, route.from, actor.npc.location.point())
+        if (prefix != null) {
+            val depot = city.building(courier.destinationBuildingId)?.takeIf { it.id == courier.cargo.warehouseId &&
+                it.type == BuildingType.WAREHOUSE && it.control == actor.plan.storage } ?: return
+            val standing = storageStanding(actor, city, actor.npc.world, actor.plan.storage, depot, true) ?: return
+            actor.targets[actor.plan.storage] = standing
+            actor.courierReturnHint = prefix.finish(city, courier.cargo, courier.destinationBuildingId,
+                trip, actor.npc.location.point(), standing.point())
+        } else {
+            if (!citizenAtStorage(actor.npc.world, route.from, destination)) return
+            actor.courierReturnHint = CitizenCourierReturnHint.capture(city, courier.cargo, trip, route.from, actor.npc.location.point())
+        }
     }
 
     /** Fresh route planning still replaces every motion; only the observed same-shipment prefix survives. */

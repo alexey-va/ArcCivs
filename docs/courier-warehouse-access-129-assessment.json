@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.129: bounded warehouse access after a source leg from another building",
+  "assumptions": [
+    "Two actual forester visits under0.1.128 started at the builder hut and took4.896–5.652seconds from arrival to return-route readiness. The native pickup took144–397ms. A warehouse-origin-only hint omitted these real export legs.",
+    "One actual physical source-leg observation may begin at the courier current feet after another delivery. Its identity remains the same fixed cargo, source, warehouse, current city and endpoint shapes. At most256actual outdoor ground cells are retained; no prior-shipment path cache is added.",
+    "The hint is pinned to the exact currently resolved native warehouse standing point. Its warehouse-side fresh-search access tube is bounded to32blocks from the nearest observed cell, half-width2columns. The source-side bound remains12blocks. Larger, disconnected, overflowing, moved, interrupted or unsafe observations skip the hint.",
+    "This is only a search preference. Native blocks, body collision, permissions, building/control restrictions and road costs are freshly checked by the existing A*; the original search cap, wider-search fallback and movement validation remain. No unchecked reversed path or teleport is introduced.",
+    "Exact item quantities, metadata, receipt fences, accepted cargo, work timers, production headroom, Trails multiplier, recipes and payment remain unchanged. Direct changes are separately0Vault,0premiumtokens,0playerXP,0newitemgrants.",
+    "The current network SELL prohibition and separate contracts remain unchanged. Faster physical logistics is not a sale or a measured income increase. Actual latency and realized throughput require independent runtime observation."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "item_conservation": {
+    "recovery_grants_before": 0,
+    "recovery_grants_after": 0,
+    "extra_item_mint": 0,
+    "extra_item_burn": 0,
+    "accepted_cargo_quantity_change": 0,
+    "native_receipts_and_acknowledgements_preserved": true
+  },
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "search_limits": {
+    "retained_observed_cells": 256,
+    "new_search_budget": false,
+    "source_anchor_blocks": 12,
+    "warehouse_destination_anchor_blocks": 32,
+    "access_tube_half_width_columns": 2,
+    "fixed_native_destination_exact": true
+  },
+  "realized_throughput_delta": null,
+  "conclusion": "No direct currency, grant, output quantity or payment change. Faster route preparation is verified separately and must not be converted into assumed income."
+}
