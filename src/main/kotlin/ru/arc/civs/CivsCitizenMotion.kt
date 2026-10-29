@@ -3,6 +3,7 @@ package ru.arc.civs
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Tag
+import org.bukkit.block.Block
 import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 import kotlin.math.abs
@@ -183,7 +184,7 @@ internal class CivsCitizenMotion(
             val working = actor.attacker == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 workRuntime.workingTravel(actor)
             val speed = if (actor.attacker != null) 1.1 else if (working)
-                .8 * surfaceSpeed(npc.world.getBlockAt(before.blockX, citizenSupportY(before.y), before.blockZ)) else .55
+                .8 * surfaceSpeed(citizenMotionSurface(before, motion)) else .55
             actor.collisionResident = null
             val next = motion.move(before, speed, { from, to -> collisions.routeMoveAllowed(actor, from, to) }) { destination ->
                 citizenOpenRouteDoors(city, route.allowedBuildings, before, destination, doorBlocked).also { opened ->
@@ -281,4 +282,16 @@ internal class CivsCitizenMotion(
         }
         threats.gravity(runtime.actors.values.filter { it.npc.isSeated || it.sleeping || it.route?.motion?.navigating == true }.mapTo(hashSetOf()) { it.workerId })
     }
+}
+
+/** At most four captured floor columns and one native match; a nearby stair never grants a multiplier. */
+internal fun citizenMotionSurface(at: Location, motion: CitizenPacketRoute): Block {
+    val world = requireNotNull(at.world)
+    val y = citizenSupportY(at.y)
+    val centre = world.getBlockAt(at.blockX, y, at.blockZ)
+    if (!centre.type.isAir) return centre
+    val (position, captured, _) = motion.stairProfileSupports(at.point()).maxByOrNull { it.third } ?: return centre
+    if (!citizenChunkReady(world, position.x shr 4, position.z shr 4) ||
+        citizenCollisionSnapshot(world, position.x, position.y, position.z) != captured) return centre
+    return world.getBlockAt(position.x, position.y, position.z)
 }

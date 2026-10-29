@@ -7,6 +7,8 @@ import ru.arc.core.whenCompleteSync
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
+private const val UPKEEP_SUPPLY_BUFFER = 16L
+
 internal class CivsResidentSupplies(
     private val authority: CivsService,
     private val records: CivsCityRecords,
@@ -102,13 +104,16 @@ internal class CivsResidentSupplies(
         authority.upkeepRequirements(city).flatMap { (workerId, inputs) ->
             val worker = city.workers.first { it.id == workerId }
             val target = requireNotNull(worker.assignment)
-            CivsEquipment.storageInputs(worker, inputs).mapNotNull { (material, count) ->
-                val incoming = city.workers.mapNotNull(CivWorker::cargo).filter {
-                    it.material == material && CivsLogistics.destination(city, it)?.id == target
-                }.sumOf(CivCargo::amount)
-                val need = (count - (stock(target)[material] ?: 0L)).coerceAtLeast(0)
-                if (need > 0 || incoming > 0) CivSupplyRequest(target, material, need, incoming) else null
-            }
+            // The accepted column still costs one item; real courier stock covers several
+            // subsequent columns instead of requiring a round trip after every cut.
+            CivsEquipment.storageInputs(worker, inputs.mapValues { (_, count) -> maxOf(count, UPKEEP_SUPPLY_BUFFER) })
+                .mapNotNull { (material, count) ->
+                    val incoming = city.workers.mapNotNull(CivWorker::cargo).filter {
+                        it.material == material && CivsLogistics.destination(city, it)?.id == target
+                    }.sumOf(CivCargo::amount)
+                    val need = (count - (stock(target)[material] ?: 0L)).coerceAtLeast(0)
+                    if (need > 0 || incoming > 0) CivSupplyRequest(target, material, need, incoming) else null
+                }
         }
 
     fun localStocks(city: Settlement): (UUID) -> Map<String, Long> {

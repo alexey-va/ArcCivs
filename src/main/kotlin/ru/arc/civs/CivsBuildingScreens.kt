@@ -488,8 +488,10 @@ internal fun CivsUi.queuePosition(city: Settlement, buildingId: UUID): Int? =
 
 internal fun CivsUi.buildingStatus(player: Player, city: Settlement, building: CivBuilding): Component {
     queuePosition(city, building.id)?.let { return tint(tr(player, "building-status.queued", "position" to it), STOCK) }
-    val key = "building-status.${host.buildingStatus(building.id).removePrefix("building-status.")}"
-    return tint(tr(player, key.takeIf { it in text.keys("ru") } ?: "workers.status.unavailable",
+    val state = host.buildingStatus(building.id).removePrefix("building-status.")
+    val key = "building-status.$state"
+    val label = listOf(key, "workers.status.$state").firstOrNull { it in text.keys("ru") } ?: "workers.status.unavailable"
+    return tint(tr(player, label,
         "position" to queuePosition(city, building.id)), statusColor(key))
 }
 

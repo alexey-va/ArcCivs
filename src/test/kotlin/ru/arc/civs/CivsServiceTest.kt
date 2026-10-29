@@ -48,6 +48,92 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsUpkeepSupplyBufferServiceTest : FunSpec({
+    test("a selected native upkeep job buffers sixteen real hut cobblestone without changing its one item payment") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true)
+            h.start(); upkeep.publish()
+            h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() } shouldBe emptyList()
+            val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+                .get(h.service) as CivsRoadMaintenance
+            maintenance.plan(upkeep.city, upkeep.worker) shouldBe upkeep.work
+            val target = requireNotNull(upkeep.worker.assignment)
+            h.service.upkeepRequirements(upkeep.city) shouldBe mapOf(upkeep.worker.id to mapOf("COBBLESTONE" to 1L))
+            for ((local, deficit) in listOf(0L to 16L, 7L to 9L, 16L to 0L, 64L to 0L)) {
+                h.service.upkeepSupplyRequests(upkeep.city) { mapOf("COBBLESTONE" to local) } shouldBe
+                    if (deficit == 0L) emptyList() else listOf(CivSupplyRequest(target, "COBBLESTONE", deficit, 0))
+            }
+            h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe false
+            val own = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
+            own.setItem(0, ItemStack(Material.COBBLESTONE, 1))
+            h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe true
+            own.getItem(0) shouldBe ItemStack(Material.COBBLESTONE, 1)
+            h.saves shouldBe emptyList()
+            maintenance.invalidate(upkeep.worker.id)
+            h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() } shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("upkeep buffer subtracts carried native supplies and counts an exact incoming hut shipment once") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true, cobblestone = 4)
+            h.start(); upkeep.publish()
+            val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+                .get(h.service) as CivsRoadMaintenance
+            maintenance.plan(upkeep.city, upkeep.worker) shouldBe upkeep.work
+            val target = requireNotNull(upkeep.worker.assignment)
+            val warehouse = upkeep.city.buildings.first().copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                level = 1, anchor = CivPosition(40, 64, 0), entrance = CivPosition(40, 64, -2),
+                bounds = CivBox(CivPosition(38, 63, -2), CivPosition(42, 68, 2)), control = CivPosition(40, 64, 0))
+            val cargo = CivCargo(UUID.randomUUID(), warehouse.id, warehouse.id, target, warehouse.entrance,
+                "COBBLESTONE", 5, inventoryBacked = true)
+            val courier = CivsEquipment.replace(CivWorker(UUID.randomUUID(), "Courier", warehouse.id, cargo = cargo),
+                List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 5) else null })
+            val current = upkeep.city.copy(buildings = upkeep.city.buildings + warehouse,
+                workers = upkeep.city.workers + courier)
+            h.service.upkeepSupplyRequests(current) { mapOf("COBBLESTONE" to 3L) } shouldBe
+                listOf(CivSupplyRequest(target, "COBBLESTONE", 9, 5))
+            h.service.upkeepSupplyRequests(current) { mapOf("COBBLESTONE" to 20L) } shouldBe
+                listOf(CivSupplyRequest(target, "COBBLESTONE", 0, 5))
+            CivsEquipment.usableCount(current.workers.first(), "COBBLESTONE") shouldBe 4
+            courier.cargo shouldBe cargo
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    test("buffered upkeep delivery is bounded by available real source stock bag and native destination room") {
+        serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true)
+            h.start(); upkeep.publish()
+            val maintenance = CivsService::class.java.getDeclaredField("roadMaintenance").also { it.isAccessible = true }
+                .get(h.service) as CivsRoadMaintenance
+            maintenance.plan(upkeep.city, upkeep.worker) shouldBe upkeep.work
+            val target = requireNotNull(upkeep.worker.assignment)
+            val requests = h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() }
+            val source = UUID.randomUUID()
+            val courier = UUID.randomUUID()
+            for ((available, room, bag, expected) in listOf(listOf(64L, 64L, 64L, 16L),
+                listOf(4L, 64L, 64L, 4L), listOf(64L, 3L, 64L, 3L), listOf(64L, 64L, 2L, 2L),
+                listOf(0L, 64L, 64L, 0L), listOf(64L, 0L, 64L, 0L))) {
+                val warehouse = CivSupplyStore(source, CivPosition(0, 64, 0), CivPosition(0, 64, 0),
+                    mapOf("COBBLESTONE" to available), emptyMap(), null, CivSupplyCapacity(1, emptyMap()), BuildingType.WAREHOUSE)
+                val hut = CivSupplyStore(target, CivPosition(10, 64, 0), CivPosition(10, 64, 0), emptyMap(),
+                    emptyMap(), null, CivSupplyCapacity(0, mapOf("COBBLESTONE" to room)), BuildingType.BUILDER_HUT)
+                val snapshot = CivSupplySnapshot(upkeep.city.id, Unit, mapOf(source to warehouse, target to hut), requests,
+                    listOf(CivSupplyCourier(courier, source, 0, warehouse.entrance, mapOf("COBBLESTONE" to bag))),
+                    emptyList(), emptyMap(), mapOf("COBBLESTONE" to 64))
+                val plans = allocateCivSupplies(snapshot).plans.values
+                plans.sumOf { it.cargo.amount } shouldBe expected
+                plans.forEach { it.cargo.sourceBuildingId shouldBe source; it.destinationBuildingId shouldBe target }
+            }
+            h.saves shouldBe emptyList()
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+})
+
 class CivsQueuedTavernPickupServiceTest : FunSpec({
     for (moveAway in listOf(false, true))
     test("a tavern food pickup waits for the city save and rechecks actual feet moved=$moveAway") {
@@ -681,7 +767,7 @@ class CivsNativeRoadUpkeepTest : FunSpec({
         }
     }
 
-    test("a captured native road job requests one real hut input and waits for payment without closed stone") {
+    test("a captured native road job requests a real hut buffer and waits for one item payment without closed stone") {
         serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
             val upkeep = ServiceRoadUpkeep(h, physical = true)
             val own = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
@@ -695,7 +781,7 @@ class CivsNativeRoadUpkeepTest : FunSpec({
             h.service.upkeepRequirements(upkeep.city) shouldBe mapOf(upkeep.worker.id to mapOf("COBBLESTONE" to 1L))
             h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe false
             h.service.upkeepSupplyRequests(upkeep.city) { emptyMap() } shouldBe
-                listOf(CivSupplyRequest(upkeep.worker.assignment!!, "COBBLESTONE", 1, 0))
+                listOf(CivSupplyRequest(upkeep.worker.assignment!!, "COBBLESTONE", 16, 0))
             own.setItem(0, ItemStack(Material.COBBLESTONE, 2))
             h.service.workInputsReady(upkeep.city, upkeep.worker) shouldBe true
             val result = upkeep.deliver()
@@ -5425,7 +5511,7 @@ class CivsServiceTest : FunSpec({
         }
     }
 
-    test("startup locks recovered native inventories before ready and before the first recovery pulse") {
+    test("startup fences recovered native writes before ready and admits ordinary read views after bootstrap") {
         serviceScenario { h ->
             val point = CivPosition(5, 63, 0)
             h.world.getBlockAt(point.x, point.y, point.z).type = Material.BARREL
@@ -5435,20 +5521,37 @@ class CivsServiceTest : FunSpec({
             val after = before.copy(revision = before.revision + 1)
             val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after,
                 listOf(CivInventorySlotChange(point, "BARREL", 0, null, CivPlainItem("COBBLESTONE", 64))))
+            val receipts = CompletableFuture<List<CivInventoryTransaction>>()
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(before))
-            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
-            h.start()
-            h.service.ready() shouldBe true
-            h.saves.size shouldBe 0
+            every { h.store.loadInventoryTransactions() } returns receipts
             // The pinned fixture lacks getHolder(false); expose the real barrel's holder and location for this event.
-            val eventInventory = mockk<org.bukkit.inventory.Inventory> {
+            val eventInventory = mockk<org.bukkit.inventory.Inventory>(relaxed = true) {
                 every { getHolder(false) } returns h.world.getBlockAt(point.x, point.y, point.z).state as org.bukkit.block.Barrel
                 every { location } returns barrel.location
+                every { size } returns 27
             }
-            val view = mockk<org.bukkit.inventory.InventoryView>()
+            val view = mockk<org.bukkit.inventory.InventoryView>(relaxed = true)
             every { view.topInventory } returns eventInventory
             every { view.player } returns h.player
+            fun assertWriteFence() {
+                h.paper.callEvent(InventoryClickEvent(view, InventoryType.SlotType.CONTAINER, 0,
+                    ClickType.LEFT, InventoryAction.PICKUP_ALL)).isCancelled shouldBe true
+                h.paper.callEvent(org.bukkit.event.inventory.InventoryDragEvent(view, null,
+                    ItemStack(Material.STONE, 2), false, mapOf(0 to ItemStack(Material.STONE)))).isCancelled shouldBe true
+                h.paper.callEvent(org.bukkit.event.inventory.InventoryMoveItemEvent(eventInventory,
+                    ItemStack(Material.COBBLESTONE), eventInventory, true)).isCancelled shouldBe true
+            }
+            val loaded = h.service.start()
+            h.service.ready() shouldBe false
+            loaded.isDone shouldBe false
             h.paper.callEvent(org.bukkit.event.inventory.InventoryOpenEvent(view)).isCancelled shouldBe true
+            assertWriteFence()
+            receipts.complete(listOf(tx))
+            h.tick(); h.await(loaded) shouldBe Unit
+            h.service.ready() shouldBe true
+            h.saves.size shouldBe 0
+            h.paper.callEvent(org.bukkit.event.inventory.InventoryOpenEvent(view)).isCancelled shouldBe false
+            assertWriteFence()
             barrel.getItem(0)!!.amount shouldBe 64
         }
     }

@@ -94,6 +94,34 @@ internal class CitizenPacketRoute(
     val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
     val remainingNodes: Int get() = path.size
 
+    /** A raised foot may use only the exact native stair profile that admitted its current point. */
+    internal fun stairProfileSupports(at: CitizenPoint): List<Triple<CivPosition, CitizenCollisionSnapshot, Double>> {
+        if (searching || finished || failure != null) return emptyList()
+        val entry = path.firstOrNull() ?: return emptyList()
+        val profile = entry.profileTerrain?.takeIf { cells -> cells.values.any { it.bottomStair } } ?: return emptyList()
+        val dx = entry.point.x - entry.start.x
+        val dy = entry.point.y - entry.start.y
+        val dz = entry.point.z - entry.start.z
+        val length = dx * dx + dy * dy + dz * dz
+        val t = if (length < .000000000001) 0.0 else
+            ((at.x - entry.start.x) * dx + (at.y - entry.start.y) * dy + (at.z - entry.start.z) * dz) / length
+        if (t !in -.000001..1.000001 || at.distanceSquared(CitizenPoint(entry.start.x + dx * t,
+                entry.start.y + dy * t, entry.start.z + dz * t)) > .000000000001) return emptyList()
+        val columns = linkedMapOf<Pair<Int, Int>, Triple<CivPosition, CitizenCollisionSnapshot, Double>>()
+        for ((position, state) in profile) {
+            if (position.x !in floor(at.x - .299).toInt()..floor(at.x + .299).toInt() ||
+                position.z !in floor(at.z - .299).toInt()..floor(at.z + .299).toInt()) continue
+            val top = state.boxes.filter { box ->
+                box.maxY <= at.y + .001 && at.y - box.maxY <= .562501 &&
+                    box.minX < at.x + .299 && box.maxX > at.x - .299 &&
+                    box.minZ < at.z + .299 && box.maxZ > at.z - .299
+            }.maxOfOrNull { it.maxY } ?: continue
+            val column = position.x to position.z
+            if (top > (columns[column]?.third ?: Double.NEGATIVE_INFINITY)) columns[column] = Triple(position, state, top)
+        }
+        return columns.values.toList()
+    }
+
     fun cancel() {
         searching = false
         finished = true
@@ -261,6 +289,7 @@ internal class CitizenPacketRoute(
         var earned = 0.0
         var usedGravity = false
         var previousDirection: org.bukkit.util.Vector? = null
+        var steppedStair = false
         var checkedProfile: Map<CivPosition, CitizenCollisionSnapshot>? = null
         // A normal step can cross a cell centre. Spend its remainder in this same tick,
         // never save it for a later tick or accelerate after an obstruction clears.
@@ -307,16 +336,23 @@ internal class CitizenPacketRoute(
                     (to.x - point.x) * (to.x - point.x) + (to.z - point.z) * (to.z - point.z) > .000001) waypoint.y = point.y
             }
             val delta = waypoint.toVector().subtract(point.toVector())
-            val distance = delta.length()
+            val stair = profile?.values?.any { it.bottomStair } == true
+            val horizontal = sqrt(delta.x * delta.x + delta.z * delta.z)
+            // A native stair spends the same X/Z stride as flat walking; Y is its supported lift.
+            val distance = if (stair && horizontal > .000001) horizontal else delta.length()
             if (distance < .0001) {
                 if (point.distanceSquared(to) < .000001) { path.removeFirst(); continue }
                 if (!descending) break
             }
             val direction = if (distance < .0001) org.bukkit.util.Vector() else delta.clone().multiply(1.0 / distance)
+            val straightStair = (stair || steppedStair) && previousDirection?.let { previous ->
+                previous.x * direction.x + previous.z * direction.z > .000001 &&
+                    abs(previous.x * direction.z - previous.z * direction.x) < .000001
+            } == true
             if (previousDirection?.let { previous ->
                     (abs(previous.y) > .0001 || abs(direction.y) > .0001) &&
                         previous.clone().crossProduct(direction).lengthSquared() > .000001
-                } == true) break
+                } == true && !straightStair) break
             val advance = min(distance, remaining)
             var candidate = if (advance == distance) waypoint else point.clone().add(direction.clone().multiply(advance))
             if (descending) {
@@ -332,10 +368,13 @@ internal class CitizenPacketRoute(
                     else citizenPacketStepClear(world, a, b, false))) {
                 fail("movement-blocked"); break
             }
-            // A client interpolates one straight segment between packets. Adjacent path legs
-            // may each be clear while their shortcut clips a corner; stop at that corner then.
             val origin = CitizenPoint(from.x, from.y, from.z)
-            if (moved && (!permits(origin, b) || !citizenPacketSegmentClear(world, origin, b, false, origin, null))) break
+            // Native players lift, then sweep horizontally across a stair riser. Preserve that
+            // body/ceiling check at a straight stair join; other corners retain the packet chord.
+            if ((stair || steppedStair) && abs(b.y - origin.y) > .562501) break
+            if (moved && (!permits(origin, b) || !(if (straightStair)
+                    citizenPacketStepClear(world, origin, b, false)
+                else citizenPacketSegmentClear(world, origin, b, false, origin, null)))) break
             if (!movementAllowed(from, candidate)) {
                 waitingForCollision = true
                 break
@@ -343,6 +382,7 @@ internal class CitizenPacketRoute(
             earned += entry.walked(a, b)
             point = candidate
             moved = true
+            steppedStair = steppedStair || stair
             remaining -= advance
             previousDirection = direction
             // A supported lower node still constrains the route, but its centre is

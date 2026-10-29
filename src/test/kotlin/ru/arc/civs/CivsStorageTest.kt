@@ -1932,7 +1932,7 @@ class CivsStorageTest : FunSpec({
         (touched.openInventory.topInventory === barrel) shouldBe true
         val receipt = transaction(id, city, storage.prepareDebit(city, mapOf("OAK_LOG" to 1L)))
         storage.seal(receipt)
-        (touched.openInventory.topInventory === barrel) shouldBe false
+        (touched.openInventory.topInventory === barrel) shouldBe true
         (unrelated.openInventory.topInventory === chest) shouldBe true
         val blocked = InventoryClickEvent(touchedView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)
         val allowed = InventoryClickEvent(unrelatedView, InventoryType.SlotType.CONTAINER, 0, ClickType.LEFT, InventoryAction.PICKUP_ALL)

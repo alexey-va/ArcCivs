@@ -2,10 +2,12 @@ package ru.arc.civs
 
 import org.bukkit.Tag
 import org.bukkit.World
+import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.BlockData
 import org.bukkit.block.data.Openable
 import org.bukkit.block.data.type.Door
 import org.bukkit.block.data.type.Gate
+import org.bukkit.block.data.type.Stairs
 import org.bukkit.util.BoundingBox
 import kotlin.math.abs
 import kotlin.math.floor
@@ -88,7 +90,7 @@ internal fun citizenStepProfile(from: CitizenPoint, to: CitizenPoint, floors: Li
 }
 
 internal data class CitizenCollisionSnapshot(val liquid: Boolean, val door: Boolean,
-    val localBoxes: List<BoundingBox>, val boxes: List<BoundingBox>)
+    val localBoxes: List<BoundingBox>, val boxes: List<BoundingBox>, val bottomStair: Boolean = false)
 
 /** Ground passages only: opening a trapdoor could remove a resident's floor or ladder access. */
 internal fun citizenRouteOpenable(data: BlockData): Openable? = when (data) {
@@ -99,9 +101,11 @@ internal fun citizenRouteOpenable(data: BlockData): Openable? = when (data) {
 
 internal fun citizenCollisionSnapshot(world: World, x: Int, y: Int, z: Int): CitizenCollisionSnapshot {
     val block = world.getBlockAt(x, y, z)
+    val data = block.blockData
     val local = block.collisionShape.boundingBoxes.map { it.clone() }
-    return CitizenCollisionSnapshot(block.isLiquid, citizenRouteOpenable(block.blockData) != null, local,
-        local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) })
+    return CitizenCollisionSnapshot(block.isLiquid, citizenRouteOpenable(data) != null, local,
+        local.map { it.clone().shift(x.toDouble(), y.toDouble(), z.toDouble()) },
+        data is Stairs && data.half == Bisected.Half.BOTTOM && !data.isWaterlogged)
 }
 
 /** Collision shapes are local to their block; check both body width and headroom. */

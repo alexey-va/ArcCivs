@@ -68,7 +68,8 @@ class CivsStorage(private val plugin: Plugin,
     private val playerDataPersistence: PaperPlayerDataPersistence = NativePaperPlayerDataPersistence,
     tileEntities: (Chunk) -> Array<BlockState> = { it.tileEntities }) : Listener, AutoCloseable {
     private data class Claim(val city: Settlement, val positions: Map<CivPosition, String?>, val playerId: UUID?,
-        val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet())
+        val worldPositions: Set<CivPosition> = emptySet(), val groundItems: Set<UUID> = emptySet(),
+        val viewersAllowed: Boolean = false)
     private val claims = mutableMapOf<UUID, Claim>()
     private val cityClaims = mutableMapOf<UUID, UUID>()
     private val locked = mutableMapOf<Key, UUID>()
@@ -298,11 +299,13 @@ class CivsStorage(private val plugin: Plugin,
         }
         reject(worldPositions.any { lockedWorld[Key(claim.city.worldId, it)]?.let { id -> id != transaction.id } == true }, "storage-busy")
         reject(groundItems.any { lockedGround[it]?.let { id -> id != transaction.id } == true }, "storage-busy")
-        claims[transaction.id] = claim.copy(worldPositions = worldPositions, groundItems = groundItems)
+        val viewersAllowed = transaction.containerRelocation == null && (keepViewersOpen || claim.playerId == null)
+        claims[transaction.id] = claim.copy(worldPositions = worldPositions, groundItems = groundItems,
+            viewersAllowed = viewersAllowed)
         worldPositions.forEach { lockedWorld[Key(claim.city.worldId, it)] = transaction.id }
         groundItems.forEach { lockedGround[it] = transaction.id }
         // Retain full frozen source membership for stock reads; native locks cover only receipt coordinates.
-        if (!keepViewersOpen) closeViewers(transaction.id, claim.playerId)
+        if (!viewersAllowed) closeViewers(transaction.id, claim.playerId)
     }
 
     /** Exact receipt coordinates remain locked even if their chunks or current index entries are absent. */
@@ -314,7 +317,8 @@ class CivsStorage(private val plugin: Plugin,
             transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type }
         lock(transaction.after, transaction.id, positions, transaction.playerId(),
             transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position),
-            transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId))
+            transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId),
+            closeViewers = transaction.containerRelocation != null || transaction.playerId() != null)
     }
 
     private fun lock(city: Settlement, transactionId: UUID, positions: Map<CivPosition, String?>, playerId: UUID?,
@@ -333,7 +337,7 @@ class CivsStorage(private val plugin: Plugin,
         }
         reject(city.id in cityClaims || playerId != null && playerId in lockedPlayers || positions.keys.any { Key(city.worldId, it) in locked } ||
             worldPositions.any { Key(city.worldId, it) in lockedWorld } || groundItems.any { it in lockedGround }, "storage-busy")
-        claims[transactionId] = Claim(city, positions, playerId, worldPositions, groundItems)
+        claims[transactionId] = Claim(city, positions, playerId, worldPositions, groundItems, viewersAllowed = !closeViewers)
         cityClaims[city.id] = transactionId
         if (playerId != null) lockedPlayers[playerId] = transactionId
         positions.keys.forEach { locked[Key(city.worldId, it)] = transactionId }
@@ -506,8 +510,9 @@ class CivsStorage(private val plugin: Plugin,
         checkMain()
         requireOpen()
         reject(!(city.canManage(player.uniqueId) || city.autonomy != null) || player.world.uid != city.worldId, "not-authorized")
-        reject(city.id in cityClaims, "storage-busy")
-        player.openInventory(containers.control(city, building).inventory)
+        val source = containers.control(city, building)
+        reject(playerLocked(player.uniqueId) || viewLocked(Key(city.worldId, source.position)), "storage-busy")
+        player.openInventory(source.inventory)
     }
 
     /** Read-only proof for retiring an already committed road receipt; no before or mixed endpoint is accepted. */
@@ -954,6 +959,15 @@ class CivsStorage(private val plugin: Plugin,
 
     private fun playerLocked(playerId: UUID): Boolean = receiptBootstrap || playerId in lockedPlayers
     private fun locked(inventory: Inventory): Boolean = receiptBootstrap || exactLocked(inventory)
+    private fun viewLocked(position: Key): Boolean = receiptBootstrap ||
+        locked[position]?.let { claims[it]?.viewersAllowed != true } == true
+    private fun viewLocked(inventory: Inventory): Boolean {
+        if (receiptBootstrap) return true
+        if (locked.isEmpty() && lockedPlayers.isEmpty()) return false
+        val holder = inventory.getHolder(false)
+        return (holder as? Player)?.uniqueId?.let { it in lockedPlayers } == true ||
+            holderPositions(holder).any(::viewLocked)
+    }
     private fun exactLocked(inventory: Inventory): Boolean {
         if (locked.isEmpty() && lockedPlayers.isEmpty()) return false
         val holder = inventory.getHolder(false)
@@ -965,7 +979,7 @@ class CivsStorage(private val plugin: Plugin,
         isWorldLocked(block.world.uid, CivPosition(block.x, block.y, block.z))
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    fun onOpen(event: InventoryOpenEvent) { if (playerLocked(event.player.uniqueId) || locked(event.inventory)) event.isCancelled = true }
+    fun onOpen(event: InventoryOpenEvent) { if (playerLocked(event.player.uniqueId) || viewLocked(event.inventory)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     fun onClick(event: InventoryClickEvent) { if (playerLocked(event.whoClicked.uniqueId) || locked(event.view.topInventory)) event.isCancelled = true }
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)

@@ -181,7 +181,9 @@ internal class CivsCitizenWork(
                 val target = actor.plan.travelTarget(cycle.phase)
                 if (routes.arrivedAt(actor, city, world, target)) {
                     arriveForWork(actor, city, worker, now)
-                    runtime.statuses[actor.workerId] = citizenWorkStatus(actor.plan, actor.cycle.phase, life.servingTavernGuests(actor, city)) ?: actor.cycle.status()
+                    runtime.statuses[actor.workerId] = if (actor.plan.worldWork?.upkeep != null &&
+                        actor.cycle.phase == CitizenPhase.TO_WORK) "waiting-materials"
+                    else citizenWorkStatus(actor.plan, actor.cycle.phase, life.servingTavernGuests(actor, city)) ?: actor.cycle.status()
                     // Arrival starts the observed work interval on this pulse. Its first
                     // gesture and crop-care prop belong to that same interval.
                     if (actor.cycle.phase == CitizenPhase.WORKING) animateWork(actor, city, world, now)

@@ -53,6 +53,25 @@ import java.util.UUID
 import java.util.Locale
 import java.util.concurrent.CompletableFuture
 
+class CivsBuildingStatusUiTest : FunSpec({
+    test("building inspection uses the existing worker label for active mine and travel states") {
+        for (language in listOf("ru", "en")) for (status in listOf("securing-mine", "returning-output", "defending", "retreating")) {
+            withUi { h ->
+                h.player.setLocale(Locale.forLanguageTag(language))
+                val village = autonomousSettlement(h.player, "Mine status")
+                val quarry = village.buildings.first { it.type == BuildingType.QUARRY }
+                every { h.host.inspectBuilding(h.player, village.id, quarry.id) } returns village
+                every { h.host.buildingStatus(quarry.id) } returns "building-status.$status"
+                every { h.host.workerStatus(any()) } returns "workers.status.$status"
+                h.ui.openBuildingInspection(h.player, village.id, quarry.id)
+                h.screen.id shouldBe "civs.building-inspection"
+                h.body() shouldContain plainText(h.ui.tr(h.player, "workers.status.$status"))
+                h.body().contains(plainText(h.ui.tr(h.player, "workers.status.unavailable"))) shouldBe false
+            }
+        }
+    }
+})
+
 class CivsUiTest : FunSpec({
     test("research follows the selected Auto through start pause and retained project progress") {
         withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->

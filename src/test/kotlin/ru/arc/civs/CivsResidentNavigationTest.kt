@@ -888,13 +888,9 @@ class CivsResidentNavigationTest : FunSpec({
             var moved = 0
             repeat(100) {
                 route.move(at, 1.0) { true }?.let { next ->
-                    val walking = next.clone().also { if (it.y < at.y) it.y = at.y }
+                    val walking = next.clone().also { it.y = at.y }
                     (at.distance(walking) <= .215001) shouldBe true
-                    (at.y - next.y <= 1.000001) shouldBe true
-                    for (sample in 0..10) {
-                        val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
-                        citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
-                    }
+                    assertNativeStairFrame(terrain.world, at, next)
                     at = next
                     moved++
                 }
@@ -903,6 +899,270 @@ class CivsResidentNavigationTest : FunSpec({
             route.failure shouldBe null
             route.finished shouldBe true
             at.distanceSquared(target) shouldBe 0.0
+        }
+    }
+
+    test("bottom stairs spend the same horizontal stride as flat travel in every facing and direction") {
+        MockBukkitTestRuntime.open().use {
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
+                for (speed in listOf(1.0, 1.25)) for (returning in listOf(false, true)) {
+                    val sign = if (returning) -1 else 1
+                    fun trajectory(stairs: Boolean): List<Double> {
+                        val terrain = ResidentRouteTerrain()
+                        if (stairs) {
+                            for (index in 1..3) {
+                                val stair = CivPosition(dx * index, 63 + index, dz * index)
+                                terrain.blocks[stair] = Material.OAK_STAIRS
+                                terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                                    dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                                    dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                                    dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                                    else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                                })
+                            }
+                            terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.OAK_PLANKS
+                        }
+                        val lower = Location(terrain.world, .5, 64.0, .5)
+                        val upper = Location(terrain.world, dx * 4 + .5, if (stairs) 67.0 else 64.0, dz * 4 + .5)
+                        var at = (if (returning) upper else lower).clone().also {
+                            it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+                        }
+                        val target = if (returning) lower else upper
+                        val route = CitizenPacketRoute(terrain.world, at, target,
+                            { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 64..67 },
+                            { _, _ -> true }, { 1.0 })
+                        route.prepare()
+                        route.failure shouldBe null
+                        val strides = mutableListOf<Double>()
+                        val contacts = linkedSetOf<Double>()
+                        repeat(100) { tick ->
+                            if (!route.finished) {
+                                val remaining = ((target.x - at.x) * dx + (target.z - at.z) * dz) * sign
+                                val next = requireNotNull(route.move(at, speed) { true }) {
+                                    "stairs=$stairs direction=$dx,$dz speed=$speed returning=$returning tick=$tick failure=${route.failure}"
+                                }
+                                val advance = ((next.x - at.x) * dx + (next.z - at.z) * dz) * sign
+                                withClue("stairs=$stairs direction=$dx,$dz speed=$speed returning=$returning tick=$tick $at -> $next") {
+                                    (kotlin.math.abs(advance - minOf(.215 * speed, remaining)) <= .000001) shouldBe true
+                                    (kotlin.math.abs(next.y - at.y) <= .562501) shouldBe true
+                                    citizenPacketBodyClear(terrain.world, next.point(), false) shouldBe true
+                                    // Native player stepping lifts the body, then sweeps horizontally.
+                                    citizenPacketStepClear(terrain.world, at.point(), next.point(), false) shouldBe true
+                                }
+                                for (height in listOf(64.5, 65.5, 66.5))
+                                    if (kotlin.math.abs(next.y - height) < .000001 && touchesNativeFloor(terrain.world, next))
+                                        contacts += height
+                                strides += advance
+                                at = next
+                            }
+                        }
+                        route.finished shouldBe true
+                        route.failure shouldBe null
+                        at.distanceSquared(target) shouldBe 0.0
+                        if (stairs) contacts.toList() shouldBe
+                            if (returning) listOf(66.5, 65.5, 64.5) else listOf(64.5, 65.5, 66.5)
+                        return strides
+                    }
+                    val flat = trajectory(false)
+                    val stairs = trajectory(true)
+                    stairs.size shouldBe flat.size
+                    stairs.zip(flat).forEach { (actual, expected) ->
+                        (kotlin.math.abs(actual - expected) <= .000001) shouldBe true
+                    }
+                }
+        }
+    }
+
+    test("working motion keeps the provider boost when stair contact precedes its centre column") {
+        MockBukkitTestRuntime.open().use { paper ->
+            val plugin = paper.createSimplePlugin("StairMotion")
+            var contactedAirFrames = 0
+            for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1))
+                for (returning in listOf(false, true)) for (offset in listOf(0.0, .1)) {
+                val sign = if (returning) -1 else 1
+                fun trajectory(stairs: Boolean): List<Double> {
+                    val terrain = ResidentRouteTerrain()
+                    for (index in 0..4) terrain.blocks[CivPosition(dx * index, 63, dz * index)] = Material.COBBLESTONE
+                    if (stairs) {
+                        for (index in 1..3) {
+                            val stair = CivPosition(dx * index, 63 + index, dz * index)
+                            terrain.blocks[stair] = Material.OAK_STAIRS
+                            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0), when {
+                                dx > 0 -> BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0)
+                                dx < 0 -> BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0)
+                                dz > 0 -> BoundingBox(0.0, .5, .5, 1.0, 1.0, 1.0)
+                                else -> BoundingBox(0.0, .5, 0.0, 1.0, 1.0, .5)
+                            })
+                        }
+                        terrain.blocks[CivPosition(dx * 4, 66, dz * 4)] = Material.COBBLESTONE
+                    }
+                    val lower = Location(terrain.world, .5, 64.0, .5)
+                    val upper = Location(terrain.world, dx * 4 + .5, if (stairs) 67.0 else 64.0, dz * 4 + .5)
+                    var at = (if (returning) upper else lower).clone().also {
+                        it.x -= dx * offset * sign
+                        it.z -= dz * offset * sign
+                        it.yaw = Math.toDegrees(kotlin.math.atan2(-dx.toDouble() * sign, dz.toDouble() * sign)).toFloat()
+                    }
+                    val target = if (returning) lower else upper
+                    val route = CitizenPacketRoute(terrain.world, at, target,
+                        { p -> (0..4).any { p.x == dx * it && p.z == dz * it } && p.y in 64..67 },
+                        { _, _ -> true }, { 1.0 })
+                    route.prepare()
+                    val city = pathsCity().copy(worldId = terrain.world.uid)
+                    val runtime = CitizenRuntime(plugin) { listOf(city) }
+                    val npc = mockk<PacketPlayerNpc>(relaxed = true) {
+                        every { isValid } returns true
+                        every { world } returns terrain.world
+                        every { location } answers { at.clone() }
+                        every { bodyYaw } answers { at.yaw }
+                        every { teleport(any()) } answers { at = firstArg<Location>().clone() }
+                        every { bodyYaw = any() } answers { at.yaw = firstArg() }
+                        every { pitch = any() } answers { at.pitch = firstArg() }
+                    }
+                    val worker = UUID.randomUUID()
+                    val actor = CitizenActor(city.id, worker, city.worldId, npc,
+                        CitizenPlan(CitizenToken(null, 0, 1, null), CivPosition(0, 64, 0), null, BuildingType.QUARRY, 0, null))
+                    actor.route = CitizenRoute(at.point(), target, CitizenChunks.between(at.blockX, at.blockZ, target.blockX, target.blockZ),
+                        0, 90_000, emptySet(), route, null, CivPosition(target.blockX, target.blockY, target.blockZ))
+                    runtime.actors[worker] = actor
+                    val audience = mockk<CivsCitizenAudience>(relaxed = true) {
+                        every { activeAt(any(), any(), any(), any()) } returns true
+                    }
+                    val work = mockk<CivsCitizenWork>(relaxed = true) { every { workingTravel(actor) } returns true }
+                    val collisions = mockk<CivsCitizenCollisions>(relaxed = true) {
+                        every { routeMoveAllowed(actor, any(), any()) } returns true
+                    }
+                    val routes = mockk<CivsCitizenRoutes>(relaxed = true)
+                    val logistics = mockk<CivsCitizenLogistics>(relaxed = true)
+                    val motion = CivsCitizenMotion(runtime, { collisions }, { routes },
+                        { work }, { logistics }, { audience }, mockk(relaxed = true), CivsPaths(),
+                        mockk(relaxed = true), mockk(relaxed = true), { _, _, _, _, _ -> },
+                        { ground -> if (ground.type in setOf(Material.COBBLESTONE, Material.OAK_STAIRS)) 1.25 else 1.0 },
+                        { _, _ -> false }, { runtime.navigationTick * 50 })
+                    val strides = mutableListOf<Double>()
+                    repeat(100) { tick ->
+                        if (!route.finished) {
+                            val before = at.clone()
+                            val centreAir = terrain.world.getBlockAt(at.blockX, citizenSupportY(at.y), at.blockZ).type.isAir
+                            val remaining = ((target.x - at.x) * dx + (target.z - at.z) * dz) * sign
+                            motion.activateNavigating()
+                            val advance = ((at.x - before.x) * dx + (at.z - before.z) * dz) * sign
+                            withClue("stairs=$stairs direction=$dx,$dz returning=$returning offset=$offset tick=$tick $before -> $at failure=${route.failure}") {
+                                route.waitingForCollision shouldBe false
+                                (kotlin.math.abs(advance - minOf(.215, remaining)) <= .000001) shouldBe true
+                            }
+                            if (centreAir && touchesNativeFloor(terrain.world, before)) contactedAirFrames++
+                            strides += advance
+                        }
+                    }
+                    route.finished shouldBe true
+                    route.failure shouldBe null
+                    return strides
+                }
+                val stairs = trajectory(true)
+                val flat = trajectory(false)
+                stairs.size shouldBe flat.size
+                stairs.zip(flat).forEach { (actual, expected) ->
+                    (kotlin.math.abs(actual - expected) <= .000001) shouldBe true
+                }
+            }
+            (contactedAirFrames > 0) shouldBe true
+        }
+    }
+
+    test("stair surface speed uses actual admitted floors and rejects nearby wet or changed support") {
+        MockBukkitTestRuntime.open().use {
+            val terrain = ResidentRouteTerrain()
+            terrain.blocks[CivPosition(0, 63, 0)] = Material.COBBLESTONE
+            val stair = CivPosition(1, 64, 0)
+            terrain.blocks[stair] = Material.OAK_STAIRS
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+            fun route(start: Location) = CitizenPacketRoute(terrain.world, start, Location(terrain.world, 1.5, 65.0, .5),
+                { it.x in 0..1 && it.z == 0 && it.y in 64..65 }, { _, _ -> true }, { 1.0 }).also { it.prepare() }
+            val start = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+            val accepted = route(start)
+            val contact = requireNotNull(accepted.move(start, 1.0) { true })
+            terrain.world.getBlockAt(contact.blockX, citizenSupportY(contact.y), contact.blockZ).type shouldBe Material.AIR
+            citizenMotionSurface(contact, accepted).type shouldBe Material.OAK_STAIRS
+            // Neither another prepared route nor a position nudged off the admitted profile authorises this floor.
+            citizenMotionSurface(contact, route(start)).type shouldBe Material.AIR
+            citizenMotionSurface(contact.clone().add(0.0, 0.0, .05), accepted).type shouldBe Material.AIR
+            citizenMotionSurface(contact.clone().add(0.0, .25, 0.0), accepted).type shouldBe Material.AIR
+            val nativeData = terrain.world.getBlockAt(stair.x, stair.y, stair.z).blockData as org.bukkit.block.data.type.Stairs
+            nativeData.isWaterlogged = true
+            citizenMotionSurface(contact, accepted).type shouldBe Material.AIR
+            nativeData.isWaterlogged = false
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+            citizenMotionSurface(contact, accepted).type shouldBe Material.AIR
+            accepted.move(contact, 1.0) { true } shouldBe null
+            accepted.failure shouldBe "path-changed"
+
+            // Before tread contact the admitted lift still stands over its old road, never a future stair's speed.
+            terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+            val offset = start.clone().also { it.x = .4 }
+            val approach = route(offset)
+            val lifted = requireNotNull(approach.move(offset, 1.0) { true })
+            terrain.world.getBlockAt(lifted.blockX, citizenSupportY(lifted.y), lifted.blockZ).type shouldBe Material.AIR
+            citizenMotionSurface(lifted, approach).type shouldBe Material.COBBLESTONE
+            approach.stairProfileSupports(lifted.point()).size.let { it in 1..4 } shouldBe true
+        }
+    }
+
+    test("native stair stride retains entity ceiling protection and ordinary-block boundaries") {
+        MockBukkitTestRuntime.open().use {
+            for (obstruction in listOf("entity", "ceiling", "protected", "ordinary-block", "wet-stair")) {
+                val terrain = ResidentRouteTerrain()
+                val stair = CivPosition(1, 64, 0)
+                terrain.blocks[stair] = Material.OAK_STAIRS
+                terrain.boxes[stair] = listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, .5, 1.0),
+                    BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+                val start = Location(terrain.world, .5, 64.0, .5, -90f, 0f)
+                var permitted = true
+                val route = CitizenPacketRoute(terrain.world, start, Location(terrain.world, 1.5, 65.0, .5),
+                    { it.x in 0..1 && it.z == 0 && it.y in 64..65 }, { _, _ -> permitted }, { 1.0 })
+                route.prepare()
+                when (obstruction) {
+                    "ceiling" -> terrain.blocks[CivPosition(0, 66, 0)] = Material.STONE
+                    "protected" -> permitted = false
+                    "ordinary-block" -> {
+                        terrain.blocks[stair] = Material.STONE
+                        terrain.boxes.remove(stair)
+                    }
+                    "wet-stair" -> (terrain.world.getBlockAt(1, 64, 0).blockData as org.bukkit.block.data.type.Stairs).isWaterlogged = true
+                }
+                val next = route.move(start, 1.0, { _, _ -> obstruction != "entity" }) { true }
+                withClue("obstruction=$obstruction next=$next failure=${route.failure}") {
+                    when (obstruction) {
+                        "entity" -> {
+                            next shouldBe null
+                            route.waitingForCollision shouldBe true
+                            route.failure shouldBe null
+                            // Clearing a body does not bank the obstructed frame's stride.
+                            val resumed = requireNotNull(route.move(start, 1.0) { true })
+                            (kotlin.math.abs(resumed.x - start.x - .215) <= .000001) shouldBe true
+                            assertNativeStairFrame(terrain.world, start, resumed)
+                        }
+                        "ceiling", "protected" -> {
+                            next shouldBe null
+                            route.failure shouldBe "movement-blocked"
+                        }
+                        "ordinary-block" -> {
+                            val lifted = requireNotNull(next)
+                            lifted.x shouldBe start.x
+                            lifted.z shouldBe start.z
+                            (kotlin.math.abs(lifted.y - start.y - .215) <= .000001) shouldBe true
+                            citizenPacketBodyClear(terrain.world, lifted.point(), false) shouldBe true
+                        }
+                        "wet-stair" -> {
+                            val unchanged = requireNotNull(next)
+                            (unchanged.x - start.x < .215 - .000001) shouldBe true
+                            citizenPacketBodyClear(terrain.world, unchanged.point(), false) shouldBe true
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -950,15 +1210,12 @@ class CivsResidentNavigationTest : FunSpec({
                                     verticalOnly += "$tick: $at -> $next"
                                 val a = wire(at)
                                 val b = wire(next)
-                                for (sample in 0..16) {
-                                    val point = a.clone().add(b.toVector().subtract(a.toVector()).multiply(sample / 16.0))
-                                    withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath from=$a to=$b") {
-                                        citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
-                                    }
+                                withClue("direction=$dx,$dz speed=$speed returning=$returning path=$loweredPath from=$a to=$b") {
+                                    assertNativeStairFrame(terrain.world, a, b)
                                 }
                                 for (height in listOf(64.5, 65.5, 66.5))
                                     if (kotlin.math.abs(next.y - height) < .000001 &&
-                                        citizenPacketSupported(terrain.world, CitizenPoint(next.x, next.y, next.z))) contacts += height
+                                        touchesNativeFloor(terrain.world, next)) contacts += height
                                 at = next
                             }
                         }
@@ -991,10 +1248,7 @@ class CivsResidentNavigationTest : FunSpec({
                 var halfContact = false
                 repeat(100) {
                     route.move(at, .8) { true }?.let { next ->
-                        for (sample in 0..16) {
-                            val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 16.0))
-                            citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
-                        }
+                        assertNativeStairFrame(terrain.world, at, next)
                         if (kotlin.math.abs(next.y - 64.5) < .000001) halfContact = true
                         at = next
                     }
@@ -1053,10 +1307,11 @@ class CivsResidentNavigationTest : FunSpec({
                         val walking = next.clone().also { it.y = at.y }
                         (at.distance(walking) <= .215 * speed + .000001) shouldBe true
                         (at.y - next.y <= 1.000001) shouldBe true
-                        for (sample in 0..10) {
+                        if (at.y > 67.000001) for (sample in 0..10) {
+                            // The initial full-block drop still follows its clear gravity chord.
                             val point = at.clone().add(next.toVector().subtract(at.toVector()).multiply(sample / 10.0))
-                            citizenPacketBodyClear(terrain.world, CitizenPoint(point.x, point.y, point.z), false) shouldBe true
-                        }
+                            citizenPacketBodyClear(terrain.world, point.point(), false) shouldBe true
+                        } else assertNativeStairFrame(terrain.world, at, next)
                         if (next.y < at.y - .000001) {
                             descended++
                             if ((target.x - at.x) * dx + (target.z - at.z) * dz > .000001 &&
@@ -1998,6 +2253,28 @@ private fun CitizenPacketRoute.prepare() {
     withClue("phase=$preparationPhase nodes=$nodeCount captured=$capturedBlocks operations=$operations failure=$failure") {
         searching shouldBe false
     }
+}
+
+/** Native stepping sweeps the raised body; packet interpolation is not the player's collision path. */
+private fun assertNativeStairFrame(world: World, from: Location, to: Location) {
+    (kotlin.math.abs(to.y - from.y) <= .562501) shouldBe true
+    citizenPacketBodyClear(world, from.point(), false) shouldBe true
+    citizenPacketBodyClear(world, to.point(), false) shouldBe true
+    citizenPacketStepClear(world, from.point(), to.point(), false) shouldBe true
+}
+
+/** A player's toes may reach a tread before its centre enters the stair's block. */
+private fun touchesNativeFloor(world: World, at: Location): Boolean {
+    for (x in kotlin.math.floor(at.x - .299).toInt()..kotlin.math.floor(at.x + .299).toInt())
+        for (z in kotlin.math.floor(at.z - .299).toInt()..kotlin.math.floor(at.z + .299).toInt()) {
+            val y = citizenSupportY(at.y)
+            if (world.getBlockAt(x, y, z).collisionShape.boundingBoxes.any { box ->
+                    kotlin.math.abs(y + box.maxY - at.y) <= .000001 &&
+                        x + box.minX < at.x + .299 && x + box.maxX > at.x - .299 &&
+                        z + box.minZ < at.z + .299 && z + box.maxZ > at.z - .299
+                }) return true
+        }
+    return false
 }
 
 /** Explicit geometric unit fixture. It does not model a live server or claim native client movement. */

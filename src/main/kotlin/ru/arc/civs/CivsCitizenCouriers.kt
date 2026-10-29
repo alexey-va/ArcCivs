@@ -122,8 +122,11 @@ internal class CivsCitizenCouriers(
         val excess = CivsLogistics.workerExcess(city, worker, craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
         if (excess.isEmpty()) return false
         if (CivsAutonomy.legacyStock(city)) return true
+        val searchingMine = actor.plan.type == BuildingType.QUARRY && actor.plan.idleReason == "searching-work" &&
+            actor.plan.token.assignmentId == worker.assignment && worker.assignment?.let(city::building)?.type == BuildingType.QUARRY
+        // Bounded quarry discovery is active work, not a reason to carry a single block home.
         // Finish useful work while a stack accumulates; idle or blocked producers return a partial stack.
-        return actor.plan.worldWork == null || actor.cycle.phase == CitizenPhase.PAUSED ||
+        return actor.plan.worldWork == null && !searchingMine || actor.cycle.phase == CitizenPhase.PAUSED ||
             excess.values.any { it >= CivsLogistics.MAX_CARGO } || !citizenHasCapacity(city, actor.plan)
     }
 
