@@ -75,7 +75,8 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
             val assignment = h.service.assign(h.player, guest.id, null)
             h.saves.size shouldBe 1
             assignment.isDone shouldBe false
-            val source = CivResidentFoodSource(tavern.id, requireNotNull(tavern.control), CivPosition(9, 64, 0), servingFor = guest.id)
+            val source = CivResidentFoodSource(tavern.id, requireNotNull(tavern.control), CivPosition(9, 64, 0),
+                servingFor = guest.id, servingTicket = UUID.randomUUID())
             val pickup = h.service.pickupResidentFood(city.id, keeper.id, source)
             pickup.isDone shouldBe false
             repeat(4) { h.time += 1_000; h.tick() }
@@ -102,6 +103,82 @@ class CivsQueuedTavernPickupServiceTest : FunSpec({
                 (contents.contents.filterNotNull().sumOf { it.amount }.toLong() + carried) shouldBe 4L
                 verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             }
+        }
+    }
+
+    for (retireAt in listOf("city-wait", "native-before", "journal-save"))
+    test("a retired queued serving ticket cannot debit its replacement's food retiredAt=$retireAt") {
+        val nativeBefore = CompletableFuture<Unit>()
+        val journalSaved = CompletableFuture<CivInventoryTransaction>()
+        var firstReceipt: CivInventoryTransaction? = null
+        var preparingNative = false
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                storage.persistCollectedNative = { _, before ->
+                    if (before) { preparingNative = true; nativeBefore } else CompletableFuture.completedFuture(Unit)
+                }
+            }
+        }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val tavern = h.city.buildings.last().copy(type = BuildingType.TAVERN, control = CivPosition(10, 63, 0))
+            val keeper = h.city.workers.first().copy(assignment = tavern.id, nextDeliveryAt = 1,
+                inventory = emptyMap(), items = List(CivsEquipment.SLOTS) { null }, hunger = 20)
+            val guest = h.city.workers[1].copy(assignment = hall.id, nextDeliveryAt = 1, hunger = 10)
+            val city = CivsRules.validate(h.city.copy(buildings = listOf(hall, tavern), workers = listOf(keeper, guest),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val contents = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Container).inventory
+            contents.setItem(0, ItemStack(Material.BREAD, 8))
+            val first = UUID.randomUUID()
+            val replacement = UUID.randomUUID()
+            var activeTicket = first
+            every { h.citizens.residentCollectionFeet(keeper.id, false) } returns Location(h.world, 9.5, 64.0, .5)
+            every { h.citizens.validateTavernPickup(city.id, keeper.id, guest.id, tavern.id, "BREAD", any()) } answers {
+                if (arg<UUID?>(5) != activeTicket) throw CivsRejection("stale-meal")
+            }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } answers {
+                val tx = firstArg<CivInventoryTransaction>()
+                if (retireAt == "journal-save" && tx.collected?.food?.servingTicket == first) {
+                    firstReceipt = tx
+                    journalSaved
+                } else CompletableFuture.completedFuture(tx)
+            }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            h.service.assign(h.player, guest.id, null)
+            h.saves.size shouldBe 1
+            val source = CivResidentFoodSource(tavern.id, requireNotNull(tavern.control), CivPosition(9, 64, 0),
+                servingFor = guest.id, servingTicket = first)
+            val retired = h.service.pickupResidentFood(city.id, keeper.id, source)
+            retired.isDone shouldBe false
+            if (retireAt != "city-wait") {
+                if (retireAt == "journal-save") nativeBefore.complete(Unit)
+                h.commit()
+                h.tickUntil("first ticket reaches the native before fence") { preparingNative }
+                if (retireAt == "journal-save") h.tickUntil("first ticket reaches journal save") { firstReceipt != null }
+                retired.isDone shouldBe false
+                // A prepared collection retains the existing five-second world collection cadence even when retired.
+                h.time += 5_000
+            }
+            activeTicket = replacement
+            val current = h.service.pickupResidentFood(city.id, keeper.id, source.copy(servingTicket = replacement))
+            current.isDone shouldBe false
+            contents.getItem(0)!!.amount shouldBe 8
+            verify(exactly = if (retireAt == "journal-save") 1 else 0) { h.store.saveInventoryTransaction(any()) }
+            if (retireAt == "city-wait") h.commit()
+            nativeBefore.complete(Unit)
+            if (retireAt == "journal-save") journalSaved.complete(requireNotNull(firstReceipt))
+            h.tickUntil("retired ticket rejection and replacement receipt") { retired.isDone && h.saves.size == 2 }
+            shouldThrow<CompletionException> { retired.join() }.cause.let { (it as CivsRejection).reason } shouldBe "stale-meal"
+            h.commit()
+            h.await(current)
+            repeat(8) { h.tick() }
+            val savedKeeper = h.service.settlements().single().workers.first { it.id == keeper.id }
+            CivsEquipment.plainCount(savedKeeper, "BREAD") shouldBe 4L
+            contents.getItem(0)!!.amount shouldBe 4
+            verify(exactly = 1) { h.store.saveInventoryTransaction(match { it.collected?.food?.servingTicket == replacement }) }
+            verify(exactly = if (retireAt == "journal-save") 2 else 1) { h.store.saveInventoryTransaction(any()) }
         }
     }
 })

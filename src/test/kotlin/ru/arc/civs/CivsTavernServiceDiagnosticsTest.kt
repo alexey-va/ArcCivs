@@ -53,7 +53,8 @@ class CivsTavernServiceDiagnosticsTest : FunSpec({
                 val eaten = mutableListOf<UUID>()
                 var pickups = 0
                 h.physicalFoodPickup = { order ->
-                    h.owner.validateTavernPickup(h.city.id, keeperId, requireNotNull(order.servingFor), tavern.id, "BREAD")
+                    h.owner.validateTavernPickup(h.city.id, keeperId, requireNotNull(order.servingFor), tavern.id, "BREAD",
+                        requireNotNull(order.servingTicket))
                     pickups++
                     h.city = h.city.copy(workers = h.city.workers.map {
                         if (it.id == keeperId) CivsEquipment.collectSupplies(it, mapOf("BREAD" to 4L)) else it

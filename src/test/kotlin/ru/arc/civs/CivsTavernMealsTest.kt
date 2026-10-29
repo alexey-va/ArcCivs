@@ -10,6 +10,54 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 
 class CivsTavernMealsTest : FunSpec({
+    test("a retired pickup cannot inherit a replacement service for the same guest") {
+        residentRuntime { h ->
+            try {
+                val keeperId = h.standingTavernkeeper()
+                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                h.city = h.city.copy(workers = h.city.workers.map {
+                    if (it.id == keeperId) it else it.copy(inventory = mapOf("IRON_AXE" to 1L))
+                })
+                h.tavernServiceSource = CivResidentFoodSource(tavern.id, requireNotNull(tavern.control), CivPosition(8, 64, 0))
+                val queued = mutableListOf<CivResidentFoodSource>()
+                h.physicalFoodPickup = { source ->
+                    queued += source
+                    CompletableFuture<Settlement>()
+                }
+                h.owner.residentLifeEnabled = true
+                h.navigationNow = 5_000
+                h.owner.pulse(5_000)
+                fun awaitPickup(count: Int) {
+                    for (tick in 1..800) {
+                        h.navigate()
+                        if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                        if (queued.size == count) return
+                    }
+                    error("Missing pickup $count: ${h.owner.debug(h.city.id, null)}")
+                }
+                awaitPickup(1)
+                val firstTicket = h.mealState()["ticket"]
+                val actors = h.owner.javaClass.getDeclaredField("actors").also { it.isAccessible = true }.get(h.owner) as Map<*, *>
+                val guest = requireNotNull(actors[h.workerId])
+                h.owner.javaClass.declaredMethods.single { it.name == "stopMeal" }.also { it.isAccessible = true }
+                    .invoke(h.owner, guest)
+                h.navigationNow = requireNotNull(h.navigationNow) + 1_000
+                h.owner.pulse(requireNotNull(h.navigationNow))
+                awaitPickup(2)
+                (h.mealState()["ticket"] != firstTicket) shouldBe true
+                val retired = queued.first()
+                retired.servingTicket shouldBe firstTicket
+                shouldThrow<CivsRejection> {
+                    h.owner.validateTavernPickup(h.city.id, keeperId, h.workerId, retired.buildingId, retired.material, retired.servingTicket)
+                }.reason shouldBe "stale-meal"
+                val current = queued.last()
+                current.servingTicket shouldBe h.mealState()["ticket"]
+                h.owner.validateTavernPickup(h.city.id, keeperId, h.workerId, current.buildingId, current.material, current.servingTicket)
+                h.city.workers.sumOf { CivsEquipment.plainCount(it, "BREAD") } shouldBe 0
+            } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
+        }
+    }
+
     test("all four recorded adjacent chairs admit adult and child geometry and retain their stable identity") {
         residentRuntime { h ->
             try {
@@ -135,7 +183,7 @@ class CivsTavernMealsTest : FunSpec({
                     npc.isSeated shouldBe true
                     h.usingMainHand shouldBe false
                     order.servingFor shouldBe h.workerId
-                    h.owner.validateTavernPickup(h.city.id, keeperId, h.workerId, tavern.id, "BREAD")
+                    h.owner.validateTavernPickup(h.city.id, keeperId, h.workerId, tavern.id, "BREAD", requireNotNull(order.servingTicket))
                     nativeBread -= 4
                     h.city = h.city.copy(workers = h.city.workers.map {
                         if (it.id == keeperId) CivsEquipment.collectSupplies(it, mapOf("BREAD" to 4L)) else it

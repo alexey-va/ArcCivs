@@ -4,15 +4,16 @@ import java.util.UUID
 
 /** A real container and a supported adjacent place; contents are rechecked by the receipt owner. */
 data class CivResidentFoodSource(val buildingId: UUID, val container: CivPosition, val standing: CivPosition,
-    val material: String = "BREAD", val servingFor: UUID? = null)
+    val material: String = "BREAD", val servingFor: UUID? = null, val servingTicket: UUID? = null)
 
 /** FOOD is converted once at 1:1. Pickup transfers existing bread; neither transition feeds a resident. */
 data class CivResidentFoodReceipt(val buildingId: UUID, val stockBefore: Stock, val materialized: Int = 0,
-    val material: String = "BREAD", val servingFor: UUID? = null) {
+    val material: String = "BREAD", val servingFor: UUID? = null, val servingTicket: UUID? = null) {
     fun validated(city: Settlement, transfer: CivCollectedTransfer) {
         val worker = city.workers.single { it.id == transfer.workerId }
         val building = city.building(buildingId) ?: error("Missing food building")
         require(CivsResidentFood.eligible(city, worker, building))
+        require(servingTicket == null || servingFor != null)
         servingFor?.let { guestId ->
             val guest = city.workers.single { it.id == guestId }
             require(materialized == 0 && CivsTavernMeals.keeper(city, worker, guest, building))

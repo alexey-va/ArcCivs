@@ -797,6 +797,7 @@ class CivsStorage(private val plugin: Plugin,
     internal fun prepareFoodPickup(city: Settlement, workerId: UUID, target: CivResidentFoodSource,
         feet: org.bukkit.Location): CivCollectedPlan {
         checkClaim(city)
+        reject((target.servingFor == null) != (target.servingTicket == null), "stale-meal")
         val worker = city.workers.single { it.id == workerId }
         val building = city.building(target.buildingId) ?: throw CivsRejection("building-not-found")
         reject(!CivsResidentFood.eligible(city, worker, building) ||
@@ -824,7 +825,7 @@ class CivsStorage(private val plugin: Plugin,
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(target.material to count.toLong()))
         return CivCollectedPlan(supplied, CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
             containers = changes, food = CivResidentFoodReceipt(building.id, city.stock, material = target.material,
-                servingFor = target.servingFor)))
+                servingFor = target.servingFor, servingTicket = target.servingTicket)))
     }
 
     internal fun prepareHomeDeposit(city: Settlement, workerId: UUID, destination: CivPosition,

@@ -2322,7 +2322,8 @@ class CivsCitizens(
             }
             cancelRoute(keeper)
             if (residentFoods.available(city, worker, visit.plan.material) == 0) {
-                service.pickup = try { pickupResidentFood(city.id, worker.id, service.source.copy(servingFor = guest.workerId)) }
+                service.pickup = try { pickupResidentFood(city.id, worker.id,
+                    service.source.copy(servingFor = guest.workerId, servingTicket = service.ticket)) }
                     catch (error: Exception) { CompletableFuture.failedFuture(error) }
                 return true
             }
@@ -2359,13 +2360,15 @@ class CivsCitizens(
         return true
     }
 
-    internal fun validateTavernPickup(cityId: UUID, keeperId: UUID, guestId: UUID, buildingId: UUID, material: String) {
+    internal fun validateTavernPickup(cityId: UUID, keeperId: UUID, guestId: UUID, buildingId: UUID, material: String,
+        expectedTicket: UUID? = null) {
         checkMainThread()
         val keeper = actors[keeperId] ?: throw CivsRejection("stale-meal")
         val service = keeper.tavernService ?: throw CivsRejection("stale-meal")
         val guest = actors[guestId] ?: throw CivsRejection("stale-meal")
         val visit = guest.mealVisit ?: throw CivsRejection("stale-meal")
         if (keeper.cityId != cityId || guest.cityId != cityId || service.guestId != guestId ||
+            expectedTicket != null && service.ticket != expectedTicket ||
             service.ticket != visit.ticket || service.source.buildingId != buildingId || service.source.material != material ||
             !lifeActorReady(keeper) || !mealSeatStillSafe(guest) || residentObservedAt - visit.observedAt > 2_000 ||
             !civsCanReachContainer(keeper.npc.location, service.source.container)) throw CivsRejection("stale-meal")

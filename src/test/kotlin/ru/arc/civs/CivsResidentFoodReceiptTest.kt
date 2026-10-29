@@ -59,12 +59,16 @@ class CivsResidentFoodReceiptTest : FunSpec({
         val keeper = CivWorker(UUID.randomUUID(), "Innkeeper", tavern.id, nextDeliveryAt = 1, hunger = 20)
         h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, tavern), workers = listOf(guest, keeper)))
         h.barrel.setItem(0, ItemStack(Material.BREAD, 4))
-        val source = CivResidentFoodSource(tavern.id, h.point, CivPosition(1, 64, 0), servingFor = guest.id)
+        val source = CivResidentFoodSource(tavern.id, h.point, CivPosition(1, 64, 0), servingFor = guest.id,
+            servingTicket = UUID.randomUUID())
         val before = h.city
         val id = UUID.randomUUID()
         h.storage.reserve(before, id)
-        shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(before, keeper.id, source.copy(servingFor = null), h.feet) }
+        shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(before, keeper.id,
+            source.copy(servingFor = null, servingTicket = null), h.feet) }
             .reason shouldBe "resident-food-missing"
+        shouldThrow<CivsRejection> { h.storage.prepareFoodPickup(before, keeper.id, source.copy(servingTicket = null), h.feet) }
+            .reason shouldBe "stale-meal"
         val prepared = h.storage.prepareFoodPickup(before, keeper.id, source, h.feet)
         val tx = CivInventoryTransaction(id, before.id, before.revision, before.copy(workers = before.workers.map {
             if (it.id == keeper.id) prepared.worker else it
@@ -80,9 +84,51 @@ class CivsResidentFoodReceiptTest : FunSpec({
         CivsEquipment.plainCount(h.city.workers.first { it.id == guest.id }, "BREAD") shouldBe 0
         h.city.workers.first { it.id == guest.id }.hunger shouldBe 14
         tx.collected!!.food!!.servingFor shouldBe guest.id
+        tx.collected!!.food!!.servingTicket shouldBe source.servingTicket
         shouldThrow<IllegalArgumentException> { tx.copy(after = tx.after.copy(workers = tx.after.workers.map {
             if (it.id == keeper.id) it.copy(assignment = hall.id) else it
         })).validated() }
+    }
+
+    for (legacy in listOf(false, true))
+    test("an accepted serving receipt recovers without the retired actor session legacy=$legacy") {
+        val originalHall = h.city.buildings.single()
+        val hall = originalHall.copy(anchor = CivPosition(8, 64, 0), control = CivPosition(8, 64, 0),
+            bounds = CivBox(CivPosition(6, 64, -2), CivPosition(10, 68, 2)), entrance = CivPosition(8, 64, -2))
+        val tavern = originalHall.copy(id = UUID.randomUUID(), type = BuildingType.TAVERN)
+        val guest = h.worker
+        val keeper = CivWorker(UUID.randomUUID(), "Innkeeper", tavern.id, nextDeliveryAt = 1, hunger = 20)
+        h.city = CivsRules.validate(h.city.copy(buildings = listOf(hall, tavern), workers = listOf(guest, keeper)))
+        h.barrel.setItem(0, ItemStack(Material.BREAD, 8))
+        val ticket = UUID.randomUUID()
+        val source = CivResidentFoodSource(tavern.id, h.point, CivPosition(1, 64, 0), servingFor = guest.id, servingTicket = ticket)
+        val before = h.city
+        val id = UUID.randomUUID()
+        h.storage.reserve(before, id)
+        val prepared = h.storage.prepareFoodPickup(before, keeper.id, source, h.feet)
+        val tx = CivInventoryTransaction(id, before.id, before.revision, before.copy(workers = before.workers.map {
+            if (it.id == keeper.id) prepared.worker else it
+        }, revision = before.revision + 1), emptyList(), collected = requireNotNull(prepared.transfer))
+        val gson = com.google.gson.Gson()
+        val document = gson.toJsonTree(tx).asJsonObject
+        if (legacy) document.getAsJsonObject("collected").getAsJsonObject("food").remove("servingTicket")
+        val accepted = gson.fromJson(document, CivInventoryTransaction::class.java).validated()
+        accepted.collected!!.food!!.servingTicket shouldBe if (legacy) null else ticket
+        h.storage.unlock(id)
+        every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(accepted))
+        every { h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        h.freshAllowed = false
+        val boot = h.journal.bootstrap()
+        h.ticks()
+        boot.join()
+        repeat(2) { h.journal.recover(); h.ticks() }
+        h.city shouldBe accepted.after
+        h.barrel.getItem(0)!!.amount shouldBe 4
+        CivsEquipment.plainCount(h.city.workers.first { it.id == keeper.id }, "BREAD") shouldBe 4L
+        CivsEquipment.plainCount(h.city.workers.first { it.id == guest.id }, "BREAD") shouldBe 0L
+        h.journal.pendingCount shouldBe 0
+        verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+        verify(exactly = 1) { h.store.deleteInventoryTransaction(id) }
     }
 
     test("a large empty tavern does not hide real emergency hall food behind the native read window") {
@@ -497,6 +543,7 @@ private class ResidentFoodFixture : AutoCloseable {
     val unhealthy = mutableSetOf<UUID>()
     var time = 10_000L
     var foodAllowed = true
+    var freshAllowed = true
     val journal: CivsInventoryJournal
     init {
         world.loadChunk(0, 0)
@@ -511,6 +558,7 @@ private class ResidentFoodFixture : AutoCloseable {
         journal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy, unhealthy, { false },
             { saved -> city = saved; CompletableFuture.completedFuture(Unit) },
             { _, _ -> error("unexpected ordinary mutation") }, {}, { tx ->
+                check(freshAllowed) { "retired actor cannot validate a new pickup" }
                 check(storage.collectedBeforeState(tx) == CivInventoryApplyResult.Applied)
                 if (tx.collected!!.food!!.materialized == 0) check(civsCanReachContainer(feet, point))
             }, { _, _, _ -> null }, {}, { tx, _ -> cities.getValue(tx.cityId) }, {}, { time })

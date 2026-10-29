@@ -2131,7 +2131,8 @@ class CivsService(
         action("resident_food_pickup", null, "city" to cityId, "worker" to workerId, "building" to source.buildingId) {
             afterCityAvailable(cityId) {
                 collectedMutation(cityId, workerId) { city, feet ->
-                    source.servingFor?.let { citizens.validateTavernPickup(cityId, workerId, it, source.buildingId, source.material) }
+                    source.servingFor?.let { citizens.validateTavernPickup(cityId, workerId, it, source.buildingId,
+                        source.material, source.servingTicket ?: throw CivsRejection("stale-meal")) }
                     storage.prepareFoodPickup(city, workerId, source, feet)
                 }
             }
@@ -2580,7 +2581,8 @@ class CivsService(
         if (collected.food?.materialized?.let { it > 0 } == true) return
         collected.food?.servingFor?.let { guest ->
             citizens.validateTavernPickup(tx.cityId, collected.workerId, guest,
-                requireNotNull(collected.food).buildingId, requireNotNull(collected.food).material)
+                requireNotNull(collected.food).buildingId, requireNotNull(collected.food).material,
+                requireNotNull(collected.food).servingTicket ?: throw CivsRejection("stale-meal"))
         }
         val feet = citizens.residentCollectionFeet(collected.workerId, allowNight = collected.homeId != null)
             ?: throw CivsRejection("worker-too-far")

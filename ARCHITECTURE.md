@@ -224,11 +224,14 @@ five, opposite-sex adults form families in completed houses: 20 active city
 minutes per birth, then 40 to adulthood. Children use half-scale player NPCs,
 play and wander, and cannot take jobs. Progress never catches up offline.
 Awake adults, including idle residents, lose one hunger per observed minute;
-children lose one per two awake minutes. A meal requires a supported trip to a
-staffed tavern or bootstrap hall and four continuously observed seconds. It
-consumes one existing bag bread or one closed Auto FOOD and restores at most six
-hunger. The actor rechecks the exact visit on the service's durable write lane;
-unrelated city revisions do not cancel it, and duplicate callbacks cannot eat twice.
+children lose one per two awake minutes. A native tavern visit uses an authored
+chair at a full-block table. The innkeeper transfers real food from a container to
+its own bag, then to the seated guest; eating requires the configured continuous
+observation period (four seconds for bread). Bread restores six hunger per item.
+Unavailable service can use the resident's existing carried reserve at its actual
+safe feet. Retained closed-mode Auto receipts keep their accepted FOOD debit.
+The actor rechecks the exact visit on the durable write lane; unrelated city
+revisions do not cancel it, and duplicate callbacks cannot eat twice.
 Both the five-tick work pulse and the twenty-tick owner pulse advance the same
 resident observation clock before updating actors. Meal admission checks existing
 body occupancy and route reservations when choosing a supported hall barrel side;
@@ -726,18 +729,26 @@ untouched debit can abort when the corpse expires or its pose changes; an applie
 debit completes the accepted transition on recovery. Admission prefers the accepted
 body site through normal loaded-space checks and never moves an existing actor.
 Auto control barrels permit nearby ordinary inspection but all inventory mutation
-paths require admin; receipt locks still override admin writes. Abstract Auto stock
-remains separate from native barrel contents and `inventory` stays null.
+paths require admin; receipt locks still override admin writes. PHYSICAL Auto settlements expose the same indexed control and interior containers
+as ordinary physical settlements. Retained closed-mode snapshots keep their
+accepted stock semantics until their journalled physical migration completes.
 Autonomous idle residents use the prepared building entrance as their roaming
 anchor, including a SITE whose authored control is not reachable yet.
 Full destinations keep cargo and retry, and ordinary open containers remain open.
 
 An active tavern has one innkeeper in both ordinary and Auto villages. The innkeeper
-serves guests at the tavern without a production payout or profession XP. An ordinary
-courier keeps up to four existing bread there through the same inventory-transfer receipt.
-Hungry residents with no personal bread prefer a stocked, staffed tavern, falling back to
-their town hall. They fetch up to four existing bread, limited by stock and real bag
-capacity, before returning to their job. Auto food remains the existing abstract stock.
+serves guests without a production payout or profession XP. Couriers stock the venue
+with existing native bread through the common transfer receipts: four per resident,
+up to sixty-four. Only Auto support can replenish a genuine native deficit under
+its existing supply bounds; ordinary settlements receive no automatic grant.
+The keeper's own active route survives a normal unsupported navigation frame,
+while initial admission and native pickup/delivery still require grounded, clear
+feet. Food pickup queues behind a city save and rechecks its actor and source
+before debit. The immutable service ticket follows the fresh pickup into its
+receipt, so a cancelled request cannot act as a later visit for the same guest.
+Accepted recovery remains independent of current actors, including legacy
+receipts without a ticket. Furniture keeps stable source-local IDs and transforms
+through the persisted building anchor/rotation in the private JSON registry.
 After an innkeeper assignment has been saved, 0.1.94's zero-slot tavern rule cannot
 validate that settlement. Replacing the JAR with 0.1.94 alone is not a compatible
 rollback of that state.
