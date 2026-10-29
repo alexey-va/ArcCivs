@@ -47,6 +47,65 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsQueuedTavernPickupServiceTest : FunSpec({
+    for (moveAway in listOf(false, true))
+    test("a tavern food pickup waits for the city save and rechecks actual feet moved=$moveAway") {
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                // Native region flush is covered separately; keep this service queue test deterministic.
+                storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            }
+        }) { h ->
+            val hall = h.city.buildings.first().copy(control = CivPosition(0, 63, 0))
+            val tavern = h.city.buildings.last().copy(type = BuildingType.TAVERN, control = CivPosition(10, 63, 0))
+            val keeper = h.city.workers.first().copy(assignment = tavern.id, nextDeliveryAt = 1,
+                inventory = emptyMap(), items = List(CivsEquipment.SLOTS) { null }, hunger = 20)
+            val guest = h.city.workers[1].copy(assignment = hall.id, nextDeliveryAt = 1, hunger = 10)
+            val city = CivsRules.validate(h.city.copy(buildings = listOf(hall, tavern), workers = listOf(keeper, guest),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL)))
+            h.world.getBlockAt(10, 63, 0).type = Material.BARREL
+            val contents = (h.world.getBlockAt(10, 63, 0).state as org.bukkit.block.Container).inventory
+            contents.setItem(0, ItemStack(Material.BREAD, 4))
+            var feet = Location(h.world, 9.5, 64.0, .5)
+            every { h.citizens.residentCollectionFeet(keeper.id, false) } answers { feet }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val assignment = h.service.assign(h.player, guest.id, null)
+            h.saves.size shouldBe 1
+            assignment.isDone shouldBe false
+            val source = CivResidentFoodSource(tavern.id, requireNotNull(tavern.control), CivPosition(9, 64, 0), servingFor = guest.id)
+            val pickup = h.service.pickupResidentFood(city.id, keeper.id, source)
+            pickup.isDone shouldBe false
+            repeat(4) { h.time += 1_000; h.tick() }
+            pickup.isDone shouldBe false
+            contents.getItem(0)!!.amount shouldBe 4
+            verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            if (moveAway) feet = Location(h.world, 50.5, 64.0, .5)
+            h.commit()
+            if (moveAway) {
+                h.tickUntil("moved keeper rejection") { pickup.isDone }
+                pickup.isCompletedExceptionally shouldBe true
+                contents.getItem(0)!!.amount shouldBe 4
+                h.saves.size shouldBe 1
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            } else {
+                h.tickUntil("queued food city save") { h.saves.size == 2 || pickup.isDone }
+                if (pickup.isCompletedExceptionally) pickup.join()
+                h.saves.size shouldBe 2
+                h.commit()
+                h.await(pickup)
+                val savedKeeper = h.service.settlements().single().workers.first { it.id == keeper.id }
+                val carried = CivsEquipment.plainCount(savedKeeper, "BREAD")
+                (carried > 0) shouldBe true
+                (contents.contents.filterNotNull().sumOf { it.amount }.toLong() + carried) shouldBe 4L
+                verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+            }
+        }
+    }
+})
+
 class CivsConstructionTransientFenceTest : FunSpec({
     test("a pending native receipt suspends a schematic batch and exact cell writes without losing the paid order") {
         lateinit var storage: CivsStorage

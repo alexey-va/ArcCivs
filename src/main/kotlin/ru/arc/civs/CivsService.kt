@@ -2129,9 +2129,11 @@ class CivsService(
 
     internal fun pickupResidentFood(cityId: UUID, workerId: UUID, source: CivResidentFoodSource): CompletableFuture<Settlement> =
         action("resident_food_pickup", null, "city" to cityId, "worker" to workerId, "building" to source.buildingId) {
-            collectedMutation(cityId, workerId) { city, feet ->
-                source.servingFor?.let { citizens.validateTavernPickup(cityId, workerId, it, source.buildingId, source.material) }
-                storage.prepareFoodPickup(city, workerId, source, feet)
+            afterCityAvailable(cityId) {
+                collectedMutation(cityId, workerId) { city, feet ->
+                    source.servingFor?.let { citizens.validateTavernPickup(cityId, workerId, it, source.buildingId, source.material) }
+                    storage.prepareFoodPickup(city, workerId, source, feet)
+                }
             }
         }
 

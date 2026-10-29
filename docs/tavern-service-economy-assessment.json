@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "title": "ArcCivs 0.1.117-118 real tavern service and uninterrupted existing workplace",
+  "title": "ArcCivs 0.1.117-119 real tavern service and uninterrupted existing workplace",
   "participants": [
     1,
     10,
@@ -16,7 +16,8 @@
     "Well-fed observed awake residents at hunger18+ regain1HP per4seconds up to personal maximum, without resurrection or offline catchup. Hunger expenditure stays unchanged. HP is not player XP or a monetary unit; this can improve uptime without changing the production rate.",
     "New tavern schematics retain ordinary exact material billing. The five-cell administrative repair of the existing test-world tavern is a one-time owner-authorized fixture change, not an economic reward or repeatable acquisition path.",
     "Current EconomyShopGUI SELL/AutoSell and future SELL-to-contract transition remain separate flows. No item-to-Vault conversion or contract income is invented. Downstream sale value and measured throughput are not established by this assessment.",
-    "Version0.1.118 restores the age of existing collection requests while couriers carry cargo, and prioritizes only the outstanding construction material deficit through producer-to-warehouse-to-builder trips. Existing warehouse stock, reservations and incoming cargo reduce this quantity. No new items, payout, rate, capacity, price or demand amount is introduced; faster use of already mined goods can restore construction throughput."
+    "Version0.1.118 restores the age of existing collection requests while couriers carry cargo, and prioritizes only the outstanding construction material deficit through producer-to-warehouse-to-builder trips. Existing warehouse stock, reservations and incoming cargo reduce this quantity. No new items, payout, rate, capacity, price or demand amount is introduced; faster use of already mined goods can restore construction throughput.",
+    "Version0.1.119 keeps a matching ongoing tavern service route through a normal unsupported movement frame, while pickup/delivery still require existing grounded native arrival and before-image validation. Food pickup waits behind an ordinary city save and revalidates feet afterward instead of a five-second retry. No food quantity, nutrition, hunger rate, native grant, price, payout or production rate changes."
   ],
   "currencies": {
     "vault": {

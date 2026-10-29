@@ -860,34 +860,38 @@ class CivsCitizens(
                         "status" to actor.combatStatus, "target" to actor.combatDestination),
                     "food" to mapOf("source" to actor.foodSource, "pickup_pending" to (actor.supplyPickup != null),
                         "retry_at" to actor.supplyRetryAt),
-                    "meal" to mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
+                    "meal" to (mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
                         "target" to actor.mealVisit?.target, "started_at" to actor.mealVisit?.startedAt,
                         "arrived_at" to actor.mealVisit?.arrivedAt, "observed_at" to actor.mealVisit?.observedAt,
                         "seat" to actor.mealVisit?.seat?.block, "seated_at" to actor.mealVisit?.seatedAt,
                         "furniture_id" to actor.mealVisit?.seat?.furnitureId, "table" to actor.mealVisit?.seat?.table,
                         "keeper" to actor.mealVisit?.keeperId, "served_at" to actor.mealVisit?.servedAt,
+                        "ticket" to actor.mealVisit?.ticket,
                         "service_guest" to actor.tavernService?.guestId,
+                        "service_ticket" to actor.tavernService?.ticket,
                         "service_loaded" to actor.tavernService?.loaded,
                         "service_target" to actor.tavernService?.target,
                         "service_retry_at" to meal?.serviceRetryAt,
-                        "seat_failure" to meal?.seat?.let { mealSeatUnavailable(actor) },
                         "service_failure" to actor.tavernServiceFailure?.let { mapOf("reason" to it.reason,
                             "at" to it.at, "guest" to it.guest, "target" to it.target) },
+                        "pending" to (residentLifePending(actor) && actor.mealOutcome?.first == "pending"), "retry_at" to actor.lifeRetryAt,
+                        "last_outcome" to actor.mealOutcome?.first, "last_outcome_at" to actor.mealOutcome?.second) +
+                        if (workerId == null) emptyMap() else mapOf(
+                        "seat_failure" to meal?.seat?.let { mealSeatUnavailable(actor) },
                         "service_keepers_truncated" to (actors.values.count {
                             it.cityId == actor.cityId && it.plan.type == BuildingType.TAVERN } > 4),
                         "service_keepers" to if (meal?.foodSource == null || city == null || guest == null) emptyList<Any>()
                             else actors.values.filter { it.cityId == actor.cityId && it.plan.type == BuildingType.TAVERN }
                                 .take(4).map { keeper -> mapOf("worker" to keeper.workerId,
-                                    "unavailable" to tavernKeeperUnavailable(keeper, city, guest, meal.building),
+                                    "unavailable" to tavernKeeperUnavailable(keeper, city, guest, meal.building,
+                                        continuingService = keeper.tavernService?.guestId == guest.id),
                                     "life_failure" to lifeActorUnavailable(keeper),
                                     "service_guest" to keeper.tavernService?.guestId,
                                     "last_failure" to keeper.tavernServiceFailure?.let { mapOf("reason" to it.reason,
                                         "at" to it.at, "guest" to it.guest, "target" to it.target) },
                                     "positions" to tavernServingPoints(requireNotNull(meal.seat)).map { point ->
                                         mapOf("point" to point, "unavailable" to tavernServingPointUnavailable(keeper, meal, point))
-                                    }) },
-                        "pending" to (residentLifePending(actor) && actor.mealOutcome?.first == "pending"), "retry_at" to actor.lifeRetryAt,
-                        "last_outcome" to actor.mealOutcome?.first, "last_outcome_at" to actor.mealOutcome?.second),
+                                    }) })),
                     "social" to mapOf("visit" to (actor.social.visit != null), "arrived_at" to actor.social.visit?.arrivedAt,
                         "partner" to actor.social.visit?.partnerId, "seat" to actor.social.visit?.seat,
                         "conversation_at" to actor.social.visit?.conversationAt))
@@ -2188,14 +2192,19 @@ class CivsCitizens(
         return false
     }
 
-    private fun tavernKeeperReady(actor: Actor, city: Settlement, guest: CivWorker, building: CivBuilding): Boolean =
-        tavernKeeperUnavailable(actor, city, guest, building) == null
+    private fun tavernKeeperReady(actor: Actor, city: Settlement, guest: CivWorker, building: CivBuilding,
+        continuingService: Boolean = false): Boolean = tavernKeeperUnavailable(actor, city, guest, building, continuingService) == null
 
-    private fun tavernKeeperUnavailable(actor: Actor, city: Settlement, guest: CivWorker, building: CivBuilding): String? {
+    private fun tavernKeeperUnavailable(actor: Actor, city: Settlement, guest: CivWorker, building: CivBuilding,
+        continuingService: Boolean = false): String? {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return "worker-missing"
+        // An owned navigation jump may be between supports; inventory witnesses still require grounded feet.
+        val travelling = continuingService && actor.tavernService?.guestId == guest.id && actor.route?.let {
+            it.completion == null && (it.motion.navigating || it.motion.searching)
+        } == true
         return when {
             actor.cityId != city.id || !CivsTavernMeals.keeper(city, worker, guest, building) -> "domain-ineligible"
-            !lifeActorReady(actor) -> "life-unavailable"
+            lifeActorUnavailable(actor, requireSupport = !travelling) != null -> "life-unavailable"
             actor.mealVisit != null -> "personal-meal"
             actor.foodSource != null -> "food-source"
             actor.supplyPickup != null -> "pickup-pending"
@@ -2257,11 +2266,12 @@ class CivsCitizens(
         val guest = actors[service.guestId]
         val visit = guest?.mealVisit?.takeIf { it.ticket == service.ticket }
         val resident = city.workers.firstOrNull { it.id == service.guestId }
-        if (visit == null || resident == null || !tavernKeeperReady(keeper, city, resident, visit.building) ||
+        if (visit == null || resident == null || !tavernKeeperReady(keeper, city, resident, visit.building, continuingService = true) ||
             !mealSeatStillSafe(requireNotNull(guest)) || now - service.startedAt > 45_000) {
             keeper.tavernServiceFailure = TavernServiceFailure(when {
                 visit == null || resident == null -> "guest-missing"
-                !tavernKeeperReady(keeper, city, resident, visit.building) -> "keeper-${tavernKeeperUnavailable(keeper, city, resident, visit.building)}"
+                !tavernKeeperReady(keeper, city, resident, visit.building, continuingService = true) ->
+                    "keeper-${tavernKeeperUnavailable(keeper, city, resident, visit.building, continuingService = true)}"
                 !mealSeatStillSafe(requireNotNull(guest)) -> "seat-${mealSeatUnavailable(guest)}"
                 else -> "service-timeout"
             }, now, service.guestId, service.target)
@@ -2557,7 +2567,7 @@ class CivsCitizens(
 
     private fun lifeActorReady(actor: Actor): Boolean = lifeActorUnavailable(actor) == null
 
-    private fun lifeActorUnavailable(actor: Actor): String? = when {
+    private fun lifeActorUnavailable(actor: Actor, requireSupport: Boolean = true): String? = when {
         closed.get() -> "closed"
         !actor.npc.isValid -> "actor-invalid"
         actor.workerId in pendingHarm -> "injury-pending"
@@ -2566,7 +2576,7 @@ class CivsCitizens(
         actor.attacker != null -> "combat"
         actor.npc.world.time in 12_000L..23_000L -> "night"
         actor.mealVisit?.seatedFrom != null -> mealSeatUnavailable(actor)
-        !citizenPacketSupported(actor.npc.world, actor.npc.location.point()) -> "unsupported"
+        requireSupport && !citizenPacketSupported(actor.npc.world, actor.npc.location.point()) -> "unsupported"
         !citizenPacketBodyClear(actor.npc.world, actor.npc.location.point(), false) -> "body-blocked"
         else -> null
     }
