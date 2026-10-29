@@ -287,10 +287,29 @@ internal class CivsConstructionRuntime(
                 if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                 if (validationFailure != null) return@whenCompleteSync placementFailed(city.id, order.id, validationFailure)
                 runCatching {
-                    val automaticPreparation = batch?.terrainStart != null && plan.terrain?.route?.isEmpty() == true &&
-                        order.workDone < (order.automaticPreparationBatches ?: 0)
+                    if (batch?.terrainStart != null && order.phase == ConstructionPhase.WAITING_MATERIALS &&
+                        order.payment?.awaiting != null) {
+                        // Older routed prefixes could wait for an authored material before their empty debit was corrected.
+                        afterCityAvailable(city.id) {
+                            rejectIf(placementRuns[city.id] != run, "stale-construction")
+                            mutate(city.id) { current ->
+                                rejectIf(current.construction != order || order.payment.reservedBatch != null, "stale-construction")
+                                CivsRules.changed(current, current.copy(construction = order.copy(
+                                    phase = ConstructionPhase.READY_TO_PLACE, payment = order.payment.copy(awaiting = null))))
+                            }
+                        }.whenCompleteSync(tasks) { _, clearFailure ->
+                            if (closed || placementRuns[city.id] != run) return@whenCompleteSync
+                            if (clearFailure != null) placementFailed(city.id, order.id, clearFailure)
+                            else {
+                                releasePlacement(city.id)
+                                tasks.runLater(1) { pulse() }
+                            }
+                        }
+                        return@runCatching
+                    }
+                    // The accepted item bill covers authored cells; every terrain prefix is already included.
                     val required = if (order.payment != null && order.payment.reservedBatch == null)
-                        if (automaticPreparation) emptyMap() else CivsMaterials.required(batchPlan) else null
+                        if (batch?.terrainStart != null) emptyMap() else CivsMaterials.required(batchPlan) else null
                     if (required != null) constructionSupplyNeeds[city.id] = ConstructionSupplyNeed(order.id, order.workDone, required)
                     val begin = afterCityAvailable(city.id) {
                         rejectIf(placementRuns[city.id] != run, "stale-construction")

@@ -20,7 +20,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
             ?: city.building(courier.cargo.sourceBuildingId)?.control
             ?: courier.cargo.sourceEntrance.takeIf { courier.carrying } ?: return null
         return CitizenPlan(CitizenToken(courier.cargo.warehouseId, worker.completedCycles, 0, null, courier.cargo.id),
-            destination, source, BuildingType.WAREHOUSE, 1_000, null, courier = courier)
+            destination, source, BuildingType.WAREHOUSE, 0, null, courier = courier)
     }
     if (worker.cargo != null) return null
     val assigned = worker.assignment?.let(city::building)

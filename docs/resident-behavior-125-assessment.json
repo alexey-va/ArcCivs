@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.125: resident movement, courier handling and accepted terrain billing",
+  "assumptions": [
+    "This is an item-transfer and movement arithmetic assessment, not measured player income or daily production.",
+    "An accepted road column consumes one real COBBLESTONE before and after. A selected upkeep job requests a hut buffer of 16 instead of 1, subtracting carried/local stock and accounting for in-flight shipments; actual deliveries remain source, bag and native capacity bounded.",
+    "One normalized participant/day with 1/8/16 accepted road columns is used only to compare unchanged item consumption. No work cadence, player activity, resale valuation or network income is inferred.",
+    "No Vault, tokens, player XP, recipe output or AutoSupplies item grant quantity changes. Buffer stock moves between native containers through existing exact receipts. Unused stock remains native inventory.",
+    "Trails configured multiplier is unchanged at runtime 2.3.25. Stair motion now spends the same horizontal distance budget as flat movement and preserves the existing provider boost when the footprint contacts an admitted dry bottom stair.",
+    "Current EconomyShopGUI SELL and separate contract flows remain unchanged. Indirect realized mining/forestry throughput and any sale-derived income delta are unknown and are not assumed zero.",
+    "Source/package tests and live acceptance are separate; restart item conservation uses existing native receipt recovery.",
+    "Requested courier pickup handling changes from a synthetic 1000 ms wait plus coarse phase handoffs to zero synthetic handling and the existing bounded 250 ms handoff owner. Durable item receipts still determine whether movement may resume; failed or uncertain pickup outcomes retain existing fences. This changes transport responsiveness, not accepted item quantity or production work timers.",
+    "Construction approach earthworks must use the already admitted structure-only item bill consistently. Removing an unbilled terraform-material demand neither expands the accepted bill nor bypasses captured world authority; ordinary structure rows still consume their exact physical inputs."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "native_cobblestone_consumed": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "accepted_road_column",
+          "kind": "burn",
+          "source": "CivsRoadMaintenance accepted upkeep native receipt",
+          "basis": "Normalized 1/8/16 accepted columns, not a measured daily rate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              16
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              8,
+              16
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": [],
+  "native_supply_target": {
+    "unit": "real COBBLESTONE items at the assigned hut for selected upkeep",
+    "before": 1,
+    "after": 16,
+    "mint_delta": 0,
+    "burn_delta": 0,
+    "capacity_bounded": true
+  },
+  "currency_deltas": {
+    "vault": {
+      "before": "0",
+      "after": "0",
+      "delta": "0",
+      "unit": "major",
+      "basis": "No direct flow changed."
+    },
+    "tokens": {
+      "before": "0",
+      "after": "0",
+      "delta": "0",
+      "unit": "major",
+      "basis": "No direct flow changed."
+    }
+  },
+  "movement": {
+    "horizontal_blocks_per_tick": {
+      "packet_route_stride_at_speed_1": "0.215",
+      "working_motion_without_provider_boost": "0.172",
+      "working_motion_with_configured_1_25_multiplier": "0.215",
+      "basis": "0.215 × working factor 0.8 × surface provider multiplier; route-only reference tests also exercise speed 1 and 1.25 directly."
+    },
+    "comparison": "Flat and dry-bottom-stair reference trajectories must spend equal XZ stride at each non-final frame, in four facings, ascending and descending. Existing body, ceiling, entity and policy checks remain active.",
+    "realized_throughput_delta": null
+  },
+  "conclusion": "The change batches existing real supplies and removes unintended navigation slowdowns. It changes no direct currency flow or accepted per-column item cost; throughput effects require separate observation.",
+  "courier_handling": {
+    "synthetic_wait_ms_before": 1000,
+    "synthetic_wait_ms_after": 0,
+    "handoff_owner_before_ms": 1000,
+    "handoff_owner_after_ms": 250,
+    "existing_rotated_actor_cap": 8,
+    "native_receipt_required_before_moving": true,
+    "item_quantity_change": 0,
+    "direct_Vault_delta": 0,
+    "direct_tokens_delta": 0,
+    "direct_player_XP_delta": 0,
+    "realized_transport_throughput_delta": null
+  },
+  "construction_terrain_consistency": {
+    "accepted_material_bill_before": "structure plan.blocks only",
+    "accepted_material_bill_after": "same saved structure bill; unchanged",
+    "runtime_unbilled_COARSE_DIRT_demand_before": 1,
+    "runtime_unbilled_COARSE_DIRT_demand_after": 0,
+    "basis": "Captured terraform-prefix writes remain the accepted plan; physical structure rows retain exact item payment. No old accepted order bill is expanded.",
+    "new_native_world_blocks_outside_accepted_plan": 0,
+    "inventory_mint_burn_delta": 0,
+    "direct_Vault_delta": 0,
+    "direct_tokens_delta": 0
+  }
+}

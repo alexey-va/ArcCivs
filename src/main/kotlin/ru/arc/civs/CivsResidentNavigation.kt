@@ -75,6 +75,11 @@ internal class CivsResidentNavigation(
                 travelCost: (Block) -> Double): CitizenPacketRoute =
         admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost, settings = settings))
 
+    fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
+                stepAllowed: (CitizenPoint, CitizenPoint) -> Boolean, travelCost: (Block) -> Double,
+                corridor: CitizenSearchCorridor?): CitizenPacketRoute =
+        admit(CitizenPacketRoute(world, from, to, allowed, stepAllowed, travelCost, settings = settings, corridor = corridor))
+
     fun replan(route: CitizenPacketRoute, from: Location, bodies: List<BoundingBox> = emptyList()): CitizenPacketRoute {
         checkOwner()
         from.world?.let { world ->
@@ -314,7 +319,8 @@ internal class CitizenNavigationCapture(
         completed += CitizenSearchCapture(probe, blocks, admitted.toList())
         if (prefetch && (probeIndex < requestedCount || route.prefetchConnectedFrontier())) for (edge in admitted) {
             if (probes.size >= maximumProbes) break
-            if (edge.permitted && seen.add(edge.node)) probes += CitizenSearchProbe(edge.node, edge.node.point())
+            if (edge.permitted && probe.corridor?.contains(edge.node.point()) != false && seen.add(edge.node))
+                probes += CitizenSearchProbe(edge.node, edge.node.point(), corridor = probe.corridor)
         }
         admitted.clear()
         probeIndex++

@@ -511,7 +511,7 @@ class CivsCitizens(
             .map { CivsThreatTarget(it.cityId, it.workerId, it.npc) }, nowMillis)
     }
 
-    /** Hand over admitted field/building work and short idle legs on the existing bounded worksite pulse. */
+    /** Hand over admitted work, courier transfers and short idle legs on the existing bounded pulse. */
     internal fun pulseFieldWork(nowMillis: Long) {
         checkCitizenMainThread()
         if (closed.get()) return
@@ -521,7 +521,8 @@ class CivsCitizens(
         val cities = cityProvider().associateBy { it.id }
         val viewers = audience.viewers()
         // At most eight existing actors, rotated after admission; no spawn, scan or threat pulse.
-        val candidates = actors.values.filter { it.plan.type in setOf(BuildingType.FARM, BuildingType.BUILDER_HUT) && it.workerId !in pendingHarm &&
+        val candidates = actors.values.filter { (it.plan.type in setOf(BuildingType.FARM, BuildingType.BUILDER_HUT) ||
+            it.plan.type == BuildingType.WAREHOUSE && it.plan.courier != null) && it.workerId !in pendingHarm &&
             it.npc.isValid && !it.sleeping && !it.sheltering && it.attacker == null && it.foodSource == null &&
             it.supplyPickup == null && it.social.visit == null }.take(8)
         for (actor in candidates) {
@@ -532,7 +533,7 @@ class CivsCitizens(
             if (world.uid != city.worldId || world.time in 12_000L..23_000L ||
                 !audience.activeAt(city.id, city.worldId, actor.npc.location.point(), viewers)) continue
             val plan = plans.currentPlan(actor, city, worker) ?: continue
-            if (plan.worldWork == null && plan.token.constructionId == null && plan.idleReason != "searching-work" || !plan.chunksReady(world) ||
+            if (plan.worldWork == null && plan.token.constructionId == null && plan.idleReason != "searching-work" && plan.courier == null || !plan.chunksReady(world) ||
                 !citizenChunkReady(world, actor.npc.location.blockX shr 4, actor.npc.location.blockZ shr 4) ||
                 actor.route?.chunks?.ready(world) == false) continue
             if (!plans.reconcilePlan(actor, plan, city)) continue

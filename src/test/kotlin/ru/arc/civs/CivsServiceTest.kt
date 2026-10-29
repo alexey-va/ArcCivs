@@ -48,6 +48,163 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsRoutedTerraformPaymentServiceTest : FunSpec({
+    test("routed terrain reserves no items and the next authored row still consumes one carried stone") {
+        serviceScenario { h ->
+            val f = ServiceRoutedTerraform(h, stone = 1)
+            h.start()
+            f.receipts.size shouldBe 1
+            f.receipts.single().after.construction!!.payment!!.reservedBatch shouldBe 0
+            f.receipts.single().changes shouldBe emptyList()
+            h.saves.single().first.construction!!.materials shouldBe f.order.materials
+            h.saves.single().first.workers shouldBe f.city.workers
+            f.gate shouldBe null
+            h.commit()
+            requireNotNull(f.gate).invoke() shouldBe false
+            f.workerReady = true
+            requireNotNull(f.gate).invoke() shouldBe true
+            f.completeTerrain()
+            val completedPrefix = h.saves.last().first
+            completedPrefix.construction!!.workDone shouldBe 1
+            completedPrefix.construction!!.workCredit shouldBe 2
+            completedPrefix.construction!!.materials shouldBe f.order.materials
+            completedPrefix.construction!!.blocksPlaced shouldBe 1
+            completedPrefix.workers shouldBe f.city.workers
+            h.commit()
+            h.tickUntil("next authored row payment") { f.receipts.size == 2 }
+            val stonePayment = f.receipts.last()
+            stonePayment.after.construction!!.payment!!.reservedBatch shouldBe 1
+            stonePayment.after.construction!!.materials shouldBe mapOf("OAK_PLANKS" to 1L)
+            stonePayment.after.workers.first().let { CivsEquipment.plainCount(it, "STONE") } shouldBe 0
+            h.service.city(h.player)!!.workers.first().let { CivsEquipment.plainCount(it, "STONE") } shouldBe 1
+            verify(exactly = 0) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+            h.commit(); h.paper.performTicks(20)
+            h.service.city(h.player)!!.workers.first().let { CivsEquipment.plainCount(it, "STONE") } shouldBe 0
+            h.service.city(h.player)!!.construction!!.materials shouldBe mapOf("OAK_PLANKS" to 1L)
+            f.receipts.size shouldBe 2
+            verify(exactly = 1) { h.blueprints.paste(any(), any(), any(), any(), any()) }
+        }
+    }
+
+    test("reloaded unstarted invalid-construction order retries its routed prefix without repricing the accepted bill") {
+        serviceScenario { h ->
+            val f = ServiceRoutedTerraform(h, phase = ConstructionPhase.PAUSED)
+            h.start()
+            h.saves shouldBe emptyList()
+            h.service.city(h.player)!!.construction shouldBe f.order
+            val retry = h.service.retryConstruction(h.player, f.city.id)
+            h.tick(); h.commit(); retry.join()
+            h.paper.performTicks(20)
+            f.receipts.size shouldBe 1
+            val receipt = f.receipts.single()
+            receipt.after.construction!!.id shouldBe f.order.id
+            receipt.after.construction!!.workDone shouldBe 0
+            receipt.after.construction!!.blocksPlaced shouldBe 0
+            receipt.after.construction!!.materials shouldBe f.order.materials
+            receipt.after.construction!!.payment!!.reservedBatch shouldBe 0
+            receipt.after.workers shouldBe f.city.workers
+            receipt.changes shouldBe emptyList()
+            h.commit()
+            f.workerReady = true
+            requireNotNull(f.gate).invoke() shouldBe true
+            f.completeTerrain()
+            val completed = h.saves.last().first
+            completed.construction!!.id shouldBe f.order.id
+            completed.construction!!.workDone shouldBe 1
+            completed.construction!!.materials shouldBe f.order.materials
+            completed.construction!!.failure shouldBe null
+            h.commit()
+            h.service.city(h.player)!!.construction!!.workDone shouldBe 1
+        }
+    }
+
+    test("reloaded completed terrain still waits for genuinely missing authored materials without another prefix write") {
+        serviceScenario { h ->
+            val f = ServiceRoutedTerraform(h, workDone = 1)
+            h.start()
+            val waiting = h.saves.single().first.construction!!
+            waiting.id shouldBe f.order.id
+            waiting.phase shouldBe ConstructionPhase.WAITING_MATERIALS
+            waiting.workDone shouldBe 1
+            waiting.blocksPlaced shouldBe 1
+            waiting.payment!!.awaiting shouldBe mapOf("STONE" to 1L)
+            waiting.materials shouldBe f.order.materials
+            f.receipts shouldBe emptyList()
+            h.commit()
+            h.time += 5_000; h.paper.performTicks(20)
+            h.service.city(h.player)!!.construction!!.payment!!.awaiting shouldBe mapOf("STONE" to 1L)
+            h.world.getBlockAt(f.terrain.position.x, f.terrain.position.y, f.terrain.position.z).type shouldBe Material.COARSE_DIRT
+            verify(exactly = 0) {
+                h.worldAdapter.applyTerraform(any(), any(), any(), any(), any(), any())
+                h.blueprints.paste(any(), any(), any(), any(), any())
+                h.store.saveInventoryTransaction(any())
+            }
+        }
+    }
+
+    test("a saved terrain material wait clears only its obsolete marker before reserving an empty debit") {
+        serviceScenario { h ->
+            val f = ServiceRoutedTerraform(h, phase = ConstructionPhase.WAITING_MATERIALS, legacyTerrainAwaiting = true)
+            f.order.payment!!.awaiting shouldBe mapOf("DIRT" to 1L)
+            f.order.materials shouldBe mapOf("STONE" to 1L, "DIRT" to 1L)
+            f.city.workers.all { CivsEquipment.plainCount(it, "DIRT") == 0 } shouldBe true
+            for (position in listOf(CivPosition(0, 63, 0), CivPosition(15, 63, 1), CivPosition(20, 63, 0))) {
+                (h.world.getBlockAt(position.x, position.y, position.z).state as org.bukkit.block.Barrel).inventory.isEmpty shouldBe true
+            }
+            h.start()
+            val cleared = h.saves.single().first
+            cleared.construction!!.phase shouldBe ConstructionPhase.READY_TO_PLACE
+            cleared.construction!!.id shouldBe f.order.id
+            cleared.construction!!.workDone shouldBe 0
+            cleared.construction!!.blocksPlaced shouldBe 0
+            cleared.construction!!.workCredit shouldBe f.order.workCredit
+            cleared.construction!!.materials shouldBe f.order.materials
+            cleared.construction!!.payment shouldBe CivConstructionPayment()
+            cleared.workers shouldBe f.city.workers
+            h.service.city(h.player)!!.construction shouldBe f.order
+            f.receipts shouldBe emptyList()
+            f.gate shouldBe null
+            verify(exactly = 0) { h.worldAdapter.applyTerraform(any(), any(), any(), any(), any(), any()) }
+            // Lose the prepare owner immediately after this metadata save, before its next scheduled pulse.
+            h.saves.single().second.complete(cleared)
+            h.service.close()
+            f.receipts shouldBe emptyList()
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(cleared))
+            val reopenedTasks = LifecycleTaskScope(BukkitTaskScheduler(h.plugin))
+            val reopened = CivsService(h.plugin, reopenedTasks,
+                CivsSettings(Path.of("/tmp/civs-unused"), setOf("vanilla"), 96, 500, 50_000, 4, 120, 48, 96),
+                h.store, h.blueprints, Executor(Runnable::run), h.worldAdapter, h.renderer, h.citizens,
+                backendTransfer = h.transfer, clock = { h.time }, boundaryRenderer = h.boundary,
+                storageAdapter = CivsStorage(h.plugin) { emptyArray() }, supplyExecutor = Executor(Runnable::run))
+            try {
+                h.await(reopened.start()) shouldBe Unit
+                h.tickUntil("terrain payment after durable legacy wait reload") { f.receipts.isNotEmpty() }
+                val receipt = f.receipts.single()
+                receipt.after.construction!!.id shouldBe f.order.id
+                receipt.after.construction!!.payment!!.reservedBatch shouldBe 0
+                receipt.after.construction!!.materials shouldBe f.order.materials
+                receipt.after.workers shouldBe f.city.workers
+                receipt.changes shouldBe emptyList()
+                h.tickUntil("reloaded terrain payment model save") {
+                    h.saves.any { it.first == receipt.after && !it.second.isDone }
+                }
+                reopened.city(h.player)!!.construction!!.payment!!.reservedBatch shouldBe null
+                f.gate shouldBe null
+                h.saves.single { it.first == receipt.after }.second.complete(receipt.after)
+                h.tickUntil("reloaded paid terrain native gate") { f.gate != null }
+                requireNotNull(f.gate).invoke() shouldBe false
+                f.workerReady = true
+                f.completeTerrain()
+                h.saves.last().first.construction!!.workDone shouldBe 1
+                h.saves.last().first.construction!!.materials shouldBe f.order.materials
+            } finally {
+                reopened.close()
+                reopenedTasks.close()
+            }
+        }
+    }
+})
+
 class CivsUpkeepSupplyBufferServiceTest : FunSpec({
     test("a selected native upkeep job buffers sixteen real hut cobblestone without changing its one item payment") {
         serviceScenario(nativeGeometry = true, storageFactory = { CivsStorage(it) { emptyArray() } }) { h ->
@@ -7279,6 +7436,77 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
         return placement
     }
     override fun close() { service.close(); tasks.close() }
+}
+
+/** Same saved per-batch item contract as routed new construction, including an old paused work-zero order. */
+private class ServiceRoutedTerraform(private val h: ServiceScenario,
+    phase: ConstructionPhase = ConstructionPhase.READY_TO_PLACE, workDone: Int = 0, stone: Int = 0,
+    legacyTerrainAwaiting: Boolean = false) {
+    val terrain = CivPlanBlock(CivPosition(7, 63, 0), "minecraft:air",
+        if (legacyTerrainAwaiting) "minecraft:dirt" else "minecraft:coarse_dirt")
+    val order: CivConstruction
+    val city: Settlement
+    val receipts = mutableListOf<CivInventoryTransaction>()
+    var workerReady = false
+    var gate: (() -> Boolean)? = null
+    private var placed: ((CivPlanBlock) -> Unit)? = null
+    private val applied = CompletableFuture<Unit>()
+
+    init {
+        val placement = h.incrementalPlacement()
+        val original = requireNotNull(placement.city.construction)
+        val building = requireNotNull(original.plannedBuilding)
+        val route = (0..12).map { CivPosition(it, 64, 0) }
+        val captured = requireNotNull(h.store.loadPlan(original.id).join())
+        val plan = captured.copy(blocks = if (legacyTerrainAwaiting) captured.blocks.mapIndexed { index, cell ->
+            if (index == 1) cell.copy(after = "minecraft:dirt") else cell
+        } else captured.blocks, terrain = CivTerraformPlan(
+            CivBox(terrain.position, terrain.position), listOf(terrain), route, 63, 0, 1))
+        order = original.copy(phase = phase, failure = "invalid-construction".takeIf { phase == ConstructionPhase.PAUSED },
+            batches = CivConstructionBatches(3, 16, true), workRequired = 3, workDone = workDone,
+            workCredit = 3 - workDone, blocksRequired = 3, blocksPlaced = workDone,
+            materials = if (legacyTerrainAwaiting) mapOf("STONE" to 1L, "DIRT" to 1L) else original.materials,
+            payment = CivConstructionPayment(awaiting = mapOf("DIRT" to 1L).takeIf { legacyTerrainAwaiting }),
+            preparationWorkplace = if (workDone == 0) civsTerraformBatches(plan).single().workplace else route.last())
+        city = CivsRules.validate(placement.city.copy(construction = order,
+            workers = placement.city.workers.mapIndexed { index, worker ->
+                if (index == 0 && stone > 0) CivsEquipment.collectSupplies(worker, mapOf("STONE" to stone.toLong())) else worker
+            }))
+        CivsMaterials.required(plan) shouldBe order.materials
+        order.automaticPreparationBatches shouldBe null
+        civsConstructionBatches(plan, order).size shouldBe order.workRequired
+        val snapshot = mockk<ArcSchematicSnapshot>(relaxed = true)
+        every { snapshot.blocks() } returns listOf(
+            ArcSchematicBlock(ArcSchematicPoint(0, 0, 0), "minecraft:stone", false, false),
+            ArcSchematicBlock(ArcSchematicPoint(1, 0, 0), plan.blocks[1].after, false, false))
+        every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+        every { h.store.loadPlan(order.id) } returns CompletableFuture.completedFuture(plan)
+        every { h.blueprints.recover(plan) } returns CompletableFuture.completedFuture(snapshot)
+        every { h.blueprints.pasteParts(snapshot, building, any()) } answers { CompletableFuture.completedFuture(listOf(snapshot)) }
+        every { h.blueprints.paste(snapshot, h.world.uid, building.anchor, any(), any()) } returns placement.operation
+        every { h.citizens.constructionReady(city.id, order.id) } answers { workerReady }
+        every { h.store.saveInventoryTransaction(any()) } answers {
+            val receipt = firstArg<CivInventoryTransaction>()
+            receipts += receipt
+            CompletableFuture.completedFuture(receipt)
+        }
+        every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+        every { h.worldAdapter.applyTerraform(plan, h.owner, listOf(terrain), 0, any(), any()) } answers {
+            gate = arg(4)
+            placed = arg(5)
+            applied
+        }
+        h.world.getBlockAt(terrain.position.x, terrain.position.y, terrain.position.z).type =
+            if (workDone > 0) Material.COARSE_DIRT else Material.AIR
+    }
+
+    fun completeTerrain() {
+        requireNotNull(gate).invoke() shouldBe true
+        h.world.getBlockAt(terrain.position.x, terrain.position.y, terrain.position.z).blockData = Bukkit.createBlockData(terrain.after)
+        requireNotNull(placed).invoke(terrain)
+        applied.complete(Unit)
+        h.tick()
+    }
 }
 
 private data class ServiceQueuedUpgrade(val city: Settlement, val building: CivBuilding, val design: CivPlacementPlan,

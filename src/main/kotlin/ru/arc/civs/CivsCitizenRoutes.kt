@@ -116,13 +116,18 @@ internal class CivsCitizenRoutes(
         // Only the outside leg to the real entrance is ordinary city travel. Internal
         // shaft/gallery waypoints must retain the same completed-prefix restrictions.
         val routeMine = mine.takeIf { entrance == null }
+        val hint = actor.courierReturnHint
+        actor.courierReturnHint = null
+        val corridor = actor.plan.courier?.takeIf { idleAnchor == null && it.carrying &&
+            actor.cycle.phase == CitizenPhase.RETURNING && target == actor.plan.storage && waypoint == null }
+            ?.let { hint?.corridor(city, it.cargo, from.point(), to.point()) }
         val motion = navigation.request(world, from, to, { point ->
             citizenRoutePointAllowed(city, allowed, point, routeMine) && citizenControlClear(city, point) &&
                 (idleAnchor == null || idleTransit || citizenIdleRouteAllowed(idleAnchor, from.point(), point, mealTarget) &&
                     citizenIdleTerrain(world, point, city.buildings))
         }, { first, second -> citizenControlStepClear(city, first, second) &&
             (entrance != null || minePassage == null || minePassage.allows(second)) },
-            { ground -> routeCosts.cost(ground, surfaceSpeed) })
+            { ground -> routeCosts.cost(ground, surfaceSpeed) }, corridor)
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = CitizenRoute(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
@@ -149,6 +154,25 @@ internal class CivsCitizenRoutes(
         }
         look(actor.npc, from.yaw, 0f)
         return true
+    }
+
+    /** Called only after the owner's ordinary arrival proof, before cancelling its route. */
+    fun captureCourierReturnHint(actor: CitizenActor, city: Settlement) {
+        actor.courierReturnHint = null
+        val courier = actor.plan.courier?.takeIf { actor.plan.type == BuildingType.WAREHOUSE && !it.carrying &&
+            it.cargo.sourceWorkerId == null && actor.cycle.phase == CitizenPhase.TO_WORK } ?: return
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || actor.npc.world.uid != city.worldId ||
+            actor.sheltering || actor.returningToWarehouse || actor.foodSource != null || actor.mealVisit != null) return
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
+        if (worker.assignment != courier.cargo.warehouseId ||
+            city.building(courier.cargo.warehouseId)?.type != BuildingType.WAREHOUSE) return
+        val route = actor.route?.takeIf { !it.intermediate && it.authored == actor.plan.workplace &&
+            it.motion.forwardProgress > 0.0 } ?: return
+        val destination = city.building(courier.destinationBuildingId)?.control ?: return
+        if (!citizenAtStorage(actor.npc.world, route.from, destination)) return
+        val trip = route.trip ?: return
+        actor.courierReturnHint = CitizenCourierReturnHint.capture(city, courier.cargo, trip,
+            route.from, actor.npc.location.point())
     }
 
     fun observePath(route: CitizenRoute) {

@@ -186,7 +186,12 @@ internal class CivsCitizenWork(
                     else citizenWorkStatus(actor.plan, actor.cycle.phase, life.servingTavernGuests(actor, city)) ?: actor.cycle.status()
                     // Arrival starts the observed work interval on this pulse. Its first
                     // gesture and crop-care prop belong to that same interval.
-                    if (actor.cycle.phase == CitizenPhase.WORKING) animateWork(actor, city, world, now)
+                    if (actor.cycle.phase == CitizenPhase.WORKING) {
+                        if (actor.plan.type == BuildingType.WAREHOUSE && actor.plan.courier != null) {
+                            actor.cycle.work(now)
+                            submitReadyPickup(actor)
+                        } else animateWork(actor, city, world, now)
+                    }
                     return
                 }
                 if (actor.route == null) routes.startRoute(actor, world, target, now)
@@ -232,13 +237,15 @@ internal class CivsCitizenWork(
                     // but request more credit only when the current credited rows run out.
                     if (cycle.phase == CitizenPhase.READY && actor.plan.idleReason != "placing")
                         logistics.submitReadyDelivery(actor, city, world, now)
+                    else if (cycle.phase == CitizenPhase.PICKUP_READY && actor.plan.type == BuildingType.WAREHOUSE && actor.plan.courier != null)
+                        submitReadyPickup(actor)
                 }
             }
             CitizenPhase.PICKUP_READY -> {
                 val target = requireNotNull(actor.plan.workplace)
                 if (!routes.arrivedAt(actor, city, world, target))
                     routes.pauseNavigation(actor, "route-unreachable", "left-pickup-point", routes.resolvedTarget(actor, target).location(world), now)
-                else cycle.beginPickup()?.let { ticket -> logistics.submitPickup(actor, ticket) }
+                else submitReadyPickup(actor)
             }
             CitizenPhase.READY -> if (actor.plan.idleReason != "placing") logistics.submitReadyDelivery(actor, city, world, now)
             else -> Unit
@@ -252,6 +259,10 @@ internal class CivsCitizenWork(
         }
     }
 
+    private fun submitReadyPickup(actor: CitizenActor) {
+        actor.cycle.beginPickup()?.let { ticket -> logistics.submitPickup(actor, ticket) }
+    }
+
     fun arriveForWork(actor: CitizenActor, city: Settlement, worker: CivWorker, now: Long) {
         actor.arrivalWait = null
         actor.route?.takeIf { it.motion.forwardProgress > 0.0 }?.let { route ->
@@ -263,6 +274,7 @@ internal class CivsCitizenWork(
                 "distance" to sqrt(actual.distanceSquared(route.target.point())),
                 "elapsed_ms" to now - route.startedAt)
         }
+        routes.captureCourierReturnHint(actor, city)
         routes.cancelRoute(actor)
         if (actor.cycle.phase == CitizenPhase.TO_STORAGE && city.inventory != null && actor.plan.courier == null &&
             actor.plan.type !in CivsWorksites.TYPES &&

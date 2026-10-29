@@ -35,7 +35,8 @@ internal data class CitizenSearchNode(val x: Int, val y: Double, val z: Int,
     val climbing: Boolean = false, val initial: Boolean = false) {
     fun point() = CitizenPoint(x + .5, y, z + .5)
 }
-internal data class CitizenSearchProbe(val node: CitizenSearchNode, val from: CitizenPoint, val incoming: Boolean = false)
+internal data class CitizenSearchProbe(val node: CitizenSearchNode, val from: CitizenPoint, val incoming: Boolean = false,
+    val corridor: CitizenSearchCorridor? = null)
 internal data class CitizenSearchEdge(val node: CitizenSearchNode, val action: CitizenRouteAction, val permitted: Boolean)
 internal data class CitizenPlannedStep(val point: CitizenPoint, val action: CitizenRouteAction)
 internal data class CitizenSearchCapture(val probe: CitizenSearchProbe,
@@ -58,6 +59,7 @@ internal class CitizenNavigationSearch(
     private val maximumY: Int,
     private val avoiding: List<CitizenTerrainBox>,
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
+    private val preferredCorridor: CitizenSearchCorridor? = null,
 ) {
     private data class Entry(val node: CitizenSearchNode, val cost: Double, val score: Double, val order: Int)
     private data class Parent(val node: CitizenSearchNode, val action: CitizenRouteAction)
@@ -143,7 +145,8 @@ internal class CitizenNavigationSearch(
         }
         pending = requested
         if (requested.isNotEmpty()) return result(buildList {
-            addAll(requested.keys.map { CitizenSearchProbe(it, if (it == start) origin else it.point()) })
+            addAll(requested.keys.map { CitizenSearchProbe(it, if (it == start) origin else it.point(),
+                corridor = preferredCorridor.takeUnless { widerSearch }) })
             if (inspectEndpoint) {
                 inspectEndpoint = false
                 add(CitizenSearchProbe(CitizenSearchNode(floor(target.x).toInt(), target.y, floor(target.z).toInt()), target, incoming = true))
@@ -229,9 +232,9 @@ internal class CitizenNavigationSearch(
     }
 
     private fun inCorridor(point: CitizenPoint): Boolean =
-        point.x in min(origin.x, target.x) - settings.initialHorizontalMargin..max(origin.x, target.x) + settings.initialHorizontalMargin &&
+        preferredCorridor?.contains(point) ?: (point.x in min(origin.x, target.x) - settings.initialHorizontalMargin..max(origin.x, target.x) + settings.initialHorizontalMargin &&
             point.z in min(origin.z, target.z) - settings.initialHorizontalMargin..max(origin.z, target.z) + settings.initialHorizontalMargin &&
-            point.y in min(origin.y, target.y) - settings.initialVerticalMargin..max(origin.y, target.y) + settings.initialVerticalMargin
+            point.y in min(origin.y, target.y) - settings.initialVerticalMargin..max(origin.y, target.y) + settings.initialVerticalMargin)
 
     /** Prove isolation only for a centred, integer-height goal on a full block. Other shapes
      * and ladders keep the ordinary search; unknown cells never prove a closed entrance. */

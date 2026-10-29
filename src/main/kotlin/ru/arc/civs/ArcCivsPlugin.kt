@@ -193,6 +193,8 @@ open class ArcCivsPlugin : JavaPlugin() {
             lifecycle.own(observations.registerLocationSource(this, "civs-settlements") { limit ->
                 if (service.ready()) civsSceneLocations(service.settlements(), limit) else emptyList()
             })
+            lifecycle.own(observations.registerEntitySource(this, "civs-construction",
+                CivsConstructionSceneDisplays(service::settlements, service::ready)))
             val ui = lifecycle.own(CivsUi(this, service, lifecycle.tasks, text))
             service.ui = ui
             val corpses = CivsCorpseRenderer(this, lifecycle.tasks, text, service::corpseSettlements, ui::openCorpse,

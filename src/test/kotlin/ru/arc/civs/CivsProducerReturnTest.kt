@@ -125,14 +125,19 @@ class CivsProducerReturnTest : FunSpec({
             val accepted = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
                 if (it == farm.id) mapOf("WHEAT" to 32L) else emptyMap()
             })
-            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
             h.onPickup = { cityId, workerId, cargo ->
                 cargo.sourceWorkerId shouldBe null
                 h.owner.requireStorageArrival(cityId, workerId, farm.id)
             }
             h.owner.pulse(2_000)
             val courier = h.owner.collisionActors().single { it.uniqueId == courierId }
+            // A newly admitted courier with an offer spawns at its source. Use an existing
+            // warehouse actor to prove that source arrival, independently of the producer, gates pickup.
+            courier.teleport(org.bukkit.Location(h.world, 9.5, 64.0, 1.5))
+            h.courierProvider = { _, worker -> accepted.takeIf { worker.id == courierId } }
+            h.owner.pulse(2_500)
             h.pickups shouldBe 0
+            h.phase(courierId) shouldBe CitizenPhase.TO_WORK
             courier.teleport(org.bukkit.Location(h.world, 21.5, 64.0, .5))
             for (now in listOf(3_000L, 4_000L, 5_000L, 6_000L)) h.owner.pulse(now)
             h.pickups shouldBe 1

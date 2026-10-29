@@ -25,6 +25,7 @@ internal class CitizenPacketRoute(
     private val travelCost: (org.bukkit.block.Block) -> Double,
     private val avoiding: List<BoundingBox> = emptyList(),
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
+    private val corridor: CitizenSearchCorridor? = null,
 ) {
     private class Waypoint(val start: CitizenPoint, val point: CitizenPoint, val corner: Boolean = true,
                            val action: CitizenRouteAction = CitizenRouteAction.WALK,
@@ -93,6 +94,8 @@ internal class CitizenPacketRoute(
     val nodeCount: Int get() = visited
     val endpoint: CitizenPoint? get() = path.lastOrNull()?.point
     val remainingNodes: Int get() = path.size
+    /** The request received a hint; ordinary wider-search fallback may still be needed. */
+    internal val hasCourierCorridorHint: Boolean get() = corridor != null
 
     /** A raised foot may use only the exact native stair profile that admitted its current point. */
     internal fun stairProfileSupports(at: CitizenPoint): List<Triple<CivPosition, CitizenCollisionSnapshot, Double>> {
@@ -158,7 +161,7 @@ internal class CitizenPacketRoute(
     }
 
     internal fun newSearch() = CitizenNavigationSearch(origin, CitizenPoint(target.x, target.y, target.z),
-        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) }, settings)
+        minimumY, maximumY, avoiding.map { CitizenTerrainBox(it.minX, it.minY, it.minZ, it.maxX, it.maxY, it.maxZ) }, settings, corridor)
 
     internal fun attachAsync(cancel: () -> Unit) {
         check(directSearch == null) { "A direct route cannot be submitted after search started" }
