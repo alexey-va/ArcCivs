@@ -1939,6 +1939,12 @@ class CivsForestryRemoteRevalidationTest : FunSpec({
             fun closeOrdinaryFootings(at: CivPosition) {
                 for (x in at.x - 3..at.x + 3) for (z in at.z - 3..at.z + 3)
                     if (x != at.x || z != at.z) for (y in 59..63) world.getBlockAt(x, y, z).type = Material.AIR
+                // A crown-aware ray can see from the old leaf/wall roof. Seal those
+                // bodies physically; the ceiling stays above every intended remote ray.
+                for (x in at.x - 3..at.x + 3) for (z in at.z - 3..at.z + 3) {
+                    val ceiling = world.getBlockAt(x, at.y + 3, z)
+                    if (ceiling.type.isAir) ceiling.type = Material.STONE
+                }
             }
             closeOrdinaryFootings(root)
             val leaves = Bukkit.createBlockData("minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]")
@@ -1960,11 +1966,13 @@ class CivsForestryRemoteRevalidationTest : FunSpec({
             citizenPacketSupported(world, nearPoint) shouldBe true
             citizenPacketBodyClear(world, nearPoint, false) shouldBe true
             val ordinary = buildList {
-                for (dy in -4..2) for (dx in -3..3) for (dz in -3..3) {
+                for (dy in -4..3) for (dx in -4..4) for (dz in -4..4) {
                     if (dx == 0 && dz == 0) continue
                     val p = root.copy(x = root.x + dx, y = root.y + dy, z = root.z + dz)
-                    if (citizenStandable(world, p) && citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false) &&
-                        citizenCanReachBlock(world, Location(world, p.x + .5, p.y + 1.62, p.z + .5), root)) add(p)
+                    val eye = Location(world, p.x + .5, p.y + 1.62, p.z + .5)
+                    if (citizenBlockAimPoints(eye, root).none { eye.distanceSquared(it) <= CITIZEN_BLOCK_REACH * CITIZEN_BLOCK_REACH }) continue
+                    if (citizenStandable(world, p) &&
+                        citizenPacketBodyClear(world, CitizenPoint(p.x + .5, p.y.toDouble(), p.z + .5), false)) add(p)
                 }
             }
             ordinary shouldBe emptyList()

@@ -1,0 +1,36 @@
+{
+  "building": "be480ebd-4dff-4dfc-a740-4e78d331558e",
+  "city": "8b890e82-2bff-4e27-b3f9-5932754a820b",
+  "job": {
+    "cells": "ABXrABYMABVvABWQABHqARHrAhHsARIMABIsABFuARGOAxHuABFPARFvAhGPBBGvAxHPBRHvAxIPABFwARGQAhGwAxHwABGRARGxABGyAA3pAA3KAQ3qAA4KAQ3LAg3rAA4rAg3MBA3sAg4MAQ4sAA5MBA3NAw3tBA4NAg4tAQ5NAA1OAQ1uAg2OBA2uBQ3uAw4OBg0PAA0vAQ1PAg1vBA2PAw2vBQ3PBQ4PAA1QAg2QBA2wAw3QBQ3wAA1xAQ2RAg2xAA2SAQ2yAAnpAAnKAQnqAAoKAQnLAgnrAAorAgnMBAnsAgoMAQosAApMAgmtBAnNAwntBAoNAgotAQpNAAlOAQluAgmOBAmuAwnOBQnuAwoOBAouAAkvAQlPAglvBAmPAwmvBQnPBQoPAwovAAlQAgmQBAmwAwnQBQnwAwoQBAowAAlxAQmRAgmxBAnRAwnxBAoRAgoxAAmSAQmyAAXpAAXKAQXqAAYKAQXLAgXrAAYrAgXMBAXsAgYMAQYsAAZMBAXNAwXtBAYNAgYtAAVOAQVuAgWOBAWuAwXOBQXuAwYOBAYuAAUvAQVPAgVvBAWPAwWvBQXPBQYPAwYvAAVQAgWQBAWwAwXQBQXwAwYQBAYwAAVxAQWRAgWxBAXRAwXxBAYRAgYxBgVyAAWSAQWyBw3vBwnvBwXvBwHv",
+    "harvestedLogs": 0,
+    "id": "63109948-55c0-40d9-bc0f-88414e97f99c",
+    "next": 128,
+    "root": {
+      "x": -1883,
+      "y": 64,
+      "z": -2692
+    },
+    "roots": [
+      {
+        "x": -1883,
+        "y": 64,
+        "z": -2692
+      }
+    ],
+    "sapling": "OAK_SAPLING",
+    "seedDeferred": false,
+    "states": [
+      "minecraft:oak_leaves[distance=6,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=5,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=4,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=2,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=3,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=1,persistent=false,waterlogged=false]",
+      "minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]",
+      "minecraft:oak_log[axis=y]"
+    ],
+    "thinning": false
+  },
+  "revision": 81323
+}

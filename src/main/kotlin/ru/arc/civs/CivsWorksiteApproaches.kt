@@ -408,6 +408,9 @@ internal class CivsWorksiteApproaches(
             val remote = tryRemote()
             if (remote != null || !search.remoteFinished) return remote
         }
+        // Only this exact immutable captured tree may supply the ordinary ray's crown witness.
+        val forestryIntent = search.captured?.takeIf { context.cachedMatches(city, worker, building, it) }?.work
+            ?.takeIf { it.forestry != null && runCatching { CivsForestry.validateWork(city, it) }.isSuccess }
         fun nextPosition() { search.next++; search.nextAim = 0 }
         while (search.next < offsets.size) {
             if (context.nanoTime() >= context.discoveryBudget.deadline) return pending()
@@ -448,7 +451,7 @@ internal class CivsWorksiteApproaches(
             while (search.nextAim < aims.size) {
                 if (context.spotRaysRemaining <= 0 || context.nanoTime() >= context.discoveryBudget.deadline) return pending()
                 context.spotRaysRemaining--
-                if (citizenCanReachBlockPoint(world, eye, target, aims[search.nextAim++], reach)) {
+                if (citizenCanReachBlockPoint(world, eye, target, aims[search.nextAim++], reach, forestryIntent)) {
                     workSpots.remove(worker.id)
                     return CivWorkApproach(p, capturedWork = search.captured?.takeIf {
                         context.cachedMatches(city, worker, building, it)
@@ -466,6 +469,8 @@ internal class CivsWorksiteApproaches(
             val key = requireNotNull(standingKey(worker, building, null, target))
             val closed = rejected ?: RejectedWorkSpots(key, target)
             search.remote.origins.forEach(closed.remote::observed)
+            // A full sweep is exhausted even when no stance was ever admitted to a resident.
+            closed.retryAt = Bukkit.getCurrentTick().toLong() + 100
             rejectedWorkSpots[worker.id] = closed
         }
         // A completed sweep may retry after a bounded pause; elapsed time never

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.127: bounded access to an accepted forestry crown",
+  "assumptions": [
+    "The accepted saved forestry job, its cell cursor and harvested item receipts remain unchanged. No item or block is granted to recover a closed approach.",
+    "Ordinary access retains the existing three-block reach, supported and body-clear stance, chunk, world authority and exact captured native batch checks. Only nonpersistent, nonwaterlogged natural leaves may obscure its forestry ray, using the existing captured-forestry trace policy.",
+    "Stone, glass, water and persistent foliage still obstruct work. Ignoring natural foliage for this bounded ray does not authorize changing an uncaptured leaf or any extra block.",
+    "A completed approach sweep with zero admitted stances uses the existing bounded retry interval. A service-budget yield is not exhaustion; saved progress is not discarded.",
+    "Per-operation output quantities, native source-to-bag-to-container receipts, tools, recipes, work timers, storage headroom, prices and player rewards remain unchanged.",
+    "Realized forestry throughput may recover from a stalled baseline and is not measured or valued as a guaranteed income increase. Current EconomyShopGUI SELL and separate contracts remain unchanged."
+  ],
+  "participants": [1, 1, 1],
+  "currencies": {
+    "vault": {"minor_per_unit": 100, "flows": []},
+    "tokens": {"minor_per_unit": 1, "flows": []}
+  },
+  "prices": [],
+  "item_conservation": {
+    "new_item_grants_before": 0,
+    "new_item_grants_after": 0,
+    "recovery_mint_before": 0,
+    "recovery_mint_after": 0,
+    "recovery_burn_before": 0,
+    "recovery_burn_after": 0,
+    "saved_job_cursor_preserved": true,
+    "unprocessed_cells_remain_native_world": true,
+    "exact_native_receipts_preserved": true
+  },
+  "player_xp": {"before": 0, "after": 0},
+  "realized_throughput_delta": null,
+  "conclusion": "No direct currency, item grant or per-operation quantity change. Recovery must be verified through the existing exact forestry and cargo receipts after activation."
+}

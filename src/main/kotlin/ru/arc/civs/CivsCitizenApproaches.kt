@@ -164,10 +164,12 @@ private fun citizenTraceBlockPoint(world: World, eye: Location, target: CivPosit
     val distance = delta.length()
     if (distance < .001) return true
     delta.multiply(1.0 / distance)
-    val job = work?.takeIf { it.remoteWork && distance <= CITIZEN_REMOTE_WORK_REACH }?.forestry?.job
+    val job = work?.takeIf {
+        distance <= if (it.remoteWork) CITIZEN_REMOTE_WORK_REACH else CITIZEN_BLOCK_REACH
+    }?.forestry?.job
     var travelled = 0.0
     // A twelve-block ray crosses fewer than 32 voxels. Natural foliage may obscure the
-    // remote animation, including a neighbouring crown; this never authorizes changing those leaves.
+    // captured tree's animation, including a neighbouring crown; this never authorizes changing those leaves.
     repeat(if (job == null) 1 else 32) {
         val start = eye.clone().add(delta.clone().multiply(travelled))
         val hit = world.rayTraceBlocks(start, delta, distance - travelled, FluidCollisionMode.ALWAYS, true) ?: return true
