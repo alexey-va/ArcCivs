@@ -9,6 +9,7 @@ import org.bukkit.Material
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
+import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.Executor
@@ -133,7 +134,7 @@ class CivsMineAutoFallbackTest : FunSpec({
 })
 
 private fun mineFallbackFixture(automatic: Boolean, locked: (CivPosition) -> Boolean = { false }, hazard: Material = Material.WATER, settings: CivsWorksiteSettings = CivsWorksiteSettings(),
-    body: (MockBukkitTestRuntime, CivsWorksiteWorldFixture, CivsWorksites, Settlement, CivBuilding, CivWorker, CivPosition) -> Unit) {
+    body: (MockBukkitTestRuntime, CivsWorksiteWorldFixture, CivsWorksites, Settlement, CivBuilding, CivWorker, CivPosition) -> Unit) = failOnUnsupportedMockBukkitOperation {
     MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
         val world = CivsWorksiteWorldFixture("mine-auto-fallback-$automatic").also(paper.server::addWorld)
         val plugin = paper.createSimplePlugin("MineAutoFallback")

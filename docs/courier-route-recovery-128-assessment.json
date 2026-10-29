@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.128: retain observed courier approach across route replacement",
+  "assumptions": [
+    "The source inventory debit, exact cargo contents, worker bag, target receipt and uncertain-future fence are unchanged. A retained route preference never admits pickup or delivery.",
+    "The change preserves at most the existing 256 observed outdoor ground cells for one fixed physical shipment. It stores no future path and creates no new timer, global queue or search budget.",
+    "A required geometry replan still starts a fresh native search. The retained prefix is only a preference after current source/depot identity, world, city extent, observed continuity, protected footprint, connectivity and anchor checks.",
+    "Ordinary interruptions, changed shipment or endpoints, teleport gaps, overflow and invalid current footprints discard the prefix. Every return still checks current native bodies, obstacles, permissions and costs, using the same bounded search and fallback.",
+    "The previous four observed forester visits had 138-193 ms native pickup operations and 1.848-6.045 seconds from arrival to return-path readiness. The slowest followed completion of the university during its inbound journey. These are observations, not guaranteed throughput or a priced earning rate.",
+    "No item output quantity, recipe, work timer, Trails multiplier, storage headroom, price, player XP or grant changes. Current EconomyShopGUI SELL and separate contracts are unchanged. Realized throughput after the fix requires native observation."
+  ],
+  "participants": [1, 1, 1],
+  "currencies": {
+    "vault": {"minor_per_unit": 100, "flows": []},
+    "tokens": {"minor_per_unit": 1, "flows": []}
+  },
+  "prices": [],
+  "item_conservation": {
+    "recovery_grants_before": 0,
+    "recovery_grants_after": 0,
+    "extra_item_mint": 0,
+    "extra_item_burn": 0,
+    "accepted_cargo_quantity_change": 0,
+    "native_receipts_and_acknowledgements_preserved": true
+  },
+  "player_xp": {"before": 0, "after": 0},
+  "search_limits": {"retained_observed_cells": 256, "new_search_budget": false},
+  "realized_throughput_delta": null,
+  "conclusion": "No direct currency, grant, output quantity or payment change. Faster route preparation is verified separately and must not be converted into assumed income."
+}

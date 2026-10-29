@@ -911,13 +911,17 @@ class CivsSpatialWorkReviewTest : FunSpec({
                 world.setStorm(true)
                 var paused = false
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused })
-                    repeat(4) {
+                    // Five admitted slices cover the authored field; deadline expiry is tested above.
+                    val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, { paused }, nanoTime = { 0L })
+                    fun scan() = ((runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>)["farmScan"] as Map<*, *>
+                    repeat(4) { slice ->
                         runtime.pulse(listOf(city))
+                        scan()["examined"] shouldBe (slice + 1) * 16
                         runtime.plan(city, worker) shouldBe null
                         runtime.idleReason(city, worker) shouldBe "searching-work"
                     }
                     runtime.pulse(listOf(city))
+                    scan()["examined"] shouldBe plots.size
                     runtime.idleReason(city, worker) shouldBe "waiting-growth"
                     repeat(12) {
                         paused = true
@@ -927,6 +931,11 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         paused = false
                         runtime.pulse(listOf(city))
                         runtime.idleReason(city, worker) shouldBe "waiting-growth"
+                    }
+                    scan()["examined"] shouldBe plots.size
+                    plots.forEach { soil ->
+                        world.getBlockAt(soil.x, soil.y, soil.z).blockData.asString shouldBe "minecraft:farmland[moisture=7]"
+                        world.getBlockAt(soil.x, soil.y + 1, soil.z).blockData.asString shouldBe "minecraft:wheat[age=2]"
                     }
                     val empty = plots.first().let { it.copy(y = it.y + 1) }
                     world.getBlockAt(empty.x, empty.y, empty.z).type = Material.AIR

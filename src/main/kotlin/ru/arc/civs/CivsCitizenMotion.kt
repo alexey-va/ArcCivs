@@ -99,7 +99,7 @@ internal class CivsCitizenMotion(
             routes.observeArrivalWait(actor, route)
             if (route.trip?.validFor(city) == false) {
                 // Replan from the observed position after a building change; this is not a stuck-route recovery.
-                routes.cancelRoute(actor)
+                routes.cancelForContinuation(actor, city, route)
                 continue
             }
             if (route.motion.searching) {
@@ -154,12 +154,14 @@ internal class CivsCitizenMotion(
                 route.motionReady(runtime.navigationTick, now)
                 actor.navigationEpisodeProgress = 0.0
                 val elapsed = (now - route.startedAt).coerceAtLeast(0)
-                if (elapsed >= 1_000 || route.storageReason != null) CivsDiagnostics.event("citizen_route_ready", "city" to actor.cityId,
+                if (elapsed >= 1_000 || route.storageReason != null || city.inventory?.mode == CivStorageMode.PHYSICAL &&
+                    actor.plan.type == BuildingType.WAREHOUSE && actor.plan.courier?.carrying == true &&
+                    actor.cycle.phase == CitizenPhase.RETURNING) CivsDiagnostics.event("citizen_route_ready", "city" to actor.cityId,
                     "worker" to actor.workerId, "route_started_at" to route.startedAt,
                     "reason" to route.storageReason, "source" to route.storageBuilding,
                     "phase" to actor.cycle.phase, "state" to if (motion.continuation) "segment-ready" else "path-ready",
                     "elapsed_ms" to elapsed, "path_nodes" to motion.nodeCount, "failure" to motion.failure,
-                    "intermediate" to route.intermediate)
+                    "intermediate" to route.intermediate, "corridor_hint" to motion.hasCourierCorridorHint)
             }
             if (route.path == null) motion.endpoint?.let { route.path = CitizenPathSnapshot(motion.nodeCount, it, false) }
             if ((motion.failure != null || route.completion != null || route.timedOut(now)) &&
@@ -172,7 +174,7 @@ internal class CivsCitizenMotion(
             }
             if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
-                    routes.cancelRoute(actor)
+                    routes.cancelForContinuation(actor, city, route)
                     routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }
@@ -242,6 +244,9 @@ internal class CivsCitizenMotion(
                     if (beforeGrounded) route.trip?.observe(before.point())
                     if (nextGrounded) route.trip?.observe(next.point())
                 } else actor.footsteps.reset()
+                actor.courierInboundPrefix?.let { prefix ->
+                    route.trip?.let { prefix.observe(before.point(), next.point(), it) }
+                }
             }
             if (motion.failure != null) {
                 if (!routes.replanNavigation(actor, route, requireNotNull(motion.failure), now)) {
@@ -251,7 +256,7 @@ internal class CivsCitizenMotion(
             }
             else if (motion.finished) {
                 if (route.intermediate || motion.continuation) {
-                    routes.cancelRoute(actor)
+                    routes.cancelForContinuation(actor, city, route)
                     routes.startRoute(actor, npc.world, route.authored, now, route.idleAnchor)
                     continue
                 }

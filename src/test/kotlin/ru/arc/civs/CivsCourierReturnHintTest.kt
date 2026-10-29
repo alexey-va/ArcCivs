@@ -10,11 +10,19 @@ import ru.arc.paper.testing.MockBukkitTestRuntime
 import java.util.UUID
 
 class CivsCourierReturnHintTest : FunSpec({
-    test("a real walked courier source leg retains one hint through its pending pickup then consumes it on return") {
+    for (completeUnrelated in listOf(false, true)) test("a real walked courier source leg survives unrelated completion=$completeUnrelated and its pending pickup") {
         residentRuntime { h ->
             val (source, courierId) = h.courierSource(material = "WHEAT", amount = 1)
             h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = null) })
             h.city.inventory!!.mode shouldBe CivStorageMode.PHYSICAL
+            val unrelated = source.copy(id = UUID(0, 128), type = BuildingType.UNIVERSITY,
+                anchor = CivPosition(-25, 64, 25), entrance = CivPosition(-25, 64, 24), control = CivPosition(-25, 64, 25),
+                bounds = CivBox(CivPosition(-27, 63, 23), CivPosition(-23, 68, 27)), phase = BuildingPhase.CONSTRUCTING,
+                production = null, schematicId = "university1")
+            if (completeUnrelated) h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + unrelated,
+                construction = CivConstruction(UUID(0, 129), unrelated.id, 1, 1, 0,
+                    ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = unrelated,
+                    batches = CivConstructionBatches(1, 16), materials = mapOf("STONE" to 1L), payment = CivConstructionPayment())))
             h.idleReason = "searching-work"
             val offered = requireNotNull(CivsLogistics.plan(h.city, h.city.workers.last()) {
                 if (it == source.id) mapOf("WHEAT" to 32L) else emptyMap()
@@ -36,16 +44,36 @@ class CivsCourierReturnHintTest : FunSpec({
             offersEnabled = true
             h.navigationNow = 3_000
             h.owner.pulse(3_000)
+            val runtime = CivsCitizens::class.java.getDeclaredField("runtime").also { it.isAccessible = true }
+                .get(h.owner) as CitizenRuntime
+            val actor = runtime.actors.getValue(courierId)
+            var completed = false
             var now = 3_000L
             for (tick in 1..600) {
                 h.navigate(); now = requireNotNull(h.navigationNow)
+                if (completeUnrelated && !completed && actor.npc.location.distance(warehouseFeet) >= 5.0 && h.pickups == 0) {
+                    val oldRoute = requireNotNull(actor.route)
+                    val oldTrip = requireNotNull(oldRoute.trip)
+                    (oldTrip.walked.size >= 2) shouldBe true
+                    h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings.map {
+                        if (it.id == unrelated.id) it.copy(phase = BuildingPhase.ACTIVE) else it
+                    }, construction = null))
+                    h.navigate(); now = requireNotNull(h.navigationNow)
+                    actor.route shouldBe null // Real Motion geometry fence cancelled the old navigation.
+                    h.owner.pulseFieldWork(now)
+                    val fresh = requireNotNull(actor.route)
+                    (fresh !== oldRoute) shouldBe true
+                    (fresh.trip !== oldTrip) shouldBe true
+                    fresh.trip?.validFor(h.city) shouldBe true
+                    citizenAtStorage(h.world, fresh.from,
+                        requireNotNull(h.city.building(offered.cargo.warehouseId)?.control)) shouldBe false
+                    completed = true
+                }
                 if (tick % 5 == 0) h.owner.pulseFieldWork(now)
                 if (h.pickups == 1) break
             }
             withClue(h.navigationState(courierId)) { h.pickups shouldBe 1 }
-            val runtime = CivsCitizens::class.java.getDeclaredField("runtime").also { it.isAccessible = true }
-                .get(h.owner) as CitizenRuntime
-            val actor = runtime.actors.getValue(courierId)
+            completed shouldBe completeUnrelated
             (actor.npc.location.distance(warehouseFeet) >= 5.0) shouldBe true
             val hint = requireNotNull(actor.courierReturnHint)
             val sourceFeet = actor.npc.location
@@ -65,6 +93,48 @@ class CivsCourierReturnHintTest : FunSpec({
             h.unloads shouldBe 0
         }
     }
+
+    for (change in listOf("warehouse", "source", "protected-corridor", "shipment", "world", "centre", "radius", "teleport", "overflow"))
+        test("an observed courier prefix rejects $change before reuse under fresh geometry") {
+            val warehouse = CivBuilding(UUID(0, 130), BuildingType.WAREHOUSE, 1, CivPosition(0, 64, 0), 0, "test-warehouse",
+                CivBox(CivPosition(-2, 63, -2), CivPosition(2, 68, 2)), CivPosition(0, 64, 0), BuildingPhase.ACTIVE,
+                control = CivPosition(0, 64, 0))
+            val source = warehouse.copy(id = UUID(0, 131), type = BuildingType.FORESTER, anchor = CivPosition(40, 64, 0),
+                bounds = CivBox(CivPosition(38, 63, -2), CivPosition(42, 68, 2)), entrance = CivPosition(40, 64, 0),
+                control = CivPosition(40, 64, 0), schematicId = "test-forester")
+            val city = pathsCity().copy(radius = 512, buildings = listOf(warehouse, source), inventory = CivInventory(CivStorageMode.PHYSICAL))
+            val cargo = CivCargo(UUID(0, 132), warehouse.id, source.id, warehouse.id, source.entrance, "OAK_LOG", 64)
+            val origin = CitizenPoint(.5, 64.0, .5)
+            val prefix = requireNotNull(CitizenCourierInboundPrefix.begin(city, cargo, warehouse.id, origin))
+            val paths = CivsPaths()
+            val first = paths.begin(city)
+            var actual = origin
+            fun walk(trip: CivsPaths.Trip, at: CitizenPoint) {
+                trip.observe(at); prefix.observe(actual, at, trip); actual = at
+            }
+            if (change == "overflow") for (z in 0..9) for (x in 3..36) walk(first, CitizenPoint(x + .5, 64.0, z + .5))
+            for (x in 1..20) walk(first, CitizenPoint(x + .5, 64.0, .5))
+            if (change == "overflow") first.walked shouldBe emptySet()
+            val updated = when (change) {
+                "warehouse", "source" -> city.copy(buildings = city.buildings.map {
+                    if (it.id == (if (change == "warehouse") warehouse.id else source.id))
+                        it.copy(control = requireNotNull(it.control).copy(z = 1)) else it
+                })
+                "protected-corridor" -> city.copy(buildings = city.buildings + warehouse.copy(id = UUID(0, 133),
+                    bounds = CivBox(CivPosition(12, 63, -1), CivPosition(14, 68, 1))))
+                "world" -> city.copy(worldId = UUID(0, 134))
+                "centre" -> city.copy(center = city.center.copy(z = 1))
+                "radius" -> city.copy(radius = city.radius - 1)
+                else -> city
+            }
+            val currentCargo = if (change == "shipment") cargo.copy(id = UUID(0, 135)) else cargo
+            prefix.append(updated, currentCargo, warehouse.id, first, actual)
+            val second = paths.begin(updated)
+            if (change == "teleport") actual = actual.copy(z = actual.z + 5)
+            prefix.start(updated, currentCargo, warehouse.id, actual)
+            for (x in 21..40) walk(second, CitizenPoint(x + .5, 64.0, .5))
+            prefix.finish(updated, currentCargo.copy(inventoryBacked = true), warehouse.id, second, actual) shouldBe null
+        }
 
     test("one observed courier corridor reduces long return capture without changing native search authority") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->

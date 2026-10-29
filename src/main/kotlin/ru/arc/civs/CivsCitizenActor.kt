@@ -16,6 +16,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     val footsteps = CitizenFootsteps()
     var route: CitizenRoute? = null
     var courierReturnHint: CitizenCourierReturnHint? = null
+    var courierInboundPrefix: CitizenCourierInboundPrefix? = null
     var collisionResident: UUID? = null
     var residentYield: CitizenResidentYield? = null
     var yieldRetryAfter = 0L

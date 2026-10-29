@@ -111,6 +111,16 @@ internal class CivsCitizenRoutes(
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
             workRuntime.workingTravel(actor)) paths.begin(city) else null
+        val inbound = actor.plan.courier?.takeIf { actor.plan.type == BuildingType.WAREHOUSE && !it.carrying &&
+            actor.cycle.phase == CitizenPhase.TO_WORK && it.cargo.sourceWorkerId == null && idleAnchor == null &&
+            !actor.sheltering && !actor.returningToWarehouse && actor.foodSource == null && actor.mealVisit == null }
+        if (inbound == null || trip == null) actor.courierInboundPrefix = null
+        else {
+            actor.courierInboundPrefix?.start(city, inbound.cargo, inbound.destinationBuildingId, from.point())
+            if (actor.courierInboundPrefix == null && city.building(inbound.destinationBuildingId)?.control?.let {
+                    citizenAtStorage(world, from.point(), it) } == true)
+                actor.courierInboundPrefix = CitizenCourierInboundPrefix.begin(city, inbound.cargo, inbound.destinationBuildingId, from.point())
+        }
         // Even leisure and interrupted work prefer the existing streets; only working trips teach new corridors.
         val routeCosts = trip ?: paths.begin(city)
         // Only the outside leg to the real entrance is ordinary city travel. Internal
@@ -169,10 +179,23 @@ internal class CivsCitizenRoutes(
         val route = actor.route?.takeIf { !it.intermediate && it.authored == actor.plan.workplace &&
             it.motion.forwardProgress > 0.0 } ?: return
         val destination = city.building(courier.destinationBuildingId)?.control ?: return
-        if (!citizenAtStorage(actor.npc.world, route.from, destination)) return
         val trip = route.trip ?: return
-        actor.courierReturnHint = CitizenCourierReturnHint.capture(city, courier.cargo, trip,
-            route.from, actor.npc.location.point())
+        val prefix = actor.courierInboundPrefix
+        if (!citizenAtStorage(actor.npc.world, prefix?.origin ?: route.from, destination)) return
+        actor.courierReturnHint = if (prefix != null) prefix.finish(city, courier.cargo, courier.destinationBuildingId,
+            trip, actor.npc.location.point())
+        else CitizenCourierReturnHint.capture(city, courier.cargo, trip, route.from, actor.npc.location.point())
+    }
+
+    /** Fresh route planning still replaces every motion; only the observed same-shipment prefix survives. */
+    fun cancelForContinuation(actor: CitizenActor, city: Settlement, route: CitizenRoute) {
+        val prefix = actor.courierInboundPrefix
+        val courier = actor.plan.courier
+        if (prefix != null && courier != null && actor.cycle.phase == CitizenPhase.TO_WORK && !courier.carrying)
+            route.trip?.let { prefix.append(city, courier.cargo, courier.destinationBuildingId, it,
+                actor.npc.location.point()) }
+        cancelRoute(actor)
+        actor.courierInboundPrefix = prefix.takeIf { courier != null && actor.cycle.phase == CitizenPhase.TO_WORK && !courier.carrying }
     }
 
     fun observePath(route: CitizenRoute) {
@@ -508,6 +531,7 @@ internal class CivsCitizenRoutes(
     }
 
     fun cancelRoute(actor: CitizenActor, wakeDestination: Location? = null) {
+        actor.courierInboundPrefix = null
         actor.npc.isUsingMainHand = false
         life.standFromMeal(actor)
         actor.residentYield = null

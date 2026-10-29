@@ -74,11 +74,71 @@ internal class CitizenCourierReturnHint private constructor(
 
     companion object {
         fun capture(city: Settlement, cargo: CivCargo, trip: CivsPaths.Trip,
-                    start: CitizenPoint, arrived: CitizenPoint): CitizenCourierReturnHint? {
-            if (!trip.validFor(city) || trip.walked.size !in 2..CivsPaths.MAX_TRIP_CELLS ||
-                CitizenSearchCorridor.fromWalked(trip.walked, arrived, start) == null) return null
+                    start: CitizenPoint, arrived: CitizenPoint,
+                    walked: Set<CivPosition> = trip.walked): CitizenCourierReturnHint? {
+            if (!trip.validFor(city) || walked.size !in 2..CivsPaths.MAX_TRIP_CELLS ||
+                CitizenSearchCorridor.fromWalked(walked, arrived, start) == null) return null
             return CitizenCourierReturnHint(city.id, city.worldId, cargo.id, trip.network.geometry,
-                city.roadRouteOverrides.orEmpty(), start, arrived, trip.walked.toSet())
+                city.roadRouteOverrides.orEmpty(), start, arrived, walked.toSet())
+        }
+    }
+}
+
+/** One physical source leg's observed prefix, never old navigation or road-learning work. */
+internal class CitizenCourierInboundPrefix private constructor(
+    private val cityId: UUID, private val worldId: UUID, private val center: CivPosition, private val radius: Int,
+    private val cargo: CivCargo, private val destinationId: UUID, private val endpoints: List<CivBuilding>,
+    val origin: CitizenPoint, private var actual: CitizenPoint,
+) {
+    // Null is a tombstone: a later continuation cannot revive overflow or a rejected identity.
+    private var walked: Set<CivPosition>? = emptySet()
+    private var segmentObserved = false
+
+    private fun matches(city: Settlement, current: CivCargo, destination: UUID): Boolean =
+        city.id == cityId && city.worldId == worldId && city.center == center && city.radius == radius &&
+            city.inventory?.mode == CivStorageMode.PHYSICAL && cargo == current.copy(inventoryBacked = false) &&
+            destinationId == destination && endpoints.all { shape(city.building(it.id)) == it }
+
+    fun start(city: Settlement, cargo: CivCargo, destination: UUID, from: CitizenPoint) {
+        if (!matches(city, cargo, destination) || actual.distanceSquared(from) > .25) walked = null
+        segmentObserved = false
+    }
+
+    fun observe(from: CitizenPoint, to: CitizenPoint, trip: CivsPaths.Trip) {
+        // Trip only clears a previously nonempty observation set on its 256-cell overflow.
+        if (actual.distanceSquared(from) > .25 || segmentObserved && trip.walked.isEmpty()) walked = null
+        segmentObserved = segmentObserved || trip.walked.isNotEmpty()
+        actual = to
+    }
+
+    fun append(city: Settlement, cargo: CivCargo, destination: UUID, trip: CivsPaths.Trip,
+               at: CitizenPoint) {
+        val previous = walked
+        if (previous == null || !matches(city, cargo, destination) || actual.distanceSquared(at) > .25 ||
+            trip.cityId != city.id || trip.network.geometry.world != worldId || trip.network.geometry.center != center ||
+            trip.network.geometry.radius != radius || segmentObserved && trip.walked.isEmpty()) { walked = null; return }
+        val combined = previous + trip.walked
+        val geometry = CivsPaths.Geometry(city.worldId, city.center, city.radius, city.buildings, city.construction?.plannedBuilding)
+        walked = combined.takeIf { it.size <= CivsPaths.MAX_TRIP_CELLS && it.all(geometry::outside) }
+    }
+
+    fun finish(city: Settlement, cargo: CivCargo, destination: UUID, trip: CivsPaths.Trip,
+               at: CitizenPoint): CitizenCourierReturnHint? {
+        if (!trip.validFor(city)) return null
+        append(city, cargo, destination, trip, at)
+        return walked?.let { CitizenCourierReturnHint.capture(city, cargo, trip, origin, at, it) }
+    }
+
+    companion object {
+        private fun shape(building: CivBuilding?): CivBuilding? = building?.copy(phase = BuildingPhase.ACTIVE, production = null)
+        fun begin(city: Settlement, cargo: CivCargo, destination: UUID, origin: CitizenPoint): CitizenCourierInboundPrefix? {
+            if (city.inventory?.mode != CivStorageMode.PHYSICAL || cargo.sourceWorkerId != null ||
+                destination != cargo.warehouseId || city.building(cargo.warehouseId)?.type != BuildingType.WAREHOUSE) return null
+            val ids = setOf(cargo.warehouseId, cargo.sourceBuildingId, destination)
+            val endpoints = ids.map { shape(city.building(it)) ?: return null }
+            if (endpoints.any { it.control == null }) return null
+            return CitizenCourierInboundPrefix(city.id, city.worldId, city.center, city.radius,
+                cargo.copy(inventoryBacked = false), destination, endpoints, origin, origin)
         }
     }
 }
