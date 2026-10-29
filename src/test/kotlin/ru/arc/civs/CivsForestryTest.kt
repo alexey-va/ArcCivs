@@ -1988,8 +1988,9 @@ class CivsForestryRemoteRevalidationTest : FunSpec({
             }.associateWith { world.getBlockAt(it.x, it.y, it.z).blockData.asString }
             fun entry() = (runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>
             fun deferred() = (entry()["deferredForestApproaches"] as Map<*, *>)["total"] as Int
-            fun deferredObject(point: CivPosition): Any? = ((CivsWorksites::class.java.getDeclaredField("deferredForestApproaches")
-                .also { it.isAccessible = true }.get(runtime) as Map<*, *>)[worker.id] as? Map<*, *>)?.get(point)
+            val approaches = CivsWorksites::class.java.getDeclaredField("approaches").also { it.isAccessible = true }.get(runtime)
+            fun deferredObject(point: CivPosition): Any? = ((CivsWorksiteApproaches::class.java.getDeclaredField("deferredForestApproaches")
+                .also { it.isAccessible = true }.get(approaches) as Map<*, *>)[worker.id] as? Map<*, *>)?.get(point)
             fun pulse() {
                 (Bukkit.getScheduler() as BukkitSchedulerMock).performTicks(5)
                 runtime.pulse(listOf(city))

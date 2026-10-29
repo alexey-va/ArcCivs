@@ -9,22 +9,67 @@ import org.bukkit.block.Block
 import org.bukkit.inventory.ItemStack
 import java.util.UUID
 import kotlin.math.roundToInt
+import ru.arc.civs.requireWorksite as requireCivs
 
 /** Owns the retained zone, pending tree/plant observations and captured native forestry batches. */
 internal class CivsForestryWorksite(
-    private val budget: CivWorkDiscoveryBudget,
-    private val stock: (Settlement, UUID) -> Map<String, Long>,
-    private val forestryPaths: (Settlement) -> Set<Pair<Int, Int>>,
-    private val residentFeet: (UUID) -> Location?,
-    private val readBlock: (Settlement, CivBuilding, World, CivPosition, Boolean) -> Block?,
-    private val approach: (Settlement, CivWorker, CivBuilding, World, CivPosition, (() -> CivWorldWork?)?) -> CivWorkAccess,
-    private val makeWork: (CivWorker, CivBuilding, CivWorkApproach, CivWorkAction) -> CivWorldWork,
-    private val recordNeed: (CivWorker, CivWorkNeed) -> CivWorldWork?,
-    private val needStatus: (Settlement, CivWorker) -> String?,
-    private val deferredRoots: (CivWorker, CivBuilding) -> Set<CivPosition>,
-    private val refreshApproaches: (UUID, Location, Set<CivPosition>) -> Unit,
-    private val deferApproach: (CivWorker, CivBuilding, CivPosition) -> Unit,
-) {
+    context: CivsWorksiteContext, approaches: CivsWorksiteApproaches,
+) : CivsProfessionWorksite(context, approaches) {
+    override val type = BuildingType.FORESTER
+    override val toolSuffix = "_AXE"
+
+    override fun active(city: Settlement, building: CivBuilding): Boolean = city.inventory != null || city.autonomy?.paused == false
+    override fun hasBudget(city: Settlement, worker: CivWorker, building: CivBuilding, current: CivWorldWork?): Boolean =
+        if (current != null) context.spotChecksRemaining > 0 && context.spotRaysRemaining > 0
+        else context.discoveryBudget.forestUnits > 0 && (context.discoveryBudget.columns > 0 || hasPending(worker.id) ||
+            approaches.rejectedWorkSpots[worker.id]?.pending != null || city.forestryJobs?.containsKey(building.id.toString()) == true)
+    override fun inspectCurrent(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        work: CivWorldWork): CivWorksiteDiscovery? {
+        when (approachAccessible(city, building, world, work)) {
+            null -> return CivWorksiteDiscovery.Pending
+            false -> if (!approaches.rejectStanding(city, worker, work)) approaches.retireAction(worker.id)
+            true -> Unit
+        }
+        return null
+    }
+    override fun recoverRejected(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        pending: CivWorkCached): CivWorldWork? = approaches.retryForestApproach(city, worker, building, world, pending)
+    override fun propose(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
+        current: CivWorldWork?): CivWorksiteDiscovery {
+        if (current != null && !CivsForestry.care(current)) return CivWorksiteDiscovery.Retained
+        return result(toolWork(city, worker, building, world, current)
+            ?: plan(city, worker, building, world, harvestOnly = current != null), current)
+    }
+    override fun searchEligible(city: Settlement, worker: CivWorker, building: CivBuilding): Boolean =
+        CivsAutonomy.legacyStock(city) || CivsEquipment.slots(worker)[4]?.material?.endsWith(toolSuffix) == true
+    override fun validatePlan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, work: CivWorldWork) {
+        if (work.forestry != null || work.changes.isNotEmpty()) {
+            try { CivsForestry.validateWork(city, work) { point ->
+                context.read(city, building, world, point, allowOwn = false)?.blockData?.asString
+            } } catch (_: IllegalArgumentException) { throw CivsRejection("stale-worksite") }
+            if (work.forestry == null || city.forestryJobs?.get(building.id.toString()) == null) {
+                val timber = work.forestry?.job?.timber ?: requireNotNull(CivsProduction.material(building))
+                val roots = work.forestry?.job?.roots ?: if (CivsForestry.care(work))
+                    careRoots(city, building, world, requireNotNull(work.focus), timber)
+                        ?: throw CivsRejection("stale-worksite") else CivsForestry.plantingRoots(work)
+                val paths = CivsForestry.paths(city, context.forestryPaths(city))
+                val clear = if (work.forestry != null || CivsForestry.care(work)) CivsForestry.rootsClear(city, roots, paths)
+                    else CivsForestry.plantingClear(city, roots, paths)
+                requireCivs(clear, "stale-worksite")
+            }
+        }
+        if (work.remoteWork || CivsForestry.care(work))
+            requireCivs(approaches.workAccessible(city, building, world, work) == true, "stale-worksite")
+    }
+    override fun invalidate(workerId: UUID, building: CivBuilding?, completedWork: CivWorldWork?, hadCached: Boolean) { invalidate(workerId) }
+    override fun completed(workerId: UUID, building: CivBuilding, work: CivWorldWork) { completed(workerId, work) }
+    override fun changed(workerId: UUID, building: CivBuilding, point: CivPosition) { changed(workerId, point) }
+    override fun protectionChanged(workerId: UUID, building: CivBuilding?, affected: (CivPosition, Int) -> Boolean) { protectionChanged(workerId, affected) }
+    override fun forget(workerId: UUID, building: CivBuilding?, buildingStillUsed: Boolean) { forget(workerId) }
+    override fun retain(workerIds: Set<UUID>, buildingIds: Set<UUID>) { retain(workerIds) }
+    override fun containsChunk(workerId: UUID, building: CivBuilding, chunk: Pair<Int, Int>): Boolean = containsChunk(workerId, chunk)
+
+    private val budget = context.discoveryBudget
     private var spotSearchPending = false
     private data class ForestScan(val building: CivBuilding, val scan: CivsForestry.Scan, val roots: List<CivPosition>)
     private val forestScans = hashMapOf<UUID, ForestScan>()
@@ -146,7 +191,7 @@ internal class CivsForestryWorksite(
         harvestOnly: Boolean): CivWorldWork? {
         spotSearchPending = false
         if (!CivsAutonomy.legacyStock(city) && CivsEquipment.slots(worker)[4]?.material?.endsWith("_AXE") != true) return null
-        val paths = CivsForestry.paths(city, forestryPaths(city))
+        val paths = CivsForestry.paths(city, context.forestryPaths(city))
         city.forestryJobs?.get(building.id.toString())?.let { job ->
             return forestBatch(city, worker, building, world, job)
         }
@@ -155,10 +200,10 @@ internal class CivsForestryWorksite(
         val timber = requireNotNull(CivsProduction.material(building))
         val sapling = timber.removeSuffix("_LOG") + "_SAPLING"
         val availableSaplings = if (!CivsAutonomy.legacyStock(city))
-            CivsEquipment.available(worker, stock(city, building.id)).filterKeys { it.endsWith("_SAPLING") } else emptyMap()
+            CivsEquipment.available(worker, context.stock(city, building.id)).filterKeys { it.endsWith("_SAPLING") } else emptyMap()
         val supplies = if (!CivsAutonomy.legacyStock(city)) availableSaplings[sapling] ?: 0L else forestSupply(city, worker, building, sapling)
-        val deferred = deferredRoots(worker, building)
-        val feet = residentFeet(worker.id)?.takeIf { it.world == world }
+        val deferred = approaches.deferredRoots(worker, building)
+        val feet = context.residentFeet(worker.id)?.takeIf { it.world == world }
         val search = forestSearches[worker.id]?.takeIf { it.building == building }
             ?: run {
                 val layout = CivsWorksiteLayouts.site(building)?.getAsJsonObject("forester") ?: return null
@@ -177,7 +222,7 @@ internal class CivsForestryWorksite(
         if (origin != search.residentOrigin) {
             search.residentOrigin = origin
             if (feet != null) {
-                refreshApproaches(worker.id, feet, deferred)
+                approaches.refreshForestApproaches(worker.id, feet, deferred)
             }
         }
         if (search.saplings != supplies || search.availableSaplings != availableSaplings) {
@@ -356,7 +401,7 @@ internal class CivsForestryWorksite(
         }
         if (search.retryRoots.isNotEmpty()) return blocked(worker, "searching-work", point = search.retryRoots.keys.first(),
             reason = "tree-observation-pending")
-        if (needStatus(city, worker) == "searching-work") return blocked(worker, "waiting-growth")
+        if (context.currentNeed(city, worker)?.status == "searching-work") return blocked(worker, "waiting-growth")
         return null
     }
 
@@ -387,7 +432,7 @@ internal class CivsForestryWorksite(
 
     private fun forestSupply(city: Settlement, worker: CivWorker, building: CivBuilding, sapling: String): Long =
         if (CivsAutonomy.legacyStock(city)) if (city.stock.wood > 0 || building.id.toString() !in city.forestrySeeded.orEmpty()) 4L else 0L
-        else CivsEquipment.available(worker, stock(city, building.id))[sapling] ?: 0
+        else CivsEquipment.available(worker, context.stock(city, building.id))[sapling] ?: 0
 
     private fun finishForestScan(city: Settlement, worker: CivWorker, building: CivBuilding, world: World,
         pending: ForestScan): CivWorldWork? {
@@ -417,7 +462,7 @@ internal class CivsForestryWorksite(
                 reason = if (job == null) pending.scan.failureReason ?: "tree-scan-incomplete" else "tree-already-claimed")
         }
         val work = forestBatch(city, worker, building, world, job)
-        val status = needStatus(city, worker)
+        val status = context.currentNeed(city, worker)?.status
         if (work != null || !spotSearchPending && status in
             setOf("worksite-no-access", "worksite-obstacle", "worksite-protected", "waiting-saplings")) {
             forestScans.remove(worker.id)
@@ -426,7 +471,7 @@ internal class CivsForestryWorksite(
                 if (search.unfunded.size > search.columns.size) search.unfunded.remove(search.unfunded.keys.first())
             }
             else if (work == null && status == "worksite-no-access") {
-                deferApproach(worker, building, job.root)
+                approaches.deferForestRoot(worker, building, job.root)
             }
         }
         return work
@@ -624,20 +669,20 @@ internal class CivsForestryWorksite(
     }
 
     private fun read(city: Settlement, building: CivBuilding, world: World, point: CivPosition,
-        observeBuilding: Boolean = false): Block? = readBlock(city, building, world, point, observeBuilding)
+        observeBuilding: Boolean = false): Block? = context.read(city, building, world, point, allowOwn = false, observeBuilding = observeBuilding)
 
     private fun beside(city: Settlement, worker: CivWorker, building: CivBuilding, world: World, point: CivPosition,
-        capture: (() -> CivWorldWork?)? = null): CivWorkApproach? = approach(city, worker, building, world, point, capture)
-        .also { spotSearchPending = it.pending }.approach
+        capture: (() -> CivWorldWork?)? = null): CivWorkApproach? = approaches.beside(city, worker, building, world, point, allowOwn = false, capture = capture)
+        .also { spotSearchPending = context.spotSearchPending }
 
     private fun work(worker: CivWorker, building: CivBuilding, approach: CivWorkApproach, changes: List<CivPlanBlock>,
         inputs: Map<String, Long> = emptyMap(), outputs: Map<String, Long> = emptyMap(), status: String,
         duration: Long = 3_000, focus: CivPosition? = null): CivWorldWork =
-        makeWork(worker, building, approach, CivWorkAction(changes, inputs, outputs, status, duration, focus))
+        context.work(worker, building, approach, changes, inputs, outputs, status, duration, focus = focus)
 
     private fun blocked(worker: CivWorker, status: String, material: String? = null, amount: Long = 1,
         point: CivPosition? = null, reason: String? = null, blockMaterial: String? = null): CivWorldWork? =
-        recordNeed(worker, CivWorkNeed(status, material, amount, point, reason, blockMaterial))
+        context.blocked(worker, status, material, amount, point, reason, blockMaterial)
 
     private fun protectedTreeCell(other: CivBuilding, point: CivPosition): Boolean =
         other.bounds.contains(point.x, point.y, point.z) ||

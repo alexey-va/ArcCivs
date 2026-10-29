@@ -1,6 +1,7 @@
 package ru.arc.civs
 
 import org.bukkit.Chunk
+import org.bukkit.FluidCollisionMode
 import org.bukkit.Location
 import org.bukkit.World
 import java.util.UUID
@@ -270,7 +271,6 @@ internal fun CivPosition.location(world: World) = Location(world, x + 0.5, y.toD
 internal fun CivPosition.point() = CitizenPoint(x + 0.5, y.toDouble(), z + 0.5)
 internal fun Location.point() = CitizenPoint(x, y, z)
 
-
 /** Horizontal footprints stay off transit routes, except the departure and actual destination buildings. */
 internal fun citizenRouteCellAllowed(city: Settlement, allowed: Set<UUID>, x: Int, z: Int): Boolean =
     city.contains(x, z) && civsProtectedBuildings(city).none { it.id !in allowed && !civsPublicTransit(it, x, z) &&
@@ -404,3 +404,85 @@ internal fun citizenMineWaypoint(city: Settlement, world: World, from: Location,
     }
     return null
 }
+
+internal fun citizenNavigationOutcome(completion: CitizenNavigationCompletion?, arrived: Boolean,
+    elapsedMillis: Long, timeoutMillis: Long, navigating: Boolean, searching: Boolean = false): CitizenNavigationOutcome = when {
+    completion?.cancelReason != null -> CitizenNavigationOutcome.CANCELLED
+    arrived -> CitizenNavigationOutcome.ARRIVED
+    completion != null -> CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
+    searching -> CitizenNavigationOutcome.PENDING
+    elapsedMillis > timeoutMillis -> CitizenNavigationOutcome.TIMED_OUT
+    !navigating -> CitizenNavigationOutcome.STOPPED
+    else -> CitizenNavigationOutcome.PENDING
+}
+
+// Entrances retain the domain bound; a real actor can stop up to 0.65 blocks from an entrance.
+internal const val CITIZEN_ROUTE_ARRIVAL_TOLERANCE = 1.0
+/** Packet routes use the actual standing cell centre at both intermediate and final nodes. */
+internal fun citizenNearEndpoint(from: CitizenPoint, target: CivPosition): Boolean =
+    abs(from.y - target.y) <= 0.5 && from.distanceSquared(target.point()) <= 0.65 * 0.65
+
+/** Transient reach during a fall must not cancel the route before the real landing. */
+internal fun citizenAtSupportedEndpoint(world: World, from: CitizenPoint, target: CivPosition): Boolean =
+    citizenNearEndpoint(from, target) && citizenPacketSupported(world, from)
+
+internal fun citizenRouteWithinReach(from: CitizenPoint, to: CitizenPoint,
+    maximumDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE): Boolean {
+    if (maximumDistance !in 1..CivsLogistics.MAX_TRANSFER_DISTANCE) return false
+    val maximum = maximumDistance + CITIZEN_ROUTE_ARRIVAL_TOLERANCE
+    return from.distanceSquared(to) <= maximum * maximum
+}
+internal fun citizenStorageNeedsReset(previous: CivPosition, next: CivPosition, actualPosition: CitizenPoint,
+    maximumDistance: Int = CivsRules.MAX_WORK_ROUTE_DISTANCE): Boolean =
+    previous != next && !citizenRouteWithinReach(actualPosition, next.point(), maximumDistance)
+
+internal fun CitizenPlan.chunksReady(world: World): Boolean = if (courier?.cargo?.sourceWorkerId != null)
+    citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
+else workplace?.let {
+    CitizenChunks.between(storage.x, storage.z, it.x, it.z).ready(world)
+} ?: citizenChunkReady(world, storage.x shr 4, storage.z shr 4)
+
+internal fun citizenArrived(from: Location, to: Location): Boolean {
+    if (from.world != to.world || abs(from.y - to.y) > 0.5) return false
+    val offset = to.toVector().subtract(from.toVector())
+    val distance = offset.length()
+    if (!citizenAtSupportedEndpoint(from.world!!, from.point(), CivPosition(to.blockX, to.blockY, to.blockZ))) return false
+    if (distance < 0.01) return true
+    return from.world!!.rayTraceBlocks(from.clone().add(0.0, 0.8, 0.0), offset.normalize(), distance,
+        FluidCollisionMode.ALWAYS, true) == null
+}
+
+internal class CitizenRoute(val from: CitizenPoint, val target: Location, val chunks: CitizenChunks, val startedAt: Long,
+    val timeoutMillis: Long, val allowedBuildings: Set<UUID>, var motion: CitizenPacketRoute, val trip: CivsPaths.Trip?,
+    val authored: CivPosition, val intermediate: Boolean = false, val idleAnchor: CivPosition? = null) {
+    var completion: CitizenNavigationCompletion? = null
+    var planningReported = false
+    var mineFailureReported = false
+    var storageReason: String? = null
+    var storageBuilding: UUID? = null
+    var path: CitizenPathSnapshot? = null
+    var previousMotion: CitizenPacketRoute? = null
+    var replanReason: String? = null
+    var replanAttempts = 0
+    var nativeCollisionTicks = 0
+    var observedProgress = 0.0
+    var progressSinceObservation = 0.0
+    var progressSinceReplan = 0.0
+    var progressTick = 0L
+    val timing = CitizenRouteTiming(startedAt, timeoutMillis)
+    var preparationReportAfter = startedAt + 2_000
+    var preparationRetryAt: Long? = null
+    var blockedWaypoint: CitizenPoint? = null
+
+    fun motionReady(tick: Long, now: Long) {
+        timing.ready(now)
+        observedProgress = motion.forwardProgress
+        progressSinceObservation = 0.0
+        progressSinceReplan = 0.0
+        progressTick = tick
+    }
+
+    fun timedOut(now: Long): Boolean = timing.timedOut(now, motion.searching)
+}
+internal data class CitizenArrivalWait(val token: CitizenToken, val target: CivPosition, val cargoId: UUID?,
+                               val carrying: Boolean?, val progressAt: Long)

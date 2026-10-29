@@ -1076,10 +1076,10 @@ class CivsWorldTest : FunSpec({
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.DIRT
 
             s.world.getBlockAt(0, 64, 0).type = Material.COARSE_DIRT
-            val stale = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
+            val refreshed = s.subject.captureAutonomousSite(city.id, city.owner, city.worldId, building,
                 listOf(worldCell(0, 64, "minecraft:stone")), proposed.terrain)
             s.scheduler.tick()
-            failureReason(stale) shouldBe "world-changed"
+            completed(refreshed).terrain!!.blocks.single() shouldBe cell.copy(before = "minecraft:coarse_dirt")
             s.world.getBlockAt(0, 64, 0).type shouldBe Material.COARSE_DIRT
         }
     }
@@ -1346,6 +1346,15 @@ class CivsWorldTest : FunSpec({
             s.scheduler.tick()
             completed(capture).terrain!!.route shouldBe route
             s.world.getBlockAt(1, 64, 0).type shouldBe Material.AIR
+
+            // Safe natural ground may change between planning stages. The proposed fill still
+            // proves the route; analysis must neither cancel the site nor rewrite this block.
+            s.world.getBlockAt(1, 64, 0).type = Material.COARSE_DIRT
+            val refreshedRoute = s.subject.autonomousRoute(city, building, route.first(),
+                java.util.concurrent.Executor(Runnable::run), proposed.terrain)
+            repeat(100) { if (!refreshedRoute.isDone) s.scheduler.tick() }
+            completed(refreshedRoute) shouldBe Unit
+            s.world.getBlockAt(1, 64, 0).type shouldBe Material.COARSE_DIRT
 
             val changedSource = CivPlanBlock(CivPosition(0, 63, 0), "minecraft:stone", "minecraft:dirt")
             val unsafe = proposed.terrain!!.copy(bounds = CivBox(CivPosition(0, 63, 0), CivPosition(1, 65, 0)),

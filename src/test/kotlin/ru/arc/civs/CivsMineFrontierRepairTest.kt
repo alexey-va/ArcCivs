@@ -148,8 +148,9 @@ private class FrontierRepairFixture(val paper: MockBukkitTestRuntime, val world:
     val plugin: Plugin, val access: CivsWorld, val city: Settlement, val mine: CivBuilding,
     val primary: CivPosition, val primaryLocal: CivPosition, val runtime: CivsWorksites) {
     fun frontierCells(plan: CivsMinePlan, around: CivPosition, sections: Map<String, Long>): List<Pair<CivPosition, CivPosition>> {
-        val method = CivsWorksites::class.java.declaredMethods.single { it.name == "mineFrontier" }.also { it.isAccessible = true }
-        val tasks = method.invoke(runtime, city, mine, world, plan, around, emptySet<CivPosition>(), null,
+        val owner = CivsWorksites::class.java.getDeclaredField("mine").also { it.isAccessible = true }.get(runtime)
+        val method = CivsMineWorksite::class.java.declaredMethods.single { it.name == "mineFrontier" }.also { it.isAccessible = true }
+        val tasks = method.invoke(owner, city, mine, world, plan, around, emptySet<CivPosition>(), null,
             city.minePlans!!.getValue(mine.id.toString()).nextStep, emptySet<CivPosition>(), sections) as List<*>
         return tasks.map { raw ->
             val task = requireNotNull(raw)

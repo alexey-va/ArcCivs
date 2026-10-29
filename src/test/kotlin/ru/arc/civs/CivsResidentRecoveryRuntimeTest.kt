@@ -353,13 +353,10 @@ class CivsResidentRecoveryRuntimeTest : FunSpec({
 
 private fun startRecoveryRoute(h: ResidentRuntime, target: CivPosition, anchor: CivPosition) {
     val actors = h.owner.javaClass.getDeclaredField("actors").run { isAccessible = true; get(h.owner) as Map<*, *> }
-    val actor = requireNotNull(actors[h.workerId])
-    h.owner.javaClass.declaredMethods.single { it.name == "cancelRoute" }.run {
-        isAccessible = true; invoke(h.owner, actor, null)
-    }
-    h.owner.javaClass.declaredMethods.single { it.name == "startRoute" }.run {
-        isAccessible = true; invoke(h.owner, actor, h.world, target, requireNotNull(h.navigationNow), anchor)
-    }
+    val actor = requireNotNull(actors[h.workerId]) as CitizenActor
+    val routes = h.owner.javaClass.getDeclaredField("routes").run { isAccessible = true; get(h.owner) as CivsCitizenRoutes }
+    routes.cancelRoute(actor)
+    routes.startRoute(actor, h.world, target, requireNotNull(h.navigationNow), anchor)
 }
 
 private fun carryingCourier(h: ResidentRuntime): CivCargo {

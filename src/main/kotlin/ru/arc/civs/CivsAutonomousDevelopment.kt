@@ -72,7 +72,7 @@ internal class CivsAutonomousDevelopment(
     }
 
     fun accessReady(city: Settlement): Boolean = city.autonomy == null ||
-        autonomousAccessChecked[city.id] == city.buildings
+        civsSameBuildingLayout(autonomousAccessChecked[city.id], city.buildings)
 
     /** A bounded inverse of older terrain journals runs before growth, even when resource stock is empty. */
     fun pulseAccessRepair() {
@@ -88,7 +88,7 @@ internal class CivsAutonomousDevelopment(
             fun completed(counts: Map<String, Int>?, error: Throwable?) {
                 busy -= city.id
                 if (closed) return
-                if (error == null && (counts?.get("denied") ?: 0) == 0 && cities[city.id]?.buildings == city.buildings) {
+                if (error == null && (counts?.get("denied") ?: 0) == 0 && civsSameBuildingLayout(cities[city.id]?.buildings, city.buildings)) {
                     autonomousAccessChecked[city.id] = city.buildings.toList()
                     autonomousAccessRetryAt.remove(city.id)
                     if ((counts?.get("changed") ?: 0) > 0 || (counts?.get("conflicts") ?: 0) > 0) CivsDiagnostics.record(Level.WARNING, city.id, CivsDiagnostics.line(
@@ -107,7 +107,7 @@ internal class CivsAutonomousDevelopment(
                 }
             }
             if (failure != null) { completed(null, failure); return@whenCompleteSync }
-            if (!ready() || cities[city.id]?.buildings != city.buildings || cities[city.id]?.autonomy?.paused != false) {
+            if (!ready() || !civsSameBuildingLayout(cities[city.id]?.buildings, city.buildings) || cities[city.id]?.autonomy?.paused != false) {
                 completed(null, CivsRejection("stale-building")); return@whenCompleteSync
             }
             if (repairs.isNullOrEmpty()) { completed(emptyMap(), null); return@whenCompleteSync }
@@ -132,7 +132,7 @@ internal class CivsAutonomousDevelopment(
         val adopted = CivsSettlementPlans.current(city)
         val checked = autonomyLayoutChecked[city.id]
         val infrastructure = CivsAutonomy.infrastructureDue(city, ordinary) &&
-            (checked?.first != city.buildings || now() >= checked.second)
+            (checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second)
         if (!infrastructure && ordinary == null && adopted != null) return
         var goal = if (infrastructure || ordinary == null) CivsAutonomy.goal(city, BuildingType.ROAD, 1, null) else requireNotNull(ordinary)
         val existing = if (infrastructure) null else goal.buildingId?.let(city::building)
@@ -214,7 +214,7 @@ internal class CivsAutonomousDevelopment(
             runCatching { afterCityAvailable(city.id) {
                 val current = cities[city.id] ?: throw CivsRejection("no-city")
                 val latest = if (infrastructure) CivsAutonomy.goal(current, goal.type, 1, null) else CivsAutonomy.nextGoal(current, blueprints::maximumLevel)
-                rejectIf(infrastructure && current.buildings != city.buildings, "stale-development")
+                rejectIf(infrastructure && !civsSameBuildingLayout(current.buildings, city.buildings), "stale-development")
                 rejectIf(infrastructure && latest?.ready != true, "not-enough-resources")
                 rejectIf(autonomyRequests[city.id] != request || current.autonomy?.paused != false ||
                     current.construction != null || current.constructionQueue.orEmpty().isNotEmpty() ||
@@ -269,7 +269,7 @@ internal class CivsAutonomousDevelopment(
                 val price = CivsDecorationCost.cost(requireNotNull(design).blueprint.materials)
                 afterCityAvailable(city.id) {
                     val current = cities[city.id] ?: throw CivsRejection("no-city")
-                    rejectIf(autonomyRequests[city.id] != request || current.buildings != city.buildings ||
+                    rejectIf(autonomyRequests[city.id] != request || !civsSameBuildingLayout(current.buildings, city.buildings) ||
                         current.autonomy?.paused != false || current.construction != null ||
                         current.constructionQueue.orEmpty().isNotEmpty() || !settlementActive(current), "stale-development")
                     rejectIf(CivsAutonomy.legacyStock(current) && !current.stock.covers(price), "not-enough-resources")

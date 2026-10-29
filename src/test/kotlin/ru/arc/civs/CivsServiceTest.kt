@@ -297,9 +297,9 @@ class CivsAutoGlobalSupplyServiceTest : FunSpec({
             val dispatcher = field.get(h.service) as CivsSupplyDispatcher
             h.tickUntil("accepted native global observation") { dispatcher.observation(city.id) != null }
             dispatcher.plan(city.id, workers.first().id)!!.cargo.amount shouldBe 8L
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            val pulse = CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
             h.time += 1_000
-            pulse.invoke(h.service)
+            pulse.invokeService(h.service)
             h.tick()
             target.contents.filterNotNull().filter { it.type == Material.COBBLESTONE }.sumOf { it.amount } shouldBe 0
             h.saves shouldBe emptyList()
@@ -308,14 +308,14 @@ class CivsAutoGlobalSupplyServiceTest : FunSpec({
             source.clear()
             storage.supplyPickup(mockk { every { inventory } returns source })
             h.time += 1_000
-            pulse.invoke(h.service)
+            pulse.invokeService(h.service)
             h.saves shouldBe emptyList()
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             h.tickUntil("fresh empty warehouse observation") {
                 dispatcher.observation(city.id)?.stores?.get(warehouse.id)?.stock?.isEmpty() == true
             }
             h.time += 1_000
-            pulse.invoke(h.service)
+            pulse.invokeService(h.service)
             h.tickUntil("exact globally missing grant") { h.saves.isNotEmpty() }
             target.contents.filterNotNull().filter { it.type == Material.COBBLESTONE }.sumOf { it.amount } shouldBe 8
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
@@ -335,12 +335,12 @@ class CivsAutoGlobalSupplyServiceTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.paper.addPlayer("AutoBootstrapWitness").teleport(Location(h.world, 1.5, 65.0, .5))
             h.start()
-            CivsService::class.java.getDeclaredMethod("pulseSupply").also { it.isAccessible = true }.invoke(h.service)
+            CivsCargoRequests::class.java.getDeclaredMethod("pulseSupply").also { it.isAccessible = true }.invokeService(h.service)
             val field = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
             val dispatcher = field.get(h.service) as CivsSupplyDispatcher
             h.tickUntil("bootstrap native observation") { dispatcher.observation(city.id) != null }
             h.time += 1_000
-            CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }.invoke(h.service)
+            CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }.invokeService(h.service)
             h.tickUntil("bootstrap food receipt") { h.saves.isNotEmpty() }
             target.contents.filterNotNull().filter { it.type == Material.BREAD }.sumOf { it.amount } shouldBe 4
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
@@ -521,9 +521,9 @@ class CivsAutonomousStorageRuntimeTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             h.service.ready() shouldBe true
-            val migrate = CivsService::class.java.getDeclaredMethod("pulseAutoStorage").also { it.isAccessible = true }
-            val flush = CivsService::class.java.getDeclaredMethod("pulseStorage").also { it.isAccessible = true }
-            migrate.invoke(h.service)
+            val migrate = CivsStorageActions::class.java.getDeclaredMethod("pulseAutoStorage").also { it.isAccessible = true }
+            val flush = CivsStorageActions::class.java.getDeclaredMethod("pulseStorage").also { it.isAccessible = true }
+            migrate.invokeService(h.service)
             h.saves.size shouldBe 1
             val migrated = h.saves.single().first
             migrated.stock shouldBe Stock()
@@ -533,13 +533,13 @@ class CivsAutonomousStorageRuntimeTest : FunSpec({
             h.saves.size shouldBe 1 // An unknown migration save cannot issue another copy.
             verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
             h.commit()
-            flush.invoke(h.service); h.tick()
+            flush.invokeService(h.service); h.tick()
             if (initiallyFull) {
                 h.saves.size shouldBe 1
                 verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
                 barrel.clear()
                 h.time += 6_000
-                flush.invoke(h.service); h.tick()
+                flush.invokeService(h.service); h.tick()
             }
             h.saves.size shouldBe 2
             fun count(material: Material) = barrel.contents.filterNotNull().filter { it.type == material }.sumOf { it.amount }
@@ -593,20 +593,20 @@ class CivsResidentFoodFairnessTest : FunSpec({
                 .setLong(autonomousDevelopment(h.service), Long.MAX_VALUE)
             h.start()
             if (firstBuffer == "unavailable") h.world.unloadChunk(0, 0)
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
-            pulse.invoke(h.service)
+            val pulse = CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            pulse.invokeService(h.service)
             h.saves shouldBe emptyList()
             // Await the real budgeted capture without advancing the population or grant clocks.
-            val observation = CivsService::class.java.getDeclaredMethod("autoSupplyObservation", Settlement::class.java)
+            val observation = CivsResidentSupplies::class.java.getDeclaredMethod("autoSupplyObservation", Settlement::class.java)
                 .also { it.isAccessible = true }
-            h.tickUntil("second town native supply capture") { observation.invoke(h.service, second) != null }
+            h.tickUntil("second town native supply capture") { observation.invokeService(h.service, second) != null }
             h.time += 1_000
-            pulse.invoke(h.service)
+            pulse.invokeService(h.service)
             h.tickUntil("second town native food receipt") { h.saves.isNotEmpty() }
             h.saves.single().first.id shouldBe second.id
             h.saves.single().first.stock shouldBe Stock()
             secondBarrel.contents.filterNotNull().filter { it.type == Material.BREAD }.sumOf { it.amount } shouldBe 4
-            repeat(3) { h.time += 1_000; pulse.invoke(h.service) }
+            repeat(3) { h.time += 1_000; pulse.invokeService(h.service) }
             h.saves.size shouldBe 1
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             h.commit()
@@ -633,8 +633,8 @@ class CivsAutoSupplyAckAuthorityTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.paper.addPlayer("GrantWitness").teleport(Location(h.world, 1.5, 65.0, .5))
             h.start()
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
-            pulse.invoke(h.service)
+            val pulse = CivsResidentSupplies::class.java.getDeclaredMethod("pulseAutoSupplies").also { it.isAccessible = true }
+            pulse.invokeService(h.service)
             receipt!!.autoSupplyBuildingId shouldBe hall.id
             barrel.isEmpty shouldBe true
             allowed = false
@@ -643,7 +643,7 @@ class CivsAutoSupplyAckAuthorityTest : FunSpec({
             barrel.isEmpty shouldBe true
             h.saves shouldBe emptyList()
             h.service.settlements().single() shouldBe city
-            h.time += 10_000; pulse.invoke(h.service)
+            h.time += 10_000; pulse.invokeService(h.service)
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             verify(exactly = 0) { h.store.deleteInventoryTransaction(any()) }
         }
@@ -926,8 +926,8 @@ class CivsServiceTest : FunSpec({
             every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
             h.start()
             h.paper.addPlayer("ResearchFundingWitness").teleport(Location(h.world, .5, 65.0, .5))
-            val pulse = CivsService::class.java.getDeclaredMethod("pulseResearch").also { it.isAccessible = true }
-            pulse.invoke(h.service)
+            val pulse = CivsCityResearch::class.java.getDeclaredMethod("pulseResearch").also { it.isAccessible = true }
+            pulse.invokeService(h.service)
             val tx = requireNotNull(receipt)
             tx.changes.map { it.container }.distinct() shouldBe listOf(university.control)
             tx.changes.map { it.before!!.material to it.before!!.amount }.toMap() shouldBe
@@ -936,7 +936,7 @@ class CivsServiceTest : FunSpec({
             barrel.getItem(0)!!.amount shouldBe 1
             h.service.city(h.player)!!.research!!.project!!.funded shouldBe false
             h.saves shouldBe emptyList()
-            pulse.invoke(h.service)
+            pulse.invokeService(h.service)
             verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
             journal.complete(tx)
             h.tickUntil("exact research debit and pending city credit") { h.saves.isNotEmpty() }
@@ -949,7 +949,7 @@ class CivsServiceTest : FunSpec({
             tx.after.workers shouldBe emptyList()
             tx.after.stock shouldBe Stock()
             h.commit()
-            pulse.invoke(h.service); h.tick()
+            pulse.invokeService(h.service); h.tick()
             val funded = h.service.city(h.player)!!
             funded.research!!.project!!.funded shouldBe true
             funded.research!!.project!!.workDone shouldBe 0
@@ -978,7 +978,7 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            fun complete() = deliver.invoke(h.service, ready.id, worker.id, university.id, worker.completedCycles,
+            fun complete() = deliver.invokeService(h.service, ready.id, worker.id, university.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             every { h.citizens.requireSelectedWorkDelivery(ready.id, worker.id, plan.token) } throws CivsRejection("route-unreachable")
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { complete().join() })?.reason shouldBe "route-unreachable"
@@ -1027,9 +1027,8 @@ class CivsServiceTest : FunSpec({
             shouldThrow<CivsRejection> { h.service.research(h.player, auto.id) }.reason shouldBe "not-authorized"
             every { h.player.world } returns h.world
             every { h.player.hasPermission("arccivs.admin") } returns true
-            val mutate = CivsService::class.java.declaredMethods.single { it.name == "mutate" }.also { it.isAccessible = true }
             val unrelated: (Settlement) -> Settlement = { it.copy(revision = it.revision + 1) }
-            val pending = mutate.invoke(h.service, auto.id, false, unrelated) as CompletableFuture<*>
+            val pending = h.service.mutate(auto.id, transform = unrelated)
             val queued = h.service.beginResearch(h.player, auto.id, CivResearchId.MATERIALS)
             queued.isDone shouldBe false
             every { h.player.hasPermission("arccivs.admin") } returns false
@@ -1633,6 +1632,13 @@ class CivsServiceTest : FunSpec({
             development.pulseAccessRepair(); h.tick()
             repair.complete(mapOf("changed" to 1, "unchanged" to 0, "conflicts" to 0, "denied" to 0)); h.tick()
             development.accessReady(city) shouldBe true
+            val productionChanged = city.copy(buildings = city.buildings.map { building ->
+                if (building.id == offender.id) building.copy(production = "SPRUCE_LOG") else building
+            })
+            development.accessReady(productionChanged) shouldBe true
+            development.accessReady(city.copy(buildings = city.buildings.map { building ->
+                if (building.id == offender.id) building.copy(entrance = building.entrance.copy(x = building.entrance.x + 1)) else building
+            })) shouldBe false
             development.pulseAccessRepair(); h.tick()
             verify(exactly = 2) { h.worldAdapter.repairAutonomousAccess(any(), any()) }
             h.service.settlements().single().stock shouldBe Stock()
@@ -1691,7 +1697,7 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            fun complete() = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
+            fun complete() = deliver.invokeService(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
             every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
@@ -1727,7 +1733,7 @@ class CivsServiceTest : FunSpec({
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
             val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
-            fun complete() = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
+            fun complete() = deliver.invokeService(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             every { h.citizens.pendingStockDelivery(village.id, worker.id) } returns worker.pendingStock
             every { h.citizens.requirePendingStockDelivery(village.id, worker.id, token) } throws CivsRejection("route-unreachable")
@@ -1761,16 +1767,15 @@ class CivsServiceTest : FunSpec({
                 workers = listOf(worker))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(village))
             h.start()
-            val mutate = CivsService::class.java.declaredMethods.single { it.name == "mutate" }.also { it.isAccessible = true }
             val unrelated: (Settlement) -> Settlement = { it.copy(stock = it.stock.copy(stone = it.stock.stone + 1),
                 revision = it.revision + 1) }
-            val pending = mutate.invoke(h.service, village.id, false, unrelated) as CompletableFuture<*>
+            val pending = h.service.mutate(village.id, transform = unrelated)
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
             val token = CitizenToken(quarry.id, worker.completedCycles, worker.nextDeliveryAt, null)
             every { h.citizens.requireAutonomousDelivery(village.id, worker.id, token) } returns requireNotNull(citizenPlan(village, worker))
-            val queued = deliver.invoke(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
+            val queued = deliver.invokeService(h.service, village.id, worker.id, quarry.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             queued.isDone shouldBe false
             verify(exactly = 0) { h.citizens.requireAutonomousDelivery(any(), any(), any()) }
@@ -1812,7 +1817,7 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            val pending = deliver.invoke(h.service, village.id, worker.id, farm.id, worker.completedCycles,
+            val pending = deliver.invokeService(h.service, village.id, worker.id, farm.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             h.saves.single().first shouldBe village.copy(revision = village.revision + 1)
             work.changes.forEach { cell ->
@@ -1948,7 +1953,7 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            val rejected = deliver.invoke(h.service, village.id, worker.id, farm.id, worker.completedCycles,
+            val rejected = deliver.invokeService(h.service, village.id, worker.id, farm.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             CivsDiagnostics.rejection(shouldThrow<CompletionException> { rejected.join() })?.reason shouldBe "stale-worksite"
             worksites.plan(village, worker) shouldBe null
@@ -2043,9 +2048,9 @@ class CivsServiceTest : FunSpec({
             h.world.loadChunk(site.control!!.x shr 4, site.control.z shr 4)
             h.world.getBlockAt(site.control.x, site.control.y, site.control.z).type = Material.BARREL
             h.start()
-            val activate = CivsService::class.java.getDeclaredMethod("activateBuilding", Settlement::class.java,
+            val activate = CivsBuildingRequests::class.java.getDeclaredMethod("activateBuilding", Settlement::class.java,
                 CivBuilding::class.java, Player::class.java).also { it.isAccessible = true }
-            val started = activate.invoke(h.service, city, site, null) as CompletableFuture<*>
+            val started = activate.invokeService(h.service, city, site, null) as CompletableFuture<*>
             h.tick()
             started.isCompletedExceptionally shouldBe false
             verify(exactly = 1) { h.worldAdapter.captureManualFoundation(city.id, city.owner, city.worldId,
@@ -2205,8 +2210,8 @@ class CivsServiceTest : FunSpec({
                 h.world.getBlockAt(control.x, control.y, control.z).type shouldBe Material.AIR
                 // The MockK actor is absent from onlinePlayers, so timer pulses cannot visit it.
                 h.paper.server.onlinePlayers.contains(h.player) shouldBe false
-                CivsService::class.java.getDeclaredMethod("refreshBoundary", Player::class.java)
-                    .also { it.isAccessible = true }.invoke(h.service, h.player)
+                CivsPlacementSession::class.java.getDeclaredMethod("refreshBoundary", Player::class.java)
+                    .also { it.isAccessible = true }.invokeService(h.service, h.player)
                 verify(atLeast = 1) { h.boundary.pulse(h.player, null, false, null, null, emptyMap()) }
                 verify(exactly = 0) { h.boundary.pulse(h.player, match<Settlement> { it.id == h.city.id }, any(), any(), any(), any()) }
             }
@@ -2556,7 +2561,7 @@ class CivsServiceTest : FunSpec({
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
                 .also { it.isAccessible = true }
-            fun complete() = deliver.invoke(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
+            fun complete() = deliver.invokeService(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             val completion = complete()
             val accepted = requireNotNull(receipt)
@@ -2616,7 +2621,7 @@ class CivsServiceTest : FunSpec({
             val nativeBefore = crop.blockData.asString
             val deliver = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE).also { it.isAccessible = true }
-            fun complete() = deliver.invoke(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
+            fun complete() = deliver.invokeService(h.service, ready.id, worker.id, farm.id, worker.completedCycles,
                 worker.nextDeliveryAt, null, h.time) as CompletableFuture<*>
             val result = complete()
             crop.blockData.asString shouldBe nativeBefore
@@ -2972,11 +2977,11 @@ class CivsServiceTest : FunSpec({
             val supplies = h.service.prepareResidentSupplies(before.id, carpenter.id, workshop.id, old.id)
             (shouldThrow<CompletionException> { h.await(supplies) }.cause as CivsRejection).reason shouldBe "stale-delivery"
             // Invoke the exact private callback wired into CivsCitizens, without adding a production test seam.
-            val delivery = CivsService::class.java.getDeclaredMethod("deliverCraft", UUID::class.java, UUID::class.java,
+            val delivery = CivsResidentSupplies::class.java.getDeclaredMethod("deliverCraft", UUID::class.java, UUID::class.java,
                 UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE).let {
                 it.isAccessible = true
                 @Suppress("UNCHECKED_CAST")
-                (it.invoke(h.service, before.id, carpenter.id, workshop.id, carpenter.completedCycles,
+                (it.invokeService(h.service, before.id, carpenter.id, workshop.id, carpenter.completedCycles,
                     carpenter.nextDeliveryAt, old.id, h.time) as CompletableFuture<Settlement>)
             }
             (shouldThrow<CompletionException> { h.await(delivery) }.cause as CivsRejection).reason shouldBe "stale-delivery"
@@ -3164,17 +3169,17 @@ class CivsServiceTest : FunSpec({
         serviceScenario { h ->
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.VIRTUAL))))
             h.start()
-            val factory = CivsService::class.java.getDeclaredMethod("captureSupply", UUID::class.java, Map::class.java)
+            val factory = CivsCargoRequests::class.java.getDeclaredMethod("captureSupply", UUID::class.java, Map::class.java)
                 .also { it.isAccessible = true }
             @Suppress("UNCHECKED_CAST")
-            val step = factory.invoke(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
+            val step = factory.invokeService(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
             val member = h.paper.addPlayer("SupplyBusyMember")
             val save = h.service.addMember(h.player, member.name)
             save.isDone shouldBe false
             shouldThrow<CivsRejection> { step() }.reason shouldBe "city-busy"
             h.commit(); save.join()
             @Suppress("UNCHECKED_CAST")
-            val retry = factory.invoke(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
+            val retry = factory.invokeService(h.service, h.city.id, emptyMap<UUID, CivCourierPlan>()) as () -> CivSupplySnapshot?
             var result: CivSupplySnapshot? = null
             repeat(16) { if (result == null) result = retry() }
             result!!.cityId shouldBe h.city.id
@@ -3188,8 +3193,7 @@ class CivsServiceTest : FunSpec({
             val changed = current.copy(revision = current.revision + 1, workers = current.workers.mapIndexed { index, worker ->
                 if (index == 0) worker.copy(completedCycles = worker.completedCycles + 1) else worker
             })
-            val publish = CivsService::class.java.getDeclaredMethod("publish", Settlement::class.java).also { it.isAccessible = true }
-            (publish.invoke(h.service, changed) as CompletableFuture<*>).join()
+            h.service.publish(changed).join()
             val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
                 .get(h.service) as CivsSupplyDispatcher
             dispatcher.cityIds() shouldBe setOf(current.id)
@@ -4756,9 +4760,9 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(capture).thenApply { captures[it.id] = it; it }
             }
             h.start()
-            val startOrder = CivsService::class.java.getDeclaredMethod("startOrder", UUID::class.java,
+            val startOrder = CivsBuildingRequests::class.java.getDeclaredMethod("startOrder", UUID::class.java,
                 Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
-            val starting = startOrder.invoke(h.service, city.owner, city, plan, bytes) as CompletableFuture<*>
+            val starting = startOrder.invokeService(h.service, city.owner, city, plan, bytes) as CompletableFuture<*>
             if (autonomous && earthworks) {
                 h.saves shouldBe emptyList()
                 starting.isDone shouldBe false
@@ -4807,9 +4811,9 @@ class CivsServiceTest : FunSpec({
                 else CompletableFuture.completedFuture(firstArg())
             }
             h.start()
-            val startOrder = CivsService::class.java.getDeclaredMethod("startOrder", UUID::class.java,
+            val startOrder = CivsBuildingRequests::class.java.getDeclaredMethod("startOrder", UUID::class.java,
                 Settlement::class.java, CivPlacementPlan::class.java, ByteArray::class.java).also { it.isAccessible = true }
-            val starting = startOrder.invoke(h.service, city.owner, city, plan, byteArrayOf(2)) as CompletableFuture<*>
+            val starting = startOrder.invokeService(h.service, city.owner, city, plan, byteArrayOf(2)) as CompletableFuture<*>
             h.tick()
 
             CivsDiagnostics.cause(shouldThrow<CompletionException> { starting.join() }) shouldBe failure
@@ -6507,10 +6511,7 @@ private class ServiceMineFallback(private val h: ServiceScenario) {
         val transition: (Settlement, CivInventory) -> Settlement = { before, inventory ->
             CivsRules.finishWorldWork(before, work, h.time).copy(inventory = inventory)
         }
-        return CivsService::class.java.getDeclaredMethod("inventoryMutation", UUID::class.java,
-            kotlin.jvm.functions.Function1::class.java, Player::class.java, java.lang.Boolean.TYPE,
-            kotlin.jvm.functions.Function2::class.java).also { it.isAccessible = true }
-            .invoke(h.service, city.id, prepare, null, true, transition) as CompletableFuture<Settlement>
+        return h.service.inventoryMutation(city.id, prepare, null, true, transition)
     }
 
     fun receipt(): CivInventoryTransaction {
@@ -6565,7 +6566,7 @@ private class ServiceRoadUpkeep(private val h: ServiceScenario, physical: Boolea
     @Suppress("UNCHECKED_CAST")
     fun deliver(): CompletableFuture<Settlement> = CivsService::class.java.getDeclaredMethod("deliver", UUID::class.java,
         UUID::class.java, UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE)
-        .also { it.isAccessible = true }.invoke(h.service, city.id, worker.id, hut.id, worker.completedCycles,
+        .also { it.isAccessible = true }.invokeService(h.service, city.id, worker.id, hut.id, worker.completedCycles,
             worker.nextDeliveryAt, null, h.time) as CompletableFuture<Settlement>
 }
 
@@ -6942,4 +6943,22 @@ private class ServicePlacement(val city: Settlement) {
     val pasted = CompletableFuture<ArcSchematicMutationResult>()
     val repaired = CompletableFuture<ArcSchematicMutationResult>()
     val operation = mockk<ArcSchematicOperation>(relaxed = true)
+}
+
+/** Private callback tests resolve their exact canonical owner after service decomposition. */
+private fun java.lang.reflect.Method.invokeService(service: CivsService, vararg arguments: Any?): Any? {
+    val ownerField = when (declaringClass) {
+        CivsResidentSupplies::class.java -> "residentSupplies"
+        CivsCargoRequests::class.java -> "cargoRequests"
+        CivsStorageActions::class.java -> "storageActions"
+        CivsCityResearch::class.java -> "cityResearch"
+        CivsBuildingRequests::class.java -> "buildingRequests"
+        CivsPlacementSession::class.java -> "placement"
+        CivsService::class.java -> null
+        else -> error("Missing service callback owner for $declaringClass")
+    }
+    val owner = ownerField?.let { field ->
+        CivsService::class.java.getDeclaredField(field).also { it.isAccessible = true }.get(service)
+    } ?: service
+    return invoke(owner, *arguments)
 }

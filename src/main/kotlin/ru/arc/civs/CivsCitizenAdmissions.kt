@@ -119,3 +119,29 @@ internal data class CitizenSpawnSample(val point: CivPosition, val reason: Strin
     val support: String?, val feet: String?, val head: String?)
 internal data class CitizenSpawnSearch(val point: CivPosition?, val at: Long, val inspected: Int,
     val rejections: Map<String, Int>, val samples: List<CitizenSpawnSample>)
+
+internal fun citizenHasViewer(worldId: UUID, point: CitizenPoint, viewers: List<CitizenViewer>, range: Int): Boolean =
+    viewers.any { it.worldId == worldId && it.point.distanceSquared(point) <= range.toDouble() * range }
+internal fun citizenSpawnBudget(active: Int, maximum: Int): Int = (maximum.coerceIn(0, 48) - active).coerceIn(0, 2)
+
+internal const val CITIZEN_SPAWN_CANDIDATE_LIMIT = 13 * 9
+
+/** Preserve the nearest floor first, then inspect only four blocks above and below it. */
+internal fun citizenSpawnCandidates(origin: CivPosition, ordinal: Int): Sequence<CivPosition> = sequence {
+    val offsets = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1, 1 to 1, -1 to 1,
+        1 to -1, -1 to -1, 2 to 0, -2 to 0, 0 to 2, 0 to -2)
+    for (dy in listOf(0, 1, -1, 2, -2, 3, -3, 4, -4)) for (index in offsets.indices) {
+        val (dx, dz) = offsets[Math.floorMod(index + ordinal, offsets.size)]
+        val x = origin.x.toLong() + dx
+        val y = origin.y.toLong() + dy
+        val z = origin.z.toLong() + dz
+        if (x in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() && y in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() &&
+            z in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) yield(CivPosition(x.toInt(), y.toInt(), z.toInt()))
+    }
+}
+
+/** Failed native target checks consume an admission too, so they must not monopolize the next pulse. */
+internal fun <T> citizenRotateAfterAdmission(actors: MutableMap<UUID, T>, workerId: UUID) {
+    val actor = actors.remove(workerId) ?: return
+    actors[workerId] = actor
+}

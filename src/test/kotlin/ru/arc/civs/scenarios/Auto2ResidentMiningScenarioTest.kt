@@ -193,7 +193,8 @@ private fun mineActorTrace(h: ResidentRuntime): String {
 
 private fun mineRepairTrace(run: SettlementScenario, worker: CivWorker, mine: CivBuilding): String {
     val runtime = SettlementScenario::class.java.getDeclaredField("worksites").also { it.isAccessible = true }.get(run)
-    val scans = CivsWorksites::class.java.getDeclaredField("mineSafety").also { it.isAccessible = true }.get(runtime) as Map<*, *>
+    val owner = CivsWorksites::class.java.getDeclaredField("mine").also { it.isAccessible = true }.get(runtime)
+    val scans = CivsMineWorksite::class.java.getDeclaredField("mineSafety").also { it.isAccessible = true }.get(owner) as Map<*, *>
     val scan = scans[worker.id] ?: return "none"
     val frontier = scan.javaClass.getDeclaredField("frontier").also { it.isAccessible = true }.get(scan) as List<*>
     val plan = requireNotNull(CivsMinePlan.forBuilding(mine))

@@ -21,7 +21,7 @@ data class CivPlanBoardSnapshot(
     val plan: CivSettlementPlan? = null,
 )
 
-/** Geometry identity deliberately excludes stock, residents and construction work cursors. */
+/** Geometry identity excludes production selection, stock, residents and construction work cursors. */
 internal fun civsPlanBoardLayoutKey(city: Settlement): String {
     require(city.buildings.size <= CivsRules.MAX_SITES)
     val digest = MessageDigest.getInstance("SHA-256")
@@ -33,7 +33,7 @@ internal fun civsPlanBoardLayoutKey(city: Settlement): String {
     fun building(value: CivBuilding) {
         field(value.id); field(value.type); field(value.level); field(value.anchor); field(value.rotation)
         field(value.schematicId); field(value.bounds); field(value.entrance); field(value.phase)
-        field(value.control); field(value.production); field(value.transit.orEmpty().size)
+        field(value.control); field(value.transit.orEmpty().size)
         value.transit.orEmpty().forEach(::field)
     }
     field(city.id); field(city.name); field(city.worldId); field(city.center); field(city.radius)

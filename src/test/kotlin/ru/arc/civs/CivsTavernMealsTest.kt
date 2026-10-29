@@ -38,9 +38,9 @@ class CivsTavernMealsTest : FunSpec({
                 awaitPickup(1)
                 val firstTicket = h.mealState()["ticket"]
                 val actors = h.owner.javaClass.getDeclaredField("actors").also { it.isAccessible = true }.get(h.owner) as Map<*, *>
-                val guest = requireNotNull(actors[h.workerId])
-                h.owner.javaClass.declaredMethods.single { it.name == "stopMeal" }.also { it.isAccessible = true }
-                    .invoke(h.owner, guest)
+                val guest = requireNotNull(actors[h.workerId]) as CitizenActor
+                val life = h.owner.javaClass.getDeclaredField("life").also { it.isAccessible = true }.get(h.owner) as CivsCitizenLife
+                life.stopMeal(guest)
                 h.navigationNow = requireNotNull(h.navigationNow) + 1_000
                 h.owner.pulse(requireNotNull(h.navigationNow))
                 awaitPickup(2)

@@ -85,6 +85,9 @@ class CivsPlanBoardSnapshotTest : FunSpec({
         val constructing = city.copy(construction = order)
         civsPlanBoardLayoutKey(city.copy(revision = 100, stock = Stock(9, 10, 11),
             workers = listOf(CivWorker(UUID.randomUUID(), "Resident", null, completedCycles = 70)))) shouldBe key
+        civsPlanBoardLayoutKey(city.copy(buildings = city.buildings.map { building ->
+            if (building.type == BuildingType.FORESTER) building.copy(production = "SPRUCE_LOG") else building
+        })) shouldBe key
         civsPlanBoardLayoutKey(constructing.copy(construction = order.copy(workDone = 1))) shouldBe civsPlanBoardLayoutKey(constructing)
         listOf(city.copy(name = "Renamed"), city.copy(radius = 97), city.copy(center = city.center.copy(x = 1)),
             city.copy(worldId = UUID.randomUUID()), city.copy(constructionQueue = listOf(city.buildings.last().id)),

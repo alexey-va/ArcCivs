@@ -9,6 +9,7 @@ enum class BuildingType {
 
     val isInfrastructure: Boolean get() = this == WALL || this == GATE || this == ROAD
     val isResidence: Boolean get() = this == HOUSE || this == TAVERN
+    val isWorldWork: Boolean get() = this == FARM || this == FORESTER || this == QUARRY
     val maxLevel: Int get() = if (isInfrastructure || this == PLAN_BOARD || this == DECORATION) 1 else 3
 }
 enum class BuildingPhase { SITE, CONSTRUCTING, ACTIVE }

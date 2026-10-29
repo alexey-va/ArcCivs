@@ -185,8 +185,9 @@ class Auto2MineCoverScenarioTest : FunSpec({
 
 /** Read only the existing execution diagnostic; native selection and its limits stay untouched. */
 private fun mineSectionDenial(runtime: CivsWorksites, mine: CivBuilding): Pair<String, String>? {
-    val executions = CivsWorksites::class.java.getDeclaredField("mineExecutions").also { it.isAccessible = true }
-        .get(runtime) as Map<*, *>
+    val owner = CivsWorksites::class.java.getDeclaredField("mine").also { it.isAccessible = true }.get(runtime)
+    val executions = CivsMineWorksite::class.java.getDeclaredField("mineExecutions").also { it.isAccessible = true }
+        .get(owner) as Map<*, *>
     val execution = executions[mine.id] ?: return null
     val section = execution.javaClass.getDeclaredField("lastDeniedSection").also { it.isAccessible = true }
         .get(execution) as? String ?: return null

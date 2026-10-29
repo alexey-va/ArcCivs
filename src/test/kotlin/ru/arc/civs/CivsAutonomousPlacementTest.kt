@@ -209,6 +209,13 @@ class CivsAutonomousPlacementTest : FunSpec({
 
             mound.type = Material.STONE
             val current = mound.blockData.asString
+            val recaptured = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
+                blueprint.building, blueprint.cells, site, oldTerrain)
+            s.finish(recaptured)
+            recaptured.join().terrain!!.blocks.single { it.position == changed }.before shouldBe current
+            oldTerrain.blocks.single { it.position == changed }.before shouldBe original
+            mound.type shouldBe Material.STONE
+
             val added = changed.copy(y = 67)
             val addedBlock = s.world.getBlockAt(added.x, added.y, added.z)
             addedBlock.type = Material.GRASS_BLOCK
@@ -216,7 +223,7 @@ class CivsAutonomousPlacementTest : FunSpec({
             val stale = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
                 blueprint.building, blueprint.cells, site, oldTerrain)
             s.finish(stale)
-            spatialFailure(stale) shouldBe "world-changed"
+            spatialFailure(stale) shouldBe "autonomy-terrain"
 
             val refreshed = s.planner.prepareExisting(s.city, blueprint)
             s.finish(refreshed)

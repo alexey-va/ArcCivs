@@ -18,6 +18,29 @@ assemble = load("catalog_assembler", "assemble-catalog.py")
 dining = load("catalog_dining", "enrich-tavern-dining.py")
 
 
+class CatalogRecipeInputsTest(unittest.TestCase):
+    def test_scene_geometry_bytes_are_part_of_stable_recipe_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script_path = Path(directory) / "curate-catalog.py"
+            scene_path = script_path.with_name("catalog_scene.py")
+            script_path.write_bytes(b"script source")
+            scene_path.write_bytes(b"scene geometry v1")
+
+            first = curate.code_inputs(script_path)
+            repeated = curate.code_inputs(script_path)
+            first_hash = curate.digest(curate.canonical(first))
+
+            self.assertEqual(first, repeated)
+            self.assertEqual(first_hash, curate.digest(curate.canonical(repeated)))
+
+            scene_path.write_bytes(b"scene geometry v2")
+            changed_scene = curate.code_inputs(script_path)
+
+            self.assertEqual(first["scriptSha256"], changed_scene["scriptSha256"])
+            self.assertNotEqual(first["sceneGeometrySha256"], changed_scene["sceneGeometrySha256"])
+            self.assertNotEqual(first_hash, curate.digest(curate.canonical(changed_scene)))
+
+
 def room():
     names = ["minecraft:air", "minecraft:stone", "minecraft:bookshelf", "minecraft:chest", "minecraft:barrel", "minecraft:oak_planks"]
     registry = {"blocks": {name: {"boundingBox": "empty" if name.endswith(":air") else "block"} for name in names}}

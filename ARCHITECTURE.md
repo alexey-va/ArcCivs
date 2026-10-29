@@ -1,5 +1,8 @@
 # ArcCivs settlement contract
 
+The [runtime module map and extension rules](docs/runtime-modules.md) describe
+the concrete execution owners, new-profession seam and changed-world policy.
+
 Players found one settlement, choose a curated imported building style, place
 and preview a town hall site, welcome gradual pioneers, assign a hut builder, build production and housing,
 recruit residents, and upgrade buildings/town hall through three levels.

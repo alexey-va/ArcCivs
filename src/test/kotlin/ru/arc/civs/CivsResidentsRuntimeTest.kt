@@ -4769,10 +4769,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
         set("route", null)
         set("cycle", CitizenCycle(plan.token, 0, pickupAtWorkplace = true, carrying = true).also { it.start() })
         set("collisionResident", blocker)
-        owner.javaClass.declaredMethods.single { it.name == "beginResidentYield" }.run {
-            isAccessible = true
-            invoke(owner, actor)
-        }
+        val collisions = field(owner, "collisions") as CivsCitizenCollisions
+        collisions.beginResidentYield(actor as CitizenActor)
     }
     fun playerAt(at: Location): Player = paper.addPlayer("TrafficBlocker").also { it.teleport(at); world.threatEntities += it }
     fun nativeCollisions() = CivsResidentCollisions(plugin, owner::collisionActors, owner::nudgeResident)
