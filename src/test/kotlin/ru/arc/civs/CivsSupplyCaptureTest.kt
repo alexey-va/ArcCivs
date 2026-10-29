@@ -27,6 +27,21 @@ import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.util.UUID
 
 class CivsSupplyCaptureTest : FunSpec({
+    test("captured producer output room reserves two slots in each native holder") {
+        supplyCaptureScenario { h ->
+            h.city = h.city.copy(buildings = h.city.buildings.map {
+                if (it.id == h.warehouse.id) it.copy(type = BuildingType.QUARRY) else it
+            })
+            val first = h.nodes.getValue(requireNotNull(h.warehouse.control))
+            val second = h.nodes.getValue(CivPosition(2, 64, 0))
+            repeat(26) { first.contents[it] = ItemStack(Material.STONE, 64) }
+            repeat(24) { second.contents[it] = ItemStack(Material.STONE, 64) }
+            val capacity = h.capture().stores.getValue(h.warehouse.id).capacity
+            capacity.emptySlots shouldBe 4
+            capacity.outputEmptySlots shouldBe 1
+        }
+    }
+
     test("Auto captures actual slots separately for the producer and warehouse without counting an outside chest half") {
         supplyCaptureScenario { h ->
             h.city = h.city.copy(inventory = null, autonomy = CivAutonomy())
@@ -176,6 +191,32 @@ class CivsSupplyCaptureTest : FunSpec({
             h.storage.supplyPickup(h.pickup(CivPosition(3, 64, 0)))
             h.storage.supplyRevision(h.city.id) shouldBe revision
             h.storage.supplyCaptureCurrent(h.city, before) shouldBe true
+        }
+    }
+})
+
+class CivsUpgradeStorageCapacityTest : FunSpec({
+    test("an actual upgrade invalidates prior capacity and excludes old chest room while retaining its stock") {
+        supplyCaptureScenario { h ->
+            val control = h.nodes.getValue(requireNotNull(h.warehouse.control))
+            repeat(STORAGE_SLOTS) { control.contents[it] = ItemStack(Material.STONE, 64) }
+            val chest = h.nodes.getValue(CivPosition(2, 64, 0))
+            chest.contents[0] = ItemStack(Material.OAK_LOG, 60)
+            val previous = h.capture()
+            previous.stores.getValue(h.warehouse.id).capacity shouldBe CivSupplyCapacity(26, mapOf("OAK_LOG" to 4L))
+            val target = h.warehouse.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+            h.city = h.city.copy(construction = CivConstruction(UUID.randomUUID(), h.warehouse.id, 2, 1, 0,
+                ConstructionPhase.CONSTRUCTING, Stock(), plannedBuilding = target))
+            h.storage.supplyCaptureCurrent(h.city, previous, setOf(h.warehouse.id)) shouldBe false
+            h.storage.supplyCaptureCurrent(h.city, previous, setOf(h.producer.id)) shouldBe true
+            val current = h.capture().stores.getValue(h.warehouse.id)
+            current.stock shouldBe mapOf("STONE" to (STORAGE_SLOTS * 64L), "OAK_LOG" to 60L)
+            current.capacity shouldBe CivSupplyCapacity(0, emptyMap())
+            current.slots shouldBe 54
+            val during = h.capture()
+            h.city = h.city.copy(construction = null)
+            h.storage.supplyCaptureCurrent(h.city, during, setOf(h.warehouse.id)) shouldBe false
+            h.capture().stores.getValue(h.warehouse.id).capacity shouldBe CivSupplyCapacity(26, mapOf("OAK_LOG" to 4L))
         }
     }
 })

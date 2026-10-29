@@ -23,7 +23,13 @@ internal class CivsWorksiteApproaches(
     private val forestry: () -> CivsForestryWorksite,
     private val invalidate: (UUID) -> Unit,
 ) {
-    data class RemoteWorkProbe(var candidate: CivWorldWork? = null, var nextAim: Int = 0)
+    data class RemoteWorkProbe(var candidate: CivWorldWork? = null, var nextAim: Int = 0,
+        val origins: MutableSet<CivPosition> = linkedSetOf()) {
+        fun observed(origin: CivPosition) {
+            origins += origin
+            if (origins.size > 512) origins.remove(origins.first())
+        }
+    }
     data class WorkSpotSearch(val buildingId: UUID, val target: CivPosition, val allowOwn: Boolean,
         val ladder: Boolean, val offsets: List<CivPosition>,
         var next: Int = 0, var nextAim: Int = 0, var sawStanding: Boolean = false,
@@ -53,11 +59,20 @@ internal class CivsWorksiteApproaches(
             val reach = if (building.type == BuildingType.QUARRY) 6 else 4
             fun nearby(p: CivPosition, radius: Int) = kotlin.math.abs(p.x - point.x) <= radius &&
                 kotlin.math.abs(p.z - point.z) <= radius && point.y in p.y - 3..p.y + 3
-            nearby(rejected.lastFocus, reach) || rejected.positions.keys.any { nearby(it, 1) }
+            val focus = rejected.lastFocus
+            nearby(focus, reach) || rejected.positions.keys.any { nearby(it, 1) } ||
+                building.type == BuildingType.FORESTER && rejected.remote.origins.any { origin ->
+                    point.x in minOf(origin.x, focus.x) - 1..maxOf(origin.x, focus.x) + 1 &&
+                        point.z in minOf(origin.z, focus.z) - 1..maxOf(origin.z, focus.z) + 1 &&
+                        point.y in minOf(origin.y - 1, focus.y)..maxOf(origin.y + 2, focus.y + 1)
+                }
         }
     }
     fun protectionChanged(workerId: UUID, affected: (CivPosition, Int) -> Boolean) {
-        refreshRejected(workerId) { rejected -> affected(rejected.lastFocus, 6) || rejected.positions.keys.any { affected(it, 1) } }
+        refreshRejected(workerId) { rejected ->
+            affected(rejected.lastFocus, 6) || rejected.positions.keys.any { affected(it, 1) } ||
+                rejected.key.building.type == BuildingType.FORESTER && rejected.remote.origins.any { affected(it, 1) }
+        }
         workSpots[workerId]?.takeIf { affected(it.target, 6) }?.let { workSpots.remove(workerId) }
     }
     fun deferredRoots(worker: CivWorker, building: CivBuilding): Set<CivPosition> =
@@ -65,17 +80,32 @@ internal class CivsWorksiteApproaches(
             deferred.entries.removeIf { it.value.key.building != building }
         }.keys
     fun refreshForestApproaches(workerId: UUID, feet: Location, deferred: Set<CivPosition>) {
+        if (rejectedWorkSpots[workerId] != null) return
+        val origin = CivPosition(feet.blockX, feet.y.roundToInt(), feet.blockZ)
         val eye = feet.clone().add(0.0, 1.62, 0.0)
         val reach = CITIZEN_REMOTE_WORK_REACH
-        refreshRejected(workerId) { rejected ->
-            rejected.lastFocus in deferred && citizenBlockAimPoints(eye, rejected.lastFocus).any { aim ->
-                eye.distanceSquared(aim) <= reach * reach
-            }
-        }
+        val roots = deferredForestApproaches[workerId] ?: return
+        val reopened = roots.entries.firstOrNull { (focus, rejected) ->
+            focus in deferred && origin !in rejected.remote.origins &&
+                citizenBlockAimPoints(eye, focus).any { aim ->
+                    eye.distanceSquared(aim) <= reach * reach
+                }
+        } ?: return
+        // Preserve failed ordinary stances while a new actor cell tries the remote approach.
+        val focus = reopened.key
+        val rejected = reopened.value
+        roots.remove(focus)
+        rejected.retryAt = null; rejected.remoteChecked = false
+        rejected.remote.candidate = null; rejected.remote.nextAim = 0
+        rejectedWorkSpots[workerId] = rejected
+        workSpots.remove(workerId)
+        forestry().approachReopened(workerId, focus)
     }
     fun deferForestRoot(worker: CivWorker, building: CivBuilding, root: CivPosition) {
         val key = requireNotNull(standingKey(worker, building, null, root))
-        deferForest(worker.id, rejectedWorkSpots.remove(worker.id) ?: RejectedWorkSpots(key, root))
+        val rejected = rejectedWorkSpots[worker.id]?.takeIf { it.key == key }
+            ?.also { rejectedWorkSpots.remove(worker.id) } ?: RejectedWorkSpots(key, root)
+        deferForest(worker.id, rejected)
     }
 
     private fun refreshRejected(workerId: UUID, affected: (RejectedWorkSpots) -> Boolean) {
@@ -83,6 +113,7 @@ internal class CivsWorksiteApproaches(
             // Keep a pending immutable batch; only its geometry evidence expired.
             rejected.positions.clear(); rejected.retryAt = null; rejected.checkedChanges = 0
             rejected.remoteChecked = false; rejected.remote.candidate = null; rejected.remote.nextAim = 0
+            rejected.remote.origins.clear()
             workSpots.remove(workerId)
         }
         deferredForestApproaches[workerId]?.entries?.removeIf { (_, rejected) ->
@@ -111,6 +142,7 @@ internal class CivsWorksiteApproaches(
         rejected.pending = context.cached.remove(worker.id)
         rejected.checkedChanges = 0
         rejected.remoteChecked = work.remoteWork
+        if (building.type == BuildingType.FORESTER && work.remoteWork) rejected.remote.observed(work.standing)
         rejected.remote.candidate = null
         rejected.remote.nextAim = 0
         workSpots.remove(worker.id)
@@ -150,8 +182,9 @@ internal class CivsWorksiteApproaches(
         if (context.spotChecksRemaining <= 0 || context.nanoTime() >= context.discoveryBudget.deadline) { context.spotSearchPending = true; return null }
         context.spotChecksRemaining--
         val actual = CitizenPoint(feet.x, feet.y, feet.z)
-        if (!citizenPacketSupported(world, actual) || !citizenPacketBodyClear(world, actual, false)) return null
         val standing = CivPosition(feet.blockX, feet.y.roundToInt(), feet.blockZ)
+        if (building.type == BuildingType.FORESTER) probe.observed(standing)
+        if (!citizenPacketSupported(world, actual) || !citizenPacketBodyClear(world, actual, false)) return null
         val candidate = work.copy(standing = standing, remoteWork = true)
         if (candidate != probe.candidate) { probe.candidate = candidate; probe.nextAim = 0 }
         if (!workStandingAllowed(city, building, world, candidate, focus)) return null
@@ -429,6 +462,12 @@ internal class CivsWorksiteApproaches(
             if (remote != null || !search.remoteFinished) return remote
         }
         workSpots.remove(worker.id)
+        if (building.type == BuildingType.FORESTER) {
+            val key = requireNotNull(standingKey(worker, building, null, target))
+            val closed = rejected ?: RejectedWorkSpots(key, target)
+            search.remote.origins.forEach(closed.remote::observed)
+            rejectedWorkSpots[worker.id] = closed
+        }
         // A completed sweep may retry after a bounded pause; elapsed time never
         // discards failures in the middle of trying its remaining alternatives.
         if (rejected != null && rejected.positions.isNotEmpty()) rejected.retryAt = Bukkit.getCurrentTick().toLong() + 100

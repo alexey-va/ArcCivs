@@ -874,7 +874,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                                 } }
                             if (landingOpening && (geometry.builtStanding(wall, accessStep, sectionSteps) ||
                                     geometry.builtStanding(wall.copy(y = wall.y - 1), accessStep, sectionSteps))) continue
-                            if (landingOpening && geometry.version == 7 && CivsMineProgress.v6State(city.minePlans?.get(building.id.toString())) != null &&
+                            if (landingOpening && geometry.version == 7 &&
                                 (CivsMineProgress.priorStanding(building, city.minePlans?.get(building.id.toString()),
                                     CivsWorksiteLayouts.point(building, wall)) ||
                                     CivsMineProgress.priorStanding(building, city.minePlans?.get(building.id.toString()),

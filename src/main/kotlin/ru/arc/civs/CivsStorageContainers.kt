@@ -132,7 +132,7 @@ internal class CivsStorageContainers(
         if (block.type.name !in CIVS_STORAGE_TYPES || expectedType != null && block.type.name != expectedType || control && block.type != Material.BARREL)
             throw CivsRejection("storage-container-invalid", located + ("block" to block.type.name))
         require(inventory.size == STORAGE_SLOTS)
-        return Source(position, block.type.name, inventory)
+        return Source(position, block.type.name, inventory, civsNativeContainerAcceptsInsert(city, position))
     }
 
     private fun captureSupplyContainer(city: Settlement, position: CivPosition, expectedType: String?): CivSupplyCapturedContainer? {
@@ -148,7 +148,7 @@ internal class CivsStorageContainers(
                 val native = requireNotNull(item)
                 CivSupplyCapturedSlot(native.type.name, native.amount, plain(native) != null, native.maxStackSize)
             }
-        })
+        }, source.acceptsInsert)
     }
 
     fun placed(event: BlockPlaceEvent) {

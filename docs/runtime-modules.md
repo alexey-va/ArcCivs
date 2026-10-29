@@ -78,6 +78,14 @@ and `CivsStorageItems`. Their output still enters `CivsInventoryTransaction` and
 the same `CivsInventoryJournal`; there is no alternative native debit path.
 `CivsWorkerCommits` confirms observed work through that existing city authority.
 
+New producer output leaves two empty slots per physical holder for required
+supplies. Existing contents and accepted receipts keep their original quantities.
+Upgrade preparation can relocate exact native items between existing holders of
+the same building. `CivContainerRelocation` enters the existing inventory journal
+and native persistence fences; it never creates a second transfer journal.
+Unchanged destination container cells are excluded from schematic paste, including
+their inventory and metadata. Insufficient space prevents the transfer and upgrade.
+
 `CivsRules` remains the pure domain entrypoint. `CivsConstructionRules` owns
 construction and payment transitions; `CivsSnapshotValidation` owns immutable
 saved-state integrity. World observations are not snapshot-integrity checks.
@@ -88,6 +96,13 @@ granting another publication path. Placement drafts, accepted building orders,
 resident supplies, cargo, storage actions and deletion each keep their own
 request/cursor state in their concrete owner. The root still persists city
 records and applies accepted inventory receipts through the original journal.
+
+Construction fences are public nearby visual cues, including autonomous upgrades.
+The viewer's own territory marks and control labels remain private. The existing
+packet-display scene and fixed part budget own both; no physical fence blocks are
+placed and the completed site's fence retires with its construction state.
+These packet fences appear in the Minecraft client; the passive WorldView scene
+does not currently export them.
 
 ### Menus
 

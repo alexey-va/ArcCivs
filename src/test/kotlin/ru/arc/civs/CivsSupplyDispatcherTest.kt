@@ -13,6 +13,59 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 class CivsSupplyDispatcherTest : FunSpec({
+    test("construction inputs may use a hall producer's output headroom") {
+        val original = supplyFixture()
+        val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = mapOf("COBBLESTONE" to 2L))
+        val hall = original.stores.getValue(SUPPLY_TARGET).copy(type = BuildingType.TOWN_HALL,
+            outputMaterial = "BOOK", capacity = CivSupplyCapacity(2, emptyMap()))
+        val input = original.copy(stores = mapOf(warehouse.id to warehouse, hall.id to hall),
+            requests = listOf(CivSupplyRequest(hall.id, "COBBLESTONE", 2, 0, true)),
+            couriers = original.couriers.take(1).map { it.copy(bagRoom = mapOf("COBBLESTONE" to 64L)) },
+            stackSizes = mapOf("COBBLESTONE" to 64))
+        allocateCivSupplies(input).plans.values.single().cargo.amount shouldBe 2L
+    }
+
+    test("production headroom admits a needed tool but no new output backfill shipment") {
+        val original = supplyFixture()
+        val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).copy(stock = mapOf("OAK_LOG" to 64L, "IRON_AXE" to 1L))
+        val forest = original.stores.getValue(SUPPLY_TARGET).copy(type = BuildingType.FORESTER,
+            desiredStock = mapOf("IRON_AXE" to 1L), outputMaterial = "OAK_LOG", capacity = CivSupplyCapacity(2, emptyMap()))
+        val input = original.copy(stores = mapOf(warehouse.id to warehouse, forest.id to forest),
+            requests = listOf(CivSupplyRequest(forest.id, "OAK_LOG", 64, 0), CivSupplyRequest(forest.id, "IRON_AXE", 1, 0)),
+            couriers = original.couriers.map { it.copy(bagRoom = mapOf("OAK_LOG" to 64L, "IRON_AXE" to 1L)) },
+            stackSizes = mapOf("OAK_LOG" to 64, "IRON_AXE" to 1))
+        val plans = allocateCivSupplies(input).plans.values
+        plans.size shouldBe 1
+        plans.single().cargo.material shouldBe "IRON_AXE"
+        plans.single().cargo.amount shouldBe 1L
+        plans.single().destinationBuildingId shouldBe forest.id
+    }
+
+    test("a saturated producer exports existing output before an ordinary supply trip to recover tool room") {
+        val original = constructionCollectionFixture()
+        val fullForest = original.stores.getValue(SUPPLY_QUARRY).copy(type = BuildingType.FORESTER,
+            stock = mapOf("OAK_LOG" to 27L), desiredStock = mapOf("IRON_AXE" to 1L), outputMaterial = "OAK_LOG")
+        val input = original.copy(stores = original.stores + (fullForest.id to fullForest),
+            requests = listOf(CivSupplyRequest(SUPPLY_TAVERN, "BREAD", 4, 0), CivSupplyRequest(fullForest.id, "IRON_AXE", 1, 0)),
+            couriers = original.couriers.map { it.copy(bagRoom = mapOf("OAK_LOG" to 64L, "IRON_AXE" to 1L, "BREAD" to 64L)) },
+            stackSizes = original.stackSizes + mapOf("OAK_LOG" to 64, "IRON_AXE" to 1))
+        val selected = allocateCivSupplies(input).plans.values.single()
+        selected.cargo.material shouldBe "OAK_LOG"
+        selected.cargo.sourceBuildingId shouldBe fullForest.id
+        selected.destinationBuildingId shouldBe SUPPLY_WAREHOUSE
+        selected.cargo.amount shouldBe 27L
+
+        val olderMeal = CivSupplyTask(null, null, SUPPLY_TAVERN, "BREAD", false)
+        val newerRecovery = CivSupplyTask(fullForest.id, null, SUPPLY_WAREHOUSE, "OAK_LOG", false)
+        allocateCivSupplies(input, ages = mapOf(olderMeal to 0L, newerRecovery to 10L), now = 20L)
+            .plans.values.single().cargo.material shouldBe "BREAD"
+
+        val noDestinationRoom = input.copy(stores = input.stores + (SUPPLY_WAREHOUSE to
+            input.stores.getValue(SUPPLY_WAREHOUSE).copy(capacity = CivSupplyCapacity(0, emptyMap()))))
+        allocateCivSupplies(noDestinationRoom).plans.values.any { it.cargo.sourceBuildingId == fullForest.id } shouldBe false
+        fullForest.stock shouldBe mapOf("OAK_LOG" to 27L)
+    }
+
     test("construction shortage collects its missing quarry goods before ordinary tavern supply") {
         val input = constructionCollectionFixture()
         val collection = allocateCivSupplies(input).plans.values.single()
@@ -33,7 +86,10 @@ class CivsSupplyDispatcherTest : FunSpec({
     }
 
     test("priority collection is bounded by construction stock and incoming goods") {
-        val original = constructionCollectionFixture()
+        val fixture = constructionCollectionFixture()
+        // Isolate construction demand from the independent recovery of a saturated producer.
+        val original = fixture.copy(stores = fixture.stores + (SUPPLY_QUARRY to
+            fixture.stores.getValue(SUPPLY_QUARRY).copy(capacity = CivSupplyCapacity(3, emptyMap()))))
         val input = original.copy(couriers = original.couriers + original.couriers.single().copy(workerId = SUPPLY_SECOND))
         val plans = allocateCivSupplies(input).plans
         plans.values.filter { it.cargo.material == "COBBLESTONE" }.sumOf { it.cargo.amount } shouldBe 2L

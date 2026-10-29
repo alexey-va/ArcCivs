@@ -57,16 +57,20 @@ internal class CivsNativePersistence(
     fun persist(transaction: CivInventoryTransaction, before: Boolean): CompletableFuture<Unit> {
         check(Bukkit.isPrimaryThread())
         check(!closed)
-        val transfer = transaction.collected ?: return CompletableFuture.completedFuture(Unit)
+        val transfer = transaction.collected
+        val containerChanges = if (transaction.containerRelocation != null) transaction.containerRelocation.containers.flatMap { holder ->
+            (0 until STORAGE_SLOTS).map { slot -> CivNativeContainerChange(holder.position, holder.type, slot, holder.before[slot], holder.after[slot]) }
+        } else transfer?.containers.orEmpty()
+        if (transfer == null && containerChanges.isEmpty()) return CompletableFuture.completedFuture(Unit)
         // No partial Item tail may migrate to an unjournalled chunk while this asynchronous fence runs.
-        require(transfer.ground.all { it.after == null }) { "Partial ground receipts cannot use this persistence adapter" }
+        require(transfer?.ground.orEmpty().all { it.after == null }) { "Partial ground receipts cannot use this persistence adapter" }
         val world = plugin.server.getWorld(transaction.after.worldId) ?: throw CivsRejection("storage-unavailable")
         check(plugin.server.version.contains("1.21.11-2568-f57bd86")) { "Unsupported native item persistence runtime: ${plugin.server.version}" }
         val bytes = hashMapOf<CivResidentItem, ByteArray>()
         fun proof(item: CivResidentItem?) = ItemProof(item?.let { bytes.getOrPut(it) { it.stack().serializeAsBytes() } })
-        val targets = transfer.ground.groupBy { (it.position.x shr 4) to (it.position.z shr 4) }.map { (chunk, changes) ->
+        val targets = transfer?.ground.orEmpty().groupBy { (it.position.x shr 4) to (it.position.z shr 4) }.map { (chunk, changes) ->
             Target(chunk.first, chunk.second, true, changes.map { GroundProof(it.entityId, proof(if (before) it.before else null)) }, emptyList())
-        } + transfer.containers.groupBy { (it.container.x shr 4) to (it.container.z shr 4) }.map { (chunk, changes) ->
+        } + containerChanges.groupBy { (it.container.x shr 4) to (it.container.z shr 4) }.map { (chunk, changes) ->
             Target(chunk.first, chunk.second, false, emptyList(), changes.map {
                 SlotProof(it.container, it.containerType, it.slot, proof(if (before) it.before else it.after))
             })

@@ -2133,6 +2133,139 @@ class CivsWorldTest : FunSpec({
     }
 })
 
+class CivsWarehouseRetainedContainersTest : FunSpec({
+    test("an unchanged W1 to W2 destination chest retains native items metadata and its frozen state") {
+        worldScenario { s ->
+            val p = CivPosition(-1912, 65, -2779)
+            s.world.loadChunk(p.x shr 4, p.z shr 4)
+            val old = worldBuilding(CivBox(p, p.copy(x = p.x + 1))).copy(type = BuildingType.WAREHOUSE,
+                anchor = p, entrance = p.copy(z = p.z + 1), phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, old).copy(center = p)
+            s.cities += city
+            val next = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+            val state = "minecraft:chest[facing=east,type=single,waterlogged=false]"
+            val block = s.world.getBlockAt(p.x, p.y, p.z).also { it.type = Material.CHEST }
+            val key = org.bukkit.NamespacedKey("arccivs", "retained_test")
+            val chest = block.state as Chest
+            chest.blockData = Bukkit.createBlockData(state)
+            chest.persistentDataContainer.set(key, org.bukkit.persistence.PersistentDataType.STRING, "native-holder")
+            chest.update(true, false) shouldBe true
+            val item = ItemStack(Material.DIAMOND, 7).also { stack ->
+                stack.itemMeta = stack.itemMeta.also { meta ->
+                    meta.displayName(net.kyori.adventure.text.Component.text("Warehouse reserve"))
+                    meta.persistentDataContainer.set(key, org.bukkit.persistence.PersistentDataType.STRING, "exact-item")
+                }
+            }
+            (block.state as Chest).blockInventory.setItem(0, item)
+            val cells = listOf(ArcSchematicBlock(ArcSchematicPoint(p.x, p.y, p.z), state, false, false),
+                ArcSchematicBlock(ArcSchematicPoint(p.x + 1, p.y, p.z), "minecraft:stone", false, false))
+            val capture = s.subject.capture(city.id, city.owner, city.worldId, next, cells, old)
+            s.scheduler.tick()
+            val plan = completed(capture)
+            plan.blocks.first() shouldBe CivPlanBlock(p, state, state)
+            CivsMaterials.required(plan) shouldBe mapOf("STONE" to 1L)
+            val recovered = com.google.gson.Gson().fromJson(com.google.gson.Gson().toJson(plan), CivPlacementPlan::class.java)
+            val validation = s.subject.revalidate(recovered, city.owner)
+            s.scheduler.tick()
+            completed(validation) shouldBe Unit
+            (block.state as Chest).blockInventory.getItem(0) shouldBe item
+            (block.state as Chest).persistentDataContainer.get(key, org.bukkit.persistence.PersistentDataType.STRING) shouldBe "native-holder"
+            block.blockData = Bukkit.createBlockData(state.replace("facing=east", "facing=north"))
+            val changed = s.subject.revalidate(recovered, city.owner)
+            s.scheduler.tick()
+            failureReason(changed) shouldBe "world-changed"
+            (block.state as Chest).blockInventory.getItem(0) shouldBe item
+        }
+    }
+
+    for (after in listOf("minecraft:air", "minecraft:barrel[facing=north,open=false]",
+        "minecraft:chest[facing=east,type=single,waterlogged=false]"))
+    test("a filled mutated W1 container still blocks capture before redistribution to $after") {
+        worldScenario { s ->
+            val p = CivPosition(-1912, 65, -2781)
+            s.world.loadChunk(p.x shr 4, p.z shr 4)
+            val old = worldBuilding(CivBox(p, p)).copy(type = BuildingType.WAREHOUSE,
+                anchor = p, entrance = p.copy(z = p.z + 1), phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, old).copy(center = p)
+            s.cities += city
+            val block = s.world.getBlockAt(p.x, p.y, p.z).also {
+                it.type = Material.CHEST
+            }
+            (block.state as Chest).also {
+                it.blockData = Bukkit.createBlockData("minecraft:chest[facing=south,type=single,waterlogged=false]")
+                it.update(true, false) shouldBe true
+            }
+            (block.state as Chest).blockInventory.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val capture = s.subject.capture(city.id, city.owner, city.worldId,
+                old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING),
+                listOf(ArcSchematicBlock(ArcSchematicPoint(p.x, p.y, p.z), after, after == "minecraft:air", false)), old)
+            s.scheduler.tick()
+            failureReason(capture) shouldBe "container-not-empty"
+            (block.state as Chest).blockInventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+})
+
+class CivsUpgradeStorageQueuedProposalTest : FunSpec({
+    for (after in listOf("minecraft:air", "minecraft:barrel[facing=north,open=false]",
+        "minecraft:chest[facing=east,type=single,waterlogged=false]"))
+    test("an owned queued upgrade proposes $after without touching a filled changing source") {
+        worldScenario { s ->
+            val p = CivPosition(0, 64, 0)
+            val old = worldBuilding(CivBox(p, p)).copy(type = BuildingType.WAREHOUSE, phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, old).copy(autonomy = CivAutonomy())
+            s.cities += city
+            val block = s.world.getBlockAt(p.x, p.y, p.z).also { it.type = Material.CHEST }
+            (block.state as Chest).also {
+                it.blockData = Bukkit.createBlockData("minecraft:chest[facing=south,type=single,waterlogged=false]")
+                it.update(true, false) shouldBe true
+            }
+            val contents = (block.state as Chest).blockInventory
+            val item = ItemStack(Material.DIAMOND, 3)
+            contents.setItem(0, item)
+            val next = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+            val cells = listOf(ArcSchematicBlock(ArcSchematicPoint(p.x, p.y, p.z), after, after == "minecraft:air", false))
+            val queued = s.subject.captureSite(city.id, city.owner, city.worldId, next, cells, old)
+            s.scheduler.tick()
+            val proposal = completed(queued)
+            proposal.blocks.single().after shouldBe after
+            contents.getItem(0) shouldBe item
+            val real = s.subject.capture(city.id, city.owner, city.worldId, next, cells, old)
+            s.scheduler.tick()
+            failureReason(real) shouldBe "container-not-empty"
+            val validation = s.subject.revalidate(proposal, city.owner)
+            s.scheduler.tick()
+            failureReason(validation) shouldBe "container-not-empty"
+            contents.getItem(0) shouldBe item
+            contents.clear() // The separate durable inventory receipt must complete before actual capture.
+            val evacuated = s.subject.capture(city.id, city.owner, city.worldId, next, cells, old)
+            s.scheduler.tick()
+            completed(evacuated).blocks.single().after shouldBe after
+            contents.isEmpty shouldBe true
+        }
+    }
+
+    test("proposal-only relaxation excludes waiting sites and legacy registered changing holders") {
+        for (registered in listOf(false, true)) worldScenario { s ->
+            val p = CivPosition(0, 64, 0)
+            val old = worldBuilding(CivBox(p, p)).copy(type = BuildingType.WAREHOUSE,
+                phase = if (registered) BuildingPhase.ACTIVE else BuildingPhase.SITE)
+            val city = worldCity(s.world.uid, old).copy(inventory = if (registered)
+                CivInventory(CivStorageMode.PHYSICAL, containers = listOf(p)) else null)
+            s.cities += city
+            val block = s.world.getBlockAt(p.x, p.y, p.z).also { it.type = Material.CHEST }
+            val contents = (block.state as Chest).blockInventory
+            contents.setItem(0, ItemStack(Material.DIAMOND, 3))
+            val next = old.copy(level = if (registered) 2 else 1, phase = BuildingPhase.CONSTRUCTING)
+            val proposed = s.subject.captureSite(city.id, city.owner, city.worldId, next,
+                listOf(ArcSchematicBlock(ArcSchematicPoint(p.x, p.y, p.z), "minecraft:air", true, false)), old)
+            s.scheduler.tick()
+            failureReason(proposed) shouldBe if (registered) "registered-container" else "container-not-empty"
+            contents.getItem(0) shouldBe ItemStack(Material.DIAMOND, 3)
+        }
+    }
+})
+
 private class WorldScenario(val paper: MockBukkitTestRuntime, collisionWorld: Boolean = false,
     nanoTime: () -> Long = { 0L }) : AutoCloseable {
     val world = if (collisionWorld) CivsWorksiteWorldFixture("civs-world").also(paper.server::addWorld)

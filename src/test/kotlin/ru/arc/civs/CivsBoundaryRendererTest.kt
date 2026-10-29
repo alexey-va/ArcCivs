@@ -318,6 +318,67 @@ class CivsBoundaryRendererTest : FunSpec({
         }
     }
 
+    test("public construction selection uses the nearest same-world worksite and retires after completion") {
+        val world = UUID.randomUUID()
+        val old = fenceBuilding().copy(phase = BuildingPhase.ACTIVE)
+        val planned = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), old.id, 2, 100, 20,
+            ConstructionPhase.WAITING_MATERIALS, Stock(), plannedBuilding = planned)
+        val city = boundaryCity(world, UUID.randomUUID()).copy(buildings = listOf(old),
+            construction = order, autonomy = CivAutonomy())
+        val other = city.copy(id = UUID.randomUUID(), worldId = UUID.randomUUID())
+        civsNearbyConstructionCity(listOf(other, city), world, 5.5, 64.0, -5.5) shouldBe city
+        civsNearbyConstructionCity(listOf(other), world, 5.5, 64.0, -5.5) shouldBe null
+        civsNearbyConstructionCity(listOf(city), world, 5.5, 96.0, -5.5) shouldBe null
+        civsNearbyConstructionCity(listOf(city), world, 100.0, 64.0, -5.5) shouldBe null
+        civsNearbyConstructionCity(listOf(city.copy(construction = null)), world, 5.5, 64.0, -5.5) shouldBe null
+    }
+
+    test("nearby visitors see an Auto upgrade fence without private territory marks or control labels") {
+        boundaryScenario(labels = true) { h ->
+            h.player.teleport(Location(h.player.world, 5.5, 64.0, -5.5))
+            val old = fenceBuilding().copy(phase = BuildingPhase.ACTIVE)
+            val planned = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING)
+            val order = CivConstruction(UUID.randomUUID(), old.id, 2, 100, 20,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), plannedBuilding = planned)
+            val city = h.city.copy(owner = UUID.randomUUID(), autonomy = CivAutonomy(),
+                buildings = listOf(old), construction = order)
+            val expected = civsConstructionFenceGeometry(city, 5.5, 64.0, -5.5).size
+            (expected > 0) shouldBe true
+            val entities = h.player.world.entities.size
+            h.renderer.pulse(h.player, city); h.paper.performTicks(2)
+            h.remaining.size shouldBe expected
+            h.labelHandles shouldBe emptyList()
+            verify(exactly = 0) { h.displays.spawnBlock(any(), match { it.material != Material.OAK_PLANKS }) }
+            h.player.world.entities.size shouldBe entities
+            h.renderer.pulse(h.player, city.copy(construction = null)); h.paper.performTicks(2)
+            h.remaining.size shouldBe 0
+        }
+    }
+
+    test("a managed city boundary does not hide the neighbouring Auto upgrade fence") {
+        boundaryScenario(labels = true) { h ->
+            h.player.teleport(Location(h.player.world, 90.5, 64.0, -5.5))
+            val old = fenceBuilding().copy(phase = BuildingPhase.ACTIVE, anchor = CivPosition(100, 60, 0),
+                bounds = CivBox(CivPosition(100, 60, 0), CivPosition(111, 72, 11)), entrance = CivPosition(105, 64, -1),
+                control = CivPosition(105, 65, 5))
+            val order = CivConstruction(UUID.randomUUID(), old.id, 2, 100, 20,
+                ConstructionPhase.WAITING_MATERIALS, Stock(), plannedBuilding = old.copy(level = 2))
+            val auto = h.city.copy(id = UUID.randomUUID(), owner = UUID.randomUUID(), center = CivPosition(196, 64, 0),
+                buildings = listOf(old), construction = order, autonomy = CivAutonomy())
+            val selected = civsNearbyConstructionCity(listOf(h.city, auto), h.city.worldId, 90.5, 64.0, -5.5)
+            selected shouldBe auto
+            val privateParts = civsBoundaryGeometry(h.city, 90.5, 64.0, -5.5).size
+            val publicParts = civsConstructionFenceGeometry(auto, 90.5, 64.0, -5.5).size
+            (privateParts > 0 && publicParts > 0) shouldBe true
+            h.renderer.pulse(h.player, h.city, constructionCity = selected); h.paper.performTicks(2)
+            h.remaining.size shouldBe privateParts + publicParts
+            h.labelHandles shouldBe emptyList()
+            h.renderer.pulse(h.player, h.city, constructionCity = auto.copy(construction = null)); h.paper.performTicks(2)
+            h.remaining.size shouldBe privateParts
+        }
+    }
+
     test("stationary membership retains private packet handles and leaving the edge removes them") {
         boundaryScenario { h ->
             val nativeEntities = h.player.world.entities.size

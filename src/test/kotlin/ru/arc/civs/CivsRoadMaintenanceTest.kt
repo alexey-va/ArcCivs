@@ -200,6 +200,42 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
     }
 
+    test("a saved gate approach shares a short hill cut without changing gate transit or its immutable journal") {
+        val original = listOf(64, 64, 64, 65, 66, 67, 67, 67, 66, 65, 64, 64, 64)
+            .mapIndexed { z, y -> CivPosition(0, y, z) }
+        val base = upkeepCity()
+        val source = base.buildings.last().copy(type = BuildingType.FORESTER, anchor = CivPosition(0, 63, 40),
+            bounds = CivBox(CivPosition(0, 63, 40), CivPosition(5, 72, 45)), entrance = original.last(), transit = null,
+            schematicId = CivsBlueprints.schematicId(base.style, BuildingType.FORESTER, 1))
+        val gateRoute = original + (1..5).map { CivPosition(it, 64, 12) }
+        val gate = source.copy(id = UUID(0, 42), type = BuildingType.GATE, anchor = CivPosition(4, 63, 11),
+            bounds = CivBox(CivPosition(4, 63, 11), CivPosition(8, 68, 15)), entrance = gateRoute.last(),
+            schematicId = "fixture/gate", transit = (4..8).flatMap { x -> (11..15).map { z -> CivPosition(x, 64, z) } })
+        val city = base.copy(buildings = base.buildings.dropLast(1) + source + gate)
+        val plans = listOf(upkeepApproach(city, source, original), upkeepApproach(city, gate, gateRoute))
+        val immutable = Gson().toJson(plans)
+        val targets = CivsRoadMaintenance.prepare(city, plans).targets.filter { it.routeOverride != null }
+        targets.size shouldBe 1
+        val target = targets.single()
+        target.linkedRouteOverrides!!.keys shouldBe setOf(gate.id.toString())
+        val worker = city.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, CivPosition(0, 64, 2),
+            listOf(CivPlanBlock(target.floor, "minecraft:dirt", target.after)),
+            status = "repairing-road", focus = target.floor, upkeep = target)
+        val after = CivsRoadMaintenance.complete(city, work, 3_000)
+        after.building(gate.id) shouldBe gate
+        val access = CivAutonomousAccess.from(after, plans)
+        access.routes.getValue(source.id).all { it.y == 64 } shouldBe true
+        access.routes.getValue(gate.id).all { it.y == 64 } shouldBe true
+        val receipt = CivRoadUpkeepReceipt(worker, city.stock, work, 3_000)
+        Gson().fromJson(Gson().toJson(receipt), CivRoadUpkeepReceipt::class.java).validated(after)
+        receipt.before(after) shouldBe city
+        Gson().toJson(plans) shouldBe immutable
+        // Authored road transit still owns its grade independently of an approach journal.
+        shouldThrow<IllegalArgumentException> { target.linkedRouteOverrides!!.getValue(gate.id.toString())
+            .validated(city, gate.copy(type = BuildingType.ROAD)) }
+    }
+
     test("local road cuts compose against the immutable journal but reject long slopes and invented grades") {
         val town = upkeepCity()
         val source = town.buildings.last().copy(type = BuildingType.HOUSE, entrance = CivPosition(0, 64, 17), transit = null)
@@ -315,7 +351,7 @@ class CivsRoadMaintenanceTest : FunSpec({
             work.copy(changes = listOf(work.changes.single().let { it.copy(before = it.after) })),
             work.copy(changes = work.changes + work.changes), work.copy(equipmentAfter = emptyList())))
             shouldThrow<IllegalArgumentException> { CivsRoadMaintenance.complete(before, invalid, 3_000) }
-        CivsRoadMaintenance.eligible(before.copy(constructionQueue = listOf(before.buildings.first().id))) shouldBe false
+        CivsRoadMaintenance.eligible(before.copy(constructionQueue = listOf(before.buildings.first().id))) shouldBe true
         CivsRoadMaintenance.eligible(before.copy(construction = CivConstruction(UUID.randomUUID(), before.buildings.first().id,
             2, 1, 0, ConstructionPhase.CONSTRUCTING, Stock()))) shouldBe false
     }

@@ -344,6 +344,103 @@ class CivsStorageTest : FunSpec({
         return building
     }
 
+    test("new producer output preserves two native slots for supplies without changing existing stacks") {
+        val forest = addLocalBuilding(BuildingType.FORESTER)
+        val local = cargo(world.getBlockAt(6, 64, 0))
+        city = city.copy(autonomy = CivAutonomy(), inventory = CivInventory(CivStorageMode.PHYSICAL))
+        storage.foodCanModify = { _, _ -> true }
+        repeat(25) { local.setItem(it, ItemStack(Material.OAK_LOG, 64)) }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> {
+            storage.prepareWork(city, forest.id, emptyMap(), mapOf("OAK_LOG" to 1L), emptyList())
+        }.reason shouldBe "storage-full"
+        repeat(25) { local.getItem(it) shouldBe ItemStack(Material.OAK_LOG, 64) }
+        local.getItem(25) shouldBe null
+        local.getItem(26) shouldBe null
+
+        val tool = storage.prepareAutoSupply(city, CivAutoSupplyDemand(forest.id, mapOf("IRON_AXE" to 1L))) { true }!!
+        val tx = CivInventoryTransaction(id, city.id, city.revision,
+            city.copy(inventory = tool.inventoryAfter, revision = city.revision + 1), tool.changes,
+            autoSupplyBuildingId = forest.id)
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        local.getItem(25) shouldBe ItemStack(Material.IRON_AXE)
+        local.getItem(26) shouldBe null
+        repeat(25) { local.getItem(it) shouldBe ItemStack(Material.OAK_LOG, 64) }
+    }
+
+    test("producer output may finish an existing partial stack while preserving the two empty slots") {
+        val forest = addLocalBuilding(BuildingType.FORESTER)
+        val local = cargo(world.getBlockAt(6, 64, 0))
+        city = city.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+        repeat(24) { local.setItem(it, ItemStack(Material.STONE, 64)) }
+        local.setItem(24, ItemStack(Material.OAK_LOG, 60))
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        shouldThrow<CivsRejection> {
+            storage.prepareWork(city, forest.id, emptyMap(), mapOf("OAK_LOG" to 5L), emptyList())
+        }.reason shouldBe "storage-full"
+        local.getItem(24) shouldBe ItemStack(Material.OAK_LOG, 60)
+        val tx = transaction(id, city, storage.prepareWork(city, forest.id, emptyMap(), mapOf("OAK_LOG" to 4L), emptyList()))
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        local.getItem(24) shouldBe ItemStack(Material.OAK_LOG, 64)
+        local.getItem(25) shouldBe null
+        local.getItem(26) shouldBe null
+    }
+
+    test("each producer holder preserves its own supply slots instead of pooling headroom") {
+        val forest = addLocalBuilding(BuildingType.FORESTER)
+        val local = cargo(world.getBlockAt(6, 64, 0))
+        val secondBlock = world.getBlockAt(7, 64, 0).also { it.type = Material.BARREL }
+        indexedBlocks += secondBlock
+        val second = cargo(secondBlock)
+        city = city.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+        repeat(26) { local.setItem(it, ItemStack(Material.STONE, 64)) }
+        repeat(24) { second.setItem(it, ItemStack(Material.STONE, 64)) }
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        val tx = transaction(id, city, storage.prepareWork(city, forest.id, emptyMap(), mapOf("OAK_LOG" to 64L), emptyList()))
+        storage.seal(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        local.getItem(26) shouldBe null
+        second.getItem(24) shouldBe ItemStack(Material.OAK_LOG, 64)
+        second.getItem(25) shouldBe null
+        second.getItem(26) shouldBe null
+    }
+
+    test("quota limited producer returns retain every carried item instead of occupying supply headroom") {
+        val forest = addLocalBuilding(BuildingType.FORESTER)
+        val local = cargo(world.getBlockAt(6, 64, 0))
+        val worker = CivWorker(UUID.randomUUID(), "Forester", forest.id, nextDeliveryAt = 1,
+            items = List(CivsEquipment.SLOTS) { if (it == CivsEquipment.BAG) CivResidentItem("OAK_LOG", 64) else null })
+        city = city.copy(inventory = CivInventory(CivStorageMode.PHYSICAL), workers = listOf(worker))
+        repeat(26) { local.setItem(it, ItemStack(Material.OAK_LOG, 64)) }
+        storage.reserve(city, UUID.randomUUID())
+        val returned = storage.prepareResidentReturn(city, worker.id, forest.id)
+        returned.worker shouldBe worker
+        returned.plan.changes shouldBe emptyList()
+        local.getItem(26) shouldBe null
+        CivsEquipment.plainCount(returned.worker, "OAK_LOG") shouldBe 64
+    }
+
+    test("accepted legacy producer credit replays into its last native slot without losing existing items") {
+        val forest = addLocalBuilding(BuildingType.FORESTER)
+        val local = cargo(world.getBlockAt(6, 64, 0))
+        city = city.copy(inventory = CivInventory(CivStorageMode.PHYSICAL))
+        repeat(26) { local.setItem(it, ItemStack(Material.OAK_LOG, 64)) }
+        val tx = CivInventoryTransaction(UUID.randomUUID(), city.id, city.revision,
+            city.copy(revision = city.revision + 1), listOf(
+                CivInventorySlotChange(requireNotNull(forest.control), "BARREL", 26, null, CivPlainItem("OAK_LOG", 1))))
+        storage.lock(tx)
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        repeat(26) { local.getItem(it) shouldBe ItemStack(Material.OAK_LOG, 64) }
+        local.getItem(26) shouldBe ItemStack(Material.OAK_LOG, 1)
+    }
+
     test("an old unpicked worker handoff cannot debit a bag with either full or empty warehouse slots") {
         val warehouse = addLocalBuilding(BuildingType.WAREHOUSE)
         val quarry = addLocalBuilding(BuildingType.QUARRY, 10)
@@ -1894,6 +1991,7 @@ class CivsStorageTest : FunSpec({
         repeat(chest.size) { chest.setItem(it, ItemStack(Material.STONE, 64)) }
         barrel.setItem(0, ItemStack(Material.PAPER, 3))
         barrel.setItem(1, ItemStack(Material.LEATHER, 1))
+        barrel.setItem(2, null) // Consuming the two recipe inputs leaves the producer's two supply slots after output.
         val id = UUID.randomUUID()
         storage.reserve(city, id)
         val receipt = transaction(id, city, storage.prepareProduction(city, city.buildings.single())).validated()
@@ -1906,6 +2004,7 @@ class CivsStorageTest : FunSpec({
         barrel.getItem(0)!!.type shouldBe Material.BOOK
         barrel.getItem(0)!!.amount shouldBe 1
         barrel.getItem(1) shouldBe null
+        barrel.getItem(2) shouldBe null
         chest.getItem(0) shouldBe ItemStack(Material.STONE, 64)
     }
 

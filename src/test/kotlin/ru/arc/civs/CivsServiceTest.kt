@@ -2082,7 +2082,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.beginPlanBoardSelection(h.player, board.city.id).join()
             verify(exactly = 1) { h.boundary.pulse(h.player, board.city, true, null, null,
-                board.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }) }
+                board.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }, board.city) }
             val selected = h.service.selectGround(h.player, h.service.selection(h.player)!!.id, board.target)
             h.await(selected)
             h.service.preview(h.player)!!.autonomous shouldBe true
@@ -2212,8 +2212,8 @@ class CivsServiceTest : FunSpec({
                 h.paper.server.onlinePlayers.contains(h.player) shouldBe false
                 CivsPlacementSession::class.java.getDeclaredMethod("refreshBoundary", Player::class.java)
                     .also { it.isAccessible = true }.invokeService(h.service, h.player)
-                verify(atLeast = 1) { h.boundary.pulse(h.player, null, false, null, null, emptyMap()) }
-                verify(exactly = 0) { h.boundary.pulse(h.player, match<Settlement> { it.id == h.city.id }, any(), any(), any(), any()) }
+                verify(atLeast = 1) { h.boundary.pulse(h.player, null, false, null, null, emptyMap(), null) }
+                verify(exactly = 0) { h.boundary.pulse(h.player, match<Settlement> { it.id == h.city.id }, any(), any(), any(), any(), any()) }
             }
         }
 
@@ -4430,8 +4430,16 @@ class CivsServiceTest : FunSpec({
             val city = h.city.copy(stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
                 buildings = listOf(hall) + h.city.buildings.drop(1))
             every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-            val upgraded = CivBlueprint(hall.copy(level = 3, control = target), h.world.uid,
-                mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf(1))
+            val cells = buildList {
+                for (y in hall.bounds.min.y..hall.bounds.max.y) for (x in hall.bounds.min.x..hall.bounds.max.x)
+                    for (z in hall.bounds.min.z..hall.bounds.max.z) {
+                        val marker = CivPosition(x, y, z) == target
+                        add(ArcSchematicBlock(ArcSchematicPoint(x, y, z),
+                            if (marker) "minecraft:structure_void" else "minecraft:air", !marker, false))
+                    }
+            }
+            val upgraded = CivBlueprint(hall.copy(level = 3, control = target, phase = BuildingPhase.CONSTRUCTING), h.world.uid,
+                mockk(relaxed = true), cells, emptyList(), byteArrayOf(1))
             every { h.blueprints.controlPosition(hall) } returns CompletableFuture.completedFuture(target)
             every { h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
                 arg<CivPosition>(5) shouldBe hall.anchor
@@ -4882,12 +4890,12 @@ class CivsServiceTest : FunSpec({
             val upgrade = h.service.upgradeBuilding(player, building.id)
             h.paper.performTicks(20)
             h.service.preview(player) shouldBe null
-            verify(atLeast = 1) { h.boundary.pulse(player, any(), false, null, null, any()) }
+            verify(atLeast = 1) { h.boundary.pulse(player, any(), false, null, null, any(), any()) }
             preparation.complete(blueprint); h.paper.performTicks(20)
             upgrade.isDone shouldBe false
             h.service.preview(player) shouldBe null
-            verify(atLeast = 2) { h.boundary.pulse(player, any(), false, null, null, any()) }
-            verify(exactly = 0) { h.boundary.pulse(player, any(), true, any(), any(), any()); h.renderer.show(any(), any(), any()) }
+            verify(atLeast = 2) { h.boundary.pulse(player, any(), false, null, null, any(), any()) }
+            verify(exactly = 0) { h.boundary.pulse(player, any(), true, any(), any(), any(), any()); h.renderer.show(any(), any(), any()) }
         }
     }
 
@@ -5304,7 +5312,7 @@ class CivsServiceTest : FunSpec({
             h.start()
             h.service.beginBuildingSelection(h.player, BuildingType.WAREHOUSE).join()
             h.service.selection(h.player)!!.type shouldBe BuildingType.WAREHOUSE
-            verify(exactly = 1) { h.boundary.pulse(h.player, h.city, true, null, null, h.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }) }
+            verify(exactly = 1) { h.boundary.pulse(h.player, h.city, true, null, null, h.city.buildings.associate { it.id to h.service.buildingStatus(it.id) }, h.city) }
             verify(exactly = 0) { h.player.rayTraceBlocks(any(), any()); h.blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) }
             val position = CivPosition(6, 63, 6)
             h.world.getBlockAt(position.x, position.y, position.z).type = Material.GRASS_BLOCK
@@ -6551,7 +6559,7 @@ private class ServiceRoadUpkeep(private val h: ServiceScenario, physical: Boolea
         h.world.getBlockAt(20, 63, 0).type = Material.DIRT
         h.world.getBlockAt(20, 62, 0).type = Material.STONE
         every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
-        every { h.worldAdapter.captureRoadUpkeep(any(), worker, any()) } answers {
+        every { h.worldAdapter.captureRoadUpkeep(any(), worker, any(), any()) } answers {
             work.takeIf { h.world.getBlockAt(20, 63, 0).type == Material.DIRT }
         }
         every { h.worldAdapter.roadUpkeepPending(any(), work) } answers { h.world.getBlockAt(20, 63, 0).type == Material.DIRT }

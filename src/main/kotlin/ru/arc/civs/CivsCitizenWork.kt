@@ -292,6 +292,7 @@ internal class CivsCitizenWork(
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
         if (city.inventory == null || building == null || actor.plan.courier != null ||
             actor.cycle.phase in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED) ||
+            actor.plan.worldWork?.status == "waiting-tool" ||
             !couriers.sourceOffersCargo(actor, city, worker)) {
             if (actor.outputReturn != null) { actor.outputReturn = null; routes.cancelRoute(actor) }
             return false

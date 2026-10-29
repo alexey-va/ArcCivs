@@ -24,7 +24,8 @@ data class CivRoadRouteOverride(val originalRoute: List<CivPosition>, val route:
     }
 
     internal fun validated(city: Settlement, source: CivBuilding) {
-        require(!source.type.isInfrastructure)
+        // Gates and walls can share an accepted approach; authored ROAD transit keeps its own grade.
+        require(source.type != BuildingType.ROAD)
         for (points in listOf(originalRoute, route)) {
             require(points.size in 4..CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH && points.last() == source.entrance)
             require(points.all { city.contains(it.x, it.z) && it.y in -4_093..4_094 } &&
@@ -171,10 +172,20 @@ internal data class CivRoadUpkeepNetwork(val cityId: UUID, val worldId: UUID,
     val routeOverrides: Map<String, CivRoadRouteOverride>? = null)
 
 /** Main-thread native scan owner; only preparation of the detached network runs off-thread. */
-internal class CivsRoadMaintenance(private val world: CivsWorld, private val currentTick: () -> Int = Bukkit::getCurrentTick) {
+internal class CivsRoadMaintenance(private val world: CivsWorld,
+    private val registerSurface: ((UUID, CivPosition) -> Unit)? = null,
+    private val paymentPossible: (Settlement) -> Boolean? = { true },
+    private val currentTick: () -> Int = Bukkit::getCurrentTick) {
     private val networks = mutableMapOf<UUID, CivRoadUpkeepNetwork>()
     private val cursors = mutableMapOf<UUID, Int>()
     private val selected = mutableMapOf<UUID, CivWorldWork>()
+    private val gradeChecks = mutableMapOf<UUID, ArrayDeque<CivRoadUpkeep>>()
+    private val developmentWaiting = mutableSetOf<UUID>()
+    private data class GradeNetworkWait(val token: Long, val beforeGeneration: Long?, val buildings: List<CivBuilding>,
+        val overrides: Map<String, CivRoadRouteOverride>?)
+    private val awaitingGradeNetwork = mutableMapOf<UUID, GradeNetworkWait>()
+    private val networkGenerations = mutableMapOf<UUID, Long>()
+    private var generation = 0L
     private var budgetTick = Int.MIN_VALUE
     private var remaining = 0
     private val waiting = linkedMapOf<UUID, Int>()
@@ -196,10 +207,21 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
         require(prepared.cityId == city.id && prepared.worldId == city.worldId && prepared.buildings == city.buildings &&
             prepared.routeOverrides == city.roadRouteOverrides)
         val previous = networks.put(city.id, prepared)
-        if (previous?.buildings != prepared.buildings || previous?.routeOverrides != prepared.routeOverrides) {
+        if (previous?.buildings != prepared.buildings || previous?.routeOverrides != prepared.routeOverrides ||
+            previous?.targets != prepared.targets) {
             cursors.remove(city.id)
             city.workers.forEach { selected.remove(it.id) }
+            val lowered = city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
+                val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
+                CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
+                    before[key]?.let { floor.y < it.y } == true
+                }.values
+            }.toHashSet()
+            gradeChecks[city.id] = ArrayDeque(prepared.targets.filter { it.routeOverride != null || it.floor in lowered })
+            networkGenerations[city.id] = ++generation
         }
+        awaitingGradeNetwork[city.id]?.takeIf { it.buildings == prepared.buildings && it.overrides == prepared.routeOverrides }
+            ?.let { awaitingGradeNetwork.remove(city.id) }
     }
 
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {
@@ -215,23 +237,105 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
             it.routeOverrides == city.roadRouteOverrides } ?: return null
         selected[worker.id]?.let { work ->
             if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city) &&
-                (!budget(worker.id) || world.roadUpkeepPending(city, work))) return work
+                !budget(worker.id)) return work
+            if (work.cycle == worker.completedCycles && work.buildingId == worker.assignment && work.inputs == inputs(city)) {
+                val refreshed = world.captureRoadUpkeep(city, worker, requireNotNull(work.upkeep), registerSurface)
+                    ?.copy(inputs = inputs(city))
+                if (refreshed != null) {
+                    val retained = if (refreshed.changes == work.changes) work else refreshed
+                    selected[worker.id] = retained
+                    return retained
+                }
+                gradeChecks[city.id]?.removeAll { it.floor == work.upkeep?.floor }
+            }
             selected.remove(worker.id)
         }
         if (network.targets.isEmpty()) return null
         repeat(minOf(SCAN_COLUMNS, network.targets.size)) {
             if (!budget(worker.id)) return null
-            val cursor = Math.floorMod(cursors[city.id] ?: 0, network.targets.size)
-            cursors[city.id] = (cursor + 1) % network.targets.size
-            val work = world.captureRoadUpkeep(city, worker, network.targets[cursor])?.copy(inputs = inputs(city)) ?: return@repeat
+            val grade = gradeChecks[city.id]?.removeFirstOrNull()
+            if (grade == null && (city.id in developmentWaiting || city.constructionQueue.orEmpty().isNotEmpty())) return null
+            val target = grade ?: nextTarget(city.id, network)
+            val work = world.captureRoadUpkeep(city, worker, target, registerSurface)?.copy(inputs = inputs(city))
+            if (grade != null && work != null) gradeChecks.getValue(city.id).addLast(grade)
+            if (work == null) return@repeat
             selected[worker.id] = work
             return work
         }
         return null
     }
 
-    fun invalidate(workerId: UUID) { selected.remove(workerId); waiting.remove(workerId) }
-    fun clear() { networks.clear(); cursors.clear(); selected.clear(); waiting.clear() }
+    /** Metadata and grade observations after resident work; a captured paid candidate is never selected here. */
+    fun backfillSurfaces(city: Settlement) {
+        if (registerSurface == null && gradeChecks[city.id].isNullOrEmpty() || city.autonomy == null || city.pendingDeletion != null) return
+        val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
+            it.routeOverrides == city.roadRouteOverrides && it.targets.isNotEmpty() } ?: return
+        val worker = city.workers.firstOrNull { worker ->
+            !CivsResidents.isChild(worker) && worker.cargo == null && worker.assignment?.let(city::building)?.let {
+                it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE
+            } == true
+        } ?: return
+        repeat(minOf(SCAN_COLUMNS, network.targets.size)) {
+            if (!budget(worker.id)) return
+            val grade = gradeChecks[city.id]?.removeFirstOrNull()
+            val target = grade ?: nextTarget(city.id, network)
+            // A damaged candidate stays unselected while its grade remains in the finite observation pass.
+            val captured = world.captureRoadUpkeep(city, worker, target, registerSurface)
+            if (grade != null && captured != null) gradeChecks.getValue(city.id).addLast(grade)
+        }
+    }
+
+    private fun nextTarget(cityId: UUID, network: CivRoadUpkeepNetwork): CivRoadUpkeep {
+        val cursor = Math.floorMod(cursors[cityId] ?: 0, network.targets.size)
+        cursors[cityId] = (cursor + 1) % network.targets.size
+        return network.targets[cursor]
+    }
+
+    /** Growth yields to an admitted column and one finite native pass of the lowered grade, not ordinary wear. */
+    fun admitDevelopment(city: Settlement): Boolean {
+        developmentWaiting += city.id
+        if (!eligible(city)) return true
+        if (city.id in awaitingGradeNetwork) return false
+        val builders = city.workers.filter { worker -> !CivsResidents.isChild(worker) && worker.cargo == null &&
+            worker.assignment?.let(city::building)?.let { it.type == BuildingType.BUILDER_HUT && it.phase == BuildingPhase.ACTIVE } == true }
+        if (builders.isEmpty() || CivsAutonomy.legacyStock(city) && !funded(city)) return true
+        if (paymentPossible(city) == false) {
+            gradeChecks.remove(city.id)
+            selected.entries.removeIf { it.value.upkeep?.cityId == city.id }
+            return true
+        }
+        val admitted = builders.any { worker -> selected[worker.id]?.let { work ->
+            worker.assignment == work.buildingId && worker.completedCycles == work.cycle &&
+                worker.cargo == null && !CivsResidents.isChild(worker)
+        } == true }
+        return !admitted && gradeChecks[city.id].isNullOrEmpty()
+    }
+
+    fun developmentFinished(cityId: UUID) { developmentWaiting.remove(cityId) }
+    fun awaitGradeNetwork(city: Settlement): Long {
+        val token = ++generation
+        awaitingGradeNetwork[city.id] = GradeNetworkWait(token, networkGenerations[city.id], city.buildings.toList(),
+            city.roadRouteOverrides?.toMap())
+        return token
+    }
+    /** A stale load may finish without publishing; it cannot clear a newer wait or freshly observed work. */
+    fun gradeNetworkCompleted(cityId: UUID, token: Long) {
+        val wait = awaitingGradeNetwork[cityId]?.takeIf { it.token == token } ?: return
+        awaitingGradeNetwork.remove(cityId)
+        if (networkGenerations[cityId] == wait.beforeGeneration) {
+            gradeChecks.remove(cityId)
+            selected.entries.removeIf { it.value.upkeep?.cityId == cityId }
+        }
+    }
+
+    fun invalidate(workerId: UUID) {
+        selected.remove(workerId)?.upkeep?.let { failed -> gradeChecks[failed.cityId]?.removeAll { it.floor == failed.floor } }
+        waiting.remove(workerId)
+    }
+    fun clear() {
+        networks.clear(); cursors.clear(); selected.clear(); waiting.clear()
+        gradeChecks.clear(); developmentWaiting.clear(); awaitingGradeNetwork.clear(); networkGenerations.clear()
+    }
 
     /** Only an observed damaged column creates a request; healthy roads never reserve or receive supplies. */
     fun requirements(city: Settlement): Map<UUID, Map<String, Long>> = if (!eligible(city) ||
@@ -246,6 +350,15 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
         private const val SCAN_COLUMNS = 8
         private val NATIVE_INPUTS = mapOf("COBBLESTONE" to 1L)
         private fun inputs(city: Settlement): Map<String, Long> = if (CivsAutonomy.legacyStock(city)) emptyMap() else NATIVE_INPUTS
+        /** A complete zero observation lets development create its missing production source. */
+        internal fun paymentPossible(city: Settlement, snapshot: CivSupplySnapshot?): Boolean? {
+            if (CivsAutonomy.legacyStock(city) || city.workers.any {
+                    CivsEquipment.usableCount(it, "COBBLESTONE") > 0 || it.cargo?.let { cargo ->
+                        cargo.inventoryBacked && cargo.stockResource == null && cargo.material == "COBBLESTONE" && cargo.amount > 0
+                    } == true
+                } || snapshot?.stores?.values?.any { (it.stock["COBBLESTONE"] ?: 0L) > 0 } == true) return true
+            return if (CivsAutoSupplies.observed(city, snapshot)) false else null
+        }
         internal const val MAX_CLEARANCE = 4
         private val directions = listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)
         private val stair = Regex("minecraft:(cobblestone|oak|spruce|dark_oak)_stairs\\[facing=(north|south|east|west),half=bottom," +
@@ -358,7 +471,7 @@ internal class CivsRoadMaintenance(private val world: CivsWorld, private val cur
 
         fun eligible(city: Settlement): Boolean = city.autonomy?.paused == false &&
             (city.inventory == null || city.inventory.mode == CivStorageMode.PHYSICAL) &&
-            city.pendingDeletion == null && city.construction == null && city.constructionQueue.orEmpty().isEmpty()
+            city.pendingDeletion == null && city.construction == null
 
         private fun funded(city: Settlement): Boolean =
             city.stock.stone > (CivsAutonomy.nextGoal(city)?.cost?.stone ?: 0L)

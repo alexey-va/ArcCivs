@@ -83,7 +83,9 @@ internal class CivsBuildingRequests(
         result
     }
 
-    fun confirmPreview(player: Player, preview: CivsPlacementPreview): CompletableFuture<Unit> {
+    fun confirmPreview(player: Player, preview: CivsPlacementPreview): CompletableFuture<Unit> = confirmPreview(player, preview, false)
+
+    private fun confirmPreview(player: Player, preview: CivsPlacementPreview, storageChecked: Boolean): CompletableFuture<Unit> {
         rejectIf(placement.currentPreview(player) !== preview || !player.isOnline, "preview-expired")
         val blueprint = preview.blueprint
         rejectIf(blueprint.building.type.isInfrastructure, "invalid-building")
@@ -107,6 +109,12 @@ internal class CivsBuildingRequests(
             return storageActions.relocateControl(player, blueprint.building.id, requireNotNull(blueprint.building.control))
                 .thenCompose { authority.afterCityAvailable(cityId) { confirmPreview(player, preview) } }
         }
+        if (preview.upgrading && !queuedUpgrade && !storageChecked && previousCity != null && !blueprint.building.type.isInfrastructure)
+            return withUpgradeStorage(previousCity, blueprint.building, blueprint.cells, freshAdmission = {
+                rejectIf(!player.isOnline || placement.currentPreview(player) !== preview, "preview-expired")
+                authority.near(player, blueprint.worldId, blueprint.building.entrance)
+                rejectIf(placement.managedPlacement(player, cityId, blueprint.building.type) != previousCity, "stale-city")
+            }) { confirmPreview(player, preview, true) }
         rejectIf(cityId in records.busy || cityId in records.unhealthy, "city-busy")
         if (previousCity == null) {
             requireFounder(player, preview.autonomous)
@@ -261,7 +269,10 @@ internal class CivsBuildingRequests(
             .forEach { cleanupCaptured(queuedDesignId(it)) }
     }
 
-    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> {
+    fun activateBuilding(city: Settlement, building: CivBuilding, player: Player? = null): CompletableFuture<Unit> =
+        activateBuilding(city, building, player, false)
+
+    private fun activateBuilding(city: Settlement, building: CivBuilding, player: Player?, storageChecked: Boolean): CompletableFuture<Unit> {
         val buildingId = building.id
         val actor = player?.uniqueId ?: city.owner
         rejectIf(city.pendingDeletion != null, "deletion-pending")
@@ -270,6 +281,12 @@ internal class CivsBuildingRequests(
         requireAssignedBuilder(city, building.id)
         authority.reserveCity(city.id)
         val result = authority.tracked<Unit>()
+        var ownsReservation = true
+        fun completeActivation(failure: Throwable?) {
+            if (ownsReservation) { ownsReservation = false; authority.releaseCity(city.id) }
+            if (failure == null) result.complete(Unit) else result.completeExceptionally(failure)
+            authority.updateHealth()
+        }
         val designId = queuedDesignId(building)
         store.loadPlan(designId).thenCompose { plan ->
             requireNotNull(plan) { "Missing queued design $buildingId" }
@@ -278,26 +295,45 @@ internal class CivsBuildingRequests(
                 Triple(plan, snapshot, requireNotNull(bytes))
             }
         }.whenCompleteSync(tasks) { loaded, failure ->
-            if (failure != null) return@whenCompleteSync finishReservation(city.id, actor, result, failure)
+            if (failure != null) return@whenCompleteSync completeActivation(failure)
             runCatching {
                 val (sitePlan, snapshot, bytes) = requireNotNull(loaded)
                 val target = if (building.phase == BuildingPhase.SITE) building.copy(phase = BuildingPhase.CONSTRUCTING)
                     else sitePlan.building.copy(production = building.production)
                 if (target.control != building.control) {
+                    ownsReservation = false
                     authority.releaseCity(city.id)
                     storageActions.relocateControl(city, building, requireNotNull(target.control)).whenCompleteSync(tasks) { relocated, relocationFailure ->
-                        if (relocationFailure != null) finishReservation(city.id, actor, result, relocationFailure)
+                        if (relocationFailure != null) completeActivation(relocationFailure)
                         else runCatching { activateBuilding(requireNotNull(relocated), requireNotNull(relocated.building(buildingId)), player) }
                             .onSuccess { activated -> activated.whenCompleteSync(tasks) { _, activationFailure ->
-                                finishReservation(city.id, actor, result, activationFailure)
-                            } }.onFailure { finishReservation(city.id, actor, result, it) }
+                                completeActivation(activationFailure)
+                            } }.onFailure { completeActivation(it) }
                     }
                     return@whenCompleteSync
                 }
                 controlInstallations.requirePresent(city.worldId, building)
                 CompletableFuture.supplyAsync({ CivsBlueprints.worldCells(snapshot, target.anchor,
                     decoration = target.type == BuildingType.DECORATION) }, executor).whenCompleteSync(tasks) cellsReady@ { cells, cellsFailure ->
-                    if (cellsFailure != null) return@cellsReady finishReservation(city.id, actor, result, cellsFailure)
+                    if (cellsFailure != null) return@cellsReady completeActivation(cellsFailure)
+                    if (!storageChecked && building.phase == BuildingPhase.ACTIVE && !building.type.isInfrastructure) {
+                        if (!authority.ready() || records.cities[city.id] != city || city.id !in records.busy) {
+                            completeActivation(CivsRejection("stale-city"))
+                            return@cellsReady
+                        }
+                        ownsReservation = false
+                        authority.releaseCity(city.id)
+                        withUpgradeStorage(city, target, requireNotNull(cells), freshAdmission = {
+                            if (player != null) {
+                                rejectIf(!player.isOnline, "not-authorized")
+                                rejectIf(placement.managedPlacement(player, city.id, building.type) != city, "stale-city")
+                                authority.near(player, city.worldId, building.entrance)
+                            }
+                        }) { refreshed ->
+                            activateBuilding(refreshed, requireNotNull(refreshed.building(buildingId)), player, true)
+                        }.whenCompleteSync(tasks) { _, relocationFailure -> completeActivation(relocationFailure) }
+                        return@cellsReady
+                    }
                     // Waiting designs reserve against fresh before-images, never the terrain at confirmation.
                     val terrain = if (building.phase == BuildingPhase.SITE &&
                         (sitePlan.adminPlacement || city.autonomy == null || sitePlan.terrain?.route?.isEmpty() == true))
@@ -310,7 +346,7 @@ internal class CivsBuildingRequests(
                     terrain.thenCompose { preparation -> world.capture(city.id, city.owner, city.worldId,
                         target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement) }
                         .whenCompleteSync(tasks) capturedReady@ { captured, captureFailure ->
-                            if (captureFailure != null) return@capturedReady finishReservation(city.id, actor, result, captureFailure)
+                            if (captureFailure != null) return@capturedReady completeActivation(captureFailure)
                             runCatching {
                                 rejectIf(!authority.ready() || records.cities[city.id]?.pendingDeletion != null, "not-ready")
                                 if (player != null) {
@@ -321,12 +357,12 @@ internal class CivsBuildingRequests(
                                 startOrder(actor, records.cities.getValue(city.id), requireNotNull(captured).copy(capturedSha256 = sitePlan.capturedSha256), bytes)
                                     .whenCompleteSync(tasks) { _, orderFailure ->
                                         if (orderFailure == null && building.phase == BuildingPhase.ACTIVE) cleanupCaptured(designId)
-                                        finishReservation(city.id, actor, result, orderFailure)
+                                        completeActivation(orderFailure)
                                     }
-                            }.onFailure { finishReservation(city.id, actor, result, it) }
+                            }.onFailure { completeActivation(it) }
                         }
                 }
-            }.onFailure { finishReservation(city.id, actor, result, it) }
+            }.onFailure { completeActivation(it) }
         }
         return result
     }
@@ -455,6 +491,21 @@ internal class CivsBuildingRequests(
                 }
             }.onFailure { authority.releaseCity(city.id); result.completeExceptionally(it) }
         }
+        return result
+    }
+
+    private fun withUpgradeStorage(city: Settlement, target: CivBuilding, cells: List<ru.arc.paper.api.ArcSchematicBlock>,
+        freshAdmission: () -> Unit = {},
+        resume: (Settlement) -> CompletableFuture<Unit>): CompletableFuture<Unit> {
+        val result = authority.tracked<Unit>()
+        runCatching { authority.relocateUpgradeStorage(city, target, cells, freshAdmission) }.onSuccess { moving ->
+            moving.whenCompleteSync(tasks) { saved, failure ->
+                if (failure != null) result.completeExceptionally(failure)
+                else runCatching { resume(requireNotNull(saved)) }.onSuccess { resumed ->
+                    resumed.whenComplete { _, error -> if (error == null) result.complete(Unit) else result.completeExceptionally(error) }
+                }.onFailure { result.completeExceptionally(it) }
+            }
+        }.onFailure { result.completeExceptionally(it) }
         return result
     }
 

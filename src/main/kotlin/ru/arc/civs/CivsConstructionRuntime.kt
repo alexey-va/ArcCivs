@@ -53,7 +53,8 @@ internal class CivsConstructionRuntime(
     private data class ConstructionFocus(val orderId: UUID, val position: CivPosition, val tick: Int)
     private data class ConstructionSupplyNeed(val orderId: UUID, val batch: Int, val materials: Map<String, Long>)
     private data class RecoveredPlacement(val plan: CivPlacementPlan, val snapshot: ArcSchematicSnapshot,
-        val access: PlacementAccess, val batch: CivBuildBatch?, val validationPlan: CivPlacementPlan)
+        val access: PlacementAccess, val batch: CivBuildBatch?, val validationPlan: CivPlacementPlan,
+        val retainedContainers: Set<CivPosition>)
     private val placing = mutableSetOf<UUID>()
     private val placementRuns = mutableMapOf<UUID, UUID>()
     private val placementAccess = mutableMapOf<UUID, PlacementAccess>()
@@ -267,17 +268,19 @@ internal class CivsConstructionRuntime(
                     }
                 }
                 val containerTypes = setOf("minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel")
-                val containersChanged = cells.any { it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes }
+                val containersChanged = cells.any { it.before != it.after &&
+                    (it.before.substringBefore('[') in containerTypes || it.after.substringBefore('[') in containerTypes) }
                 RecoveredPlacement(plan, snapshot, PlacementAccess(plan, materials.filterKeys { p ->
                     batch == null || p.x in batch.minimum.x..batch.maximum.x && p.y in batch.minimum.y..batch.maximum.y && p.z in batch.minimum.z..batch.maximum.z
                 }, containersChanged, cells.filter { it.before != it.after },
                     batch, batches?.getOrNull(order.workDone + 1)?.workplace,
-                    plan.terrain?.preparedRouteSurfaces()?.mapTo(hashSetOf(), CivPlanBlock::position).orEmpty()), batch, plan.copy(blocks = cells))
+                    plan.terrain?.preparedRouteSurfaces()?.mapTo(hashSetOf(), CivPlanBlock::position).orEmpty()), batch, plan.copy(blocks = cells),
+                    plan.blocks.asSequence().filter(::civsRetainedContainer).map(CivPlanBlock::position).toHashSet())
             }, executor)
         }.whenCompleteSync(tasks) { recovered, failure ->
             if (closed || placementRuns[city.id] != run) return@whenCompleteSync
             if (failure != null) return@whenCompleteSync placementFailed(city.id, order.id, failure)
-            val (plan, snapshot, access, batch, batchPlan) = requireNotNull(recovered)
+            val (plan, snapshot, access, batch, batchPlan, retainedContainers) = requireNotNull(recovered)
             val validation = if (batch?.terrainStart != null || batchPlan.blocks.isEmpty()) CompletableFuture.completedFuture(Unit)
                 else world.revalidate(batchPlan, city.owner)
             validation.whenCompleteSync(tasks) { _, validationFailure ->
@@ -320,7 +323,7 @@ internal class CivsConstructionRuntime(
                                     .onFailure { placementFailed(city.id, order.id, it) }
                                 return@whenCompleteSync
                             }
-                            blueprints.pasteParts(snapshot, plan.building, batch).whenCompleteSync(tasks) { parts, cropFailure ->
+                            blueprints.pasteParts(snapshot, plan.building, batch, retainedContainers).whenCompleteSync(tasks) { parts, cropFailure ->
                                 if (closed || placementRuns[city.id] != run) return@whenCompleteSync
                                 if (cropFailure != null) placementFailed(city.id, order.id, cropFailure)
                                 else {
@@ -341,6 +344,11 @@ internal class CivsConstructionRuntime(
         val orderId = order.id
         runCatching {
             rejectIf(!ready() || cityId !in placing || cityId in unhealthy, "not-ready")
+            if (parts.isEmpty()) {
+                placementAccess[cityId] = access
+                completePlacementBatch(cityId, order, plan, fullSnapshot, access)
+                return
+            }
             require(parts.isNotEmpty() && partIndex in parts.indices) { "Empty construction tile" }
             placementAccess[cityId] = access
             CivsDiagnostics.event("construction_part_started", "city" to cityId, "order" to orderId,

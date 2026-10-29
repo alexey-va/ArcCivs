@@ -5,8 +5,13 @@ import org.bukkit.inventory.Inventory
 import org.bukkit.inventory.ItemStack
 
 internal const val MATERIALIZATION_SLOT_CHANGES = 1_024
+internal const val PRODUCTION_OUTPUT_HEADROOM = 2
 
-internal data class CivStorageSource(val position: CivPosition, val type: String, val inventory: Inventory)
+internal fun productionOutputHeadroom(type: BuildingType?): Int =
+    if (type != null && CivsProduction.options(type).isNotEmpty()) PRODUCTION_OUTPUT_HEADROOM else 0
+
+internal data class CivStorageSource(val position: CivPosition, val type: String, val inventory: Inventory,
+    val acceptsInsert: Boolean = true)
 internal data class CivStorageSnapshot(val source: CivStorageSource, val before: List<ItemStack?>, val after: MutableList<ItemStack?>)
 
 /** Detached plain-slot edits shared by debit, credit and native receipt classification. */
@@ -54,31 +59,39 @@ internal object CivsStorageItems {
         return CivStoragePlan(inventory.validated(), changes.toList())
     }
 
-    fun insert(snapshots: List<CivStorageSnapshot>, material: String, amount: Long): Long = insert(snapshots.asSequence(), material, amount)
+    fun insert(snapshots: List<CivStorageSnapshot>, material: String, amount: Long, reservedEmptySlots: Int = 0): Long =
+        insert(snapshots.asSequence(), material, amount, reservedEmptySlots = reservedEmptySlots)
 
     fun insert(snapshots: Sequence<CivStorageSnapshot>, material: String, amount: Long,
-        changed: MutableSet<Pair<CivPosition, Int>>? = null): Long {
+        changed: MutableSet<Pair<CivPosition, Int>>? = null, reservedEmptySlots: Int = 0): Long {
+        require(reservedEmptySlots >= 0)
         var remaining = amount
         var writes = 0
         val limit = requireNotNull(stack(material, 1)).maxStackSize
         // Finish each source before proceeding: the control remains primary even when another chest has a partial stack.
-        for (snapshot in snapshots) for (empty in listOf(false, true)) for (slot in snapshot.after.indices) {
-            if (remaining == 0L) return 0
-            val current = snapshot.after[slot]
-            val item = plain(current)
-            if (if (empty) !isEmpty(current) else item?.material != material) continue
-            val count = if (empty) 0 else requireNotNull(item).amount
-            val added = minOf(remaining, (limit - count).coerceAtLeast(0).toLong()).toInt()
-            if (added > 0) {
-                if (changed != null) {
-                    val key = snapshot.source.position to slot
-                    if (key !in changed && changed.size >= MATERIALIZATION_SLOT_CHANGES) return remaining
-                    changed += key
-                } else reject(writes == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
-                snapshot.after[slot] = stack(material, count + added)
-                writes++
+        for (snapshot in snapshots) {
+            if (!snapshot.source.acceptsInsert) continue
+            var emptyRoom = (snapshot.after.count(::isEmpty) - reservedEmptySlots).coerceAtLeast(0)
+            for (empty in listOf(false, true)) for (slot in snapshot.after.indices) {
+                if (remaining == 0L) return 0
+                val current = snapshot.after[slot]
+                val item = plain(current)
+                if (if (empty) !isEmpty(current) else item?.material != material) continue
+                if (empty && emptyRoom == 0) continue
+                val count = if (empty) 0 else requireNotNull(item).amount
+                val added = minOf(remaining, (limit - count).coerceAtLeast(0).toLong()).toInt()
+                if (added > 0) {
+                    if (changed != null) {
+                        val key = snapshot.source.position to slot
+                        if (key !in changed && changed.size >= MATERIALIZATION_SLOT_CHANGES) return remaining
+                        changed += key
+                    } else reject(writes == MAX_INVENTORY_SLOT_CHANGES, "storage-transaction-too-large")
+                    snapshot.after[slot] = stack(material, count + added)
+                    if (empty) emptyRoom--
+                    writes++
+                }
+                remaining -= added
             }
-            remaining -= added
         }
         return remaining
     }

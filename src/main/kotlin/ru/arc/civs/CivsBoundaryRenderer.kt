@@ -30,7 +30,7 @@ import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
 
-/** Private territory marks, site fences and control labels; Core owns tracking and ordered transport. */
+/** Public site fences and private territory/control cues; Core owns tracking and ordered transport. */
 class CivsBoundaryRenderer internal constructor(
     private val plugin: Plugin,
     private val tasks: LifecycleTaskScope,
@@ -63,19 +63,23 @@ class CivsBoundaryRenderer internal constructor(
 
     /** Called by the settlement pulse, with its current local membership snapshot. No world/block scans. */
     fun pulse(player: Player, city: Settlement?, placing: Boolean = false, planned: CivBox? = null,
-              plannedBuildingId: UUID? = null, buildingStatuses: Map<UUID, String> = emptyMap()) {
+              plannedBuildingId: UUID? = null, buildingStatuses: Map<UUID, String> = emptyMap(),
+              constructionCity: Settlement? = city) {
         check(Bukkit.isPrimaryThread()) { "Civs boundary updates require the server thread" }
         if (closed) return
-        if (city == null || !city.canManage(player.uniqueId) || !player.isOnline || player.world.uid != city.worldId) {
+        if (city == null || !player.isOnline || player.world.uid != city.worldId) {
             clear(player.uniqueId)
             return
         }
         val location = player.location
-        val desired = (civsBoundaryGeometry(city, location.x, location.y, location.z) +
-            civsConstructionFenceGeometry(city, location.x, location.y, location.z) +
-            if (placing) civsBuildingBoundaryGeometry(city, location.x, location.y, location.z, planned, plannedBuildingId)
+        val managing = city.canManage(player.uniqueId)
+        val fence = constructionCity?.takeIf { it.worldId == city.worldId && it.pendingDeletion == null }
+            ?.let { civsConstructionFenceGeometry(it, location.x, location.y, location.z) }.orEmpty()
+        val desired = (fence +
+            (if (managing) civsBoundaryGeometry(city, location.x, location.y, location.z) else emptyList()) +
+            if (managing && placing) civsBuildingBoundaryGeometry(city, location.x, location.y, location.z, planned, plannedBuildingId)
             else emptyList()).associate { it.key to it.cuboid }
-        val desiredLabels = text?.let { catalog ->
+        val desiredLabels = text?.takeIf { managing }?.let { catalog ->
             civsControlHolograms(city, location.x, location.y, location.z) {
                 catalog.buildingHologram(player, city, it, buildingStatuses[it.id])
             }
@@ -367,6 +371,28 @@ internal fun civsBuildingBoundaryGeometry(city: Settlement, viewerX: Double, vie
 
 internal const val CIVS_FENCE_PART_LIMIT = 192
 
+/** The existing per-viewer scene selects one nearby public worksite, including autonomous upgrades. */
+internal fun civsNearbyConstructionCity(cities: Collection<Settlement>, worldId: UUID,
+    viewerX: Double, viewerY: Double, viewerZ: Double): Settlement? {
+    require(viewerX.isFinite() && viewerY.isFinite() && viewerZ.isFinite())
+    return cities.asSequence().filter { it.worldId == worldId && it.pendingDeletion == null }.mapNotNull { city ->
+        val distance = civsConstructionSites(city).asSequence().filter { abs(viewerY - it.entrance.y) <= 16 }.map { building ->
+            val box = building.bounds
+            val dx = maxOf(box.min.x - viewerX, 0.0, viewerX - (box.max.x.toLong() + 1))
+            val dz = maxOf(box.min.z - viewerZ, 0.0, viewerZ - (box.max.z.toLong() + 1))
+            dx * dx + dz * dz
+        }.minOrNull()?.takeIf { it <= 32.0 * 32.0 } ?: return@mapNotNull null
+        city to distance
+    }.minWithOrNull(compareBy<Pair<Settlement, Double>> { it.second }.thenBy { it.first.id })?.first
+}
+
+private fun civsConstructionSites(city: Settlement): Collection<CivBuilding> {
+    val sites = city.buildings.filter { it.phase != BuildingPhase.ACTIVE || it.id == city.construction?.buildingId }
+        .associateByTo(linkedMapOf()) { it.id }
+    city.construction?.plannedBuilding?.let { sites[it.id] = it }
+    return sites.values
+}
+
 /**
  * A visual-only two-rail fence, grounded at the authored entrance rather than a buried foundation.
  * The existing city pulse samples at most 16 building boxes and short nearby edge windows. No chunks
@@ -374,10 +400,7 @@ internal const val CIVS_FENCE_PART_LIMIT = 192
  */
 internal fun civsConstructionFenceGeometry(city: Settlement, viewerX: Double, viewerY: Double, viewerZ: Double): List<CivsBoundaryPart> {
     require(viewerX.isFinite() && viewerY.isFinite() && viewerZ.isFinite())
-    val planned = city.construction?.plannedBuilding
-    val sites = city.buildings.filter { it.phase != BuildingPhase.ACTIVE || it.id == city.construction?.buildingId }
-        .associateByTo(linkedMapOf()) { it.id }
-    if (planned != null) sites[planned.id] = planned
+    val sites = civsConstructionSites(city)
     fun distance(building: CivBuilding): Double {
         val box = building.bounds
         val dx = maxOf(box.min.x - viewerX, 0.0, viewerX - (box.max.x.toLong() + 1))
@@ -385,7 +408,7 @@ internal fun civsConstructionFenceGeometry(city: Settlement, viewerX: Double, vi
         return dx * dx + dz * dz
     }
     return buildList {
-        for (building in sites.values.sortedWith(compareBy<CivBuilding>(::distance).thenBy { it.id })) {
+        for (building in sites.sortedWith(compareBy<CivBuilding>(::distance).thenBy { it.id })) {
             if (size >= CIVS_FENCE_PART_LIMIT) break
             if (distance(building) > 32.0 * 32.0 || abs(viewerY - building.entrance.y) > 16) continue
             val bounds = building.bounds

@@ -470,6 +470,75 @@ class CivsBlueprintsTest : FunSpec({
     }
 })
 
+class CivsUpgradeStorageBlueprintTest : FunSpec({
+    lateinit var paper: MockBukkitTestRuntime
+    beforeEach { paper = MockBukkitTestRuntime.open() }
+    afterEach { paper.close() }
+
+    test("a recovered upgrade crops every retained native holder and control while replaying changed source geometry and air") {
+        val origin = ArcSchematicPoint(0, 0, 0)
+        val marker = ArcSchematicPoint(0, 1, 0)
+        val destination = ArcSchematicPoint(1, 1, 1)
+        val unchangedBarrel = ArcSchematicPoint(3, 1, 2)
+        val changingSource = ArcSchematicPoint(2, 1, 1)
+        val east = "minecraft:chest[facing=east,type=single,waterlogged=false]"
+        val south = "minecraft:chest[facing=south,type=single,waterlogged=false]"
+        val barrel = "minecraft:barrel[facing=up,open=false]"
+        val snapshot = BlueprintCellsSnapshot(origin, ArcSchematicPoint(3, 2, 2), origin, mapOf(
+            marker to "minecraft:structure_void", destination to east, unchangedBarrel to barrel,
+            changingSource to east, ArcSchematicPoint(2, 0, 1) to "minecraft:stone"))
+        val building = blueprintBuilding(snapshot, CivPosition(100, 64, 200), marker).copy(type = BuildingType.WAREHOUSE, level = 2)
+        fun world(point: ArcSchematicPoint) = CivPosition(building.anchor.x + point.x,
+            building.anchor.y + point.y, building.anchor.z + point.z)
+        val blocks = snapshot.blocks().filterNot { it.position == marker }.map { cell ->
+            CivPlanBlock(world(cell.position), when (cell.position) {
+                destination -> east
+                unchangedBarrel -> barrel
+                changingSource -> south
+                else -> "minecraft:air"
+            }, cell.blockData)
+        }
+        val plan = CivPlacementPlan(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), building, blocks,
+            snapshot.fileSha256)
+        val recoveredPlan = com.google.gson.Gson().let { it.fromJson(it.toJson(plan), CivPlacementPlan::class.java) }
+        val retained = recoveredPlan.blocks.filter(::civsRetainedContainer).mapTo(hashSetOf(), CivPlanBlock::position)
+        retained shouldBe setOf(world(destination), world(unchangedBarrel))
+        CivsMaterials.required(recoveredPlan) shouldBe mapOf("CHEST" to 1L, "STONE" to 1L) // Retained destinations contribute no material debit.
+        val libraries = BlueprintLibraries()
+        every { libraries.captured.loadVerified(plan.id.toString(), snapshot.fileSha256,
+            ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns CompletableFuture.completedFuture(snapshot)
+        every { libraries.captured.transform(snapshot, ArcSchematicTransform(0, false)) } returns CompletableFuture.completedFuture(snapshot)
+        libraries.subject.use { subject ->
+            val recovered = subject.recover(recoveredPlan).join()
+            val parts = subject.pasteParts(recovered, building, retainedContainers = retained).join()
+            val pasted = parts.flatMap { it.blocks() }
+            pasted.map { it.position }.toSet() shouldBe snapshot.blocks().map { it.position }.toSet() -
+                setOf(marker, destination, unchangedBarrel)
+            pasted.map { it.position }.distinct().size shouldBe pasted.size
+            pasted.single { it.position == changingSource }.blockData shouldBe east
+            pasted.any { it.isAir } shouldBe true
+            snapshot.blockAt(destination.x, destination.y, destination.z).blockData shouldBe east
+            shouldThrow<java.util.concurrent.CompletionException> {
+                subject.pasteParts(snapshot, building, retainedContainers = retained + world(ArcSchematicPoint(2, 0, 1))).join()
+            }.let { CivsDiagnostics.rejection(it)?.reason shouldBe "invalid-plan" }
+            shouldThrow<CivsRejection> { CivsBlueprints.verifyCapturedPlan(recoveredPlan.copy(blocks = blocks.map {
+                if (it.position == world(destination)) it.copy(after = south) else it
+            }), snapshot) }.reason shouldBe "invalid-plan"
+        }
+    }
+
+    test("an entirely retained single-cell batch is empty and never re-pastes the filled container") {
+        val at = ArcSchematicPoint(0, 0, 0)
+        val state = "minecraft:chest[facing=east,type=single,waterlogged=false]"
+        val snapshot = BlueprintCellsSnapshot(at, at, at, mapOf(at to state))
+        val building = blueprintBuilding(snapshot, CivPosition(100, 64, 200), at).copy(control = null)
+        BlueprintLibraries().subject.use { subject ->
+            subject.pasteParts(snapshot, building,
+                CivBuildBatch(building.anchor, building.anchor), setOf(building.anchor)).join() shouldBe emptyList()
+        }
+    }
+})
+
 private class BlueprintGeometrySnapshot(
     override val origin: ArcSchematicPoint,
     private val cells: List<ArcSchematicBlock>? = null,

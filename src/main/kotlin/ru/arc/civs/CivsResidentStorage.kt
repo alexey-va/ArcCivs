@@ -69,7 +69,7 @@ internal class CivsResidentStorage(
         val ordered = positions.drop(cursor) + positions.take(cursor)
         if (positions.isNotEmpty()) homeCursors[workerId] = (cursor + 4) % positions.size
         val snapshots = containers.resolveSources(city, ordered.asSequence().take(4)
-            .filter { foodCanModify(city, it.key) }.map { it.key to it.value }).map { source ->
+            .filter { foodCanModify(city, it.key) }.map { it.key to it.value }).filter { it.acceptsInsert }.map { source ->
             source to source.inventory.storageContents.map(CivResidentItem::of).toMutableList()
         }.toList()
         val originals = snapshots.associate { (source, slots) -> source.position to slots.toList() }
@@ -125,7 +125,7 @@ internal class CivsResidentStorage(
         val cursor = (homeCursors[worker.id] ?: 0).takeIf { it in entries.indices } ?: 0
         for (entry in entries.drop(cursor) + entries.take(cursor)) ordered[entry.key] = entry.value
         if (destination == null && entries.isNotEmpty()) homeCursors[worker.id] = (cursor + 4) % entries.size
-        return containers.resolveSources(city, ordered.asSequence().take(4).map { it.key to it.value })
+        return containers.resolveSources(city, ordered.asSequence().take(4).map { it.key to it.value }).filter { it.acceptsInsert }
     }
 
     internal fun homeDestination(city: Settlement, worker: CivWorker, reserve: Map<String, Long>): CivPosition? {
@@ -200,6 +200,7 @@ internal class CivsResidentStorage(
         reject(city.autonomy?.paused != false || city.inventory != null || city.stock.food <= 0 ||
             feet.world?.uid != city.worldId, "resident-food-missing")
         for ((building, source) in foodSources(city, worker, feet, reserve = true)) {
+            if (!source.acceptsInsert) continue
             val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
             if (citizenCollectedHomeTarget(city, building, world, source.position) == null) continue
             val original = source.inventory.storageContents.map(CivResidentItem::of)

@@ -14,7 +14,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
 
 /** Actual unreserved room. Empty native slots are shared by all materials; virtual room is units. */
-internal data class CivSupplyCapacity(val emptySlots: Int, val partialRoom: Map<String, Long>, val virtualRoom: Long? = null)
+internal data class CivSupplyCapacity(val emptySlots: Int, val partialRoom: Map<String, Long>, val virtualRoom: Long? = null,
+    /** Fresh producer output only; actual capacity still belongs to inputs and durable carried cargo. */
+    val outputEmptySlots: Int? = null)
 internal data class CivSupplyStore(val id: UUID, val entrance: CivPosition, val control: CivPosition,
     val stock: Map<String, Long>, val desiredStock: Map<String, Long>, val outputMaterial: String?, val capacity: CivSupplyCapacity,
     val type: BuildingType? = null)
@@ -358,8 +360,9 @@ internal data class CivSupplyAllocation(val plans: Map<UUID, CivCourierPlan>, va
 private class CivSupplyBudget : RuntimeException()
 
 /** Shared slot arithmetic: reserving a partial new stack leaves room only for that material. */
-internal class CivSupplyRoom(capacity: CivSupplyCapacity, private val stacks: Map<String, Int>) {
-    private var empty = capacity.emptySlots.coerceAtLeast(0)
+internal class CivSupplyRoom(capacity: CivSupplyCapacity, private val stacks: Map<String, Int>, outputHeadroom: Boolean = false) {
+    private var empty = (if (outputHeadroom) capacity.outputEmptySlots ?:
+        (capacity.emptySlots - PRODUCTION_OUTPUT_HEADROOM) else capacity.emptySlots).coerceAtLeast(0)
     private val partial = capacity.partialRoom.mapValues { it.value.coerceAtLeast(0) }.toMutableMap()
     private var virtual = capacity.virtualRoom?.coerceAtLeast(0)
     /** Only a complete plain material removal proves which captured slots become empty.
@@ -413,9 +416,13 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     // Inputs can occupy the output's future slot: the carpenter must physically pick them
     // all up before working. They still compete with each other for actual native slots.
     val actualRooms = stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes) }
+    val outputRooms = stores.mapValues { CivSupplyRoom(it.value.capacity, snapshot.stackSizes,
+        outputHeadroom = it.value.outputMaterial != null) }
     fun craftInput(building: UUID, material: String) = (crafts.required[building]?.get(material) ?: 0L) > 0
-    fun roomFor(building: UUID, material: String): Long = minOf(actualRooms[building]?.fits(material) ?: 0L,
-        if (craftInput(building, material)) Long.MAX_VALUE else rooms[building]?.fits(material) ?: 0L)
+    fun roomFor(building: UUID, material: String, required: Boolean = false): Long = minOf(actualRooms[building]?.fits(material) ?: 0L,
+        if (craftInput(building, material)) Long.MAX_VALUE else rooms[building]?.fits(material) ?: 0L,
+        if (required || (stores[building]?.desiredStock?.get(material) ?: 0L) > 0L) Long.MAX_VALUE
+        else outputRooms[building]?.fits(material) ?: 0L)
     val couriers = snapshot.couriers.associateBy { it.workerId }
     val busySources = hashSetOf<UUID>()
     fun task(request: CivSupplyRequest) = CivSupplyTask(null, null, request.buildingId, request.material, request.construction)
@@ -448,7 +455,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         assigned[worker] = plan
         val cargo = plan.cargo
         val futureRoom = rooms[plan.destinationBuildingId].takeUnless { craftInput(plan.destinationBuildingId, cargo.material) }
-        for (room in listOfNotNull(actualRooms[plan.destinationBuildingId], futureRoom)) {
+        for (room in listOfNotNull(actualRooms[plan.destinationBuildingId], futureRoom, outputRooms[plan.destinationBuildingId])) {
             if (carried && room.fits(cargo.material) < cargo.amount) room.block()
             else room.take(cargo.material, cargo.amount)
         }
@@ -474,7 +481,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             cargo.id != CivsLogistics.shipmentId(snapshot.cityId, worker, courier.cycle, cargo.sourceBuildingId,
                 cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
             remaining(plan) < cargo.amount || (courier.bagRoom[cargo.material] ?: 0) < cargo.amount ||
-            roomFor(plan.destinationBuildingId, cargo.material) < cargo.amount ||
+            roomFor(plan.destinationBuildingId, cargo.material, key?.construction == true) < cargo.amount ||
             cargo.sourceWorkerId?.let { sources[it]?.buildingId != cargo.sourceBuildingId } == true ||
             cargo.sourceWorkerId in busySources || key != null && (demand[key] ?: 0) < cargo.amount ||
             cargo.sourceBuildingId == cargo.warehouseId && key == null) continue
@@ -491,7 +498,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             val target = stores[snapshot.constructionTargets[warehouse.id] ?: key.target]
             if (key.construction && key.material == material && target != null &&
                 distance(warehouse.control, target.control) <= snapshot.maximumTransferDistance &&
-                roomFor(target.id, material) > 0) count else 0L
+                roomFor(target.id, material, required = true) > 0) count else 0L
         }
         val incoming = assigned.values.filter { it.destinationBuildingId == warehouse.id && it.cargo.material == material }
             .sumOf { it.cargo.amount }
@@ -524,7 +531,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             if (producer != null && (producer.workerId in busySources || producer.workerId == courier.workerId)) return
             seen += key
             val amount = minOf(CivsLogistics.MAX_CARGO, quantity, courier.bagRoom[material] ?: 0,
-                roomFor(target.id, material))
+                roomFor(target.id, material, key.construction))
             if (amount <= 0) return
             val cargo = CivCargo(CivsLogistics.shipmentId(snapshot.cityId, courier.workerId, courier.cycle,
                 source.id, target.id, material, producer?.workerId), warehouse.id, source.id, target.id,
@@ -558,9 +565,18 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             for ((material, count) in excess[producer.workerId].orEmpty()) if (count > 0)
                 offer(source, warehouse, material, count, CivSupplyTask(source.id, producer.workerId, warehouse.id, material, false), producer)
         }
-        val selected = candidates.minWithOrNull(compareBy<Candidate> { if (it.key.construction) 0 else 1 }
-            .thenBy { if (it.key.source == null) 0 else 1 }
-            .thenBy { ages[it.key] ?: now }.thenBy { it.distance }.thenBy { it.plan.cargo.id.toString() }) ?: continue
+        fun capacityRecovery(candidate: Candidate): Boolean {
+            if (candidate.key.worker != null) return false
+            val source = candidate.key.source?.let(stores::get) ?: return false
+            return source.outputMaterial != null && source.capacity.virtualRoom == null &&
+                (source.capacity.outputEmptySlots ?: (source.capacity.emptySlots - PRODUCTION_OUTPUT_HEADROOM)) <= 0
+        }
+        // Saturated producers share ordinary request age, so neither recovery nor meals can monopolise the courier.
+        val selected = candidates.minWithOrNull(compareBy<Candidate> {
+            if (it.key.construction) 0 else if (capacityRecovery(it) || it.key.source == null) 1 else 2
+        }.thenBy { if (it.key.construction && it.key.source != null) 1 else 0 }
+            .thenBy { ages[it.key] ?: now }.thenBy { if (capacityRecovery(it)) 0 else 1 }
+            .thenBy { it.distance }.thenBy { it.plan.cargo.id.toString() }) ?: continue
         reserve(courier.workerId, selected.plan, selected.key)
         served += selected.key
     }

@@ -15,6 +15,7 @@ import ru.arc.core.whenCompleteSync
 import ru.arc.observability.RuntimeHealthContribution
 import ru.arc.observability.RuntimeHealthState
 import ru.arc.paper.api.ArcBlockProtectionService
+import ru.arc.paper.api.ArcSchematicBlock
 import ru.arc.paper.network.BackendTransfer
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
@@ -58,7 +59,9 @@ class CivsService(
     private val records = CivsCityRecords({ cities }, busy, unhealthy, { closed }, { loading },
         { loadFailure }, { geometryGeneration }, { completions.size })
     private val world = worldAdapter ?: CivsWorld(plugin, tasks, navigationSettings = settings.navigation) { cities.values.toList() }
-    private val roadMaintenance = CivsRoadMaintenance(world)
+    private val roadMaintenance = CivsRoadMaintenance(world,
+        registerSurface = { cityId, position -> footTraffic.registerSurface(cityId, position) },
+        paymentPossible = ::roadUpkeepPaymentPossible)
     private val layoutDebug = CivsLayoutDebug(plugin.dataFolder.toPath(), tasks, executor, { id ->
         store.loadPlan(id).whenComplete { _, failure ->
             if (failure != null) plugin.logger.log(Level.WARNING, "ArcCivs layout export could not read plan=$id", failure)
@@ -71,7 +74,8 @@ class CivsService(
         { city -> cityPlans.loadAutonomousPlans(city) }, ::settlementActive, { id, action -> afterCityAvailable(id, action) },
         { id, transform -> mutate(id, transform = transform) },
         { id, transform -> afterCityAvailable(id) { mutate(id, transform = transform) } },
-        { city, design -> buildingRequests.commitAutonomousDesign(city, design) }, { construction.pulse() }, clock)
+        { city, design -> admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, design) } }, { construction.pulse() }, clock,
+        developmentFinished = roadMaintenance::developmentFinished)
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
@@ -156,7 +160,7 @@ class CivsService(
         blueprints, store, executor, physics, storage, citizens, footTraffic, { cities }, busy, unhealthy,
         ::ready, { closed }, ::settlementActive, autonomousDevelopment::accessReady,
         { id, action -> afterCityAvailable(id, action) }, { id, transform -> mutate(id, transform = transform) },
-        { city, building -> buildingRequests.activateBuilding(city, building) },
+        { city, building -> admitRoadDevelopment(city) { buildingRequests.activateBuilding(city, building) } },
         { city, order, required -> buildingRequests.payBatch(city, order, required) }, ::updateHealth, clock)
 
     private val inventoryJournal = CivsInventoryJournal(plugin, tasks, store, storage, { cities }, busy,
@@ -310,6 +314,7 @@ class CivsService(
             roadMaintenance = roadMaintenance)
         storage.residentFoods = residentFoods
         storage.forestryLeafCurrentCity = { cities[it] }
+        storage.relocationCurrentCity = { cities[it] }
         storage.foodCanModify = { city, position ->
             plugin.server.getWorld(city.worldId)?.takeIf { position.y in it.minHeight until it.maxHeight &&
                 it.isChunkLoaded(position.x shr 4, position.z shr 4) }
@@ -572,6 +577,63 @@ class CivsService(
 
     internal fun upkeepRequirements(city: Settlement): Map<UUID, Map<String, Long>> = roadMaintenance.requirements(city)
 
+    private fun roadUpkeepPaymentPossible(city: Settlement): Boolean? {
+        val snapshot = supply.observation(city.id)
+        val possible = CivsRoadMaintenance.paymentPossible(city, snapshot)
+        if (possible != false) return possible
+        val observation = snapshot?.inputKey as? CivSupplyObservation ?: return null
+        return if (storage.supplyCaptureCurrent(city, observation.capture)) false else null
+    }
+
+    private fun admitRoadDevelopment(city: Settlement, action: () -> CompletableFuture<Unit>): CompletableFuture<Unit> {
+        if (!roadMaintenance.admitDevelopment(city)) return CompletableFuture.failedFuture(CivsRejection("city-busy"))
+        val result = runCatching(action).getOrElse {
+            roadMaintenance.developmentFinished(city.id)
+            return CompletableFuture.failedFuture(it)
+        }
+        result.whenCompleteSync(tasks) { _, _ -> roadMaintenance.developmentFinished(city.id) }
+        return result
+    }
+
+    /** Move existing exact items before upgrade capture; no order or world change is authorized by this receipt. */
+    internal fun relocateUpgradeStorage(city: Settlement, target: CivBuilding,
+        cells: List<ArcSchematicBlock>, freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
+        checkMain()
+        rejectIf(!ready(), "not-ready")
+        rejectIf(cities[city.id] != city || city.id in busy || city.id in unhealthy, "city-busy")
+        val previous = city.building(target.id)
+        if (previous == null || previous.phase != BuildingPhase.ACTIVE || previous.type.isInfrastructure || target.level != previous.level + 1)
+            return CompletableFuture.completedFuture(city)
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        busy += city.id
+        val result = tracked<Settlement>()
+        fun abort(failure: Throwable?) {
+            storage.unlock(id)
+            busy -= city.id
+            if (failure == null) result.complete(city) else result.completeExceptionally(failure)
+        }
+        CompletableFuture.supplyAsync({
+            require(cells.size in 1..CivsStore.MAX_PLAN_BLOCKS)
+            cells.associate { CivPosition(it.position.x, it.position.y, it.position.z) to it.blockData }
+                .also { require(it.size == cells.size) }
+        }, executor).whenCompleteSync(tasks) { future, failure ->
+            if (failure != null) return@whenCompleteSync abort(failure)
+            val tx = runCatching {
+                rejectIf(!ready() || cities[city.id] != city || city.id !in busy, "stale-city")
+                freshAdmission()
+                val move = storage.prepareUpgradeRelocation(city, target, requireNotNull(future))
+                    ?: run { abort(null); return@whenCompleteSync }
+                CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
+                    emptyList(), containerRelocation = move).also { storage.seal(it) }
+            }.getOrElse { abort(it); return@whenCompleteSync }
+            inventoryJournal.submitRelocation(city, tx, freshAdmission).whenCompleteSync(tasks) { saved, journalFailure ->
+                if (journalFailure == null) result.complete(requireNotNull(saved)) else result.completeExceptionally(journalFailure)
+            }
+        }
+        return result
+    }
+
     internal fun inventoryMutation(
         cityId: UUID, prepare: (Settlement) -> CivStoragePlan?,
         sourcePlayer: Player? = null,
@@ -652,11 +714,23 @@ class CivsService(
     }
 
     private fun inventoryRetired(tx: CivInventoryTransaction, recoveryPath: Boolean): Settlement {
+        tx.containerRelocation?.let { move ->
+            storage.refreshBuilding(tx.after, move.building)
+            CivsDiagnostics.event("upgrade_storage_relocated", "city" to tx.cityId, "transaction" to tx.id,
+                "building" to move.building.id, "containers" to move.containers.size, "slots" to move.changes().size,
+                "recovery_path" to recoveryPath)
+        }
         tx.upkeep?.let { receipt ->
             val work = receipt.work
             val upkeep = requireNotNull(work.upkeep)
-            if (upkeep.routeOverride != null) cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
-                if (failure != null) log("reload repaired autonomous road ${tx.cityId}", failure, tx.cityId)
+            if (upkeep.routeOverride != null) {
+                val gradeLoad = roadMaintenance.awaitGradeNetwork(tx.after)
+                cityPlans.loadAutonomousPlans(tx.after).whenCompleteSync(tasks) { _, failure ->
+                    roadMaintenance.gradeNetworkCompleted(tx.cityId, gradeLoad)
+                    if (failure != null) {
+                        log("reload repaired autonomous road ${tx.cityId}", failure, tx.cityId)
+                    }
+                }
             }
             val surfaceChange = work.changes.firstOrNull { it.position == upkeep.floor }
             footTraffic.registerSurface(tx.cityId, upkeep.floor)
@@ -870,6 +944,8 @@ class CivsService(
         citizens.pulse(now())
         plugin.server.onlinePlayers.forEach({ player -> placement.refreshBoundary(player) })
         if (ready()) {
+            cities.values.asSequence().filter { it.id !in busy && it.id !in unhealthy && it.pendingDeletion == null }
+                .forEach(roadMaintenance::backfillSurfaces)
             inventoryJournal.recover()
             pulseCorpses()
             deletion.pulseDeletions()

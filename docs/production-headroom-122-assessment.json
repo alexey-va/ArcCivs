@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.122: native producer output headroom, item-only limit assessment",
+  "assumptions": [
+    "This is a single physical 27-slot producer-container capacity model, not measured daily production or income. One modeled insertion attempt is normalized to one participant/day solely for the calculator.",
+    "The low/base/high attempt contains 1/64/128 ordinary items of one material with native stack size 64; the holder already has 25 occupied full slots and two empty slots, with no partial matching stack.",
+    "Before: the attempted new output may fill the final two slots. After: it is deferred; ordinary bag returns retain every unaccepted item. Existing native contents, accepted receipts, carried cargo, recipes and required input/tool grants retain their existing item quantities.",
+    "Required inputs/tools may use the two reserved slots. The allowance is not a new grant rate. Legacy over-limit native contents are grandfathered and must leave only through ordinary durable transfers or consumption.",
+    "No vault or token price, payout, mint, burn, tax, boost or SELL redemption changes. Item units are not converted to coins or tokens. The current SELL configuration and separate contract flows remain unchanged; no resale valuation is assumed.",
+    "This is a source-change assessment for ArcCivs 0.1.122; it is not evidence of delivery, activation, or observed player behavior.",
+    "The item flow is a storage-admission illustration only: it does not change work output, payout quantity, accepted-receipt quantity, or the amount retained in NPC cargo; output that cannot enter the holder remains carried/deferred.",
+    "Two slots per producer holder are reserved as item headroom for required inputs/tools; this means slots (which may each hold a stack), not a claim of exactly two items.",
+    "Trails movement figures below are arithmetic sensitivity examples for the requested PLAINS registered wood-stair multiplier change, not measured travel time, production rate, or game income.",
+    "Physical mining and forestry realized-throughput deltas are unknown. No work cadence, daily rate, or SELL valuation is inferred."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    },
+    "native_output_items_per_attempt": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "new_output_admitted_into_final_two_slots",
+          "kind": "item",
+          "source": "ArcCivs/CivsStoragePlanner.prepareWork, prepareResidentReturn; CivsSupplyDispatcher.allocateCivSupplies",
+          "basis": "Explicit saturated-container insertion example; no production frequency or monetary valuation inferred.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              64,
+              128
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "native_slot_limit": {
+    "unit": "slots_per_27_slot_producer_holder",
+    "before": 27,
+    "after": 25,
+    "required_input_tool_headroom": 2
+  },
+  "conservation": {
+    "existing_native_items_removed": 0,
+    "carried_items_removed_without_native_receipt": 0,
+    "accepted_receipts_invalidated": 0
+  },
+  "prices": [],
+  "currency_deltas": {
+    "vault": {
+      "before": "0",
+      "after": "0",
+      "delta": "0",
+      "unit": "major",
+      "basis": "No direct Vault flow, payout, price, or rate is changed."
+    },
+    "tokens": {
+      "before": "0",
+      "after": "0",
+      "delta": "0",
+      "unit": "major",
+      "basis": "No direct token flow, payout, price, or rate is changed."
+    }
+  },
+  "native_item_outcome": {
+    "per_holder_headroom": {
+      "slots": 2,
+      "slot_limit_before": 27,
+      "slot_limit_after": 25
+    },
+    "work_output_quantity_change": 0,
+    "payout_quantity_change": 0,
+    "existing_native_items_removed": 0,
+    "carried_items_removed_without_native_receipt": 0,
+    "accepted_receipts_invalidated": 0,
+    "interpretation": "Only storage admission is modeled. New output not admitted to the holder is deferred/carried; this assessment models no item payout increase/decrease or item deletion."
+  },
+  "movement_sensitivity": {
+    "surface": "PLAINS registered wood stairs",
+    "speed_multiplier": {
+      "before": "1.0",
+      "after": "1.25",
+      "context": "Existing configured cobblestone speed multiplier remains 1.25."
+    },
+    "baseline_speed_blocks_per_tick": "0.8",
+    "effective_speed_blocks_per_tick": {
+      "before": "0.8",
+      "after": "1.0"
+    },
+    "tick_seconds": "0.05",
+    "route_cost": {
+      "before": "2.25",
+      "after": "1.0",
+      "unit": "relative navigation cost"
+    },
+    "hypothetical_traversals": [
+      {
+        "stair_blocks": 1,
+        "before_ticks": "1.25",
+        "after_ticks": "1",
+        "before_seconds": "0.0625",
+        "after_seconds": "0.05"
+      },
+      {
+        "stair_blocks": 4,
+        "before_ticks": "5",
+        "after_ticks": "4",
+        "before_seconds": "0.25",
+        "after_seconds": "0.20"
+      },
+      {
+        "stair_blocks": 16,
+        "before_ticks": "20",
+        "after_ticks": "16",
+        "before_seconds": "1.0",
+        "after_seconds": "0.8"
+      }
+    ],
+    "basis": "Hypothetical distance divided by assumed speed: before speed 0.8 blocks/tick; after speed 0.8 × 1.25 = 1.0 blocks/tick; 50 ms/tick. Not observed game income, throughput, or measured travel time."
+  },
+  "realized_production_throughput": {
+    "physical_mining": {
+      "status": "unknown",
+      "measured_delta": null
+    },
+    "forestry": {
+      "status": "unknown",
+      "measured_delta": null
+    },
+    "reason": "No before/after in-world production observation is included; no new item amounts are assumed."
+  }
+}

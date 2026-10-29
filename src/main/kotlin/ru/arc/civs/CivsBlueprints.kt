@@ -311,8 +311,10 @@ class CivsBlueprints(
             ArcSchematicPoint(batch.minimum.x - building.anchor.x, batch.minimum.y - building.anchor.y, batch.minimum.z - building.anchor.z),
             ArcSchematicPoint(batch.maximum.x - building.anchor.x, batch.maximum.y - building.anchor.y, batch.maximum.z - building.anchor.z))
 
-    /** Preserve the authored barrel cell without modifying captured bytes or discarding air around it. */
-    internal fun pasteParts(snapshot: ArcSchematicSnapshot, building: CivBuilding, batch: CivBuildBatch? = null): CompletableFuture<List<ArcSchematicSnapshot>> = try {
+    /** Exclude whole preserved native containers without modifying captured bytes or discarding surrounding air. */
+    internal fun pasteParts(snapshot: ArcSchematicSnapshot, building: CivBuilding, batch: CivBuildBatch? = null,
+        retainedContainers: Set<CivPosition> = emptySet()): CompletableFuture<List<ArcSchematicSnapshot>> =
+        CompletableFuture.supplyAsync({ try {
         val minimum = batch?.minimum?.let { CivPosition(it.x - building.anchor.x, it.y - building.anchor.y, it.z - building.anchor.z) }
             ?: CivPosition(snapshot.minimum.x, snapshot.minimum.y, snapshot.minimum.z)
         val maximum = batch?.maximum?.let { CivPosition(it.x - building.anchor.x, it.y - building.anchor.y, it.z - building.anchor.z) }
@@ -325,13 +327,21 @@ class CivsBlueprints(
         val preserved = marker?.takeIf { sourceBounds.contains(it.x, it.y, it.z) &&
             snapshot.blockAt(it.x, it.y, it.z).blockData.substringBefore('[') == "minecraft:structure_void" }
         if (hasAuthoredControl(building) && preserved == null) throw CivsRejection("invalid-plan")
-        val boxes = if (preserved != null && bounds.contains(preserved.x, preserved.y, preserved.z)) withoutPoint(bounds, preserved) else listOf(bounds)
+        val retained = retainedContainers.map { point ->
+            CivPosition(point.x - building.anchor.x, point.y - building.anchor.y, point.z - building.anchor.z).also {
+                if (!sourceBounds.contains(it.x, it.y, it.z) || !civsRetainContainerState(snapshot.blockAt(it.x, it.y, it.z).blockData))
+                    throw CivsRejection("invalid-plan")
+            }
+        }
+        val boxes = (listOfNotNull(preserved) + retained).distinct().fold(listOf(bounds)) { parts, point ->
+            parts.flatMap { box -> if (box.contains(point.x, point.y, point.z)) withoutPoint(box, point) else listOf(box) }
+        }
         if (boxes == listOf(sourceBounds)) CompletableFuture.completedFuture(listOf(snapshot))
         else boxes.fold(CompletableFuture.completedFuture(emptyList<ArcSchematicSnapshot>())) { prepared, box ->
             val part = captured.crop(snapshot, ArcSchematicPoint(box.min.x, box.min.y, box.min.z), ArcSchematicPoint(box.max.x, box.max.y, box.max.z))
             prepared.thenCombine(part) { parts, next -> parts + next }
         }
-    } catch (failure: RuntimeException) { CompletableFuture.failedFuture(failure) }
+    } catch (failure: RuntimeException) { CompletableFuture.failedFuture(failure) } }, executor).thenCompose { it }
 
     fun repair(worldId: UUID, blocks: List<ArcSchematicBlock>): ArcSchematicOperation = captured.repairConnections(worldId, blocks)
 

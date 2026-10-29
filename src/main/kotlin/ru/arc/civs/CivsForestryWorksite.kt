@@ -8,7 +8,6 @@ import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.inventory.ItemStack
 import java.util.UUID
-import kotlin.math.roundToInt
 import ru.arc.civs.requireWorksite as requireCivs
 
 /** Owns the retained zone, pending tree/plant observations and captured native forestry batches. */
@@ -87,7 +86,7 @@ internal class CivsForestryWorksite(
         val treeColumns: MutableSet<CivPosition> = linkedSetOf(),
         val unfunded: MutableMap<CivPosition, Pair<String, Long>> = linkedMapOf(), val unplantable: MutableSet<CivPosition> = linkedSetOf(),
         val dirty: MutableSet<CivPosition> = linkedSetOf(), val retryRoots: MutableMap<CivPosition, ForestRetry> = linkedMapOf(),
-        var retryAt: Long? = null, var plantNext: Boolean = false, var residentOrigin: CivPosition? = null,
+        var retryAt: Long? = null, var plantNext: Boolean = false,
         var plantingRefusals: Long = 0, val plantingReasons: MutableMap<String, Long> = linkedMapOf(),
         var lastPlantingCandidate: CivPosition? = null, var lastPlantingPoint: CivPosition? = null,
         var lastPlantingReasons: List<String> = emptyList(), var lastPlantingNeighbour: String? = null,
@@ -218,13 +217,7 @@ internal class CivsForestryWorksite(
                     dx * dx + dz * dz
                 })
             }.also { forestSearches[worker.id] = it }
-        val origin = feet?.let { CivPosition(it.blockX, it.y.roundToInt(), it.blockZ) }
-        if (origin != search.residentOrigin) {
-            search.residentOrigin = origin
-            if (feet != null) {
-                approaches.refreshForestApproaches(worker.id, feet, deferred)
-            }
-        }
+        if (feet != null) approaches.refreshForestApproaches(worker.id, feet, deferred)
         if (search.saplings != supplies || search.availableSaplings != availableSaplings) {
             search.saplings = supplies
             search.availableSaplings = availableSaplings

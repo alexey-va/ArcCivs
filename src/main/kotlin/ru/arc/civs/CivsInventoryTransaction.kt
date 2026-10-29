@@ -78,15 +78,21 @@ data class CivInventoryTransaction(
     val mine: CivMineReceipt? = null,
     /** Explicit native issuance; absent in older receipts and ordinary transfers/production. */
     val autoSupplyBuildingId: UUID? = null,
+    /** Exact internal container move; absent in all older receipts. */
+    val containerRelocation: CivContainerRelocation? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
         require(beforeRevision in 0 until Long.MAX_VALUE && after.id == cityId && after.revision == beforeRevision + 1)
         CivsRules.validate(after)
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
-            autonomousVisual != null || after.autonomy != null && residentTransfer != null)
+            autonomousVisual != null || containerRelocation != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId).size <= 1)
+            autoSupplyBuildingId, containerRelocation).size <= 1)
+        containerRelocation?.let {
+            require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
+            it.validated(after)
+        }
         collected?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)

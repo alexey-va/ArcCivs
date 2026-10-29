@@ -270,14 +270,22 @@ internal class CivsPlacementSession(
         val selection = selections[player.uniqueId]
         val selectedCity = selection?.cityId ?: preview?.cityId
         val type = if (selection?.cityId != null) selection.type else preview?.blueprint?.building?.type
+        val location = player.location
+        val constructionCity = if (authority.ready() && selectedCity == null)
+            civsNearbyConstructionCity(authority.settlements(), player.world.uid, location.x, location.y, location.z) else null
         val city = if (!authority.ready()) null else if (selectedCity != null && type != null)
-            runCatching { managedPlacement(player, selectedCity, type) }.getOrNull() else authority.city(player)
+            runCatching { managedPlacement(player, selectedCity, type) }.getOrNull() else {
+            authority.city(player)?.takeIf { it.worldId == player.world.uid &&
+                kotlin.math.abs(it.center.x.toDouble() - location.x) <= it.radius + 24.0 &&
+                kotlin.math.abs(it.center.z.toDouble() - location.z) <= it.radius + 24.0 }
+                ?: constructionCity
+        }
         val authorized = selectedCity == null || city != null
         val visiblePreview = preview?.takeIf { authorized }
         boundary.pulse(player, city,
             authorized && (player.uniqueId in selections || preview != null || previewLoads[player.uniqueId] == true),
             visiblePreview?.blueprint?.building?.bounds, visiblePreview?.blueprint?.building?.id,
-            city?.buildings?.associate { it.id to diagnostics.buildingStatus(it.id) }.orEmpty())
+            city?.buildings?.associate { it.id to diagnostics.buildingStatus(it.id) }.orEmpty(), constructionCity ?: city)
     }
 
     fun currentPreview(player: Player): CivsPlacementPreview {

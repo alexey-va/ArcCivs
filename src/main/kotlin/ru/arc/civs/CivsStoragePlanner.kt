@@ -239,7 +239,7 @@ internal class CivsStoragePlanner(
         if (city.inventory?.mode == CivStorageMode.VIRTUAL) return warehouseSpace(city, buildingId).coerceAtMost(CivsLogistics.MAX_CARGO)
         val maximum = requireNotNull(stack(material, 1)).maxStackSize
         var room = 0L
-        for (source in containers.localSources(city, buildingId)) for (current in source.inventory.storageContents) {
+        for (source in containers.localSources(city, buildingId).filter { it.acceptsInsert }) for (current in source.inventory.storageContents) {
             room += if (isEmpty(current)) maximum else plain(current)?.takeIf { it.material == material }?.let { maximum - it.amount } ?: 0
             if (room >= CivsLogistics.MAX_CARGO) return CivsLogistics.MAX_CARGO
         }
@@ -284,8 +284,9 @@ internal class CivsStoragePlanner(
             }
         } else emptyList()
         var virtual = inventory
+        val headroom = productionOutputHeadroom(city.building(buildingId)?.type)
         val moved = offered.mapValues { (material, count) ->
-            if (inventory.mode == CivStorageMode.PHYSICAL) count - insert(snapshots, material, count)
+            if (inventory.mode == CivStorageMode.PHYSICAL) count - insert(snapshots, material, count, reservedEmptySlots = headroom)
             else minOf(count, warehouseSpace(city.copy(inventory = virtual), buildingId)).also { amount ->
                 if (amount > 0) virtual = creditVirtual(city.copy(inventory = virtual), material, amount, buildingId).inventoryAfter
             }
@@ -392,7 +393,10 @@ internal class CivsStoragePlanner(
         debit(snapshots(), missing)
         if (missing.isNotEmpty()) throw CivsRejection("materials-missing", mapOf(
             "material" to missing.firstKey(), "count" to missing.getValue(missing.firstKey()).toString()))
-        outputs.forEach { (material, amount) -> reject(insert(snapshots(), material, amount) != 0L, "storage-full") }
+        val headroom = productionOutputHeadroom(building.type)
+        outputs.forEach { (material, amount) ->
+            reject(insert(snapshots(), material, amount, reservedEmptySlots = headroom) != 0L, "storage-full")
+        }
         return plan(inventory, captured).copy(worldChanges = worldChanges.toList(), mine = mine)
     }
 

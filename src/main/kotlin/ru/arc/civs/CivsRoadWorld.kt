@@ -7,6 +7,7 @@ import org.bukkit.World
 import org.bukkit.block.Block
 import org.bukkit.block.TileState
 import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.Bisected
 import org.bukkit.block.data.Waterlogged
 import org.bukkit.block.data.type.Stairs
 import org.bukkit.plugin.Plugin
@@ -43,7 +44,8 @@ internal class CivsRoadWorld(
     }
 
     /** Discovery is externally budgeted. This method never loads chunks or writes a block. */
-    internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep): CivWorldWork? {
+    internal fun captureRoadUpkeep(city: Settlement, worker: CivWorker, upkeep: CivRoadUpkeep,
+        registerSurface: ((UUID, CivPosition) -> Unit)? = null): CivWorldWork? {
         check(Bukkit.isPrimaryThread())
         val world = plugin.server.getWorld(city.worldId) ?: return null
         val p = upkeep.floor
@@ -59,7 +61,16 @@ internal class CivsRoadWorld(
             world.getBlockAt(p.x, p.y + dy, p.z).blockData.asString
         }, CivsRoadMaintenance.ownedPavement(city, upkeep)) ?: return null
         val changes = listOfNotNull(change) + cover
-        if (changes.isEmpty()) return null
+        if (changes.isEmpty()) {
+            val stairs = block.blockData as? Stairs
+            if (registerSurface != null && stairs != null && stairs.material != Material.COBBLESTONE_STAIRS &&
+                stairs.half == Bisected.Half.BOTTOM && !stairs.isWaterlogged && !isClosed() && city.autonomy != null &&
+                world.worldBorder.isInside(block.location)) {
+                try { upkeep.validated(city) } catch (_: IllegalArgumentException) { return null }
+                if (canModify(city.owner, block, after.material)) registerSurface(city.id, p)
+            }
+            return null
+        }
         val assignment = worker.assignment ?: return null
         for (dy in listOf(1, 0, 2, 3)) for ((dx, dz) in listOf(1 to 0, 0 to 1, -1 to 0, 0 to -1)) {
             val standing = CivPosition(p.x + dx, p.y + dy, p.z + dz)
