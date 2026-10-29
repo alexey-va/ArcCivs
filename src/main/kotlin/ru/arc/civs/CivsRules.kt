@@ -137,8 +137,12 @@ object CivsRules {
     fun constructionStorageInputs(city: Settlement, buildingId: UUID, materials: Map<String, Long>): Map<String, Long> =
         constructionWorkers(city, buildingId).fold(materials) { remaining, worker -> CivsEquipment.storageInputs(worker, remaining) }
 
+    internal fun workplaceAvailable(city: Settlement, building: CivBuilding): Boolean =
+        building.phase == BuildingPhase.ACTIVE && (city.construction?.takeIf { it.buildingId == building.id }
+            ?.let { it.targetLevel > building.level } ?: true)
+
     fun productionAvailable(city: Settlement, building: CivBuilding): Boolean =
-        building.phase == BuildingPhase.ACTIVE && !isBuilder(city, building) && city.construction?.buildingId != building.id &&
+        workplaceAvailable(city, building) && !isBuilder(city, building) &&
             (if (building.type == BuildingType.UNIVERSITY) CivsResearch.university(city)?.id == building.id &&
                 city.research?.project?.let { it.funded && !it.paused } == true
             else CivsProduction.options(building.type).isNotEmpty() || city.autonomy != null && building.type == BuildingType.BLACKSMITH)
@@ -179,8 +183,7 @@ object CivsRules {
     fun profession(city: Settlement, building: CivBuilding): String = profession(effectiveWorkType(city, building))
 
     fun staffedTavern(city: Settlement, building: CivBuilding): Boolean =
-        building.type == BuildingType.TAVERN && building.phase == BuildingPhase.ACTIVE &&
-            city.construction?.buildingId != building.id && city.workers.any {
+        building.type == BuildingType.TAVERN && workplaceAvailable(city, building) && city.workers.any {
                 it.assignment == building.id && !CivsResidents.isChild(it)
             }
 

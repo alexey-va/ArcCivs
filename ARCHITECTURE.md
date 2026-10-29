@@ -180,7 +180,7 @@ by the observer's periodic refresh; no observation authorizes or repeats a write
 Work props never enter city storage. Supplied personal tools, armor, food and consumables are recorded separately in the city snapshot. Residents expose a native
 inventory menu backed by 33 saved slots: six equipment slots and 27 bag slots. Quick transfers preserve
 item metadata and use the same inventory journal; returned items go to the player's
-inventory, not the warehouse. One bread heals six health points. The legacy supply
+inventory, not the warehouse. One bread restores six hunger points. The legacy supply
 action offers up to 16 bread; the native bag uses its actual slot capacity. Armor
 equips native slots; a supplied matching iron work tool reduces incoming
 damage by ten percent. Props alone confer no bonus. Residents start with 20 health;
@@ -208,8 +208,11 @@ Damage from players, monsters and the environment enters the virtual resident
 damage owner. The actor stops work while its injury waits for the current city
 write; health or permanent removal is committed before visual health/despawn changes.
 Failed/unknown injury commits remain frozen until a successful canonical reload.
-There is no native regeneration. Viewer/chunk retirement preserves stored health
-and personal inventory; it cannot heal or resurrect a dead worker. Nearby idle
+Awake, observed residents with at least 18 hunger recover one health point per
+four observed seconds, up to their personal maximum. Recovery is persisted before
+publication, uses no native regeneration and adds no hunger drain. Missing observations,
+pause, viewer/chunk retirement and restart discard unfinished recovery time; they
+preserve stored health and personal inventory and cannot resurrect a dead worker. Nearby idle
 monsters approach residents through bounded round-robin checks; existing monster
 targets take priority. `CivsResidentDamageEvent` is the cancellable integration
 boundary for virtual residents; native `EntityDamageEvent` listeners do not receive

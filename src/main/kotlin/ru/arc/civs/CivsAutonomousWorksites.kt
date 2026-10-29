@@ -36,7 +36,7 @@ internal object CivsAutonomousWorksites {
         val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
         val worker = city.workers.firstOrNull { it.id == work.workerId } ?: throw CivsRejection("worker-not-found")
         requireWork(supports(city, building) && city.autonomy?.paused == false && city.pendingDeletion == null &&
-            building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id)
+            CivsRules.workplaceAvailable(city, building))
         requireWork(worker.assignment == building.id && worker.completedCycles == work.cycle && worker.cargo == null)
         requireWork(!CivsResidents.isChild(worker))
         requireWork(work.autonomousVisual && work.inputs.isEmpty() && work.outputs.isEmpty() && work.equipmentAfter == null &&

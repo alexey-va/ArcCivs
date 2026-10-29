@@ -1,0 +1,163 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.117 real tavern service and uninterrupted existing workplace",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "Before source69cbe21/0.1.116; after0.1.117. This is source assessment; deployment and observed runtime acceptance are separate evidence.",
+    "No prices, recipe quantities, work durations, fallback probabilities, hunger clock or automatic food buffer are changed. Existing adults lose1 hunger per observed awake minute, children1 per2minutes; one existing bread restores6hunger.",
+    "The low/base/high retained assumptions are5adults per settlement,0.25/1/4awake hours/day and1/10/16towns. At existing50bread per town-hour this remains12.5/50/200bread consumed per town-day in both versions, excluding initial hunger phase and one-time shelf fill. These are assumptions, not measured sessions.",
+    "Tavern service is a native container-to-keeper-bag-to-guest-bag transfer. Both bag before-images and guest meal counter fence replay; observing a meal consumes existing food once. No service reward, native food mint or abstract stock debit is added.",
+    "The already existing Auto food support can replenish a genuine deficit. Existing local stocks, reachable items and accepted incoming cargo reduce it; ordinary settlements have no such automatic grant. Existing4bread per resident buffer and64maximum are unchanged.",
+    "Active old-level workplaces keep doing their existing work during an upgrade. Short pending storage/journal mutations suspend construction writes and resume the same paid batch. Unfinished new buildings do not gain work; no additional output per action, XP reward or tool use is added.",
+    "Well-fed observed awake residents at hunger18+ regain1HP per4seconds up to personal maximum, without resurrection or offline catchup. Hunger expenditure stays unchanged. HP is not player XP or a monetary unit; this can improve uptime without changing the production rate.",
+    "New tavern schematics retain ordinary exact material billing. The five-cell administrative repair of the existing test-world tavern is a one-time owner-authorized fixture change, not an economic reward or repeatable acquisition path.",
+    "Current EconomyShopGUI SELL/AutoSell and future SELL-to-contract transition remain separate flows. No item-to-Vault conversion or contract income is invented. Downstream sale value and measured throughput are not established by this assessment."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_issuance",
+          "kind": "mint",
+          "source": "CivsTavernMeals; CivsResidentLifeRuntime; CivsRules.workplaceAvailable",
+          "basis": "Unchanged existing recurring rates; service conserves physical items. HP and one-time administrative furniture changes are separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_issuance",
+          "kind": "mint",
+          "source": "CivsTavernMeals; CivsResidentLifeRuntime; CivsRules.workplaceAvailable",
+          "basis": "Unchanged existing recurring rates; service conserves physical items. HP and one-time administrative furniture changes are separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_issuance",
+          "kind": "mint",
+          "source": "CivsTavernMeals; CivsResidentLifeRuntime; CivsRules.workplaceAvailable",
+          "basis": "Unchanged existing recurring rates; service conserves physical items. HP and one-time administrative furniture changes are separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              1,
+              1
+            ]
+          }
+        }
+      ]
+    },
+    "native_bread": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "steady_meal_consumption",
+          "kind": "burn",
+          "source": "CivsTavernMeals; CivsResidentLifeRuntime; CivsRules.workplaceAvailable",
+          "basis": "Unchanged existing recurring rates; service conserves physical items. HP and one-time administrative furniture changes are separate.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "12.5",
+              50,
+              200
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "1",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              "12.5",
+              50,
+              200
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

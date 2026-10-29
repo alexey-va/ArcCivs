@@ -87,9 +87,13 @@ def dining_overlay(documents, current, path):
                 len(p) != 3 or any(type(v) is not int or not 0 <= v < row["size"][a] for a, v in enumerate(p)) for p in seats):
             raise ValueError("Dining anchors exceed their exact frame or bound")
         site = {**row["worksite"]}
-        site.pop("tavern", None)
+        tavern = dict(site.get("tavern", {}))
+        site["tavern"] = tavern
+        tavern.pop("dining", None)
         if seats:
-            site["tavern"] = {"dining": [[p[a] - row["origin"][a] for a in range(3)] for p in seats]}
+            tavern["dining"] = [[p[a] - row["origin"][a] for a in range(3)] for p in seats]
+        if not tavern:
+            site.pop("tavern", None)
         current[identifier] = {**row, "dining": seats, "worksite": site}
         proofs[identifier] = proof["seats"]
     if set(proofs) != {key for key, row in current.items() if row["type"] == "TAVERN"}:

@@ -39,7 +39,7 @@ class CivsMineWorkStandingTest : FunSpec({
     }
 
     test("the rotated current entrance pays its missing footing from a completed inside stance") {
-        withReportedMine { _, world, mine, city, worker, runtime ->
+        withReportedMine(nanoTime = { 0L }) { _, world, mine, city, worker, runtime ->
             val work = nextMineWork(runtime, city, worker)
             val geometry = requireNotNull(CivsMinePlan.forBuilding(mine))
             val firstFloor = geometry.steps.first { it.after == "minecraft:cobblestone" && !it.shaftSupport }
@@ -59,7 +59,7 @@ class CivsMineWorkStandingTest : FunSpec({
     }
 
     test("a failed inside stance survives elapsed time while alternatives of the same action are still being tried") {
-        withReportedMine { advanceTicks, _, mine, city, worker, runtime ->
+        withReportedMine(nanoTime = { 0L }) { advanceTicks, _, mine, city, worker, runtime ->
             val first = nextMineWork(runtime, city, worker)
             runtime.rejectStanding(city, worker, first) shouldBe true
             runtime.rejectStanding(city, worker, first) shouldBe false

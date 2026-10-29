@@ -1135,7 +1135,7 @@ class CivsCitizensTest : FunSpec({
         citizenPlan(city.copy(construction = null), worker.copy(assignment = null))?.idleReason shouldBe "unassigned"
     }
 
-    test("upgrading producers pause while a builder continues rebuilding its own active hut") {
+    test("upgrading producers retain their current work while a builder rebuilds its own active hut") {
         val hall = building(BuildingType.TOWN_HALL, CivPosition(0, 64, 0))
         val hut = building(BuildingType.BUILDER_HUT, CivPosition(8, 64, 0))
         val farm = building(BuildingType.FARM, CivPosition(12, 64, 0))
@@ -1144,7 +1144,7 @@ class CivsCitizensTest : FunSpec({
             Stock(), plannedBuilding = farm.copy(level = 2, phase = BuildingPhase.CONSTRUCTING),
             batches = CivConstructionBatches(2), materials = emptyMap())
         val city = city(listOf(hall, hut, farm), worker, order)
-        citizenPlan(city, worker)?.idleReason shouldBe "building-unavailable"
+        citizenPlan(city, worker)?.idleReason shouldBe null
         val selfUpgrade = order.copy(buildingId = hut.id, plannedBuilding = hut.copy(level = 2, phase = BuildingPhase.CONSTRUCTING))
         citizenPlan(city.copy(construction = selfUpgrade), worker.copy(assignment = hut.id))?.idleReason shouldBe null
     }

@@ -21,7 +21,8 @@ class Auto2MineDescentScenarioTest : FunSpec({
     val state = System.getenv("CIVS_MINE_LIVE_STATE")
     val native = System.getenv("CIVS_MINE_LIVE_NATIVE")?.split(',')
     val shas = System.getenv("CIVS_MINE_LIVE_NATIVE_SHA256")?.split(',')
-    test("the current native mine has a paid descent to a bounded adjacent lava receipt and a real stone cut")
+    for (upgrading in listOf(false, true))
+    test("the current native mine has a paid descent to a bounded adjacent lava receipt and a real stone cut upgrading=$upgrading")
         .config(enabled = state != null && native != null && shas != null) {
             val original = Gson().fromJson(Files.readString(Path.of(requireNotNull(state))), Settlement::class.java)
             val mine = original.buildings.single { it.type == BuildingType.QUARRY }
@@ -56,7 +57,13 @@ class Auto2MineDescentScenarioTest : FunSpec({
                     items[4] = items[4]?.copy(data = null)
                 })
                 var city = CivsRules.validate(original.copy(worldId = world.uid,
-                    workers = original.workers.map { if (it.id == worker.id) geometryWorker else it }))
+                    workers = original.workers.map { if (it.id == worker.id) geometryWorker else it },
+                    construction = if (upgrading) requireNotNull(original.construction).let { order ->
+                        order.copy(buildingId = mine.id, targetLevel = mine.level + 1,
+                            plannedBuilding = mine.copy(level = mine.level + 1, phase = BuildingPhase.CONSTRUCTING),
+                            phase = ConstructionPhase.PLACING, failure = null,
+                            payment = requireNotNull(order.payment).copy(reservedBatch = order.workDone, awaiting = null))
+                    } else original.construction))
                 val plugin = paper.createSimplePlugin("Auto2MineDescent")
                 for (x in -122..-110) for (z in -177..-161) world.loadChunk(x, z)
                 fun seed(version: Int, prefix: Long, sections: Map<String, Long>) {

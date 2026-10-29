@@ -721,7 +721,7 @@ def contact_ground(size, palette, cells, primary, placement, registry):
     return None
 
 
-def load_source(library, row, plan, normalizer, registry):
+def load_source(library, row, plan, normalizer, registry, furniture=None):
     relative = Path(row["sourceRelativePath"])
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Unsafe source identity")
@@ -731,6 +731,15 @@ def load_source(library, row, plan, normalizer, registry):
     converted_size, palette, cells = normalizer.read_converted(converted)
     if converted_size != size:
         raise ValueError("Converted dimensions changed")
+    furniture_changes = []
+    furniture_records = []
+    if furniture is not None:
+        adapter, recipe = furniture
+        palette, cells, furniture_changes = adapter.apply(size, palette, cells, row["id"],
+            plan["inputSchematicSha256"], recipe, registry["_native"])
+        furniture_row = recipe.get((row["id"], plan["inputSchematicSha256"]))
+        if furniture_row and furniture_row["status"] != "blocked":
+            furniture_records = furniture_row.get("furniture", [])
     used = {palette[p] for p in cells}
     if not any(name(state) not in SKIP for state in used):
         raise Rejected("source-has-no-physical-geometry")
@@ -760,7 +769,8 @@ def load_source(library, row, plan, normalizer, registry):
             racks[p] = {"sourcePosition": list(p), "sourceState": raw_palette[pid],
                         "sourceConvertedState": palette[cells[i]], "facing": facing if facing in VECTORS else "south"}
     return {"size": size, "palette": palette, "cells": cells, "primary": primary, "placement": placement,
-            "heart": heart, "racks": racks, "row": row, "plan": plan}
+            "heart": heart, "racks": racks, "row": row, "plan": plan,
+            "furnitureChanges": furniture_changes, "furnitureRecords": furniture_records}
 
 
 def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, generator):
@@ -841,6 +851,25 @@ def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, gen
         dining = dining_seats(scene) if source["runtimeType"] == "TAVERN" else []
         if dining:
             site["tavern"] = {"dining": [scene.relative(row["seat"]) for row in dining]}
+        if source.get("furnitureRecords"):
+            furniture = []
+            for record in source["furnitureRecords"]:
+                def placed(point):
+                    turned = normalizer.rotate_position([point[a] + shift[a] for a in range(3)], base_size, q)
+                    return scene.relative([v + 1 for v in turned])
+                def current(point):
+                    local = placed(point)
+                    return scene.at([local[a] + scene.origin[a] for a in range(3)])
+                value = {**record, "point": placed(record["point"]), "sourceId": source["row"]["id"],
+                    "sourceSha256": source["plan"]["inputSchematicSha256"],
+                    "currentVanillaBlockState": current(record["point"]),
+                    "sourceVanillaBlockState": record["currentVanillaBlockState"]}
+                if record.get("facing") in VECTORS:
+                    value["facing"] = tuple(VECTORS)[(tuple(VECTORS).index(record["facing"]) + q) % 4]
+                value["vanillaBlocks"] = [{**block, "point": placed(block["point"]), "state": current(block["point"])}
+                    for block in record.get("vanillaBlocks", [])]
+                furniture.append(value)
+            site.setdefault("tavern", {})["furniture"] = furniture
         surface = surface_count(scene)
         if not 0 < surface <= 6_000 or not 0 < len(scene.cells) <= 50_000:
             raise Rejected("preview-budget-exceeded")
@@ -868,6 +897,8 @@ def curate_family(inputs, normalizer, rotations, registry, out, recipe_hash, gen
                    "sourceFront": placement["sourceFront"], "sourceQuarterTurns": q, "sourceFrameTranslation": shift,
                    "changes": scene.changes, "storage": stored, "fluids": fluids, "reachableDoors": [list(p) for p in doors], "diningSeats": dining,
                    "nativeRuntimeAcceptance": False}
+        if source.get("furnitureChanges"):
+            receipt["sourceFurnitureChanges"] = source["furnitureChanges"]
         scene_doc = None
         if source.get("exportScene"):
             scene_doc = {"version": 1, "size": scene.size, "materials": [{"block": state} for state in scene.palette],
@@ -901,6 +932,7 @@ def main():
     parser.add_argument("--scenes", action="store_true")
     parser.add_argument("--previous-catalog", type=Path, help="Retain prior accepted v2 family metadata for existing buildings")
     parser.add_argument("--native-facts", type=Path, required=True, help="Pinned offline Purpur 1.21.11 collision/fluid facts")
+    parser.add_argument("--tavern-furniture", type=Path, help="Private exact-source reviewed furniture recipe")
     args = parser.parse_args()
     if args.styles_file:
         values = json.loads(args.styles_file.read_text())
@@ -944,12 +976,19 @@ def main():
         "worksiteGeneratorSha256": digest(Path(__file__).with_name("generate-worksites.py").read_bytes()),
         "normalizerSha256": NORMALIZER_SHA, "converterSha256": CONVERTER_SHA, "spongeSha256": SPONGE_SHA,
         "registrySha256": REGISTRY_SHA, "rotationsSha256": ROTATIONS_SHA, "nativeFactsSha256": NATIVE_FACTS_SHA}
+    furniture = None
+    if args.tavern_furniture:
+        adapter_path = Path(__file__).with_name("prepare-tavern-furniture.py")
+        adapter = module("civs_tavern_furniture", adapter_path)
+        furniture = adapter, adapter.load_recipe(args.tavern_furniture)
+        recipe_inputs.update(furnitureRecipeSha256=digest(args.tavern_furniture.read_bytes()),
+            furnitureAdapterSha256=digest(adapter_path.read_bytes()))
     recipe_hash = digest(canonical(recipe_inputs))
     for (style, family, kind), rows in sorted(groups.items()):
         try:
             source = []
             for row, plan, level in sorted(rows, key=lambda r: r[2]):
-                value = load_source(args.library, row, plan, normalizer, registry)
+                value = load_source(args.library, row, plan, normalizer, registry, furniture)
                 value.update(runtimeType=kind, runtimeLevel=level, exportScene=args.scenes)
                 source.append(value)
             if kind != "DECORATION" and {r[2] for r in rows} != set(range(1, max(r[2] for r in rows) + 1)):

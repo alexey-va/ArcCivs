@@ -461,8 +461,8 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         check(Bukkit.isPrimaryThread())
         val jobs = cities.filter { plugin.server.getWorld(it.worldId) != null }.flatMap { city -> city.workers.mapNotNull { worker ->
             val building = worker.assignment?.let(city::building)
-            if (building?.type in TYPES && building?.phase == BuildingPhase.ACTIVE && city.pendingDeletion == null &&
-                city.construction?.buildingId != building?.id) Triple(city, worker, requireNotNull(building)) else null
+            if (building != null && building.type in TYPES && CivsRules.workplaceAvailable(city, building) && city.pendingDeletion == null)
+                Triple(city, worker, building) else null
         } }
         val workerIds = jobs.mapTo(hashSetOf()) { it.second.id }
         workplaces.keys.filter { it !in workerIds }.forEach(::forget)
@@ -833,7 +833,7 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         requireCivs(worker.assignment == work.buildingId && worker.completedCycles == work.cycle, "stale-delivery")
         requireCivs(plan(city, worker) == work, "stale-worksite")
         val building = city.building(work.buildingId) ?: throw CivsRejection("building-not-found")
-        requireCivs(building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id, "invalid-assignment")
+        requireCivs(CivsRules.workplaceAvailable(city, building), "invalid-assignment")
         requireCivs(building.type != BuildingType.QUARRY || work.miningStep == null && work.miningPlanVersion == null ||
             work.miningPlanVersion == CivsMinePlan.VERSION, "stale-worksite")
         requireCivs(work.autonomousVisual == CivsAutonomousWorksites.supports(city, building), "stale-worksite")

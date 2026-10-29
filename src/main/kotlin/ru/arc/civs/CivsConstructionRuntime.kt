@@ -120,6 +120,7 @@ internal class CivsConstructionRuntime(
     fun permitsSchematicMutation(worldId: UUID, x: Int, y: Int, z: Int): Boolean {
         if (!ready()) return false
         val position = CivPosition(x, y, z)
+        if (storage.isWorldLocked(worldId, position)) return false
         val access = placementAccess.values.firstOrNull { access ->
             val box = access.plan.building.bounds
             access.plan.worldId == worldId && if (access.repairing) {
@@ -347,7 +348,8 @@ internal class CivsConstructionRuntime(
             val operation = blueprints.paste(parts[partIndex], plan.worldId, plan.building.anchor,
                 java.util.function.Consumer { cell -> constructionPlaced(cityId, orderId, access, cell) },
                 java.util.function.BooleanSupplier {
-                    ready() && cities[cityId]?.autonomy?.paused != true && placementAccess[cityId] === access && !access.repairing &&
+                    ready() && cityId !in busy && cityId !in unhealthy &&
+                        cities[cityId]?.autonomy?.paused != true && placementAccess[cityId] === access && !access.repairing &&
                         cities[cityId]?.construction?.let { it.id == orderId && it.workDone == order.workDone } == true &&
                         constructionFocus[cityId]?.let { it.orderId != orderId || Bukkit.getCurrentTick() - it.tick >= 5 } != false &&
                         citizens.constructionReady(cityId, orderId)
@@ -378,7 +380,8 @@ internal class CivsConstructionRuntime(
         val automaticPreparation = plan.terrain?.route?.isEmpty() == true &&
             order.workDone < (order.automaticPreparationBatches ?: 0)
         val operation = world.applyTerraform(plan, city.owner, cells, requireNotNull(access.batch?.terrainStart), {
-            ready() && placementRuns[city.id] == run && placementAccess[city.id] === access &&
+            ready() && city.id !in busy && city.id !in unhealthy &&
+                placementRuns[city.id] == run && placementAccess[city.id] === access &&
                 cities[city.id]?.autonomy?.paused != true &&
                 cities[city.id]?.construction?.let { it.id == order.id && it.workDone == order.workDone } == true &&
                 (lastPlacedTick == Int.MIN_VALUE || Bukkit.getCurrentTick() - lastPlacedTick >= 1) &&

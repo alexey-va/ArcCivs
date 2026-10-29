@@ -8,7 +8,7 @@ internal object CivsMineFallback {
 
     fun eligible(city: Settlement, building: CivBuilding, worker: CivWorker): Boolean = city.autonomy?.paused == false &&
         city.inventory?.mode == CivStorageMode.PHYSICAL && city.pendingDeletion == null && building.type == BuildingType.QUARRY &&
-        building.phase == BuildingPhase.ACTIVE && city.construction?.buildingId != building.id &&
+        CivsRules.workplaceAvailable(city, building) &&
         worker.assignment == building.id && !CivsResidents.isChild(worker) && worker.cargo == null &&
         CivsEquipment.slots(worker)[4]?.material?.endsWith("_PICKAXE") == true
 

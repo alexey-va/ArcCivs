@@ -99,6 +99,18 @@ runtime validation.
   base blocks; the runtime derives the current surface, facing and approach.
   An unproved seat stays absent. No chairs or schematic bytes are added.
 
+An optional private `--tavern-furniture` recipe derives reviewed furniture before
+the normal curation and route checks. Each variant names the exact source ID,
+schematic hash and before/after cells. New stairs face a directly adjacent
+full-block table. Only that recorded table can occlude the native riding legs;
+the torso, head and standing approach remain clear. Changed
+source cells are recorded as `sourceFurnitureChanges`, and dining enrichment
+checks those cells against the original source before accepting their transform.
+The recipe and adapter hashes enter the new immutable family revision. Original
+source files and accepted IDs remain intact. A blocked furniture variant keeps
+its original geometry and has no new furniture proof; it does not change the
+building's availability by itself.
+
 The dining overlay is applied **before** comparison with a previous accepted
 catalog. A future rerun cannot rewrite accepted dining metadata under the same
 ID. The overlay's script, exact base catalog and geometry input hashes are saved
@@ -136,6 +148,13 @@ python3 scripts/assemble-catalog.py \
   --batch "$CIVS_BASE" --inventory "$CIVS_LIBRARY/inventory/files.jsonl" \
   --dining-overlay "$CIVS_DINING_OVERLAY" --out "$CIVS_FINAL"
 ```
+
+Add `--tavern-furniture "$CIVS_TAVERN_FURNITURE"` to the curator when a reviewed
+private recipe is supplied. `prepare-tavern-furniture.py` can also verify and
+export one exact legacy alias into a fresh private directory: `payload.schem`
+retains its technical cells, while `scene.schem` is the native-render derivative
+with the runtime control barrel and skipped markers consumed. Its report keeps
+both hashes and the proven dining anchors. Export does not apply a live repair.
 
 Repeat `--batch` for multiple partitions. On a later release, add
 `--previous-root "$CIVS_PREVIOUS_FINAL"` to the **last** assembly. That step

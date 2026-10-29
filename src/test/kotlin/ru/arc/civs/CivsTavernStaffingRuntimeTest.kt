@@ -40,7 +40,7 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
                 })
                 h.owner.residentLifeEnabled = true
                 h.owner.pulse(5_000)
-                h.mealState(keeper)["building"] shouldBe h.city.buildings.first { it.type == BuildingType.TAVERN }.id
+                h.mealState(keeper)["building"] shouldBe h.city.buildings.first { it.type == BuildingType.TOWN_HALL }.id
                 h.mealState(keeper)["source"] shouldBe CivResidentMealSource.CARRIED_BREAD
                 h.owner.canReassign(h.city.id, keeper) shouldBe false
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
@@ -48,12 +48,12 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
     }
 
     for (pendingReceipt in listOf(false, true))
-    test("accepted building borrows an idle keeper while its self-service guest continues pending receipt=$pendingReceipt") {
+    test("accepted building borrows an idle keeper while its carried emergency meal continues pending receipt=$pendingReceipt") {
         residentRuntime { h ->
             try {
                 val keeper = h.standingTavernkeeper()
                 for (x in -2..1) for (z in -2..1) h.world.loadChunk(x, z)
-                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
                 val guest = h.owner.collisionActors().first { it.uniqueId == h.workerId }
                 guest.teleport(Location(h.world, .5, 64.0, .5))
                 val pending = CompletableFuture<Settlement>()
@@ -66,16 +66,16 @@ class CivsTavernStaffingRuntimeTest : FunSpec({
                     pending
                 }
                 h.owner.residentLifeEnabled = true
-                h.owner.pulse(5_000)
-                meals shouldBe 0
-                guest.teleport(requireNotNull(h.routeTarget()))
                 val mealAt = guest.location
                 h.owner.pulse(6_000)
+                meals shouldBe 0
+                h.routeTarget() shouldBe null
+                guest.isSeated shouldBe false
                 if (pendingReceipt) for (now in 7_000L..10_000L step 1_000) {
                     h.owner.pulse(now)
                     meals shouldBe if (now < 10_000) 0 else 1
                 }
-                h.mealState()["building"] shouldBe tavern.id
+                h.mealState()["building"] shouldBe hall.id
                 h.mealState()["pending"] shouldBe pendingReceipt
                 h.mealState()["arrived_at"] shouldBe 6_000L
                 h.mealState()["source"] shouldBe CivResidentMealSource.CARRIED_BREAD

@@ -9,8 +9,14 @@ internal object CivsWorksiteLayouts {
     @Volatile private var catalogFields: Map<String, Set<Pair<Int, Int>>> = emptyMap()
 
     /** Called once by the async catalog owner before resident/city recovery starts. */
-    fun installCatalog(values: Map<String, JsonObject>) {
-        val detached = values.mapValues { it.value.deepCopy() }
+    fun installCatalog(values: Map<String, JsonObject>, furniture: Map<String, JsonObject> = emptyMap()) {
+        val detached = values.mapValues { it.value.deepCopy() }.toMutableMap()
+        furniture.forEach { (id, tavern) ->
+            val site = (detached[id] ?: sites[id] ?: JsonObject()).deepCopy()
+            site.add("tavern", tavern.deepCopy())
+            detached[id] = site
+        }
+        detached.values.forEach { site -> site.getAsJsonObject("tavern")?.getAsJsonArray("furniture")?.let(CivsTavernFurniture::validate) }
         catalogFields = detached.mapValues { (_, site) ->
             val farm = site.getAsJsonObject("farm")
             listOf("soilCells", "irrigationCells").flatMap { key -> farm?.getAsJsonArray(key)?.map {

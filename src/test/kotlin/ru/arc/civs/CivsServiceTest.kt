@@ -47,6 +47,91 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsConstructionTransientFenceTest : FunSpec({
+    test("a pending native receipt suspends a schematic batch and exact cell writes without losing the paid order") {
+        lateinit var storage: CivsStorage
+        serviceScenario(storageFactory = { plugin ->
+            io.mockk.spyk(CivsStorage(plugin) { emptyArray() }).also { storage = it }
+        }) { h ->
+            val placement = h.placement()
+            every { h.citizens.constructionReady(any(), any()) } returns true
+            var gate: java.util.function.BooleanSupplier? = null
+            every { h.blueprints.paste(any(), any(), any(), any(), any()) } answers {
+                gate = arg(4)
+                placement.operation
+            }
+            h.start(); placement.validation.complete(Unit); h.tick(); h.commit()
+            val protection = h.plugin.server.servicesManager.load(ArcBlockProtectionService::class.java)!!
+            val cell = CivPosition(15, 64, 0)
+            val before = h.service.settlements().single()
+            val worldBefore = h.world.getBlockAt(cell.x, cell.y, cell.z).blockData.asString
+            requireNotNull(gate).asBoolean shouldBe true
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, cell.x, cell.y, cell.z) shouldBe true
+            every { storage.isWorldLocked(h.world.uid, cell) } returns true
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, cell.x, cell.y, cell.z) shouldBe false
+            @Suppress("UNCHECKED_CAST")
+            val busy = CivsService::class.java.getDeclaredField("busy").also { it.isAccessible = true }.get(h.service) as MutableSet<UUID>
+            busy.add(before.id)
+            repeat(4) {
+                requireNotNull(gate).asBoolean shouldBe false
+                h.paper.performTicks(1)
+                h.world.getBlockAt(cell.x, cell.y, cell.z).blockData.asString shouldBe worldBefore
+                h.service.settlements().single().construction shouldBe before.construction
+            }
+            busy.remove(before.id)
+            every { storage.isWorldLocked(h.world.uid, cell) } returns false
+            requireNotNull(gate).asBoolean shouldBe true
+            protection.permitsSchematicMutation("arccivs-construction", h.world.uid, cell.x, cell.y, cell.z) shouldBe true
+            h.service.settlements().single().construction shouldBe before.construction
+        }
+    }
+})
+
+class CivsResidentRegenerationServiceTest : FunSpec({
+    for (automatic in listOf(false, true))
+    test("Auto $automatic resident healing waits for durable save and a delayed save accrues no extra heals") {
+        serviceScenario { h ->
+            val worker = h.city.workers.first().copy(assignment = h.city.buildings.first().id,
+                health = 8.0, hunger = 18, nextDeliveryAt = 1)
+            val city = CivsRules.validate(h.city.copy(workers = listOf(worker),
+                stock = if (automatic) Stock() else h.city.stock,
+                inventory = if (automatic) CivInventory(CivStorageMode.PHYSICAL) else h.city.inventory,
+                autonomy = if (automatic) CivAutonomy() else null))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.citizens.awakeResidentIds(city.id) } returns setOf(worker.id)
+            h.paper.addPlayer("ResidentHealthWitness").teleport(Location(h.world, 1.5, 65.0, .5))
+            h.start()
+            h.paper.performTicks(20)
+            repeat(3) {
+                h.time += 1_000
+                h.paper.performTicks(20)
+                h.saves shouldBe emptyList()
+            }
+            h.time += 1_000
+            h.paper.performTicks(20)
+            h.saves.size shouldBe 1
+            CivsResidents.health(h.saves.single().first.workers.single()) shouldBe 9.0
+            CivsResidents.health(h.service.settlements().single().workers.single()) shouldBe 8.0
+            var gameplayContinued = false
+            h.tasks.runLater(1) { gameplayContinued = true }
+            repeat(10) { h.time += 1_000; h.paper.performTicks(20) }
+            gameplayContinued shouldBe true
+            h.saves.size shouldBe 1
+            CivsResidents.health(h.service.settlements().single().workers.single()) shouldBe 8.0
+            h.commit()
+            CivsResidents.health(h.service.settlements().single().workers.single()) shouldBe 9.0
+            h.paper.performTicks(20)
+            h.saves.size shouldBe 1
+            repeat(3) { h.time += 1_000; h.paper.performTicks(20) }
+            h.saves.size shouldBe 1
+            h.time += 1_000
+            h.paper.performTicks(20)
+            h.saves.size shouldBe 2
+            CivsResidents.health(h.saves.last().first.workers.single()) shouldBe 10.0
+        }
+    }
+})
+
 class CivsAutoGlobalSupplyServiceTest : FunSpec({
     test("existing warehouse goods prevent another native grant to the requesting workplace") {
         lateinit var storage: CivsStorage

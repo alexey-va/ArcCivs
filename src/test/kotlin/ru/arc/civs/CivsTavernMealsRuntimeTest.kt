@@ -8,7 +8,7 @@ import org.bukkit.Material
 import java.util.concurrent.CompletableFuture
 
 class CivsTavernMealsRuntimeTest : FunSpec({
-    test("a worker at its ordinary work route endpoint walks to the tavern and commits its meal there") {
+    test("a worker without tavern service eats its carried reserve at the work endpoint without earning travel credit") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -30,11 +30,15 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
                 civsCanReachContainer(npc.location, requireNotNull(tavern.control)) shouldBe false
                 h.steps.clear()
+                val mealAt = npc.location
+                val teleports = h.teleports
+                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
                 var meals = 0
                 h.owner.finishResidentMeal = { cityId, plan ->
                     h.owner.validateResidentMeal(cityId, plan)
-                    plan.buildingId shouldBe tavern.id
-                    civsCanReachContainer(npc.location, requireNotNull(tavern.control)) shouldBe true
+                    plan.buildingId shouldBe hall.id
+                    npc.location shouldBe mealAt
+                    npc.isSeated shouldBe false
                     h.city = CivsResidentLife.finishMeal(h.city, plan)
                     meals++
                     CompletableFuture.completedFuture(h.city)
@@ -43,14 +47,16 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 h.owner.residentLifeEnabled = true
                 h.owner.pulse(4_000)
                 h.phase() shouldBe CitizenPhase.TO_WORK
-                h.owner.status(h.workerId) shouldBe "workers.status.moving-to-tavern"
+                h.owner.status(h.workerId) shouldBe "workers.status.eating"
+                h.routeTarget() shouldBe null
                 for (tick in 1..1_200) {
                     h.navigate()
                     if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
                     if (meals == 1) break
                 }
                 withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
-                h.steps.isNotEmpty() shouldBe true
+                h.steps.isEmpty() shouldBe true
+                h.teleports shouldBe teleports
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
                 h.city.workers.single().life!!.meals shouldBe 1L
                 h.city.stock shouldBe Stock()
@@ -59,7 +65,7 @@ class CivsTavernMealsRuntimeTest : FunSpec({
         }
     }
 
-    test("native packet navigation reaches the tavern and completes a meal without teleporting to it") {
+    test("native navigation ticks retain an emergency meal at its actual feet without teleporting") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -67,11 +73,16 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 h.city = h.city.copy(workers = h.city.workers.filter { it.id == h.workerId }, stock = Stock(),
                     inventory = CivInventory(CivStorageMode.PHYSICAL))
                 npc.teleport(Location(h.world, .5, 64.0, .5))
-                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
+                val mealAt = npc.location
+                val teleports = h.teleports
+                h.steps.clear()
                 var meals = 0
                 h.owner.finishResidentMeal = { cityId, plan ->
                     h.owner.validateResidentMeal(cityId, plan)
-                    plan.buildingId shouldBe tavern.id
+                    plan.buildingId shouldBe hall.id
+                    npc.location shouldBe mealAt
+                    npc.isSeated shouldBe false
                     h.city = CivsResidentLife.finishMeal(h.city, plan)
                     meals++
                     CompletableFuture.completedFuture(h.city)
@@ -84,15 +95,16 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                     if (meals == 1) break
                 }
                 withClue(h.owner.debug(h.city.id, h.workerId)) { meals shouldBe 1 }
-                (h.steps.isNotEmpty()) shouldBe true
-                civsCanReachContainer(npc.location, requireNotNull(tavern.control)) shouldBe true
+                h.steps.isEmpty() shouldBe true
+                h.teleports shouldBe teleports
+                npc.location shouldBe mealAt
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
                 h.city.stock shouldBe Stock()
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
         }
     }
 
-    test("a resident carrying bread walks to an unstaffed native tavern before its meal session") {
+    test("a resident carrying bread uses its emergency reserve in place when the native tavern is unstaffed") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -100,25 +112,27 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 h.city = h.city.copy(workers = h.city.workers.filter { it.id == h.workerId }, stock = Stock(),
                     inventory = CivInventory(CivStorageMode.PHYSICAL))
                 npc.teleport(Location(h.world, .5, 64.0, .5))
-                val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
+                val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
+                val mealAt = npc.location
                 var meals = 0
                 h.owner.finishResidentMeal = { cityId, plan ->
                     h.owner.validateResidentMeal(cityId, plan)
-                    plan.buildingId shouldBe tavern.id
+                    plan.buildingId shouldBe hall.id
+                    npc.location shouldBe mealAt
+                    npc.isSeated shouldBe false
                     h.city = CivsResidentLife.finishMeal(h.city, plan)
                     meals++
                     CompletableFuture.completedFuture(h.city)
                 }
                 h.owner.pulse(3_000)
-                withClue(h.owner.debug(h.city.id, h.workerId)) { h.owner.status(h.workerId) shouldBe "workers.status.moving-to-tavern" }
-                val target = requireNotNull(h.routeTarget()) { h.owner.debug(h.city.id, h.workerId).toString() }
-                (target.distanceSquared(npc.location) > 4) shouldBe true
-                for (now in 4_000L..8_000L step 1_000) h.owner.pulse(now)
+                withClue(h.owner.debug(h.city.id, h.workerId)) { h.owner.status(h.workerId) shouldBe "workers.status.eating" }
+                h.routeTarget() shouldBe null
+                npc.location shouldBe mealAt
+                for (now in 4_000L..6_000L step 1_000) h.owner.pulse(now)
                 meals shouldBe 0
-                h.usingMainHand shouldBe false
+                h.usingMainHand shouldBe true
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 2
-                npc.teleport(target)
-                for (now in 9_000L..13_000L step 1_000) h.owner.pulse(now)
+                for (now in 7_000L..8_000L step 1_000) h.owner.pulse(now)
                 meals shouldBe 1
                 h.city.workers.single().hunger shouldBe 20
                 CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 1
@@ -128,7 +142,7 @@ class CivsTavernMealsRuntimeTest : FunSpec({
         }
     }
 
-    test("an unavailable native tavern uses only carried emergency food then retries the venue") {
+    test("an unavailable tavern uses carried food and an empty restored barrel does not invent service") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -155,13 +169,19 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
                 h.city = h.city.copy(workers = h.city.workers.map { it.copy(hunger = 14) }, revision = h.city.revision + 1)
                 h.owner.pulse(35_000)
-                withClue(h.owner.debug(h.city.id, h.workerId)) { h.owner.status(h.workerId) shouldBe "workers.status.moving-to-tavern" }
+                withClue(h.owner.debug(h.city.id, h.workerId)) { h.owner.status(h.workerId) shouldBe "workers.status.eating" }
+                h.mealState()["building"] shouldBe hall.id
+                h.routeTarget() shouldBe null
                 meals shouldBe 1
+                for (now in 36_000L..40_000L step 1_000) h.owner.pulse(now)
+                meals shouldBe 2
+                CivsEquipment.plainCount(h.city.workers.single(), "BREAD") shouldBe 0
+                h.city.stock shouldBe Stock()
             } finally { CivsWorksiteLayouts.installCatalog(emptyMap()) }
         }
     }
 
-    test("a tavern route deadline falls back to carried food instead of restarting a hungry route forever") {
+    test("an unavailable service never leaves a hungry resident retrying an unnecessary route") {
         residentRuntime { h ->
             try {
                 val npc = h.prepareDiningSeat()
@@ -186,7 +206,7 @@ class CivsTavernMealsRuntimeTest : FunSpec({
         }
     }
 
-    test("an accepted guest meal continues after its optional keeper is reassigned to an accepted building") {
+    test("an accepted emergency meal continues after the idle keeper is reassigned to an accepted building") {
         residentRuntime { h ->
             try {
                 val keeper = h.standingTavernkeeper()
@@ -202,8 +222,12 @@ class CivsTavernMealsRuntimeTest : FunSpec({
                 }
                 h.owner.residentLifeEnabled = true
                 h.owner.pulse(5_000)
-                guest.teleport(requireNotNull(h.routeTarget()))
+                h.routeTarget() shouldBe null
+                val mealAt = guest.location
                 for (now in 6_000L..10_000L step 1_000) h.owner.pulse(now)
+                guest.location shouldBe mealAt
+                guest.isSeated shouldBe false
+                h.mealState()["building"] shouldBe h.city.buildings.first { it.type == BuildingType.TOWN_HALL }.id
                 h.mealState()["pending"] shouldBe true
                 val hut = h.acceptTavernConstruction()
                 h.owner.canReassign(h.city.id, keeper) shouldBe true

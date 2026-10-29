@@ -27,10 +27,12 @@ internal class CivsResidentLifeRuntime(
     private val cities get() = settlements()
     private val populationMinuteAt = mutableMapOf<UUID, Long>()
     private val populationPending = mutableSetOf<UUID>()
+    private val regeneration = CivsResidentRegenerationClock()
+    private val regenerationPending = mutableSetOf<UUID>()
 
     fun pending(cityId: UUID): Boolean = cityId in populationPending
     fun nextMinuteAt(cityId: UUID): Long? = populationMinuteAt[cityId]
-    fun resetMinuteClock() { populationMinuteAt.clear() }
+    fun resetMinuteClock() { populationMinuteAt.clear(); regeneration.clear() }
 
     fun pulseImmigration() {
         cities.values.firstOrNull { city ->
@@ -91,8 +93,11 @@ internal class CivsResidentLifeRuntime(
 
     fun pulsePopulation() {
         val active = cities.values.filter(::populationActive)
-        populationMinuteAt.keys.retainAll(active.mapTo(hashSetOf(), Settlement::id))
+        val activeIds = active.mapTo(hashSetOf(), Settlement::id)
+        populationMinuteAt.keys.retainAll(activeIds)
+        regeneration.retain(activeIds)
         val at = now()
+        pulseRegeneration(active, at)
         active.forEach { populationMinuteAt.putIfAbsent(it.id, at + 60_000) }
         val city = active.firstOrNull { it.id !in populationPending && at >= populationMinuteAt.getValue(it.id) } ?: return
         populationPending += city.id
@@ -116,6 +121,33 @@ internal class CivsResidentLifeRuntime(
             populationPending -= city.id
             if (failure != null) log("advance resident life ${city.id}", failure, city.id)
         } }.onFailure { populationPending -= city.id; log("advance resident life ${city.id}", it, city.id) }
+    }
+
+    private fun pulseRegeneration(active: List<Settlement>, at: Long) {
+        active.forEach { city ->
+            val awake = if (city.workers.any(CivsResidents::canRegenerate)) citizens.awakeResidentIds(city.id) else emptySet()
+            val due = regeneration.observe(city, awake, at)
+            if (due.isEmpty() || !regenerationPending.add(city.id)) return@forEach
+            runCatching { afterPopulationAvailable(city.id) {
+                val current = cities[city.id]
+                if (current == null || !populationActive(current))
+                    return@afterPopulationAvailable CompletableFuture.completedFuture(Unit)
+                val observed = regeneration.observe(current, citizens.awakeResidentIds(city.id), now()).intersect(due)
+                if (observed.isEmpty()) return@afterPopulationAvailable CompletableFuture.completedFuture(Unit)
+                mutate(city.id) { before ->
+                    val workers = before.workers.map { if (it.id in observed) CivsResidents.regenerate(it) else it }
+                    if (workers == before.workers) before else before.copy(workers = workers, revision = before.revision + 1)
+                }.thenApply { Unit }
+            } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->
+                regenerationPending -= city.id
+                regeneration.consumed(city.id, due, now())
+                if (failure != null) log("regenerate resident health ${city.id}", failure, city.id)
+            } }.onFailure {
+                regenerationPending -= city.id
+                regeneration.consumed(city.id, due, now())
+                log("regenerate resident health ${city.id}", it, city.id)
+            }
+        }
     }
 
     fun pulseAutoAssignments() {

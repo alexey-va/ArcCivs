@@ -86,11 +86,13 @@ class CivsBlueprints(
     private val builtins = mutableMapOf<String, CompletableFuture<Builtin>>()
     private var closed = false
     @Volatile private var catalog = CivBlueprintCatalog.EMPTY
-    private val catalogLoad = CompletableFuture.supplyAsync({ CivBlueprintCatalog.load(sourceRoot) }, executor).thenApply { loaded ->
+    private val catalogLoad = CompletableFuture.supplyAsync({
+        CivBlueprintCatalog.load(sourceRoot) to CivsTavernFurniture.load(sourceRoot)
+    }, executor).thenApply { (loaded, furniture) ->
         synchronized(this) {
             if (closed) throw CivsRejection("not-ready")
             catalog = loaded
-            CivsWorksiteLayouts.installCatalog(loaded.worksiteLayouts)
+            CivsWorksiteLayouts.installCatalog(loaded.worksiteLayouts, furniture)
         }
         Unit
     }

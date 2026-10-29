@@ -119,6 +119,37 @@ class CurationGeometryTest(unittest.TestCase):
         scene.set((4, 3, 3), "minecraft:stone", "blocked-head")
         self.assertEqual([[4, 2, 5]], [p["seat"] for p in dining.dining_proofs(scene)])
 
+    def test_full_block_table_chairs_have_a_clear_knee_gap_and_face_the_table(self):
+        scene = self.dining_room()
+        for old, new in (((4, 2, 3), (4, 2, 2)), ((4, 2, 5), (4, 2, 6))):
+            state = scene.at(old)
+            scene.set(old, "minecraft:air", "clear-knee-gap")
+            scene.set(new, state, "move-chair")
+        scene.set((4, 3, 4), "minecraft:air", "remove-high-table")
+        scene.set((4, 2, 4), "minecraft:green_wool", "full-block-table")
+        proofs = dining.dining_proofs(scene)
+        self.assertEqual([[4, 2, 2], [4, 2, 6]], [p["seat"] for p in proofs])
+        self.assertTrue(all(p["table"] == [4, 2, 4] for p in proofs))
+        scene.set((4, 2, 2), scene.at((4, 2, 6)), "reverse-chair")
+        self.assertEqual([], dining.dining_proofs(scene))
+
+    def test_four_adjacent_chairs_prove_adult_child_and_only_the_exact_table_leg_contact(self):
+        scene = self.dining_room()
+        scene.set((4, 3, 4), "minecraft:air", "remove-raised-table")
+        scene.set((4, 2, 4), "minecraft:green_wool", "full-table")
+        for facing, back, point in (("west", [0, .5, 0, .5, 1, 1], (3, 2, 4)),
+                                    ("east", [.5, .5, 0, 1, 1, 1], (5, 2, 4))):
+            state = f"minecraft:oak_stairs[facing={facing},half=bottom,shape=straight,waterlogged=false]"
+            scene.native[curate.state_key(state)] = {"boxes": [[0, 0, 0, 1, .5, 1], back]}
+            scene.set(point, state, "adjacent-chair")
+        scene.native["minecraft:dirt_path"] = {"boxes": [[0, 0, 0, 1, .9375, 1]]}
+        scene.set((4, 1, 3), "minecraft:dirt_path", "native-lowered-support")
+        for scale in (.5, 1):
+            self.assertEqual(4, len(dining.dining_proofs(scene, scale)), scale)
+        self.assertEqual([[4, 2, 3]], [p["seat"] for p in dining.dining_proofs(scene, requested_seats={(4, 2, 3)})])
+        scene.set((4, 3, 3), "minecraft:stone", "head-obstruction")
+        self.assertNotIn([4, 2, 3], [p["seat"] for p in dining.dining_proofs(scene)])
+
     def test_storage_works_across_counter_with_real_ray_and_no_adjacent_stance(self):
         scene = room(); p = (4, 2, 4)
         scene.set(p, "minecraft:bookshelf", "source")
@@ -248,7 +279,8 @@ class CatalogAssemblyTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); inventory, batch, doc = self.fixture(root)
             row = doc["entries"][0]
-            row.update(type="TAVERN", worksite={"type": "TAVERN"}, dining=[])
+            furniture = [{"id": "stable-chair", "kind": "chair", "point": [0, 1, -3]}]
+            row.update(type="TAVERN", worksite={"type": "TAVERN", "tavern": {"furniture": furniture}}, dining=[])
             inputs = {key: "a" * 64 for key in ("scriptSha256", "nativeFactsSha256", "registrySha256", "normalizerSha256", "rotationsSha256")}
             doc["recipeInputs"] = inputs
             catalog = batch / "civs/v2/catalog.json"; catalog.write_bytes(assemble.canonical(doc))
@@ -264,6 +296,7 @@ class CatalogAssemblyTest(unittest.TestCase):
             published = json.loads((final / "civs/v2/catalog.json").read_text())["entries"][0]
             self.assertEqual([[1, 1, 2]], published["dining"])
             self.assertEqual([[0, 1, -3]], published["worksite"]["tavern"]["dining"])
+            self.assertEqual(furniture, published["worksite"]["tavern"]["furniture"])
             self.assertEqual(b"synthetic-schematic", assemble.verified_payload(final, published)[0])
             assemble.assemble([batch], inventory, root / "same", previous=final, expected_sources=2, dining=path)
             overlay["entries"][0]["seats"][0]["seat"] = [1, 1, 3]

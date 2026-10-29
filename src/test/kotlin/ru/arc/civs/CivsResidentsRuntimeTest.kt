@@ -4492,6 +4492,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     var testingAllowed = false
     var foodSource: UUID? = null
     var physicalFoodSource: CivResidentFoodSource? = null
+    var tavernServiceSource: CivResidentFoodSource? = null
     var physicalFoodPickup: (CivResidentFoodSource) -> CompletableFuture<Settlement> = {
         CompletableFuture.failedFuture(CivsRejection("resident-food-missing"))
     }
@@ -4655,6 +4656,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
             residentSupplySource = { _, worker -> foodSource.takeIf { worker.id == workerId } },
             residentFoodSource = { _, worker -> physicalFoodSource.takeIf { CivsResidents.hunger(worker) <= 14 &&
                 CivsEquipment.usableCount(worker, "BREAD") == 0 } },
+            tavernFoodSource = { _, worker -> tavernServiceSource.takeIf { worker.id == workerId } },
             pickupResidentFood = { _, _, source -> physicalFoodPickup(source) },
             workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
                 supplyRequests++

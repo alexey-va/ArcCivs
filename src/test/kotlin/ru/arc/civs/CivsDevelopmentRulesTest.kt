@@ -277,7 +277,7 @@ class CivsDevelopmentRulesTest : FunSpec({
         denied("construction-not-ready") { CivsRules.beginPlacement(retried, retried.owner, order.id) }
     }
 
-    test("upgrades retain old capacity pause target production and grow territory only at final hall completion") {
+    test("upgrades retain old capacity and production and grow territory only at final hall completion") {
         var city = builderCity()
         val hut = city.building(id(2))!!
         city = finishBatch(CivsRules.startSite(city, city.owner, hut, batches(hut, 1)))
@@ -303,7 +303,7 @@ class CivsDevelopmentRulesTest : FunSpec({
         city = CivsRules.validate(city.copy(buildings = city.buildings + farm))
         val farmUpgrade = farm.copy(level = 2)
         city = CivsRules.reserveBuild(city, city.owner, farmUpgrade, batches(farmUpgrade, 1))
-        CivsRules.productionAvailable(city, farm) shouldBe false
+        CivsRules.productionAvailable(city, farm) shouldBe true
         city.building(farm.id)!!.level shouldBe 1
     }
 

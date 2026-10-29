@@ -751,11 +751,13 @@ class CivsStorage(private val plugin: Plugin,
         }
     }
 
-    internal fun residentFoodSource(city: Settlement, worker: CivWorker, feet: org.bukkit.Location): CivResidentFoodSource? {
+    internal fun residentFoodSource(city: Settlement, worker: CivWorker, feet: org.bukkit.Location,
+        tavernService: Boolean = false): CivResidentFoodSource? {
         checkMain(); requireOpen()
         if (city.inventory?.mode == CivStorageMode.VIRTUAL || feet.world?.uid != city.worldId ||
-            CivsResidents.hunger(worker) > 14 || residentFoods.carried(city, worker) != null) return null
+            CivsResidents.hunger(worker) > 14 || !tavernService && residentFoods.carried(city, worker) != null) return null
         for ((building, source) in foodSources(city, worker, feet)) {
+            if (tavernService && building.type != BuildingType.TAVERN) continue
             val material = source.inventory.storageContents.asSequence().mapNotNull(::plain).firstOrNull {
                 residentFoods.mayPickUp(city, worker, it.material) &&
                     CivsEquipment.supplyRoom(worker, Material.valueOf(it.material)) > 0
@@ -800,8 +802,11 @@ class CivsStorage(private val plugin: Plugin,
         reject(!CivsResidentFood.eligible(city, worker, building) ||
             target.container !in buildingPositions(city, building.id) || !civsCanReachContainer(feet, target.container), "worker-too-far")
         reject(!foodCanModify(city, target.container), "lands-denied")
-        reject(!residentFoods.mayPickUp(city, worker, target.material) || residentFoods.carried(city, worker) != null ||
-            CivsResidents.hunger(worker) > 14 || worker.cargo != null,
+        val serving = target.servingFor?.let { guestId ->
+            city.workers.firstOrNull { it.id == guestId }?.let { CivsTavernMeals.keeper(city, worker, it, building) } == true
+        } ?: false
+        reject(target.servingFor != null && !serving || !residentFoods.mayPickUp(city, worker, target.material) ||
+            !serving && (residentFoods.carried(city, worker) != null || CivsResidents.hunger(worker) > 14) || worker.cargo != null,
             "resident-food-missing")
         val source = resolve(city, target.container, buildingPositions(city, building.id)[target.container])
         var remaining = minOf(CivsResidentFood.BATCH, CivsEquipment.supplyRoom(worker, Material.valueOf(target.material)))
@@ -818,7 +823,8 @@ class CivsStorage(private val plugin: Plugin,
         val count = changes.sumOf { (it.before?.amount ?: 0) - (it.after?.amount ?: 0) }
         val supplied = CivsEquipment.collectSupplies(worker, mapOf(target.material to count.toLong()))
         return CivCollectedPlan(supplied, CivCollectedTransfer(worker.id, CivsEquipment.slots(worker),
-            containers = changes, food = CivResidentFoodReceipt(building.id, city.stock, material = target.material)))
+            containers = changes, food = CivResidentFoodReceipt(building.id, city.stock, material = target.material,
+                servingFor = target.servingFor)))
     }
 
     internal fun prepareHomeDeposit(city: Settlement, workerId: UUID, destination: CivPosition,

@@ -147,7 +147,9 @@ class CivsMinePlanTest : FunSpec({
                     val originalSupplies = CivsEquipment.plainCount(city.workers.single(), "COBBLESTONE")
                     CivsStorage(plugin) { emptyArray() }.use { storage ->
                         CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                            val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) }, { _, _ -> false })
+                            // Geometry and receipt semantics use a deterministic clock; time budgets have dedicated tests.
+                            val runtime = CivsWorksites(plugin, access, { current, id -> storage.buildingAvailable(current, id) },
+                                { _, _ -> false }, nanoTime = { 0L })
                             fun nextWork(): CivWorldWork {
                                 repeat(64) {
                                     runtime.pulse(listOf(city))

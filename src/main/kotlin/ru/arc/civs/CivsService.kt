@@ -155,6 +155,9 @@ class CivsService(
         },
         residentSupplySource = ::residentSupplySource, prepareSupplies = { c, w, b -> prepareResidentSupplies(c, w, b) },
         residentFoodSource = { city, worker -> citizensFeetForFood(worker.id)?.let { storage.residentFoodSource(city, worker, it) } },
+        tavernFoodSource = { city, worker -> citizensFeetForFood(worker.id)?.let {
+            storage.residentFoodSource(city, worker, it, tavernService = true)
+        } },
         pickupResidentFood = ::pickupResidentFood,
         residentFoods = residentFoods,
         craftPlan = ::craftPlan, craftDelivery = ::deliverCraft,
@@ -201,6 +204,7 @@ class CivsService(
         citizens.residentLifeEnabled = true
         citizens.returnResidentOutputs = ::returnResidentOutputs
         citizens.finishResidentMeal = residentLife::finishMeal
+        citizens.deliverTavernMeal = ::deliverTavernMeal
         citizens.finishResidentRest = residentLife::finishRest
         citizens.finishResidentLesson = residentLife::finishLesson
         citizens.worksiteTerrainChanged = worksites::changed
@@ -2125,7 +2129,19 @@ class CivsService(
 
     internal fun pickupResidentFood(cityId: UUID, workerId: UUID, source: CivResidentFoodSource): CompletableFuture<Settlement> =
         action("resident_food_pickup", null, "city" to cityId, "worker" to workerId, "building" to source.buildingId) {
-            collectedMutation(cityId, workerId) { city, feet -> storage.prepareFoodPickup(city, workerId, source, feet) }
+            collectedMutation(cityId, workerId) { city, feet ->
+                source.servingFor?.let { citizens.validateTavernPickup(cityId, workerId, it, source.buildingId, source.material) }
+                storage.prepareFoodPickup(city, workerId, source, feet)
+            }
+        }
+
+    internal fun deliverTavernMeal(cityId: UUID, delivery: CivTavernDelivery): CompletableFuture<Settlement> =
+        afterCityAvailable(cityId) {
+            citizens.validateTavernDelivery(cityId, delivery)
+            mutate(cityId) { current ->
+                citizens.validateTavernDelivery(cityId, delivery)
+                CivsTavernMeals.deliver(current, delivery, residentFoods)
+            }
         }
 
     internal fun materializeResidentFood(cityId: UUID, workerId: UUID): CompletableFuture<Settlement> =
@@ -2560,6 +2576,10 @@ class CivsService(
         rejectIf(storage.collectedBeforeState(tx) != CivInventoryApplyResult.Applied, "stale-delivery")
         if (collected.forestryLeafLoot != null) return // Exact PDC source, workplace and Lands checks live in the shared native fence.
         if (collected.food?.materialized?.let { it > 0 } == true) return
+        collected.food?.servingFor?.let { guest ->
+            citizens.validateTavernPickup(tx.cityId, collected.workerId, guest,
+                requireNotNull(collected.food).buildingId, requireNotNull(collected.food).material)
+        }
         val feet = citizens.residentCollectionFeet(collected.workerId, allowNight = collected.homeId != null)
             ?: throw CivsRejection("worker-too-far")
         val world = plugin.server.getWorld(tx.after.worldId) ?: throw CivsRejection("storage-unavailable")

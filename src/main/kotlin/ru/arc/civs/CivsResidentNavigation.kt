@@ -240,8 +240,13 @@ internal class CitizenPacketRoute(
         }
         val shape = shapes?.read(world.uid, point, org.bukkit.Bukkit.getCurrentTick().toLong(), capture) ?: capture()
         capturedBlocks++
+        // Empty air is not a surface, except the support coordinate below a ladder.
+        // Read the current types so cached geometry never caches caller-specific costs.
+        val surface = !block.type.isAir || shape.climbable ||
+            point.y + 1 < maximumY &&
+            Tag.CLIMBABLE.isTagged(world.getBlockAt(point.x, point.y + 1, point.z).type)
         return CitizenTerrainBlock(true, shape.liquid, shape.door, shape.climbable,
-            shape.hot, allowed(point), travelCost(block), shape.boxes)
+            shape.hot, allowed(point), if (surface) travelCost(block) else 1.0, shape.boxes)
     }
 
     internal fun capturePermission(from: CitizenPoint, to: CitizenPoint): Boolean = stepAllowed(from, to)
