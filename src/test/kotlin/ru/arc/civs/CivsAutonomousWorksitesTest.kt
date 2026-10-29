@@ -157,7 +157,7 @@ class CivsAutonomousWorksitesTest : FunSpec({
     }
 
     test("Auto care hands off to different known plots after each receipt and yields to a ripe crop") {
-        withAutoWorksite("auto-care-handoff", "farmer", Material.DIRT) { world, farm, city, runtime ->
+        withAutoWorksite("auto-care-handoff", "farmer", Material.DIRT, nanoTime = { 0L }) { world, farm, city, runtime ->
             val worker = city.workers.single()
             val plots = CivsWorksiteLayouts.field(farm)
             plots.forEach { soil ->
@@ -166,14 +166,18 @@ class CivsAutonomousWorksitesTest : FunSpec({
             }
             CivsWorksiteLayouts.irrigation(farm).forEach { world.getBlockAt(it.x, it.y, it.z).type = Material.WATER }
             var work = nextAutoWork(runtime, city)
+            fun scan() = ((runtime.debug(setOf(worker.id))["entries"] as List<*>).single() as Map<*, *>)["farmScan"] as Map<*, *>
             val visited = linkedSetOf<CivPosition>()
             repeat(12) {
                 work.status shouldBe "fertilizing"
                 visited.add(requireNotNull(work.focus)) shouldBe true
                 runtime.validate(city, work)
+                val known = scan()
+                known["examined"] shouldBe plots.size
                 work.changes.forEach { world.getBlockAt(it.position.x, it.position.y, it.position.z).blockData = Bukkit.createBlockData(it.after) }
                 runtime.invalidate(worker.id)
-                // The completed initial field scan survives a receipt; known care does not wait another full scan.
+                scan() shouldBe known
+                // Two admitted slices suffice; wall-clock expiry is covered by the paused-field regression.
                 work = (1..2).firstNotNullOfOrNull { runtime.pulse(listOf(city)); runtime.plan(city, worker) }
                     ?: error("Known care was lost after a native receipt")
             }
@@ -266,6 +270,7 @@ private fun nextAutoWork(runtime: CivsWorksites, city: Settlement): CivWorldWork
 }
 
 private fun withAutoWorksite(name: String, role: String, ground: Material,
+    nanoTime: () -> Long = System::nanoTime,
     body: (CivsWorksiteWorldFixture, CivBuilding, Settlement, CivsWorksites) -> Unit) {
     failOnUnsupportedMockBukkitOperation {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
@@ -280,7 +285,7 @@ private fun withAutoWorksite(name: String, role: String, ground: Material,
                     autonomy = CivAutonomy(), stock = Stock(7, 8, 9))
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
                     val runtime = CivsWorksites(plugin, access, { _, _ -> error("Auto visual work requested native inventory supplies") },
-                        { _, _ -> false })
+                        { _, _ -> false }, nanoTime = nanoTime)
                     body(world, building, city, runtime)
                 }
             } finally { tasks.close() }
