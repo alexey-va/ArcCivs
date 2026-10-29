@@ -731,7 +731,7 @@ class CivsService(
                         log("reload repaired autonomous road ${tx.cityId}", failure, tx.cityId)
                     }
                 }
-            }
+            } else roadMaintenance.upkeepRetired(tx.after, upkeep)
             val surfaceChange = work.changes.firstOrNull { it.position == upkeep.floor }
             footTraffic.registerSurface(tx.cityId, upkeep.floor)
             CivsDiagnostics.event("road_upkeep_committed", "city" to tx.cityId, "worker" to work.workerId,

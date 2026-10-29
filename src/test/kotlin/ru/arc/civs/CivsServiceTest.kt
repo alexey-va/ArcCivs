@@ -2520,6 +2520,43 @@ class CivsServiceTest : FunSpec({
         } finally { unmockkConstructor(CivsFootTraffic::class) }
     }
 
+    for ((modelAfter, worldAfter, slotAfter) in listOf(
+        Triple(true, true, true), Triple(true, false, true), Triple(true, true, false), Triple(false, true, true)))
+    test("road recovery retires revoked authority only for committed model and applied endpoints model=$modelAfter world=$worldAfter slot=$slotAfter") {
+        serviceScenario { h ->
+            val upkeep = ServiceRoadUpkeep(h, physical = true)
+            val before = upkeep.city
+            val after = CivsRoadMaintenance.complete(before, upkeep.work, h.time, nativePaid = true)
+            val control = requireNotNull(before.building(upkeep.work.buildingId)?.control)
+            val debit = CivInventorySlotChange(control, "BARREL", 0, CivPlainItem("COBBLESTONE", 1), null)
+            val tx = CivInventoryTransaction(UUID.randomUUID(), before.id, before.revision, after, listOf(debit),
+                worldChanges = upkeep.work.changes,
+                upkeep = CivRoadUpkeepReceipt(upkeep.worker, before.stock, upkeep.work, h.time)).validated()
+            val inventory = (h.world.getBlockAt(control.x, control.y, control.z).state as org.bukkit.block.Container).inventory
+            if (!slotAfter) inventory.setItem(0, ItemStack(Material.COBBLESTONE, 1))
+            if (worldAfter) h.world.getBlockAt(20, 63, 0).type = Material.COBBLESTONE
+            val loaded = if (modelAfter) after else before
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(loaded))
+            every { h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(tx))
+            every { h.store.deleteInventoryTransaction(tx.id) } returns CompletableFuture.completedFuture(true)
+            every { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) } throws CivsRejection("lands-denied")
+            h.start()
+            val fullyApplied = modelAfter && worldAfter && slotAfter
+            h.tickUntil("road receipt retirement or retained authority fence") {
+                val state = h.service.debugState("overview", before.id, null)
+                if (fullyApplied) state["inventory_recovery_total"] == 0 else state["blocked_recovery_total"] == 1
+            }
+            h.tick()
+            h.service.settlements().single() shouldBe loaded
+            h.saves shouldBe emptyList()
+            h.world.getBlockAt(20, 63, 0).type shouldBe if (worldAfter) Material.COBBLESTONE else Material.DIRT
+            inventory.getItem(0)?.let(CivResidentItem::of) shouldBe if (slotAfter) null else CivResidentItem("COBBLESTONE", 1)
+            verify(exactly = if (fullyApplied) 1 else 0) { h.store.deleteInventoryTransaction(tx.id) }
+            verify(exactly = if (fullyApplied) 0 else 1) { h.worldAdapter.validateRoadUpkeep(any(), upkeep.work) }
+            verify(exactly = 0) { h.citizens.requireWorldWorkArrival(any(), any(), any()) }
+        }
+    }
+
     test("useful crop care requires arrival at the plot and commits its cycle only through the journal") {
         serviceScenario { h ->
             val world = CivsWorksiteWorldFixture("service-crop-care").also(h.paper.server::addWorld)

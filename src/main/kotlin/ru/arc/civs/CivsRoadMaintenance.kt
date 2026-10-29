@@ -211,17 +211,31 @@ internal class CivsRoadMaintenance(private val world: CivsWorld,
             previous?.targets != prepared.targets) {
             cursors.remove(city.id)
             city.workers.forEach { selected.remove(it.id) }
-            val lowered = city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
-                val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
-                CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
-                    before[key]?.let { floor.y < it.y } == true
-                }.values
-            }.toHashSet()
-            gradeChecks[city.id] = ArrayDeque(prepared.targets.filter { it.routeOverride != null || it.floor in lowered })
+            gradeChecks[city.id] = ArrayDeque(gradeTargets(city, prepared))
             networkGenerations[city.id] = ++generation
         }
         awaitingGradeNetwork[city.id]?.takeIf { it.buildings == prepared.buildings && it.overrides == prepared.routeOverrides }
             ?.let { awaitingGradeNetwork.remove(city.id) }
+    }
+
+    private fun gradeTargets(city: Settlement, network: CivRoadUpkeepNetwork): List<CivRoadUpkeep> {
+        val lowered = city.roadRouteOverrides.orEmpty().values.flatMap { repair ->
+            val before = CivsAutonomousTerraform.roadProfile(repair.originalRoute)
+            CivsAutonomousTerraform.roadProfile(repair.route).filter { (key, floor) ->
+                before[key]?.let { floor.y < it.y } == true
+            }.values
+        }.toHashSet()
+        return network.targets.filter { it.routeOverride != null || it.floor in lowered }
+    }
+
+    /** Only retired native progress can make an earlier uncapturable peak reachable from a new cut. */
+    fun upkeepRetired(city: Settlement, upkeep: CivRoadUpkeep) {
+        if (upkeep.routeOverride != null) return // The first cut waits for its matching network publication.
+        val network = networks[city.id]?.takeIf { it.worldId == city.worldId && it.buildings == city.buildings &&
+            it.routeOverrides == city.roadRouteOverrides } ?: return
+        val grade = gradeTargets(city, network)
+        if (grade.any { it.routeOverride == null && it.floor == upkeep.floor })
+            gradeChecks[city.id] = ArrayDeque(grade)
     }
 
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? {

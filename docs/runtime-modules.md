@@ -86,6 +86,11 @@ and native persistence fences; it never creates a second transfer journal.
 Unchanged destination container cells are excluded from schematic paste, including
 their inventory and metadata. Insufficient space prevents the transfer and upgrade.
 
+An already committed road receipt can retire without replaying an action only
+when the current city exactly equals its after-snapshot and storage proves all
+locked native endpoints already applied. The existing authority fence still
+covers fresh and partially applied effects.
+
 `CivsRules` remains the pure domain entrypoint. `CivsConstructionRules` owns
 construction and payment transitions; `CivsSnapshotValidation` owns immutable
 saved-state integrity. World observations are not snapshot-integrity checks.

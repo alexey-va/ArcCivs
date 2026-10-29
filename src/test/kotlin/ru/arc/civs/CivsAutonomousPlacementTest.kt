@@ -381,16 +381,10 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("autonomous upgrade preserves its own walls but refuses foreign expansion and filled containers") {
+    test("autonomous upgrade preserves its own walls but refuses foreign expansion and a late filled cell") {
         spatialScenario { s ->
-            s.city = s.city.copy(autonomy = CivAutonomy())
+            val upgrade = s.ownedUpgrade()
             val old = s.city.buildings.single()
-            for (x in old.bounds.min.x..old.bounds.max.x) for (y in old.bounds.min.y..old.bounds.max.y)
-                for (z in old.bounds.min.z..old.bounds.max.z) s.world.getBlockAt(x, y, z).type = Material.OAK_PLANKS
-            val marker = old.control!!
-            s.world.getBlockAt(marker.x, marker.y, marker.z).type = Material.BARREL
-            val upgrade = old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING,
-                bounds = old.bounds.copy(max = old.bounds.max.copy(x = old.bounds.max.x + 1)))
             val cells = spatialCells(upgrade)
             val accepted = s.worldAccess.captureSite(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
             s.finish(accepted)
@@ -407,14 +401,75 @@ class CivsAutonomousPlacementTest : FunSpec({
             val inside = s.world.getBlockAt(0, 65, -4)
             inside.type = Material.CHEST
             (inside.state as Chest).inventory.setItem(0, ItemStack(Material.DIAMOND, 1))
-            val occupied = s.worldAccess.captureSite(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
-            s.finish(occupied)
-            spatialFailure(occupied) shouldBe "container-not-empty"
-            (inside.state as Chest).inventory.getItem(0)?.type shouldBe Material.DIAMOND
-
             val drifted = s.worldAccess.revalidate(accepted.join(), s.city.owner)
             s.finish(drifted)
             spatialFailure(drifted) shouldBe "container-not-empty"
+            (inside.state as Chest).inventory.getItem(0) shouldBe ItemStack(Material.DIAMOND, 1)
+        }
+    }
+
+    test("autonomous upgrade retains an unchanged filled owned chest with its native metadata") {
+        spatialScenario { s ->
+            val upgrade = s.ownedUpgrade()
+            val old = s.city.buildings.single()
+            val point = ArcSchematicPoint(0, 65, -4)
+            val state = "minecraft:chest[facing=south,type=single,waterlogged=false]"
+            val block = s.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.CHEST }
+            val key = org.bukkit.NamespacedKey("arccivs", "retained_spatial")
+            (block.state as Chest).also {
+                it.blockData = org.bukkit.Bukkit.createBlockData(state)
+                it.persistentDataContainer.set(key, org.bukkit.persistence.PersistentDataType.STRING, "native-holder")
+                it.update(true, false) shouldBe true
+            }
+            val item = ItemStack(Material.DIAMOND, 3).apply { editMeta {
+                it.displayName(net.kyori.adventure.text.Component.text("Upgrade keepsake"))
+                it.persistentDataContainer.set(key, org.bukkit.persistence.PersistentDataType.STRING, "exact-item")
+            } }
+            (block.state as Chest).blockInventory.setItem(0, item)
+            val cells = spatialCells(upgrade).map { cell -> if (cell.position == point)
+                ArcSchematicBlock(point, state, false, false) else cell }
+            val captured = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
+            s.finish(captured)
+            val plan = captured.join()
+            plan.blocks.single { it.position == CivPosition(point.x, point.y, point.z) } shouldBe
+                CivPlanBlock(CivPosition(point.x, point.y, point.z), state, state)
+            CivsMaterials.required(plan)["CHEST"] shouldBe null
+            val checked = s.worldAccess.revalidate(plan, s.city.owner)
+            s.finish(checked)
+            checked.join() shouldBe Unit
+            (block.state as Chest).blockInventory.getItem(0) shouldBe item
+            (block.state as Chest).persistentDataContainer.get(key, org.bukkit.persistence.PersistentDataType.STRING) shouldBe "native-holder"
+        }
+    }
+
+    for (after in listOf("minecraft:air", "minecraft:chest[facing=east,type=single,waterlogged=false]"))
+    test("autonomous upgrade only proposes a filled owned chest changing to $after until evacuation") {
+        spatialScenario { s ->
+            val upgrade = s.ownedUpgrade()
+            val old = s.city.buildings.single()
+            val point = ArcSchematicPoint(0, 65, -4)
+            val before = "minecraft:chest[facing=south,type=single,waterlogged=false]"
+            val block = s.world.getBlockAt(point.x, point.y, point.z).also { it.type = Material.CHEST }
+            (block.state as Chest).also {
+                it.blockData = org.bukkit.Bukkit.createBlockData(before)
+                it.update(true, false) shouldBe true
+            }
+            val item = ItemStack(Material.DIAMOND, 3)
+            (block.state as Chest).blockInventory.setItem(0, item)
+            val cells = spatialCells(upgrade).map { cell -> if (cell.position == point)
+                ArcSchematicBlock(point, after, after == "minecraft:air", false) else cell }
+            val proposal = s.worldAccess.captureSite(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
+            s.finish(proposal)
+            proposal.join().blocks.single { it.position == CivPosition(point.x, point.y, point.z) } shouldBe
+                CivPlanBlock(CivPosition(point.x, point.y, point.z), before, after)
+            val captured = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId, upgrade, cells, old)
+            s.finish(captured)
+            spatialFailure(captured) shouldBe "container-not-empty"
+            val checked = s.worldAccess.revalidate(proposal.join(), s.city.owner)
+            s.finish(checked)
+            spatialFailure(checked) shouldBe "container-not-empty"
+            block.blockData.asString shouldBe before
+            (block.state as Chest).blockInventory.getItem(0) shouldBe item
         }
     }
 
@@ -486,6 +541,16 @@ private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoClos
         every { blueprints.prepare(any(), any(), any(), any(), any(), any(), any(), any(), any()) } answers {
             CompletableFuture.completedFuture(spatialBlueprint(arg(3), arg(4), arg(5), arg<Int?>(7) ?: 0, arg(2)))
         }
+    }
+    fun ownedUpgrade(): CivBuilding {
+        city = city.copy(autonomy = CivAutonomy())
+        val old = city.buildings.single()
+        for (x in old.bounds.min.x..old.bounds.max.x) for (y in old.bounds.min.y..old.bounds.max.y)
+            for (z in old.bounds.min.z..old.bounds.max.z) world.getBlockAt(x, y, z).type = Material.OAK_PLANKS
+        val marker = requireNotNull(old.control)
+        world.getBlockAt(marker.x, marker.y, marker.z).type = Material.BARREL
+        return old.copy(level = 2, phase = BuildingPhase.CONSTRUCTING,
+            bounds = old.bounds.copy(max = old.bounds.max.copy(x = old.bounds.max.x + 1)))
     }
     fun finish(future: CompletableFuture<*>) {
         repeat(300) { if (!future.isDone) scheduler.tick() }

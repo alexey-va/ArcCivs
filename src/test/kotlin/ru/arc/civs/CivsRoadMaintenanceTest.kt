@@ -161,23 +161,50 @@ class CivsRoadMaintenanceTest : FunSpec({
                         world.getBlockAt(p.x, p.y, p.z).blockData = old
                     }
                     var count = 0
-                    repeat(3) {
-                        for (target in CivsRoadMaintenance.prepare(city, nativePlans).targets) {
-                            // Metadata changes invalidate the remainder of the old prepared network.
-                            if (target.routeOverride != null && city.roadRouteOverrides != null) continue
-                            val current = native.captureRoadUpkeep(city, city.workers.single(), target) ?: continue
-                            val updated = CivsRoadMaintenance.complete(city, current, 3_000L + count * 3_000L)
-                            CivRoadUpkeepReceipt(city.workers.single(), city.stock, current, 3_000L + count * 3_000L).validated(updated)
-                            current.changes.asReversed().forEach { change ->
-                                val block = world.getBlockAt(change.position.x, change.position.y, change.position.z)
-                                block.blockData = Bukkit.createBlockData(change.after)
-                            }
-                            native.validateRoadUpkeep(city, current)
-                            city = updated
-                            count++
-                            if (target.routeOverride != null) break
+                    var tick = 0
+                    val maintenance = CivsRoadMaintenance(native) { tick }
+                    maintenance.publish(city, CivsRoadMaintenance.prepare(city, nativePlans))
+                    maintenance.admitDevelopment(city) shouldBe false
+                    var admitted = false
+                    repeat(128) {
+                        if (admitted) return@repeat
+                        tick++
+                        val current = maintenance.plan(city, city.workers.single())
+                        maintenance.backfillSurfaces(city)
+                        if (current == null) {
+                            admitted = maintenance.admitDevelopment(city)
+                            return@repeat
                         }
+                        maintenance.admitDevelopment(city) shouldBe false
+                        if (count == 1) repeat(2) {
+                            // Walking has not applied the lower column; peak probes still have no standing position.
+                            tick++
+                            maintenance.plan(city, city.workers.single()) shouldBe current
+                            maintenance.backfillSurfaces(city)
+                        }
+                        val updated = CivsRoadMaintenance.complete(city, current, 3_000L + count * 3_000L)
+                        CivRoadUpkeepReceipt(city.workers.single(), city.stock, current, 3_000L + count * 3_000L).validated(updated)
+                        current.changes.asReversed().forEach { change ->
+                            val block = world.getBlockAt(change.position.x, change.position.y, change.position.z)
+                            block.blockData = Bukkit.createBlockData(change.after)
+                        }
+                        native.validateRoadUpkeep(city, current)
+                        city = updated
+                        val upkeep = requireNotNull(current.upkeep)
+                        if (upkeep.routeOverride != null) {
+                            maintenance.awaitGradeNetwork(city)
+                            maintenance.admitDevelopment(city) shouldBe false
+                            val network = CivsRoadMaintenance.prepare(city, nativePlans)
+                            val peak = network.targets.single { it.floor == CivPosition(0, 63, 6) }
+                            native.captureRoadUpkeep(city, city.workers.single(), peak) shouldBe null
+                            maintenance.publish(city, network)
+                        } else {
+                            // This is the existing inventory-retirement hook, after exact native application.
+                            maintenance.upkeepRetired(city, upkeep)
+                        }
+                        count++
                     }
+                    admitted shouldBe true
                     (count > 1) shouldBe true
                     city.stock.stone shouldBe town.stock.stone - count
                     val flat = requireNotNull(city.roadRouteOverrides)[source.id.toString()]!!.route

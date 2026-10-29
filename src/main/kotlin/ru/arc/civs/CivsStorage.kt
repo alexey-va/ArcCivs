@@ -510,6 +510,37 @@ class CivsStorage(private val plugin: Plugin,
         player.openInventory(containers.control(city, building).inventory)
     }
 
+    /** Read-only proof for retiring an already committed road receipt; no before or mixed endpoint is accepted. */
+    internal fun upkeepNativeApplied(transaction: CivInventoryTransaction): Boolean {
+        checkMain(); requireOpen()
+        if (transaction.upkeep == null) return false
+        transaction.validated()
+        val claim = claims[transaction.id] ?: return false
+        if (claim.city.id != transaction.cityId || claim.city.owner != transaction.after.owner ||
+            claim.city.worldId != transaction.after.worldId || claim.city.revision !in transaction.beforeRevision..transaction.after.revision)
+            return false
+        val sources = linkedMapOf<CivPosition, Source>()
+        for (change in transaction.changes) {
+            if (locked[Key(transaction.after.worldId, change.container)] != transaction.id) return false
+            try {
+                sources.getOrPut(change.container) { containers.resolve(transaction.after, change.container, change.containerType) }
+            } catch (_: CivsRejection) { return false }
+        }
+        val world = plugin.server.getWorld(transaction.after.worldId) ?: return false
+        val cells = linkedMapOf<CivPosition, Pair<Block, BlockData>>()
+        for (cell in transaction.worldChanges.orEmpty()) {
+            if (lockedWorld[Key(transaction.after.worldId, cell.position)] != transaction.id ||
+                cell.position.y !in world.minHeight until world.maxHeight ||
+                !world.isChunkLoaded(cell.position.x shr 4, cell.position.z shr 4)) return false
+            val block = world.getBlockAt(cell.position.x, cell.position.y, cell.position.z)
+            if (block.state is TileState) return false
+            val after = try { Bukkit.createBlockData(cell.after) } catch (_: IllegalArgumentException) { return false }
+            cells[cell.position] = block to after
+        }
+        return classify(transaction, sources) == CivInventoryApplyResult.Applied &&
+            classifyWorld(transaction, cells) == CivInventoryApplyResult.Applied
+    }
+
     /** All slots are classified first; drift prevents every write, including otherwise valid cells. */
     fun reconcile(transaction: CivInventoryTransaction): CivInventoryApplyResult {
         checkMain()

@@ -224,10 +224,11 @@ internal class CivsWorkerCommits(
         return inventoryJournal.submit(tx)
     }
 
-    /** The same native authority fence covers fresh application and restart recovery. */
+    /** Fresh or unfinished effects retain native authority; exact applied recovery only retires its journal. */
     fun validateUpkeepNative(tx: CivInventoryTransaction): CivInventoryApplyResult? {
         val receipt = tx.upkeep ?: return null
         val current = cities[tx.cityId] ?: return CivInventoryApplyResult.Conflict(mapOf("reason" to "city-unavailable"))
+        if (current == tx.after && storage.upkeepNativeApplied(tx)) return null
         return try {
             world.validateRoadUpkeep(current, receipt.work)
             null
