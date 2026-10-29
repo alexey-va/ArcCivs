@@ -26,8 +26,9 @@ internal class CivsResidentNavigation(
     nativeWork: BudgetedTaskQueue? = null,
     executor: Executor? = null,
     private val settings: CivsNavigationSettings = CivsNavigationSettings(),
+    private val nanoTime: () -> Long = System::nanoTime,
 ) {
-    private class Job(val route: CitizenPacketRoute, val search: CitizenNavigationSearch) {
+    private class Job(val route: CitizenPacketRoute, val search: CitizenNavigationSearch, val startedNanos: Long) {
         var progressTick = Bukkit.getCurrentTick().toLong()
         var nativeProgress = 0L
         val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
@@ -45,6 +46,13 @@ internal class CivsResidentNavigation(
     private val jobs = linkedMapOf<CitizenPacketRoute, Job>()
     private val terrain = CivsNavigationTerrain(settings.terrainCacheBlocks, settings.terrainRefreshTicks)
     private var closed = false
+    private var readyPreparations = 0L
+    private var failedPreparations = 0L
+    private var cancelledPreparations = 0L
+    private var preparationNanos = 0L
+    private var maximumPreparationNanos = 0L
+    private val preparationBoundsMillis = longArrayOf(100, 250, 500, 1_000, 2_000, 5_000, 10_000, Long.MAX_VALUE)
+    private val preparationBuckets = LongArray(preparationBoundsMillis.size)
     private var terminal = CompletableFuture.completedFuture(Unit)
 
     internal fun debug(): Map<String, Any?> {
@@ -52,7 +60,14 @@ internal class CivsResidentNavigation(
         return mapOf("closed" to closed, "jobs" to jobs.size, "maximum_jobs" to settings.maximumJobs,
             "native_pending" to jobs.values.count { it.capturing?.isDone == false },
             "worker_pending" to jobs.values.count { it.searching?.isDone == false },
-            "captured_blocks" to jobs.values.sumOf { it.terrain.size }, "terrain_cache" to terrain.debug())
+            "captured_blocks" to jobs.values.sumOf { it.terrain.size }, "terrain_cache" to terrain.debug(),
+            "preparation_lifetime" to mapOf("source" to "all-admitted-planner-jobs", "ready" to readyPreparations,
+                "failed" to failedPreparations, "cancelled" to cancelledPreparations,
+                "mean_ms" to if (readyPreparations == 0L) 0.0 else preparationNanos / readyPreparations / 1_000_000.0,
+                "max_ms" to maximumPreparationNanos / 1_000_000.0,
+                "buckets_ms" to preparationBuckets.indices.associate { index ->
+                    (if (index == preparationBuckets.lastIndex) ">10000" else "<=${preparationBoundsMillis[index]}") to preparationBuckets[index]
+                }))
     }
 
     fun request(world: World, from: Location, to: Location, allowed: (CivPosition) -> Boolean,
@@ -77,7 +92,7 @@ internal class CivsResidentNavigation(
         retireCancelled()
         if (closed || !tasks.isCurrent(epoch)) { route.planningFailed("cancelled"); return route }
         if (jobs.size >= settings.maximumJobs) { route.planningFailed("planner-busy"); return route }
-        val job = Job(route, route.newSearch())
+        val job = Job(route, route.newSearch(), nanoTime())
         jobs[route] = job
         route.attachAsync(job.search::cancel)
         dispatch(job, emptyList())
@@ -165,6 +180,18 @@ internal class CivsResidentNavigation(
         while (iterator.hasNext()) {
             val job = iterator.next().value
             if (job.route.searching) continue
+            // Include fast routes absent from the deliberately quiet slow-route log.
+            when {
+                job.route.preparationPhase == "cancelled" -> cancelledPreparations++
+                job.route.failure != null -> failedPreparations++
+                else -> {
+                    val elapsed = (nanoTime() - job.startedNanos).coerceAtLeast(0)
+                    readyPreparations++
+                    preparationNanos += elapsed
+                    maximumPreparationNanos = maxOf(maximumPreparationNanos, elapsed)
+                    preparationBuckets[preparationBoundsMillis.indexOfFirst { elapsed / 1_000_000.0 <= it }]++
+                }
+            }
             job.search.cancel()
             job.capturing?.cancel(false)
             job.searching?.cancel(false)

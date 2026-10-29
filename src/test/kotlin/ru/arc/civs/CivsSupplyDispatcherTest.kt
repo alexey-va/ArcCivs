@@ -13,6 +13,64 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 class CivsSupplyDispatcherTest : FunSpec({
+    test("construction shortage collects its missing quarry goods before ordinary tavern supply") {
+        val input = constructionCollectionFixture()
+        val collection = allocateCivSupplies(input).plans.values.single()
+        collection.cargo.material shouldBe "COBBLESTONE"
+        collection.cargo.amount shouldBe 2L
+        collection.cargo.sourceBuildingId shouldBe SUPPLY_QUARRY
+        collection.destinationBuildingId shouldBe SUPPLY_WAREHOUSE
+
+        val warehouse = input.stores.getValue(SUPPLY_WAREHOUSE)
+        val unloaded = input.copy(stores = input.stores + (SUPPLY_WAREHOUSE to warehouse.copy(
+            stock = warehouse.stock + ("COBBLESTONE" to collection.cargo.amount))),
+            couriers = input.couriers.map { it.copy(cycle = it.cycle + 1) })
+        val delivery = allocateCivSupplies(unloaded).plans.values.single()
+        delivery.cargo.material shouldBe "COBBLESTONE"
+        delivery.cargo.amount shouldBe 2L
+        delivery.cargo.sourceBuildingId shouldBe SUPPLY_WAREHOUSE
+        delivery.destinationBuildingId shouldBe SUPPLY_TARGET
+    }
+
+    test("priority collection is bounded by construction stock and incoming goods") {
+        val original = constructionCollectionFixture()
+        val input = original.copy(couriers = original.couriers + original.couriers.single().copy(workerId = SUPPLY_SECOND))
+        val plans = allocateCivSupplies(input).plans
+        plans.values.filter { it.cargo.material == "COBBLESTONE" }.sumOf { it.cargo.amount } shouldBe 2L
+        plans.values.single { it.cargo.material == "BREAD" }.cargo.amount shouldBe 4L
+
+        val picked = plans.getValue(SUPPLY_COURIER).let { it.copy(carrying = true,
+            cargo = it.cargo.copy(inventoryBacked = true)) }
+        val carrying = input.copy(couriers = input.couriers.filterNot { it.workerId == SUPPLY_COURIER },
+            retained = mapOf(SUPPLY_COURIER to picked))
+        allocateCivSupplies(carrying).plans.getValue(SUPPLY_SECOND).cargo.material shouldBe "BREAD"
+
+        val supplied = input.copy(requests = input.requests.map { if (it.construction) it.copy(inTransit = 2) else it })
+        allocateCivSupplies(supplied).plans.getValue(SUPPLY_COURIER).cargo.material shouldBe "BREAD"
+    }
+
+    test("busy couriers retain collection age while vanished source excess is pruned") {
+        val original = constructionCollectionFixture()
+        val nearby = original.stores.getValue(SUPPLY_TAVERN).copy(stock = mapOf("BOOK" to 8L), outputMaterial = "BOOK")
+        val input = original.copy(requests = emptyList(), stores = original.stores + (SUPPLY_TAVERN to nearby),
+            couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + ("BOOK" to 64L)) },
+            stackSizes = original.stackSizes + ("BOOK" to 64))
+        val distantTask = CivSupplyTask(SUPPLY_QUARRY, null, SUPPLY_WAREHOUSE, "COBBLESTONE", false)
+        val nearbyTask = CivSupplyTask(SUPPLY_TAVERN, null, SUPPLY_WAREHOUSE, "BOOK", false)
+        val ages = mapOf(distantTask to 0L, nearbyTask to 100L)
+        val carrying = allocateCivSupplies(input).plans.values.single().let { it.copy(carrying = true,
+            cargo = it.cargo.copy(inventoryBacked = true)) }
+        val busy = input.copy(couriers = emptyList(), retained = mapOf(SUPPLY_COURIER to carrying))
+        val seen = allocateCivSupplies(busy, ages, now = 200).seen
+        (distantTask in seen) shouldBe true
+        val retainedAges = ages.filterKeys { it in seen }
+        allocateCivSupplies(input, retainedAges, now = 300).plans.values.single().cargo.sourceBuildingId shouldBe SUPPLY_QUARRY
+
+        val exhausted = busy.copy(stores = busy.stores + (SUPPLY_QUARRY to busy.stores.getValue(SUPPLY_QUARRY)
+            .copy(stock = mapOf("COBBLESTONE" to 32L))))
+        (distantTask in allocateCivSupplies(exhausted, ages, now = 400).seen) shouldBe false
+    }
+
     test("workshop incidental excess leaves while ingredients and destination room remain reserved") {
         val original = supplyFixture()
         val workshop = original.stores.getValue(SUPPLY_TARGET).copy(
@@ -387,8 +445,29 @@ class CivsSupplyDispatcherTest : FunSpec({
 private val SUPPLY_CITY = UUID(0, 1)
 private val SUPPLY_WAREHOUSE = UUID(0, 10)
 private val SUPPLY_TARGET = UUID(0, 20)
+private val SUPPLY_QUARRY = UUID(0, 30)
+private val SUPPLY_TAVERN = UUID(0, 40)
 private val SUPPLY_COURIER = UUID(0, 100)
 private val SUPPLY_SECOND = UUID(0, 101)
+
+private fun constructionCollectionFixture(): CivSupplySnapshot {
+    val warehouse = CivSupplyStore(SUPPLY_WAREHOUSE, CivPosition(-1896, 64, -2774), CivPosition(-1905, 65, -2775),
+        mapOf("BREAD" to 4L), emptyMap(), null, CivSupplyCapacity(314, emptyMap()), BuildingType.WAREHOUSE)
+    val builder = CivSupplyStore(SUPPLY_TARGET, CivPosition(-1896, 64, -2754), CivPosition(-1900, 65, -2753),
+        emptyMap(), emptyMap(), null, CivSupplyCapacity(27, emptyMap()), BuildingType.BUILDER_HUT)
+    val quarry = CivSupplyStore(SUPPLY_QUARRY, CivPosition(-1844, 71, -2696), CivPosition(-1844, 71, -2689),
+        mapOf("COBBLESTONE" to 1472L), mapOf("COBBLESTONE" to 32L), "COBBLESTONE",
+        CivSupplyCapacity(0, emptyMap()), BuildingType.QUARRY)
+    val tavern = CivSupplyStore(SUPPLY_TAVERN, CivPosition(-1850, 63, -2763), CivPosition(-1848, 63, -2773),
+        emptyMap(), mapOf("BREAD" to 4L), null, CivSupplyCapacity(27, emptyMap()), BuildingType.TAVERN)
+    return CivSupplySnapshot(SUPPLY_CITY, Unit, listOf(warehouse, builder, quarry, tavern).associateBy { it.id },
+        listOf(CivSupplyRequest(builder.id, "COBBLESTONE", 2, 0, construction = true),
+            CivSupplyRequest(tavern.id, "BREAD", 4, 0)),
+        listOf(CivSupplyCourier(SUPPLY_COURIER, warehouse.id, 0, warehouse.control,
+            mapOf("COBBLESTONE" to 64L, "BREAD" to 64L))),
+        emptyList(), emptyMap(), mapOf("COBBLESTONE" to 64, "BREAD" to 64),
+        constructionTargets = mapOf(warehouse.id to builder.id), maximumTransferDistance = 256)
+}
 
 private fun supplyFixture(): CivSupplySnapshot {
     val warehouse = CivSupplyStore(SUPPLY_WAREHOUSE, CivPosition(0, 64, 0), CivPosition(0, 64, 0),

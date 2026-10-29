@@ -486,6 +486,31 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         .thenBy { it.cycle }.thenBy { it.workerId.toString() })
     fun distance(a: CivPosition, b: CivPosition): Double = sqrt((a.x.toDouble() - b.x).let { it * it } +
         (a.y.toDouble() - b.y).let { it * it } + (a.z.toDouble() - b.z).let { it * it })
+    fun constructionCollectionNeed(warehouse: CivSupplyStore, material: String): Long {
+        val required = demand.entries.sumOf { (key, count) ->
+            val target = stores[snapshot.constructionTargets[warehouse.id] ?: key.target]
+            if (key.construction && key.material == material && target != null &&
+                distance(warehouse.control, target.control) <= snapshot.maximumTransferDistance &&
+                roomFor(target.id, material) > 0) count else 0L
+        }
+        val incoming = assigned.values.filter { it.destinationBuildingId == warehouse.id && it.cargo.material == material }
+            .sumOf { it.cargo.amount }
+        return (required - (stock[warehouse.id]?.get(material) ?: 0L) - incoming).coerceAtLeast(0)
+    }
+    // Carried trips temporarily remove every free courier; their queued sources must keep waiting age.
+    for (key in ages.keys) {
+        checkBudget()
+        val source = key.source?.let(stores::get) ?: continue
+        val warehouse = stores[key.target] ?: continue
+        val producer = key.worker?.let(sources::get)
+        val available = if (key.worker == null) {
+            if (source.outputMaterial == null) continue
+            ((stock[source.id]?.get(key.material) ?: 0L) - (source.desiredStock[key.material] ?: 0L)).coerceAtLeast(0)
+        } else if (producer?.buildingId == source.id) excess[key.worker]?.get(key.material) ?: 0L else 0L
+        if (available > 0 && source.id != warehouse.id &&
+            distance(producer?.meeting ?: source.control, warehouse.control) <= snapshot.maximumTransferDistance &&
+            (!key.construction || constructionCollectionNeed(warehouse, key.material) > 0)) seen += key
+    }
     for (courier in ordered) {
         checkBudget()
         if (courier.workerId in assigned || courier.workerId in blockedWorkers || courier.workerId in rejectedRetained) continue
@@ -520,8 +545,12 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             // including incidental dirt/stone rather than only its advertised output.
             for ((material, available) in stock[source.id].orEmpty()) {
                 val count = (available - (source.desiredStock[material] ?: 0)).coerceAtLeast(0)
-                if (count > 0) offer(source, warehouse, material, count,
-                    CivSupplyTask(source.id, null, warehouse.id, material, false))
+                if (count > 0) {
+                    val key = CivSupplyTask(source.id, null, warehouse.id, material, false)
+                    val needed = constructionCollectionNeed(warehouse, material)
+                    if (needed > 0) offer(source, warehouse, material, minOf(count, needed), key.copy(construction = true))
+                    offer(source, warehouse, material, count, key)
+                }
             }
         }
         for (producer in sources.values) {
