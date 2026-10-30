@@ -16,6 +16,7 @@ internal class CivsCitizenPlanning(
     private val productionReady: (Settlement, CivWorker) -> Boolean,
     private val workInputsReady: (Settlement, CivWorker) -> Boolean,
     private val craftPlan: (Settlement, CivWorker) -> CivCraftJob?,
+    private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)?,
     private val remove: (CitizenActor, String) -> Unit,
 ) {
     private val routes get() = routesOwner()
@@ -77,6 +78,18 @@ internal class CivsCitizenPlanning(
     }
 
     fun plan(city: Settlement, worker: CivWorker): CitizenPlan? {
+        val resident = runtime.actors[worker.id]
+        val retained = resident?.plan?.token
+        val finishingCycle = retained?.assignmentId == worker.assignment && retained?.completedCycles == worker.completedCycles &&
+            retained?.nextDeliveryAt == worker.nextDeliveryAt && resident?.cycle?.phase !in setOf(null, CitizenPhase.IDLE, CitizenPhase.CLOSED)
+        if (!CivsResidents.isChild(worker) && (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker) &&
+            worker.cargo == null && !finishingCycle) {
+            val home = citizenHomeBuilding(city, worker) ?: return null
+            // Finish an accepted cycle, then leave a visible idle boundary for the durable life owner.
+            return CitizenPlan(CitizenToken(worker.assignment, worker.completedCycles, worker.nextDeliveryAt, null),
+                worker.assignment?.let(city::building)?.control ?: home.entrance, null,
+                worker.assignment?.let(city::building)?.type, 0, "old-age-retirement")
+        }
         val courier = if (CivsResidents.isChild(worker)) null else courierPlan(city, worker)?.takeUnless {
             city.inventory != null && !it.carrying && it.cargo.sourceWorkerId != null
         }
@@ -125,6 +138,17 @@ internal class CivsCitizenPlanning(
             base = if (job == null && base.type == BuildingType.SAWMILL) base.copy(idleReason = "waiting-orders")
                 else if (job != null) base.copy(token = base.token.copy(craftJobId = job.id),
                     suppliesNeeded = !CivsEquipment.inputsReady(worker, job.inputs, emptyMap())) else base
+        }
+        if (workstation != null && !CivsAutonomy.legacyStock(city) && base.type in CivsWorkstations.TYPES &&
+            base.courier == null && base.worldWork == null) {
+            // A selected machine belongs to this exact cycle, including its supply/meal detours.
+            val accepted = actor?.plan?.takeIf { it.token == base.token }
+            val station = accepted?.workstation ?: if (accepted == null || actor.cycle.phase in setOf(
+                    CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED, CitizenPhase.TO_STORAGE))
+                workstation(city, worker) else null
+            if (station != null) base = base.copy(workplace = station.standing, workstation = station, completeAtWorkplace = false)
+            else if (accepted == null || actor.cycle.phase in setOf(CitizenPhase.IDLE, CitizenPhase.PAUSED, CitizenPhase.CLOSED,
+                    CitizenPhase.TO_STORAGE)) base = base.copy(idleReason = base.idleReason ?: "workstation-unavailable")
         }
         val admitted = if (base.idleReason == null && !productionReady(city, worker)) base.copy(idleReason = "waiting-inputs") else base
         val planned = if (CivsAutonomy.legacyStock(city) && admitted.type != BuildingType.FORESTER && !nativeAuto || admitted.courier != null ||

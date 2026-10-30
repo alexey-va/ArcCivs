@@ -165,6 +165,7 @@ internal class CivsAutonomousPlacement(
         @Volatile private var infillCandidates = 0
         @Volatile private var candidateSource = "frontage"
         @Volatile private var gradingSamples = emptyList<Map<String, Any>>()
+        @Volatile private var routeRefreshed = false
         val rejections = java.util.concurrent.ConcurrentHashMap<String, Int>()
         @Volatile private var blockers = emptyList<CivSettlementBlocker>()
 
@@ -174,7 +175,8 @@ internal class CivsAutonomousPlacement(
             "selected_anchor" to selected?.anchor, "fixed" to (pinned != null), "layout_blockers" to blockers,
             "candidate_source" to candidateSource, "frontage_candidates" to frontageCandidates,
             "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples,
-            "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted)
+            "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted,
+            "route_refreshed" to routeRefreshed)
 
         private fun frame(): CivSettlementFrame = CivsPerimeterCrossings.adapt(
             CivsSettlementLayout.frame(city), access.routes.values + adopted?.routes.orEmpty().values, access.infrastructure)
@@ -366,8 +368,11 @@ internal class CivsAutonomousPlacement(
                 (if (pinned != null && !infrastructure && pinnedRoute == null) emptyList()
                     else frame().wallObstacles) + futureObstacles,
                 infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
-                reservedRoute = if (reservation == null) pinnedRoute else adopted?.routes?.get(buildingId.toString())
-                    ?: throw CivsRejection("invalid-plan"),
+                reservedRoute = when {
+                    routeRefreshed -> null
+                    reservation == null -> pinnedRoute
+                    else -> adopted?.routes?.get(buildingId.toString()) ?: throw CivsRejection("invalid-plan")
+                },
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }
             catch (failure: RuntimeException) { retry(failure); return }
             phase = "earthworks"
@@ -411,6 +416,13 @@ internal class CivsAutonomousPlacement(
                 return
             }
             rejections.merge(cause.reason, 1, Int::plus)
+            if (!routeRefreshed && pinned != null && previous?.phase == BuildingPhase.SITE && pinnedRoute != null &&
+                cause.reason == "autonomy-no-path") {
+                // A SITE owns its geometry, not an obsolete approach. Retry this same fixed
+                // option once through the bounded current route and native capture guards.
+                routeRefreshed = true
+                next--
+            }
             attempt()
         }
 

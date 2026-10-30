@@ -1520,10 +1520,11 @@ class CivsUiTest : FunSpec({
             }, inventory = base.inventory!!.copy(materials = mapOf("PAPER" to 6L)))
             every { h.host.buildingStatus(hall.id) } returns "building-status.waiting-inputs"
             every { h.host.workerStatus(any()) } returns "workers.status.waiting-inputs"
+            every { h.host.workerStatusInputs(any()) } returns listOf("LEATHER")
             fun export(id: String) { System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, id, h.screen, listOf(588, 380)) } }
             h.ui.openBuilding(h.player, base.id, hall.id)
             h.body() shouldContain "2 / 2"
-            h.body() shouldContain "Ждёт сырьё на складе"
+            h.body() shouldContain "Ждёт: Кожа"
             h.body() shouldContain "Книга"
             export("scribe-hall-ru")
             h.click("production")

@@ -416,6 +416,63 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
+    for (blocked in listOf(false, true))
+    test("an existing gate SITE refreshes one stale adopted approach without moving or bypassing terrain blocked=$blocked") {
+        spatialScenario { s ->
+            val bounds = CivBox(CivPosition(17, 64, 10), CivPosition(19, 67, 12))
+            val piece = CivSettlementPiece(UUID.randomUUID(), BuildingType.GATE, bounds, CivPosition(18, 65, 9),
+                buildList {
+                    for (x in bounds.min.x..bounds.max.x) for (z in bounds.min.z..bounds.max.z)
+                        for (y in bounds.min.y..bounds.max.y) add(CivSettlementBlock(CivPosition(x, y, z),
+                            if (y == bounds.min.y) "minecraft:cobblestone" else "minecraft:air"))
+                }, (10..12).map { CivPosition(18, 65, it) })
+            val building = CivsInfrastructure.building(piece)
+            val cells = piece.blocks.map { cell -> ArcSchematicBlock(
+                ArcSchematicPoint(cell.position.x, cell.position.y, cell.position.z), cell.after,
+                cell.after == "minecraft:air", false) }
+            val blueprint = CivBlueprint(building, s.city.worldId, mockk<ArcSchematicSnapshot>(), cells, cells, byteArrayOf(1))
+            val site = building.copy(phase = BuildingPhase.SITE)
+            val occupied = spatialBlueprint(UUID.randomUUID(), s.city.worldId, CivPosition(0, 64, 9), 0, 1)
+                .building.copy(phase = BuildingPhase.ACTIVE)
+            val route = (0..9).map { CivPosition(0, 65, it) } + (1..18).map { CivPosition(it, 65, 9) }
+            val frame = CivsSettlementLayout.frame(s.city)
+            val intent = CivSettlementPlan(CivsSettlementPlans.VERSION, 0, frame.halfWidth,
+                (s.city.buildings + occupied).map { CivSettlementPlot(it, it.bounds) },
+                mapOf(site.id.toString() to route), frame.wallObstacles, frame.gates.map { it.passage })
+            s.city = s.city.copy(autonomy = CivAutonomy(plan = intent),
+                buildings = s.city.buildings + occupied + site, constructionQueue = listOf(site.id))
+            requireNotNull(CivsSettlementPlans.current(s.city))
+            val barriers = if (!blocked) emptyList() else buildList {
+                for (x in -3..3) for (z in -3..3) if (kotlin.math.abs(x) == 3 || kotlin.math.abs(z) == 3)
+                    for (y in 65..67) add(CivPosition(x, y, z))
+            }
+            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type = Material.STONE_BRICKS }
+            val before = s.city
+            val activation = s.planner.prepareExisting(s.city, blueprint)
+            s.finish(activation)
+            if (blocked) spatialFailure(activation) shouldBe "autonomy-no-site"
+            else {
+                val design = activation.join()
+                design.blueprint.building shouldBe building
+                val fresh = requireNotNull(design.terrain).route
+                (fresh == route) shouldBe false
+                fresh.first() shouldBe s.city.buildings.first().entrance
+                fresh.last() shouldBe site.entrance
+                fresh.none { CivsAutonomousGeometry.horizontalContains(occupied.bounds, it) } shouldBe true
+                (fresh.size <= CivsAutonomousTerraform.MAXIMUM_ROUTE_LENGTH) shouldBe true
+            }
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["route_refreshed"] shouldBe true
+            terminal["attempted"] shouldBe 2
+            s.city shouldBe before
+            s.city.building(site.id) shouldBe site
+            s.city.construction shouldBe null
+            s.city.constructionQueue shouldBe listOf(site.id)
+            barriers.forEach { s.world.getBlockAt(it.x, it.y, it.z).type shouldBe Material.STONE_BRICKS }
+        }
+    }
+
     test("infrastructure selection ignores obsolete routes and reserved plots") {
         InfrastructurePlacementScenario().use { s ->
             val frame = CivsSettlementLayout.frame(s.city)

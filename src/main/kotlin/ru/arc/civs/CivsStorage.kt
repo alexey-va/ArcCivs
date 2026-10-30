@@ -77,6 +77,8 @@ class CivsStorage(private val plugin: Plugin,
     private val lockedPlayers = mutableMapOf<UUID, UUID>()
     private val lockedWorld = mutableMapOf<Key, UUID>()
     private val lockedGround = mutableMapOf<UUID, UUID>()
+    private val retiringByCity = mutableMapOf<UUID, Set<Key>>()
+    private val retiringControls = hashSetOf<Key>()
     internal var residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY
     internal var foodCanModify: (Settlement, CivPosition) -> Boolean = { _, _ -> false }
     internal var forestryLeafCurrentCity: (UUID) -> Settlement? = { null }
@@ -95,6 +97,9 @@ class CivsStorage(private val plugin: Plugin,
     private val nativePersistence by nativePersistenceDelegate
     internal var persistCollectedNative: (CivInventoryTransaction, Boolean) -> CompletableFuture<Unit> = { tx, before ->
         nativePersistence.persist(tx, before)
+    }
+    internal var persistControlRetirementNative: (Settlement, CivControlPlacement) -> CompletableFuture<Unit> = { city, receipt ->
+        nativePersistence.persistRetiredControl(city, receipt)
     }
     private val pendingPersistence = mutableSetOf<CompletableFuture<Unit>>()
     private val persistenceTasks = LifecycleTaskScope(BukkitTaskScheduler(plugin))
@@ -185,18 +190,28 @@ class CivsStorage(private val plugin: Plugin,
 
     fun replaceCities(cities: Collection<Settlement>) {
         checkReady()
+        retiringByCity.clear(); retiringControls.clear(); cities.forEach(::rememberRetiringControls)
         planner.clear(); residents.replaceCities(); containers.replaceCities(cities)
     }
     fun updateCity(city: Settlement) {
         checkReady()
+        rememberRetiringControls(city)
         containers.updateCity(city); planner.updateCity(city); residents.updateCity(city)
     }
     fun removeCity(cityId: UUID) {
         checkReady()
+        retiringByCity.remove(cityId)?.let(retiringControls::removeAll)
         planner.removeCity(cityId); residents.removeCity(cityId); containers.removeCity(cityId)
     }
     fun refreshBuilding(city: Settlement, building: CivBuilding? = null) {
         checkReady(); containers.refreshBuilding(city, building)
+    }
+
+    private fun rememberRetiringControls(city: Settlement) {
+        retiringByCity.remove(city.id)?.let(retiringControls::removeAll)
+        val points = city.pendingControls.orEmpty().filter { it.retire != null }
+            .flatMap { listOf(requireNotNull(it.retire).position, it.position) }.mapTo(hashSetOf()) { Key(city.worldId, it) }
+        if (points.isNotEmpty()) { retiringByCity[city.id] = points; retiringControls += points }
     }
     internal fun startSupplyCapture(city: Settlement): CivsSupplyCapture {
         checkReady(); return containers.startSupplyCapture(city)
@@ -247,6 +262,7 @@ class CivsStorage(private val plugin: Plugin,
         val positions = transaction.changes.associate { it.container to it.containerType } +
             transaction.collected?.containers.orEmpty().associate { it.container to it.containerType } +
             transaction.containerRelocation?.containers.orEmpty().associate { it.position to it.type }
+        reject(transaction.containerRelocation == null && positions.keys.any { Key(transaction.after.worldId, it) in retiringControls }, "storage-busy")
         val worldPositions = transaction.worldChanges.orEmpty().mapTo(mutableSetOf(), CivPlanBlock::position)
         val groundItems = transaction.collected?.ground.orEmpty().mapTo(mutableSetOf(), CivGroundItemChange::entityId)
         require(claim.city.id == transaction.cityId && claim.city.revision == transaction.beforeRevision &&
@@ -445,6 +461,38 @@ class CivsStorage(private val plugin: Plugin,
                 contents, contents)
         }
         return civsPlanContainerRelocation(building, target, future, holders)?.also { it.validated(city) }
+    }
+
+    /** Evacuate only the old control into existing holders; an uncreated replacement never receives items. */
+    internal fun prepareControlRelocation(city: Settlement, building: CivBuilding, from: CivPosition, to: CivPosition): CivContainerRelocation? {
+        checkClaim(city)
+        require(city.building(building.id) == building && city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            building.phase == BuildingPhase.ACTIVE && building.type in CivsWorkstations.TYPES && from != to &&
+            building.bounds.contains(from.x, from.y, from.z) && building.bounds.contains(to.x, to.y, to.z) &&
+            (from == building.control || city.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire?.position == from && it.position == to }))
+        val target = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        reject(!target.isChunkLoaded(to.x shr 4, to.z shr 4), "chunk-unloaded")
+        val replacement = target.getBlockAt(to.x, to.y, to.z)
+        reject(replacement.type != Material.BARREL && !replacement.type.isAir, "control-obstructed")
+        fun capture(point: CivPosition): CivRelocatedContainer {
+            reject(!target.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
+            reject(!foodCanModify(city, point), "lands-denied")
+            val native = target.getBlockAt(point.x, point.y, point.z)
+            reject(native.type.name !in CIVS_STORAGE_TYPES || point == from && native.type != Material.BARREL, "storage-container-invalid")
+            val source = containers.resolve(city, point, native.type.name)
+            val items = source.inventory.storageContents.map(CivResidentItem::of)
+            require(items.size == STORAGE_SLOTS)
+            return CivRelocatedContainer(point, source.type, native.blockData.asString, items, items)
+        }
+        val previous = capture(from)
+        if (previous.before.all { it == null }) return null
+        val receivers = (if (replacement.type == Material.BARREL) listOf(to) else emptyList()) +
+            containers.buildingPositions(city, building.id).keys.filter { it != from && it != to && building.bounds.contains(it.x, it.y, it.z) }
+        reject(receivers.size + 1 > CivContainerRelocation.MAX_CONTAINERS, "storage-transaction-too-large")
+        reject(receivers.isEmpty(), "storage-full")
+        val holders = listOf(previous) + receivers.map(::capture)
+        return civsPlanContainerRelocation(building, building.copy(control = to),
+            holders.associate { it.position to if (it.position == from) "minecraft:air" else it.blockData }, holders)?.also { it.validated(city) }
     }
 
     fun prepareResurrection(city: Settlement, player: Player, corpse: CivCorpse, at: Long,
@@ -804,11 +852,28 @@ class CivsStorage(private val plugin: Plugin,
                 null -> throw CivsRejection("inventory-recovery")
             }
         }
-        checkState()
+        return nativeBarrier({ persistCollectedNative(transaction, beforeJournal) }, ::checkState)
+    }
+
+    internal fun persistControlRetirement(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> = nativeBarrier({
+        persistControlRetirementNative(city, receipt)
+    }) {
+        val current = relocationCurrentCity(city.id) ?: throw CivsRejection("no-city")
+        reject(receipt !in current.pendingControls.orEmpty() || current.building(receipt.buildingId)?.control != receipt.position, "control-location-changed")
+        val point = requireNotNull(receipt.retire).position
+        val world = plugin.server.getWorld(current.worldId) ?: throw CivsRejection("world-unavailable")
+        reject(!world.isChunkLoaded(point.x shr 4, point.z shr 4), "chunk-unloaded")
+        reject(!world.getBlockAt(point.x, point.y, point.z).type.isAir, "world-changed")
+        reject(!world.isChunkLoaded(receipt.position.x shr 4, receipt.position.z shr 4) ||
+            world.getBlockAt(receipt.position.x, receipt.position.y, receipt.position.z).type != Material.BARREL, "control-obstructed")
+    }
+
+    private fun nativeBarrier(persist: () -> CompletableFuture<Unit>, checkState: () -> Unit): CompletableFuture<Unit> {
+        checkMain(); requireOpen(); checkState()
         val epoch = persistenceTasks.token()
         val result = CompletableFuture<Unit>()
         pendingPersistence += result
-        val native = try { persistCollectedNative(transaction, beforeJournal) } catch (failure: Throwable) {
+        val native = try { persist() } catch (failure: Throwable) {
             pendingPersistence -= result
             throw failure
         }
@@ -1100,22 +1165,22 @@ class CivsStorage(private val plugin: Plugin,
     private fun playerLocked(playerId: UUID): Boolean = receiptBootstrap || playerId in lockedPlayers
     private fun locked(inventory: Inventory): Boolean = receiptBootstrap || exactLocked(inventory)
     private fun viewLocked(position: Key): Boolean = receiptBootstrap ||
-        locked[position]?.let { claims[it]?.viewersAllowed != true } == true
+        position in retiringControls || locked[position]?.let { claims[it]?.viewersAllowed != true } == true
     private fun viewLocked(inventory: Inventory): Boolean {
         if (receiptBootstrap) return true
-        if (locked.isEmpty() && lockedPlayers.isEmpty()) return false
+        if (locked.isEmpty() && lockedPlayers.isEmpty() && retiringControls.isEmpty()) return false
         val holder = inventory.getHolder(false)
         return (holder as? Player)?.uniqueId?.let { it in lockedPlayers } == true ||
             holderPositions(holder).any(::viewLocked)
     }
     private fun exactLocked(inventory: Inventory): Boolean {
-        if (locked.isEmpty() && lockedPlayers.isEmpty()) return false
+        if (locked.isEmpty() && lockedPlayers.isEmpty() && retiringControls.isEmpty()) return false
         val holder = inventory.getHolder(false)
         return (holder as? Player)?.uniqueId?.let { it in lockedPlayers } == true ||
-            holderPositions(holder).any { it in locked }
+            holderPositions(holder).any { it in locked || it in retiringControls }
     }
     private fun locked(block: Block): Boolean = receiptBootstrap && block.type.name in CIVS_STORAGE_TYPES ||
-        Key(block.world.uid, CivPosition(block.x, block.y, block.z)) in locked ||
+        Key(block.world.uid, CivPosition(block.x, block.y, block.z)).let { it in locked || it in retiringControls } ||
         isWorldLocked(block.world.uid, CivPosition(block.x, block.y, block.z))
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)

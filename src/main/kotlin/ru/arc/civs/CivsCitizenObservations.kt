@@ -10,7 +10,6 @@ internal class CivsCitizenObservations(
     private val runtime: CitizenRuntime,
     private val workOwner: () -> CivsCitizenWork,
     private val logisticsOwner: () -> CivsCitizenLogistics,
-    private val plansOwner: () -> CivsCitizenPlanning,
     private val audienceOwner: () -> CivsCitizenAudience,
     private val lifeOwner: () -> CivsCitizenLife,
     private val navigation: CivsResidentNavigation,
@@ -18,10 +17,10 @@ internal class CivsCitizenObservations(
     private val maxActive: Int,
     private val viewerRange: Int,
     private val navigationClock: () -> Long,
+    private val workStatusInputs: (Settlement, CivWorker) -> List<String>,
 ) {
     private val workRuntime get() = workOwner()
     private val logistics get() = logisticsOwner()
-    private val plans get() = plansOwner()
     private val audience get() = audienceOwner()
     private val life get() = lifeOwner()
 
@@ -34,56 +33,67 @@ internal class CivsCitizenObservations(
             val worker = city?.workers?.firstOrNull { it.id == workerId }
             if (city != null && worker != null) {
                 val actor = runtime.actors[workerId]
-                actor?.combatStatus?.let { return "workers.status.$it" }
-                if (actor?.alarmSheltering == true) return "workers.status.alarm-shelter"
-                if (actor?.sheltering == true) return "workers.status.${if (actor.sleeping) "sleeping" else "sheltering"}"
-                if (actor != null && logistics.collectedPending(actor)) return "workers.status.loading-cargo"
-                if (actor?.tavernService != null) return "workers.status.serving-guests"
-                actor?.mealVisit?.let { return "workers.status.${if (it.seatedFrom != null && it.servedAt == null) "waiting"
-                    else if (it.arrivedAt == null) "moving-to-tavern" else "eating"}" }
-                if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
-                if (actor?.collectionSeek != null) return "workers.status.walking"
-                actor?.mineVisit?.let { visit ->
-                    val status = runtime.statuses[workerId]?.takeIf { it in setOf("mine-descending", "mine-returning", "route-unreachable", "searching-work") }
-                        ?: if (visit.returning) "mine-returning" else if (visit.target == null) "searching-work" else "mine-descending"
-                    return "workers.status.$status"
-                }
-                if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
-                if (actor?.supplyFailure?.second == "storage-full" && actor.supplyRetryAt > runtime.residentObservedAt)
-                    return "workers.status.storage-full"
-                if (actor?.outputReturn != null) return "workers.status.${when {
-                    actor.supplyPickup != null -> "loading-cargo"
-                    actor.supplyFailure == (actor.outputReturn to "storage-full") && actor.supplyRetryAt > runtime.residentObservedAt -> "storage-full"
-                    else -> "returning-output"
-                }}"
-                actor?.social?.visit?.let {
-                    return "workers.status.${if (it.partnerId != null) {
-                        if (it.conversationAt == null) "meeting" else "talking"
-                    } else if (it.arrivedAt == null) "to-campfire" else "campfire"}"
-                }
-                val plan = if (actor == null) plans.plan(city, worker)
-                    else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plans.plan(city, worker) }
-                if (actor != null) {
-                    if (actor.cycle.phase == CitizenPhase.PAUSED) return "workers.status.${actor.cycle.status()}"
-                    if (workRuntime.navigationFailed(actor))
-                        return "workers.status.route-unreachable"
-                    if (plan != null) workRuntime.workActivityStatus(actor, plan)?.let { return "workers.status.$it" }
-                    if (plan?.idleReason == "unassigned" && actor.route?.let { route ->
-                            route.idleAnchor != null && route.motion.navigating && !route.motion.searching &&
-                                !route.motion.waitingForCollision && !route.motion.turning
-                        } == true) return "workers.status.walking"
-                }
-                plan?.idleReason?.takeUnless { it == "placing" }?.let { return "workers.status.$it" }
-                if (runtime.actors[workerId]?.plan?.token?.let { it != plan?.token } == true) return "workers.status.waiting"
-                if (actor != null && plan != null) citizenWorkStatus(plan, actor.cycle.phase, life.servingTavernGuests(actor, city))?.let { return "workers.status.$it" }
-                if (actor != null && plan?.idleReason == "placing") {
-                    val placing = actor.cycle.phase == CitizenPhase.WORKING &&
-                        plan.token.constructionId?.let { workRuntime.constructionBuilder(actor, city, it) } != null
-                    return "workers.status.${if (placing) "placing" else actor.cycle.status()}"
-                }
+                if (actor != null) return "workers.status.${activityStatus(actor, city, worker)}"
+                citizenPlan(city, worker)?.idleReason?.takeUnless { it == "placing" }?.let { return "workers.status.$it" }
             }
         }
         return "workers.status.${if (runtime.closed.get()) "closed" else runtime.statuses[workerId] ?: "sleeping"}"
+    }
+
+    fun statusInputs(workerId: UUID): List<String> {
+        checkCitizenMainThread()
+        if (status(workerId) != "workers.status.waiting-inputs") return emptyList()
+        val city = runtime.cityProvider().firstOrNull { it.workers.any { worker -> worker.id == workerId } } ?: return emptyList()
+        val worker = city.workers.first { it.id == workerId }
+        return workStatusInputs(city, worker).distinct()
+    }
+
+    /** Observed actor state only: nameplates and scene information must never run the planner. */
+    private fun activityStatus(actor: CitizenActor, city: Settlement, worker: CivWorker): String {
+        if (actor.workerId in runtime.pendingHarm) return "injury-pending"
+        actor.combatStatus?.let { return it }
+        if (actor.alarmSheltering) return "alarm-shelter"
+        if (actor.sheltering) return if (actor.sleeping) "sleeping" else "sheltering"
+        if (logistics.collectedPending(actor)) return "loading-cargo"
+        if (actor.tavernService != null) return "serving-guests"
+        actor.mealVisit?.let { return if (it.seatedFrom != null && it.servedAt == null) "waiting"
+            else if (it.arrivedAt == null) "moving-to-tavern" else "eating" }
+        actor.foodSource?.let { source ->
+            if (actor.supplyPickup != null) return "collecting-supplies"
+            if (actor.supplyRetryAt > runtime.residentObservedAt) return "waiting-supplies"
+            return citizenSupplyDestinationStatus(city.building(source)?.type)
+        }
+        if (actor.collectionHome != null) return "moving-to-storage"
+        if (actor.collectionSeek != null) return "walking"
+        actor.mineVisit?.let { visit ->
+            return runtime.statuses[actor.workerId]?.takeIf { it in setOf("mine-descending", "mine-returning", "route-unreachable", "searching-work") }
+                ?: if (visit.returning) "mine-returning" else if (visit.target == null) "searching-work" else "mine-descending"
+        }
+        if (actor.returningToWarehouse) return "moving-to-storage"
+        if (actor.supplyFailure?.second == "storage-full" && actor.supplyRetryAt > runtime.residentObservedAt) return "storage-full"
+        if (actor.outputReturn != null) return when {
+            actor.supplyPickup != null -> "loading-cargo"
+            actor.supplyFailure == (actor.outputReturn to "storage-full") && actor.supplyRetryAt > runtime.residentObservedAt -> "storage-full"
+            else -> "returning-output"
+        }
+        actor.social.visit?.let {
+            return if (it.partnerId != null) {
+                if (it.conversationAt == null) "meeting" else "talking"
+            } else if (it.arrivedAt == null) "to-campfire" else "campfire"
+        }
+        val plan = actor.plan
+        if (runtime.statuses[actor.workerId] == "workstation-unavailable") return "workstation-unavailable"
+        if (actor.cycle.phase == CitizenPhase.PAUSED) return actor.cycle.status()
+        if (workRuntime.navigationFailed(actor)) return "route-unreachable"
+        workRuntime.workActivityStatus(actor, plan)?.let { return it }
+        if (plan.idleReason == "unassigned" && actor.route?.let { route ->
+                route.idleAnchor != null && route.motion.navigating && !route.motion.searching &&
+                    !route.motion.waitingForCollision && !route.motion.turning
+            } == true) return "walking"
+        plan.idleReason?.takeUnless { it == "placing" }?.let { return it }
+        if (plan.token.assignmentId != worker.assignment || plan.token.completedCycles != worker.completedCycles) return "waiting"
+        citizenWorkStatus(plan, actor.cycle.phase, life.servingTavernGuests(actor, city))?.let { return it }
+        return runtime.statuses[actor.workerId] ?: actor.cycle.status()
     }
 
     fun activeCount(): Int {
@@ -121,7 +131,8 @@ internal class CivsCitizenObservations(
                     "plan" to mapOf("assignment" to actor.plan.token.assignmentId, "cycle" to actor.plan.token.completedCycles,
                         "craft_job" to actor.plan.token.craftJobId,
                         "type" to actor.plan.type, "idle_reason" to actor.plan.idleReason, "storage" to actor.plan.storage,
-                        "workplace" to actor.plan.workplace, "focus" to actor.plan.worldWork?.let(::citizenWorkFocus),
+                        "workplace" to actor.plan.workplace, "focus" to (actor.plan.worldWork?.let(::citizenWorkFocus) ?: actor.plan.workstation?.focus),
+                        "workstation" to actor.plan.workstation?.let { mapOf("standing" to it.standing, "focus" to it.focus, "material" to it.material) },
                         "standing" to actor.plan.worldWork?.standing, "mining_step" to actor.plan.worldWork?.miningStep),
                     "route" to route?.let { mapOf("from" to it.from, "target" to it.target.point(), "authored" to it.authored,
                         "started_at" to it.startedAt, "intermediate" to it.intermediate,
@@ -269,12 +280,20 @@ internal class CivsCitizenObservations(
         val at = entity.location
         val type = if (resident.cargo != null) BuildingType.WAREHOUSE else
             resident.assignment?.let(city::building)?.let { CivsRules.effectiveWorkType(city, it) }
+        val status = activityStatus(actor, city, resident)
         return CivsNpcHologramSnapshot(resident.id, at.world!!.uid, at.x, at.y, at.z, resident.name,
-            "workers.status.${runtime.statuses[resident.id] ?: "waiting"}", CivsResidents.health(resident), CivsResidents.maxHealth(resident),
+            "workers.status.$status", CivsResidents.health(resident), CivsResidents.maxHealth(resident),
             actor = entity, profession = if (CivsResidents.isChild(resident)) "child" else type?.let(CivsRules::profession) ?: "unassigned",
             courierCart = citizenCourierCart(actor.plan, actor.cycle.phase, actor.sheltering),
             cargo = resident.cargo?.let { mapOf(it.material to it.amount.toInt()) }.orEmpty(),
             yaw = entity.bodyYaw, nativeHeight = entity.height, hunger = CivsResidents.hunger(resident),
-            child = CivsResidents.isChild(resident))
+            child = CivsResidents.isChild(resident),
+            statusInputs = if (status == "waiting-inputs") workStatusInputs(city, resident).distinct() else emptyList())
     }
+}
+
+internal fun citizenSupplyDestinationStatus(type: BuildingType?): String = when (type) {
+    BuildingType.TAVERN -> "moving-to-tavern"
+    BuildingType.TOWN_HALL -> "moving-to-town-hall"
+    else -> "moving-to-storage"
 }

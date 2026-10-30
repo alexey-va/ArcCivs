@@ -87,6 +87,8 @@ class CivsCitizens(
     private val immortalResidents: (UUID) -> Boolean = { false },
     private val navigationSettings: CivsNavigationSettings = CivsNavigationSettings(),
     private val recoveryClock: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val workStatusInputs: (Settlement, CivWorker) -> List<String> = { _, _ -> emptyList() },
+    private val workstation: ((Settlement, CivWorker) -> CivWorkstation?)? = null,
 ) : Listener, AutoCloseable {
     private val runtime = CitizenRuntime(plugin, cityProvider)
     internal var residentLifeEnabled: Boolean
@@ -294,14 +296,14 @@ class CivsCitizens(
         observations = CivsCitizenObservations(runtime,
             workOwner = { workRuntime },
             logisticsOwner = { logistics },
-            plansOwner = { plans },
             audienceOwner = { audience },
             lifeOwner = { life },
             navigation = navigation,
             admission = admission,
             maxActive = maxActive,
             viewerRange = viewerRange,
-            navigationClock = navigationClock)
+            navigationClock = navigationClock,
+            workStatusInputs = workStatusInputs)
         plans = CivsCitizenPlanning(runtime,
             routesOwner = { routes },
             couriersOwner = { couriers },
@@ -316,6 +318,7 @@ class CivsCitizens(
             productionReady = productionReady,
             workInputsReady = workInputsReady,
             craftPlan = craftPlan,
+            workstation = workstation,
             remove = ::remove)
         equipment = CivsCitizenEquipment(runtime,
             threats = threats)
@@ -730,14 +733,20 @@ class CivsCitizens(
     }
 
     /** Research/new native recipes must match the very session observed by this actor before any receipt. */
-    internal fun requireSelectedWorkDelivery(cityId: UUID, workerId: UUID, token: CitizenToken) {
+    internal fun requireSelectedWorkDelivery(cityId: UUID, workerId: UUID, token: CitizenToken, craftJob: CivCraftJob? = null) {
         checkCitizenMainThread()
         val city = cityProvider().firstOrNull { it.id == cityId } ?: throw CivsRejection("no-city")
         val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
         val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid } ?: throw CivsRejection("route-unreachable")
-        val current = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
+        val base = citizenPlan(city, worker) ?: throw CivsRejection("stale-delivery")
+        if (craftJob != null && !CivsCarpentry.valid(city, worker, craftJob)) throw CivsRejection("stale-delivery")
+        val current = if (craftJob == null) base else base.copy(token = base.token.copy(craftJobId = craftJob.id))
+        val station = actor.plan.workstation
+        val indoorWork = station != null && station.standing == actor.plan.workplace && !actor.plan.completeAtWorkplace &&
+            current.type in CivsWorkstations.TYPES && actor.plan.type == current.type &&
+            worker.assignment?.let(city::building)?.let { CivsWorkstations.valid(city, it, actor.npc.world, station) } == true
         if (current.token != token || actor.plan.token != token || current.idleReason != null ||
-            actor.plan.workplace != current.workplace || actor.plan.storage != current.storage ||
+            !indoorWork && actor.plan.workplace != current.workplace || actor.plan.storage != current.storage ||
             actor.sheltering || workerId in pendingHarm || closed.get()) throw CivsRejection("stale-delivery")
         requireStorageArrival(cityId, workerId, requireNotNull(token.assignmentId))
     }
@@ -942,6 +951,8 @@ class CivsCitizens(
     fun reconcileResidents() = combat.reconcileResidents()
 
     fun status(workerId: UUID): String = observations.status(workerId)
+
+    fun statusInputs(workerId: UUID): List<String> = observations.statusInputs(workerId)
 
     fun activeCount(): Int = observations.activeCount()
 

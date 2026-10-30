@@ -10,6 +10,7 @@ object CivsRules {
     const val MAX_INFRASTRUCTURE = 96
     const val MAX_SITES = MAX_BUILDINGS + MAX_INFRASTRUCTURE + MAX_DECORATIONS
     const val MAX_POPULATION = 12
+    const val MAX_RESIDENTS = MAX_POPULATION + CivsPopulation.NURSERY_PLACES
     const val MAX_WORK_ROUTE_DISTANCE = 88
     const val RECRUIT_FOOD = 12L
     const val PRODUCTION_INTERVAL = 60_000L
@@ -72,6 +73,9 @@ object CivsRules {
     }
 
     fun populationLimit(city: Settlement): Int = minOf(MAX_POPULATION, maxOf(CivsPopulation.IMMIGRANT_POPULATION, city.level() * 4))
+    /** The extra places are for children only; they never increase the adult workforce. */
+    fun residentLimit(city: Settlement): Int = populationLimit(city) +
+        if (populationLimit(city) == MAX_POPULATION) CivsPopulation.NURSERY_PLACES else 0
 
     fun slots(building: CivBuilding): Int = if (building.type in setOf(BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER)) {
         if (building.phase == BuildingPhase.ACTIVE) 1 else 0
@@ -263,6 +267,8 @@ object CivsRules {
     fun enqueue(city: Settlement, actor: UUID, buildingId: UUID): Settlement {
         authorized(city, actor)
         val building = city.building(buildingId) ?: reject("invalid-building")
+        if (buildingId !in city.constructionQueue.orEmpty())
+            check(city.pendingControls.orEmpty().none { it.buildingId == buildingId && it.retire != null }, "city-busy")
         check(building.phase == BuildingPhase.SITE || building.phase == BuildingPhase.ACTIVE &&
             (building.level < building.type.maxLevel || CivsPlanBoardBlueprint.needsRefit(building)), "invalid-building")
         check(city.construction?.buildingId != buildingId, "construction-busy")
@@ -381,7 +387,8 @@ object CivsRules {
             ?: reject("worker-not-found")
         check(now >= diedAt && now < corpse.expiresAt, "corpse-expired")
         check(city.workers.none { it.id == workerId }, "duplicate-worker")
-        check(city.workers.size < populationLimit(city), "population-full")
+        check(city.workers.size < residentLimit(city) &&
+            (CivsResidents.isChild(corpse.worker) || city.workers.count { !CivsResidents.isChild(it) } < populationLimit(city)), "population-full")
         check(city.workers.size < beds(city), "no-beds")
         return changed(city, city.copy(workers = city.workers + resurrectedWorker(city, corpse),
             corpses = city.corpses.orEmpty().filterNot { it.worker.id == workerId && it.diedAt == diedAt }))
@@ -390,6 +397,7 @@ object CivsRules {
     internal fun resurrectedWorker(city: Settlement, corpse: CivCorpse): CivWorker = corpse.worker.copy(
         assignment = null, cargo = corpse.worker.cargo?.takeIf { it.stockResource != null }, nextDeliveryAt = 0,
         health = CivsResidents.maxHealth(corpse.worker),
+        life = if (corpse.cause == "OLD_AGE") corpse.worker.life?.copy(adultMinutes = 0) else corpse.worker.life,
         homeId = corpse.worker.homeId?.takeIf { id -> city.buildings.any {
             it.id == id && (it.type == BuildingType.TOWN_HALL || it.type.isResidence)
         } })

@@ -46,7 +46,7 @@ internal fun CivsUi.townHallBodies(player: Player, city: Settlement, heading: Co
     add(presentation.panel(Component.join(Component.newline(), header), DialogTables.PanelSkin.NAVY))
     add(presentation.facts(listOf(
         presentation.field(DialogDecoration.FieldIcon.PLAYER, tr(player, "label.population")) to tint(tr(player, "common.fraction",
-            "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)), PEOPLE),
+            "value" to city.workers.size, "limit" to CivsRules.residentLimit(city)), PEOPLE),
         presentation.field(DialogDecoration.FieldIcon.HOMES, tr(player, "label.beds")) to tint(text.literal(CivsRules.beds(city)), PEOPLE),
         presentation.field(DialogDecoration.FieldIcon.LANDS, tr(player, "label.buildings")) to tint(text.literal(CivsRules.buildingCount(city)), LAND),
     ), DialogTables.PanelSkin.NAVY, DialogTables.FactsLayout.METRICS, 3))
@@ -85,7 +85,7 @@ internal fun CivsUi.showOverview(player: Player, feedback: Component? = null) {
             tr(player, "city.summary-land", "level" to tint(text.literal(city.level()), PERSONAL),
                 "radius" to tint(tr(player, "city.radius", "radius" to city.radius), NAVIGATION)),
             tr(player, "city.summary-residents", "population" to tint(tr(player, "common.fraction", "value" to city.workers.size,
-                "limit" to CivsRules.populationLimit(city)), PEOPLE), "beds" to tint(text.literal(CivsRules.beds(city)), PEOPLE)),
+                "limit" to CivsRules.residentLimit(city)), PEOPLE), "beds" to tint(text.literal(CivsRules.beds(city)), PEOPLE)),
             tr(player, "city.summary-activity", "buildings" to tint(tr(player, "common.fraction", "value" to CivsRules.buildingCount(city),
                 "limit" to CivsRules.MAX_BUILDINGS), LAND), "activity" to tint(tr(player, if (sleep) "city.sleeping" else "city.active"),
                 if (sleep) PERSONAL else COMMIT)),
@@ -471,7 +471,7 @@ internal fun CivsUi.nextStep(player: Player, city: Settlement): Component {
         city.buildings.none { it.type == BuildingType.WAREHOUSE } -> "city.next-warehouse"
         listOf(BuildingType.FORESTER, BuildingType.QUARRY, BuildingType.FARM).any { type -> city.buildings.none { it.type == type } } -> "city.next-production"
         city.workers.any { it.assignment == null && !CivsResidents.isChild(it) } -> "city.next-assign"
-        city.workers.size < CivsRules.populationLimit(city) && city.workers.size >= CivsRules.beds(city) -> "city.next-house"
+        city.workers.size < CivsRules.residentLimit(city) && city.workers.size >= CivsRules.beds(city) -> "city.next-house"
         city.level() < 3 -> "city.next-upgrade"
         else -> "city.next-grow"
     }

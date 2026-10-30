@@ -122,6 +122,8 @@ class CivsHologramsTest : FunSpec({
             plainText(civsNpcHologramText(text, npc.copy(child = true, status = "playing"))) shouldContain
                 "\nРебёнок\nИграет\n"
             plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-tool"))) shouldContain "Нужна мотыга"
+            plainText(civsNpcHologramText(text, npc.copy(status = "workers.status.waiting-inputs",
+                statusInputs = listOf("COBBLESTONE", "CHARCOAL")))) shouldContain "Ждёт: Булыжник, Древесный уголь"
             plainText(civsNpcHologramText(text, npc.copy(profession = "courier"))) shouldContain "Грузчик"
             plainText(civsNpcHologramText(text, npc.copy(name = "<red>Worker</red>"))) shouldContain "<red>Worker</red>"
             val building = CivBuilding(UUID(0, 2), BuildingType.FARM, 1, CivPosition(0, 64, 0), 0, "fixture/farm",

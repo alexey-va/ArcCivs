@@ -21,7 +21,9 @@ internal class CivsControlInstallations(
 ) {
     private val cities get() = cityProvider()
     private val controlFailures = mutableSetOf<UUID>()
+    private val installing = mutableMapOf<UUID, CompletableFuture<Settlement>>()
     private var controlCursor = 0
+    internal var controlOccupied: (UUID, CivPosition) -> Boolean = { _, _ -> false }
 
     fun forgetFailure(buildingId: UUID) { controlFailures.remove(buildingId) }
     fun clear() { controlFailures.clear(); controlCursor = 0 }
@@ -85,6 +87,14 @@ internal class CivsControlInstallations(
     }
 
     fun install(cityId: UUID, buildingId: UUID): CompletableFuture<Settlement> {
+        installing[buildingId]?.let { return it }
+        val result = installOnce(cityId, buildingId)
+        installing[buildingId] = result
+        result.whenComplete { _, _ -> installing.remove(buildingId, result) }
+        return result
+    }
+
+    private fun installOnce(cityId: UUID, buildingId: UUID): CompletableFuture<Settlement> {
         rejectIf(!ready(), "not-ready")
         val city = cities[cityId] ?: throw CivsRejection("no-city")
         val receipt = city.pendingControls.orEmpty().firstOrNull { it.buildingId == buildingId }
@@ -114,7 +124,27 @@ internal class CivsControlInstallations(
             checkApproachCell(city.id, city.owner, building, native, after.material)
             native to after
         }
+        val retired = receipt.retire
+        val retiringBlock = retired?.let {
+            val old = it.position
+            rejectIf(old.y !in target.minHeight until target.maxHeight, "outside-world")
+            rejectIf(!target.isChunkLoaded(old.x shr 4, old.z shr 4), "chunk-unloaded")
+            val native = target.getBlockAt(old.x, old.y, old.z)
+            rejectIf(!world.canModify(city.owner, native, Material.AIR), "lands-denied")
+            rejectIf(civsControlOccupied(plugin, city.worldId, old, controlOccupied), "worksite-blocked")
+            if (!native.type.isAir) {
+                rejectIf(native.type != Material.BARREL || !civsSameRelocationContainerState(native.blockData.asString, it.before), "world-changed")
+                val holder = native.state as? org.bukkit.block.Barrel ?: throw CivsRejection("control-obstructed")
+                holder.inventory.viewers.toList().forEach { viewer -> viewer.closeInventory() }
+                rejectIf(holder.inventory.storageContents.any { item -> item != null && !item.type.isAir && item.amount > 0 }, "storage-busy")
+            }
+            native
+        }
+        // Closing an old inventory can invoke other plugins; recheck the destination before writing it.
+        rejectIf(block.type != Material.BARREL && block.blockData.asString != receipt.before, "control-obstructed")
         val reused = block.type == Material.BARREL
+        if (receipt.retire != null) rejectIf(!reused && !block.type.isAir, "control-obstructed")
+        if (!reused) rejectIf(civsControlOccupied(plugin, city.worldId, point, controlOccupied), "worksite-blocked")
         if (!reused) block.setType(Material.BARREL, false)
         approach.forEach { (native, after) -> if (native.blockData.asString != after.asString) native.setBlockData(after, false) }
         if (approach.isNotEmpty()) CivsDiagnostics.event("approach_applied", "city" to city.id, "building" to building.id,
@@ -122,9 +152,29 @@ internal class CivsControlInstallations(
         storage.refreshBuilding(city, building)
         CivsDiagnostics.event("control_installed", "city" to city.id, "building" to building.id, "world" to city.worldId,
             "block" to point, "reused" to reused)
-        return mutate(cityId) { current ->
-            rejectIf(receipt !in current.pendingControls.orEmpty(), "control-location-changed")
-            CivsRules.validate(current.copy(pendingControls = current.pendingControls.orEmpty() - receipt, revision = current.revision + 1))
+        val barrier = if (retired == null) CompletableFuture.completedFuture(Unit) else {
+            val native = requireNotNull(retiringBlock)
+            if (!native.type.isAir) {
+                rejectIf(native.type != Material.BARREL || !civsSameRelocationContainerState(native.blockData.asString, retired.before), "world-changed")
+                val holder = native.state as? org.bukkit.block.Barrel ?: throw CivsRejection("control-obstructed")
+                rejectIf(holder.inventory.storageContents.any { it != null && !it.type.isAir && it.amount > 0 }, "storage-busy")
+                native.setType(Material.AIR, false)
+                storage.refreshBuilding(city, building)
+            }
+            storage.persistControlRetirement(city, receipt)
+        }
+        return barrier.thenCompose {
+            rejectIf(!ready(), "not-ready")
+            retired?.let {
+                rejectIf(!target.isChunkLoaded(it.position.x shr 4, it.position.z shr 4), "chunk-unloaded")
+                val native = target.getBlockAt(it.position.x, it.position.y, it.position.z)
+                rejectIf(!native.type.isAir, "world-changed")
+                rejectIf(!world.canModify(city.owner, native, Material.AIR), "lands-denied")
+            }
+            mutate(cityId) { current ->
+                rejectIf(receipt !in current.pendingControls.orEmpty() || current.building(buildingId)?.control != receipt.position, "control-location-changed")
+                CivsRules.validate(current.copy(pendingControls = current.pendingControls.orEmpty() - receipt, revision = current.revision + 1))
+            }
         }.whenComplete { _, failure ->
             if (failure == null) controlFailures -= buildingId
         }
@@ -146,7 +196,10 @@ internal class CivsControlInstallations(
                     buildings = buildings, pendingControls = city.pendingControls.orEmpty() + controls, revision = city.revision + 1))
             } }.onFailure { log("migrate city materials ${old.id}", it, old.id) }
         }
-        val controls = nearby.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city -> city.pendingControls.orEmpty().map { city to it } }
+        // The relocation owner retries its item transfer/retirement as one bounded operation every five seconds.
+        val controls = nearby.filter { it.id !in busy && it.id !in unhealthy }.flatMap { city ->
+            city.pendingControls.orEmpty().filter { it.retire == null }.map { city to it }
+        }
         if (controls.isEmpty()) return
         repeat(minOf(16, controls.size)) {
             val (city, pending) = controls[Math.floorMod(controlCursor++, controls.size)]

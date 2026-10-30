@@ -59,6 +59,7 @@ class CivsService(
     private val records = CivsCityRecords({ cities }, busy, unhealthy, { closed }, { loading },
         { loadFailure }, { geometryGeneration }, { completions.size })
     private val world = worldAdapter ?: CivsWorld(plugin, tasks, navigationSettings = settings.navigation) { cities.values.toList() }
+    private val workstations = CivsWorkstations(blueprints::workstations, plugin.logger)
     private val roadMaintenance = CivsRoadMaintenance(world,
         registerSurface = { cityId, position -> footTraffic.registerSurface(cityId, position) },
         paymentPossible = ::roadUpkeepPaymentPossible)
@@ -75,7 +76,8 @@ class CivsService(
         { id, transform -> mutate(id, transform = transform) },
         { id, transform -> afterCityAvailable(id) { mutate(id, transform = transform) } },
         { city, design -> admitRoadDevelopment(city) { buildingRequests.commitAutonomousDesign(city, design) } }, { construction.pulse() }, clock,
-        developmentFinished = roadMaintenance::developmentFinished)
+        developmentFinished = roadMaintenance::developmentFinished,
+        storageCapacityPressure = ::storageCapacityPressure)
     private val physics = CivsPhysics(plugin, tasks)
     private val controlCleanup = CivsControlCleanup(plugin) { owner, block -> world.canModify(owner, block) }
     private val boundary = boundaryRenderer ?: CivsBoundaryRenderer(plugin, tasks, nativeWork)
@@ -121,7 +123,8 @@ class CivsService(
         surfaceSpeed = footTraffic::speed, workPlan = { city, worker -> roadMaintenance.plan(city, worker) ?: worksites.plan(city, worker) },
         workIdleReason = worksites::idleReason, courierPlan = ::courierPlan, pickupCargo = ::pickupCargo, dropoffCargo = ::dropoffCargo,
         doorBlocked = { worldId, point -> !ready() || storage.isWorldLocked(worldId, point) },
-        productionReady = ::productionReady, workInputsReady = ::workInputsReady,
+        productionReady = ::productionReady, workInputsReady = ::workInputsReady, workStatusInputs = ::workStatusInputs,
+        workstation = workstations::select,
         backgroundActive = chunkLoading::active,
         navigationTasks = tasks, navigationWork = nativeWork, navigationSettings = settings.navigation,
         courierFailed = { cityId, workerId, cargo ->
@@ -168,6 +171,12 @@ class CivsService(
         ::track, { tx -> cargoRequests.validateNativeCollected(tx) }, ::resurrectionRejection, ::requestResurrectionAdmission,
         ::inventoryRetired, ::updateHealth, clock)
 
+    private val controlRelocations = CivsControlRelocations(plugin, tasks, world, storage, controlInstallations,
+        blueprints::interiorControls, { cities.values }, { city -> ready() && city.id !in busy && city.id !in unhealthy &&
+            !inventoryJournal.pending(city.id) && settlementActive(city) }, ::relocateControlStorage,
+        { id, transform -> afterCityAvailable(id) { mutate(id, transform = transform) } }, clock,
+        blocked = citizens::growthBlocked)
+
     private val workerCommits = CivsWorkerCommits(this, tasks, storage, worksites, citizens, world,
         physics, inventoryJournal, roadMaintenance, construction, blueprints, { cities })
 
@@ -193,6 +202,7 @@ class CivsService(
     private val cityPlans: CivsCityPlans
 
     init {
+        controlInstallations.controlOccupied = citizens::growthBlocked
         placement = CivsPlacementSession(this,
             records,
             buildingRequestsOwner = { buildingRequests },
@@ -641,6 +651,36 @@ class CivsService(
         return result
     }
 
+    /** Same-level control moves use the same exact slot receipt as upgrade evacuation. */
+    private fun relocateControlStorage(city: Settlement, building: CivBuilding, from: CivPosition,
+        to: CivPosition): CompletableFuture<Settlement> {
+        checkMain()
+        rejectIf(!ready(), "not-ready")
+        rejectIf(cities[city.id] != city || city.id in busy || city.id in unhealthy, "city-busy")
+        val id = UUID.randomUUID()
+        storage.reserve(city, id)
+        busy += city.id
+        val tx = try {
+            val move = storage.prepareControlRelocation(city, building, from, to)
+            if (move == null) {
+                storage.unlock(id)
+                busy -= city.id
+                return CompletableFuture.completedFuture(city)
+            }
+            CivInventoryTransaction(id, city.id, city.revision, city.copy(revision = city.revision + 1),
+                emptyList(), containerRelocation = move).also(storage::seal)
+        } catch (failure: Throwable) {
+            storage.unlock(id)
+            busy -= city.id
+            return CompletableFuture.failedFuture(failure)
+        }
+        val result = inventoryJournal.submitRelocation(city, tx) {
+            rejectIf(!ready() || cities[city.id] != city || city.id !in busy, "stale-city")
+        }
+        track(result)
+        return result
+    }
+
     internal fun inventoryMutation(
         cityId: UUID, prepare: (Settlement) -> CivStoragePlan?,
         sourcePlayer: Player? = null,
@@ -962,6 +1002,7 @@ class CivsService(
             pulseCorpses()
             deletion.pulseDeletions()
             controlInstallations.pulse()
+            controlRelocations.pulse()
             residentLife.pulseImmigration()
             cityResearch.pulseResearch()
             residentLife.pulseAutoAssignments()
@@ -1116,6 +1157,8 @@ class CivsService(
         planBoardDrain = runCatching { planBoards.closeAsync() }
             .getOrElse { CompletableFuture.failedFuture(it) }
         autonomousDevelopment.cancel()
+        workstations.close()
+        controlRelocations.close()
         roadMaintenance.clear()
         supply.close()
         HandlerList.unregisterAll(this)
@@ -1147,7 +1190,7 @@ class CivsService(
     }
 
     fun drained(): CompletableFuture<Void> = CompletableFuture.allOf(renderer.drained(), boundary.drained(), citizenDrain,
-        supply.drained(), layoutDebug.drained(), planBoardDrain, planBoardSnapshots.drained())
+        supply.drained(), layoutDebug.drained(), planBoardDrain, planBoardSnapshots.drained(), controlRelocations.drained())
 
     internal fun reserveCity(cityId: UUID) { busy += cityId }
     internal fun releaseCity(cityId: UUID) { busy -= cityId }
@@ -1176,6 +1219,8 @@ class CivsService(
     override fun transferHome(player: Player): CompletableFuture<Unit> = membership.transferHome(player)
 
     override fun workerStatus(workerId: UUID): String = diagnostics.workerStatus(workerId)
+
+    override fun workerStatusInputs(workerId: UUID): List<String> = diagnostics.workerStatusInputs(workerId)
 
     override fun buildingStatus(buildingId: UUID): String = diagnostics.buildingStatus(buildingId)
 
@@ -1254,6 +1299,27 @@ class CivsService(
     internal fun upkeepSupplyRequests(city: Settlement, stock: (UUID) -> Map<String, Long>): List<CivSupplyRequest> = residentSupplies.upkeepSupplyRequests(city, stock)
 
     internal fun productionReady(city: Settlement, worker: CivWorker): Boolean = residentSupplies.productionReady(city, worker)
+
+    internal fun workStatusInputs(city: Settlement, worker: CivWorker): List<String> = residentSupplies.workStatusInputs(city, worker)
+
+    /** Fresh accepted native capacity, never inferred from an empty/stale supply result. */
+    private fun storageCapacityPressure(city: Settlement): Boolean {
+        val snapshot = supply.observation(city.id)
+        val capture = (snapshot?.inputKey as? CivSupplyObservation)?.capture
+        val age = capture?.startedAtMillis?.let { now() - it }
+        if (!CivsAutoSupplies.observed(city, snapshot) || capture?.complete != true || age == null || age !in 0..10_000L) {
+            supply.request(city.id)
+            return false
+        }
+        val warehouses = city.buildings.filter { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE }
+            .mapTo(hashSetOf()) { it.id }
+        if (warehouses.isEmpty() || warehouses.any { id ->
+                capture.stores[id]?.let { it.unavailable != 0 || it.capacity.emptySlots > 2 } != false
+            }) return false
+        return storage.supplyCaptureCurrent(city, capture, warehouses, requireComplete = true).also { current ->
+            if (!current) supply.request(city.id)
+        }
+    }
 
     internal fun requireAutonomousStorage(city: Settlement, buildingId: UUID? = null) = residentSupplies.requireAutonomousStorage(city, buildingId)
 

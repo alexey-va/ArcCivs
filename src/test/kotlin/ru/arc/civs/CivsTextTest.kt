@@ -68,6 +68,19 @@ class CivsTextTest : FunSpec({
         plainText(text.render("workers.assign-help", "en", "name" to name)) shouldContain name
     }
 
+    test("waiting inputs name the recipe materials through the existing Minecraft locale catalog") {
+        val text = CivsText.fromYaml(civsLocaleSource())
+        val ru = mockk<Player> { every { locale() } returns Locale.forLanguageTag("ru-RU") }
+        val en = mockk<Player> { every { locale() } returns Locale.ENGLISH }
+        plainText(text.status(ru, "workers.status.waiting-inputs", listOf("COBBLESTONE"))) shouldBe "Ждёт: Булыжник"
+        plainText(text.status(ru, "waiting-inputs", listOf("SAND", "CHARCOAL", "SAND"))) shouldBe "Ждёт: Песок, Древесный уголь"
+        plainText(text.status(en, "waiting-inputs", listOf("RAW_IRON", "CHARCOAL"))) shouldBe "Waiting for: Raw Iron, Charcoal"
+        plainText(text.status(null, "waiting-inputs", listOf("GRAVEL"))) shouldBe "Ждёт: Гравий"
+        plainText(text.status(ru, "waiting-inputs")) shouldBe "Ждёт сырьё"
+        plainText(text.status(ru, "moving-to-tavern", listOf("BREAD"))) shouldBe "Идёт в трактир"
+        plainText(text.status(ru, "moving-to-town-hall")) shouldBe "Идёт в ратушу"
+    }
+
     test("missing translation rejects a catalog instead of publishing untranslated controls") {
         shouldThrow<IllegalArgumentException> {
             CivsText.fromYaml("ru:\n  title: 'Город'\nen:\n  different: 'Town'\n")

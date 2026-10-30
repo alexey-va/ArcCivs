@@ -51,6 +51,8 @@ class CivsSceneEntityInfoTest : FunSpec({
             civsSceneEntityInfo(text, bounds, setOf(id), snapshot().copy(name = "<red>Анна</red>"), changed)!!.title shouldBe "<red>Анна</red>"
             info.title shouldBe "Анна"
             info.fields.first().value shouldBe "Берёзки"
+            civsSceneEntityInfo(text, bounds, setOf(id), snapshot().copy(status = "workers.status.waiting-inputs",
+                statusInputs = listOf("GRAVEL")), city())!!.fields.first { it.key == "status" }.value shouldBe "Ждёт: Гравий"
         }
     }
 

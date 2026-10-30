@@ -182,6 +182,19 @@ class CivsBlueprints(
             aligned.control
         }, executor)
 
+    /** Retain only a bounded detached workstation list; Core owns the decoded source snapshot. */
+    internal fun workstations(building: CivBuilding): CompletableFuture<List<CivWorkstation>> =
+        catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenApplyAsync({ snapshot ->
+            requireVolume(snapshot)
+            CivsWorkstations.authored(building, snapshot)
+        }, executor)
+
+    internal fun interiorControls(building: CivBuilding): CompletableFuture<List<CivControlCandidate>> =
+        catalogLoad.thenCompose { sourceSnapshot(building.schematicId) }.thenApplyAsync({ snapshot ->
+            requireVolume(snapshot)
+            CivsWorkstations.authoredControls(building, snapshot)
+        }, executor)
+
     fun prepare(
         style: String, type: BuildingType, level: Int, buildingId: UUID, worldId: UUID,
         placement: CivPosition, facing: Int, exactRotation: Int? = null,

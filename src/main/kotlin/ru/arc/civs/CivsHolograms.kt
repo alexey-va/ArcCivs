@@ -40,6 +40,7 @@ data class CivsNpcHologramSnapshot(
     val nativeHeight: Double = 1.8,
     val hunger: Int = 20,
     val child: Boolean = false,
+    val statusInputs: List<String> = emptyList(),
 )
 
 /** Nearby public nameplates. No Bukkit entities, block reads, routing or gameplay state changes. */
@@ -175,7 +176,7 @@ internal fun civsNpcHologramText(text: CivsText, npc: CivsNpcHologramSnapshot): 
             "farmer", "forester", "miner" -> text.render("hologram.tool-${npc.profession}")
             else -> text.status(null, npc.status)
         }
-    } else text.status(null, npc.status)
+    } else text.status(null, npc.status, npc.statusInputs)
     val profession = when (val key = if (npc.child) "child" else npc.profession) {
         "" , "unassigned" -> text.render("hologram.resident")
         "courier" -> text.render("hologram.courier")

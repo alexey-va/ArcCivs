@@ -126,14 +126,21 @@ class CivsText private constructor(
     fun style(player: Player, style: String): Component =
         if ("style.$style" in messages.getValue("ru")) render(player, "style.$style") else literal(style)
 
-    fun status(player: Player?, status: String): Component = render(player,
-        (if (status.startsWith("workers.status.")) status else "workers.status.$status")
-            .takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable")
+    fun status(player: Player?, status: String, inputs: List<String> = emptyList(), locale: String? = null): Component {
+        val key = if (status.startsWith("workers.status.")) status else "workers.status.$status"
+        val selectedLocale = locale ?: language(player)
+        if (key == "workers.status.waiting-inputs" && inputs.isNotEmpty()) return render(
+            "workers.status.waiting-input-materials", selectedLocale,
+            "materials" to Component.join(literal(", "), inputs.distinct().map { material(it, selectedLocale) }))
+        return render(key.takeIf { it in messages.getValue("ru") } ?: "workers.status.unavailable", selectedLocale)
+    }
 
     /** Resolve names before measured layout, using the same language policy as the surrounding menu. */
-    fun material(player: Player, material: String): Component = Material.matchMaterial(material)?.let {
-        materialLabels[language(player)]?.get(it.translationKey())?.let(::literal)
-    } ?: render(player, "materials.unknown")
+    fun material(player: Player?, material: String): Component = material(material, language(player))
+
+    private fun material(material: String, locale: String): Component = Material.matchMaterial(material)?.let {
+        materialLabels[locale]?.get(it.translationKey())?.let(::literal)
+    } ?: render("materials.unknown", locale)
 
     fun reason(player: Player, reason: String?, values: Map<String, String> = emptyMap()): Component = render(player,
         "reason.$reason".takeIf { it in messages.getValue("ru") } ?: "common.error", *values.map { (key, value) ->

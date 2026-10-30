@@ -6,7 +6,8 @@ import java.util.UUID
 object CivsPopulation {
     const val IMMIGRANT_POPULATION = 5
     const val BIRTH_MINUTES = 20
-    const val ADULT_MINUTES = 40
+    const val ADULT_MINUTES = 180
+    const val NURSERY_PLACES = 2
 
     fun houseBeds(house: CivBuilding): Int = if (house.type == BuildingType.TAVERN) 4 else maxOf(3, house.level * 2)
 
@@ -33,12 +34,15 @@ object CivsPopulation {
             .associateBy { it.id }
         val houses = homes.values.filter { it.type == BuildingType.HOUSE && it.phase == BuildingPhase.ACTIVE }
         val hall = homes.values.first { it.type == BuildingType.TOWN_HALL }
+        var adultPlaces = CivsRules.populationLimit(city) - city.workers.count { !CivsResidents.isChild(it) }
         val residents = city.workers.map { before ->
             val awake = before.id in activeWorkers
             val resident = CivsResidents.activeMinute(before, awake).let { observed ->
                 if (!awake || !CivsResidents.isChild(observed)) observed
-                else if (requireNotNull(observed.childMinutes) + 1 == ADULT_MINUTES) CivsResidentLife.adult(city, observed)
-                else observed.copy(childMinutes = requireNotNull(observed.childMinutes) + 1)
+                else if (requireNotNull(observed.childMinutes) + 1 == ADULT_MINUTES && adultPlaces > 0) {
+                    adultPlaces--
+                    CivsResidentLife.adult(city, observed)
+                } else observed.copy(childMinutes = minOf(ADULT_MINUTES - 1, requireNotNull(observed.childMinutes) + 1))
             }
             resident.copy(sex = CivsResidents.sex(resident), homeId = resident.homeId?.takeIf { it in homes },
                 hunger = CivsResidents.hunger(resident))
@@ -90,7 +94,8 @@ object CivsPopulation {
             val family = families[index]
             val home = houses.firstOrNull { it.id == family.homeId } ?: continue
             val room = residents.size >= IMMIGRANT_POPULATION &&
-                residents.size < minOf(CivsRules.MAX_POPULATION, CivsRules.populationLimit(city), CivsRules.beds(city)) &&
+                residents.size < minOf(CivsRules.residentLimit(city), CivsRules.beds(city)) &&
+                residents.count(CivsResidents::isChild) < NURSERY_PLACES &&
                 residents.count { it.homeId == home.id } < houseBeds(home)
             if (!room) continue
             val minutes = minOf(BIRTH_MINUTES, family.activeMinutes + 1)
@@ -111,6 +116,17 @@ object CivsPopulation {
         if (next == city) return city
         if (city.revision == Long.MAX_VALUE) throw CivsRejection("arithmetic-overflow")
         return CivsRules.validate(next.copy(revision = city.revision + 1))
+    }
+
+    /** Caller supplies fresh idle actor positions; accepted work and unobserved residents cannot die here. */
+    internal fun retireElder(city: Settlement, observed: Map<UUID, CivDeathContext>): Settlement {
+        val elder = city.workers.firstOrNull { worker ->
+            !CivsResidents.isChild(worker) && worker.id in observed &&
+                (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker)
+        } ?: return city
+        val proof = observed.getValue(elder.id)
+        require(proof.cause == "OLD_AGE" && city.contains(proof.position.x, proof.position.z))
+        return CivsRules.hurtResident(city, city.owner, elder.id, CivsResidents.maxHealth(elder), proof)
     }
 
     /** Dead parent IDs remain ancestry. Home/family references still point at current city records. */

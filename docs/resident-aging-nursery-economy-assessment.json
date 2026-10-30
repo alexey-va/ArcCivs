@@ -1,0 +1,127 @@
+{
+  "version": 1,
+  "title": "Resident nursery and observed aging; unchanged productive ceiling",
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "assumptions": [
+    "Existing twelve-adult ceiling and builder credit remain unchanged. Level-three town halls gain at most two extra child places, subject to actual house beds; children cannot work, carry production or displace adults. No forced birth or offline catch-up.",
+    "Childhood changes from 40 to 180 observed awake minutes. At the adult ceiling a child remains an adolescent until a vacancy exists. Birth cadence remains 20 active city minutes and at most one birth per minute.",
+    "Children consume one hunger per two awake minutes. At nutrition six, a complete 180-minute childhood requires about 15 bread versus 3.33 before, with actual meal thresholds and starting hunger affecting exact timing. Two children imply about 23.33 additional bread over their childhood. Existing food items are consumed, never granted.",
+    "Adult age starts at zero when this version first observes each adult, independently of prior awakeMinutes. Natural lifespan is at least 10080 plus a stable identity offset of zero through 4320 awake adult minutes (7 to 10 active days), per owner correction before rollout. No wall-clock/offline aging. Retirement waits for an actor with no accepted operation; at most one death per city minute. Existing corpse exact inventory ownership and five-minute expiry apply; resurrection resets old-age adult time.",
+    "Warehouse pressure may prioritize the next supported ordinary upgrade; existing costs, receipts and builder duration still apply. Workstation movement and full-storage leisure do not alter recipe outputs, XP awards, durations, prices or currency. Movement can reduce realized throughput; no positive production multiplier is added.",
+    "Live Spawn ledger context at 2026-10-30: exact 168-hour boundary, 3596 records and 3931 operations across 17 players. Vault minted 32979314.25750202 and burned 34794552.08; tokens minted 38 and burned 36. Mixed-currency aggregate is deliberately unused. This ledger is not ArcCivs attribution; substantial unknown-origin coverage prevents causal claims.",
+    "Direct Vault, premium tokens and player XP are zero before and after. Current SELL/AutoSell and planned SELL-to-contract remain distinct downstream scenarios; no item-to-currency conversion or new contract payout is assumed.",
+    "Industrial control relocation transfers exact existing item stacks and metadata into existing authorized holders first. A saved protected intent then adopts an interior barrel or replaces one old empty barrel with one new interior barrel; an uncreated holder receives no items. Unknown native persistence keeps the intent and both endpoint fences until old absence and new exact slots are acknowledged from affected disk records. No drops, currency grant or extra repeatable barrel reward is introduced."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "CivsPopulation / CivsResidentLife lifecycle",
+          "basis": "No direct monetary or player XP award exists in either policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "CivsPopulation / CivsResidentLife lifecycle",
+          "basis": "No direct monetary or player XP award exists in either policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "CivsPopulation / CivsResidentLife lifecycle",
+          "basis": "No direct monetary or player XP award exists in either policy.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              1,
+              5,
+              10
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

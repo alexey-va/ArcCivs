@@ -86,7 +86,7 @@ internal object CivsSnapshotValidation {
                 }
             }
             snapshot(city.buildings.none { it.phase == BuildingPhase.CONSTRUCTING && it.id != order?.buildingId })
-            snapshot(city.workers.size in 0..CivsRules.MAX_POPULATION &&
+            snapshot(city.workers.size in 0..CivsRules.MAX_RESIDENTS &&
                 city.workers.map { it.id }.distinct().size == city.workers.size)
             CivsCorpses.validate(city)
             CivsResearch.validate(city)
@@ -145,7 +145,8 @@ internal object CivsSnapshotValidation {
                     if (city.autonomy == null && building.type == BuildingType.TOWN_HALL && CivsRules.isFounding(city)) 1 else CivsRules.slots(city, building)
             })
             // Retiring housing/storage does not evict residents or erase stock. New intake still checks current capacity.
-            snapshot(city.workers.size <= CivsRules.populationLimit(city))
+            snapshot(city.workers.size <= CivsRules.residentLimit(city) &&
+                city.workers.count { !CivsResidents.isChild(it) } <= CivsRules.populationLimit(city))
             snapshot(Resource.entries.all { city.stock[it] in 0..(if (city.autonomy != null) CivInventory.MAX_AMOUNT
                 else (128L + (CivsRules.MAX_BUILDINGS - 1) * 1024L)) })
             if (city.autonomy != null) snapshot(Resource.entries.all {
@@ -166,11 +167,24 @@ internal object CivsSnapshotValidation {
                 snapshot((city.buildings + listOfNotNull(city.construction?.plannedBuilding)).none { intersectsApproach(city, it) })
                 val approachPoints = pending.flatMap { it.approach.orEmpty() }.map { it.position }
                 snapshot(approachPoints.distinct().size == approachPoints.size)
+                val retired = pending.mapNotNull { it.retire?.position }
+                snapshot(retired.distinct().size == retired.size && retired.none { it in approachPoints })
                 snapshot(pending.all { CivsRules.present(it.buildingId, it.position) && city.building(it.buildingId)?.control == it.position &&
                     it.before.isNotEmpty() && it.before.length <= CivsStore.MAX_BLOCK_STATE_CHARS &&
                     it.before.startsWith("minecraft:") && it.before.none(Char::isISOControl) })
                 pending.forEach { receipt ->
                     val building = requireNotNull(city.building(receipt.buildingId))
+                    receipt.retire?.let { cell ->
+                        snapshot(city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+                            building.phase == BuildingPhase.ACTIVE && building.type in CivsWorkstations.TYPES &&
+                            city.construction?.buildingId != building.id &&
+                            cell.position != receipt.position && cell.position.y in -4_096..4_096 &&
+                            city.contains(cell.position.x, cell.position.z) &&
+                            building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) &&
+                            city.buildings.none { it.id != building.id && (it.control == cell.position ||
+                                it.bounds.contains(cell.position.x, cell.position.y, cell.position.z)) } &&
+                            civsRetainContainerState(cell.before) && cell.before.startsWith("minecraft:barrel[") && cell.after == "minecraft:air")
+                    }
                     val approach = receipt.approach.orEmpty()
                     snapshot(approach.size <= 3 && approach.map { it.position }.distinct().size == approach.size)
                     snapshot(approach.all { cell ->
@@ -216,7 +230,7 @@ internal object CivsSnapshotValidation {
                 building.type == BuildingType.FARM && it == "BREAD" } != false)
 
     fun intersectsApproach(city: Settlement, building: CivBuilding): Boolean = city.pendingControls.orEmpty().any {
-        it.buildingId != building.id && it.approach.orEmpty().any { cell ->
+        it.buildingId != building.id && (it.approach.orEmpty() + listOfNotNull(it.retire)).any { cell ->
             building.bounds.contains(cell.position.x, cell.position.y, cell.position.z) || building.control == cell.position
         }
     }

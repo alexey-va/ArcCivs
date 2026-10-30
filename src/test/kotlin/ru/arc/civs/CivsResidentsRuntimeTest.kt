@@ -60,6 +60,83 @@ import java.util.logging.Handler
 import java.util.logging.LogRecord
 
 class CivsResidentsRuntimeTest : FunSpec({
+    for (sourceType in listOf(BuildingType.TAVERN, BuildingType.TOWN_HALL))
+    test("food trips show the actual destination and then pickup without replanning type=$sourceType") {
+        residentRuntime { h ->
+            h.assignFarm()
+            h.city = h.city.copy(buildings = h.city.buildings.map {
+                if (it.type == BuildingType.TOWN_HALL) it.copy(control = it.entrance) else it
+            })
+            h.owner.pulse(2_000)
+            val npc = h.owner.collisionActors().single()
+            npc.teleport(Location(h.world, 21.5, 64.0, .5))
+            val hall = h.city.buildings.first()
+            val source = if (sourceType == BuildingType.TOWN_HALL) hall else hall.copy(id = UUID.randomUUID(),
+                type = sourceType, schematicId = "tavern1", anchor = CivPosition(6, 64, 0), entrance = CivPosition(6, 64, 0),
+                control = CivPosition(6, 64, 0), bounds = CivBox(CivPosition(4, 64, -2), CivPosition(8, 68, 2)))
+            if (source != hall) h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + source))
+            val control = requireNotNull(source.control)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            h.foodSource = source.id
+            h.owner.pulse(3_000)
+            val workPlans = h.workPlans
+            val expected = "workers.status.${if (sourceType == BuildingType.TAVERN) "moving-to-tavern" else "moving-to-town-hall"}"
+            h.owner.status(h.workerId) shouldBe expected
+            h.owner.hologramSnapshots().single().status shouldBe expected
+            h.workPlans shouldBe workPlans
+            npc.teleport(Location(h.world, control.x + 1.5, control.y.toDouble(), control.z + .5))
+            h.owner.pulse(4_000)
+            h.supplyRequests shouldBe 1
+            h.owner.status(h.workerId) shouldBe "workers.status.collecting-supplies"
+            h.owner.hologramSnapshots().single().status shouldBe "workers.status.collecting-supplies"
+        }
+    }
+
+    test("status and nameplate reads reuse observed plans and typed recipe inputs") {
+        residentRuntime { h ->
+            h.assignFarm()
+            h.statusInputs = listOf("COBBLESTONE", "CHARCOAL")
+            h.owner.pulse(2_000)
+            val workPlans = h.workPlans
+            h.owner.status(h.workerId) shouldBe "workers.status.waiting-inputs"
+            h.owner.statusInputs(h.workerId) shouldBe h.statusInputs
+            val snapshot = h.owner.hologramSnapshots().single()
+            snapshot.status shouldBe "workers.status.waiting-inputs"
+            snapshot.statusInputs shouldBe h.statusInputs
+            h.workPlans shouldBe workPlans
+        }
+    }
+
+    test("an indoor workstation belongs to the accepted cycle and rotates only after committed production") {
+        residentRuntime { h ->
+            val smeltery = h.assignFarm().copy(type = BuildingType.SMELTERY, schematicId = "smeltery1", production = "STONE")
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == smeltery.id) smeltery else it })
+            val first = CivWorkstation(CivPosition(23, 64, 0), CivPosition(24, 64, 0), "minecraft:furnace")
+            val next = CivWorkstation(CivPosition(23, 64, 1), CivPosition(24, 64, 1), "minecraft:furnace")
+            var offered = first
+            var selections = 0
+            h.workstationProvider = { _, _ -> selections++; offered }
+            h.recreateResidents()
+            val items = h.city.workers.single().items
+            fun plan(): Map<*, *> = (((h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>)["plan"] as Map<*, *>)
+            h.owner.pulse(2_000)
+            plan()["workplace"] shouldBe first.standing
+            plan()["focus"] shouldBe first.focus
+            plan()["workstation"] shouldBe mapOf("standing" to first.standing, "focus" to first.focus, "material" to first.material)
+            selections shouldBe 1
+            offered = next
+            h.owner.pulse(3_000)
+            plan()["workplace"] shouldBe first.standing
+            selections shouldBe 1
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(completedCycles = it.completedCycles + 1) })
+            h.owner.pulse(4_000)
+            plan()["workplace"] shouldBe next.standing
+            selections shouldBe 2
+            h.city.workers.single().items shouldBe items
+            h.deliveries shouldBe 0
+        }
+    }
+
     fun prepareCarriedMealAtTavern(h: ResidentRuntime, guard: Boolean = false): PacketPlayerNpc {
         val npc = h.prepareDiningSeat(guard)
         val tavern = h.city.buildings.first { it.type == BuildingType.TAVERN }
@@ -4538,6 +4615,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     val pendingGroundCollection = CompletableFuture<Settlement>()
     val pendingHomeDeposit = CompletableFuture<Settlement>()
     var workReady = true
+    var statusInputs = emptyList<String>()
     var testingAllowed = false
     var foodSource: UUID? = null
     var physicalFoodSource: CivResidentFoodSource? = null
@@ -4567,6 +4645,7 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
     val usingMainHand: Boolean get() = usingMainHands[workerId] ?: false
     var work: CivWorldWork? = null
     var workProvider: ((Settlement, CivWorker) -> CivWorldWork?)? = null
+    var workstationProvider: ((Settlement, CivWorker) -> CivWorkstation?)? = null
     var workIdleProvider: ((Settlement, CivWorker) -> String)? = null
     var constructionColumns = emptySet<Long>()
     var idleReason = "waiting-inputs"
@@ -4708,7 +4787,8 @@ internal class ResidentRuntime(val paper: MockBukkitTestRuntime, private val use
                 CivsEquipment.usableCount(worker, "BREAD") == 0 } },
             tavernFoodSource = { _, worker -> tavernServiceSources[worker.id] ?: tavernServiceSource.takeIf { worker.id == workerId } },
             pickupResidentFood = { _, _, source -> physicalFoodPickup(source) },
-            workInputsReady = { _, _ -> workReady }, prepareSupplies = { _, _, _ ->
+            workInputsReady = { _, _ -> workReady }, workStatusInputs = { _, _ -> statusInputs },
+            workstation = workstationProvider, prepareSupplies = { _, _, _ ->
                 supplyRequests++
                 pendingSupplies
             }, backgroundActive = { background }, navigationTasks = navigationTasks, navigationWork = navigationWork,

@@ -108,13 +108,27 @@ internal class CivsResidentLifeRuntime(
             val awake = citizens.awakeResidentIds(city.id)
             populationMinuteAt[city.id] = now() + 60_000 // Never replay minutes spent waiting for a save.
             mutate(city.id) { before ->
-                val advanced = CivsPopulation.advance(before, awake, CivsNames::name)
+                val observedElders = before.workers.filter { worker ->
+                    worker.id in awake && !CivsResidents.isChild(worker) &&
+                        (worker.life?.adultMinutes ?: 0) >= CivsResidentLife.lifespanMinutes(worker) &&
+                        citizens.canReassign(before.id, worker.id)
+                }.mapNotNull { worker -> citizens.residentFeet(worker.id)?.takeIf { it.world?.uid == before.worldId }?.let {
+                    worker.id to CivDeathContext(CivPosition(it.blockX, it.blockY, it.blockZ), now(),
+                        cause = "OLD_AGE", feetY = it.y)
+                } }.toMap()
+                val retired = CivsPopulation.retireElder(before, observedElders)
+                val advanced = CivsPopulation.advance(retired, awake, CivsNames::name)
                 val next = if (before.autonomy != null) CivsAutonomy.activeMinute(advanced, CivsNames::name) else advanced
                 if (next == before) before else next.copy(revision = before.revision + 1)
             }.thenApply { saved ->
                 CivsDiagnostics.event("resident_life", "city" to city.id, "awake" to awake.size,
                     "population" to saved.workers.size, "children" to saved.workers.count(CivsResidents::isChild),
                     "hungry" to saved.workers.count { CivsResidents.hunger(it) <= 6 })
+                saved.corpses.orEmpty().filter { corpse -> corpse.cause == "OLD_AGE" &&
+                    current.corpses.orEmpty().none { it.worker.id == corpse.worker.id && it.diedAt == corpse.diedAt }
+                }.forEach { corpse -> CivsDiagnostics.event("resident_old_age", "city" to city.id,
+                    "worker" to corpse.worker.id, "adult_minutes" to corpse.worker.life?.adultMinutes,
+                    "position" to corpse.position, "corpse_expires_at" to corpse.expiresAt) }
                 Unit
             }
         } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->

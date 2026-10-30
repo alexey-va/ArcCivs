@@ -479,7 +479,7 @@ class CivsStore(
             buildingMaterials = it.buildingMaterials?.mapValues { entry -> entry.value.toMap() }) },
         construction = city.construction?.let { it.copy(plannedBuilding = it.plannedBuilding?.let(::snapshotBuilding), materials = it.materials?.toMap(),
             payment = it.payment?.let { payment -> payment.copy(awaiting = payment.awaiting?.toMap()) }) },
-        pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList()) },
+        pendingControls = city.pendingControls?.map { it.copy(approach = it.approach?.toList(), retire = it.retire?.copy()) },
         constructionQueue = city.constructionQueue?.toList(),
         mineProgress = city.mineProgress?.toMap(),
         minePlans = city.minePlans?.mapValues { (_, state) -> CivsMineProgress.detached(state) },

@@ -31,6 +31,7 @@ internal class CivsAutonomousDevelopment(
     private val pulseConstruction: () -> Unit,
     private val clock: () -> Long,
     private val developmentFinished: (UUID) -> Unit = {},
+    private val storageCapacityPressure: (Settlement) -> Boolean = { false },
 ) {
     private val cities get() = settlements()
     private val closed get() = isClosed()
@@ -132,11 +133,12 @@ internal class CivsAutonomousDevelopment(
             it.constructionQueue.orEmpty().isEmpty() && now() >= (autonomyRetryAt[it.id] ?: 0) && settlementActive(it) }
         if (candidates.isEmpty()) return
         val city = candidates[Math.floorMod(autonomyCursor++, candidates.size)]
-        val ordinary = CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
+        val capacity = if (storageCapacityPressure(city)) CivsAutonomy.capacityGoal(city, blueprints::maximumLevel) else null
+        val ordinary = capacity ?: CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
         val adopted = CivsSettlementPlans.current(city)
         val checked = autonomyLayoutChecked[city.id]
         val layoutCheckDue = checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second
-        var infrastructure = CivsAutonomy.infrastructureDue(city, ordinary) && layoutCheckDue
+        var infrastructure = capacity == null && CivsAutonomy.infrastructureDue(city, ordinary) && layoutCheckDue
         if (!infrastructure && ordinary == null && adopted != null) { developmentFinished(city.id); return }
         var goal = if (infrastructure || ordinary == null) CivsAutonomy.goal(city, BuildingType.ROAD, 1, null) else requireNotNull(ordinary)
         val existing = if (infrastructure) null else goal.buildingId?.let(city::building)
@@ -233,7 +235,9 @@ internal class CivsAutonomousDevelopment(
             if (infrastructure) goal = CivsAutonomy.goal(city, requireNotNull(blueprint).blueprint.building.type, 1, null)
             runCatching { afterCityAvailable(city.id) {
                 val current = cities[city.id] ?: throw CivsRejection("no-city")
-                val latest = if (infrastructure) CivsAutonomy.goal(current, goal.type, 1, null) else CivsAutonomy.nextGoal(current, blueprints::maximumLevel)
+                val latest = if (infrastructure) CivsAutonomy.goal(current, goal.type, 1, null)
+                    else (if (storageCapacityPressure(current)) CivsAutonomy.capacityGoal(current, blueprints::maximumLevel) else null)
+                        ?: CivsAutonomy.nextGoal(current, blueprints::maximumLevel)
                 rejectIf(infrastructure && !civsSameBuildingLayout(current.buildings, city.buildings), "stale-development")
                 rejectIf(infrastructure && latest?.ready != true, "not-enough-resources")
                 rejectIf(autonomyRequests[city.id] != request || current.autonomy?.paused != false ||

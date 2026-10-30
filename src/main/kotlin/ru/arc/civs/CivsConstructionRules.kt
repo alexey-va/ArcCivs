@@ -6,6 +6,7 @@ import java.util.UUID
 internal object CivsConstructionRules {
     fun reserveBuild(city: Settlement, actor: UUID, building: CivBuilding, order: CivConstruction): Settlement {
         CivsRules.authorized(city, actor)
+        CivsRules.check(city.pendingControls.orEmpty().none { it.buildingId == building.id && it.retire != null }, "city-busy")
         val plan = building.copy(phase = BuildingPhase.CONSTRUCTING)
         CivsRules.check(order.buildingId == plan.id && order.targetLevel == plan.level &&
             (city.inventory == null || order.batches != null) &&

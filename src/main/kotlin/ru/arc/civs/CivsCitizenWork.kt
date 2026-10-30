@@ -125,6 +125,16 @@ internal class CivsCitizenWork(
         }
         if (actor.mineVisit != null && mineVisits.update(actor, city, worker, world, now)) return
         if (returnProducerOutputs(actor, city, worker, world, now)) return
+        actor.plan.workstation?.let { station ->
+            if (cycle.phase != CitizenPhase.DELIVERING && worker.assignment?.let(city::building)?.let {
+                    CivsWorkstations.valid(city, it, world, station)
+                } != true) {
+                routes.cancelRoute(actor)
+                cycle.deferWork(now)
+                runtime.statuses[actor.workerId] = "workstation-unavailable"
+                return
+            }
+        }
         if (returnFromWorkDetour(actor, city, world, now)) return
         if (mineVisits.update(actor, city, worker, world, now)) return
         if (CivsResidents.isChild(worker)) {
@@ -298,6 +308,7 @@ internal class CivsCitizenWork(
         actor.npc.location.point(), actor.workHandoff, runtime.navigationTick)
 
     fun workingTravel(actor: CitizenActor): Boolean = !actor.sheltering &&
+        !(actor.outputReturn == null && actor.supplyFailure?.second == "storage-full" && actor.route?.idleAnchor != null) &&
         (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, false,
             purposefulDetour = actor.mineVisit != null || actor.outputReturn != null || actor.foodSource != null || actor.workDetour != null ||
                 actor.mealVisit != null || actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.idleReason == "waiting-materials"))
@@ -312,10 +323,24 @@ internal class CivsCitizenWork(
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
         if (city.inventory == null || building == null || actor.plan.courier != null ||
             actor.cycle.phase in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED) ||
-            actor.plan.worldWork?.status == "waiting-tool" ||
-            !couriers.sourceOffersCargo(actor, city, worker)) {
+            actor.plan.worldWork?.status == "waiting-tool") {
             if (actor.outputReturn != null) { actor.outputReturn = null; routes.cancelRoute(actor) }
             return false
+        }
+        // Only a definite full-barrel rejection releases outputReturn in drainSupplies.
+        // An uncertain accepted transfer keeps its existing pin and never enters leisure.
+        val fullOutput = actor.outputReturn == null && actor.supplyFailure == (building.id to "storage-full")
+        if (!couriers.sourceOffersCargo(actor, city, worker)) {
+            if (actor.outputReturn != null || fullOutput && actor.route?.idleAnchor != null) routes.cancelRoute(actor)
+            actor.outputReturn = null
+            if (fullOutput) { actor.supplyFailure = null; actor.supplyRetryAt = 0 }
+            return false
+        }
+        if (fullOutput && now < actor.supplyRetryAt) {
+            actor.cycle.deferWork(now)
+            leisure.wander(actor, city, world, now)
+            runtime.statuses[actor.workerId] = "storage-full"
+            return true
         }
         if (actor.outputReturn != building.id) {
             rememberWorkDetour(actor)
@@ -378,7 +403,7 @@ internal class CivsCitizenWork(
         if (!routes.arrivedAt(actor, city, world, workplace)) { fieldCareHand(actor, null); return }
         val player = actor.npc
         val eye = player.location.clone().add(0.0, player.eyeHeight, 0.0)
-        val workFocus = actor.plan.worldWork?.let(::citizenWorkFocus)
+        val workFocus = actor.plan.worldWork?.let(::citizenWorkFocus) ?: actor.plan.workstation?.focus
         val focus = if (workFocus != null) citizenReachableBlockPoint(world, eye, workFocus,
             citizenWorkReach(actor.plan.type, actor.plan.worldWork), actor.plan.worldWork) ?: return
         else if (city.buildings.any { it.control == workplace })

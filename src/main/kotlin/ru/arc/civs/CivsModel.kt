@@ -132,7 +132,9 @@ data class CivConstructionPayment(val reservedBatch: Int? = null, val awaiting: 
 
 /** The city commit protects the target before this one-time native block grant is applied. */
 data class CivControlPlacement(val buildingId: UUID, val position: CivPosition, val before: String,
-    val approach: List<CivPlanBlock>? = null)
+    val approach: List<CivPlanBlock>? = null,
+    /** A saved same-level move retires only this exact empty old barrel after its native save barrier. */
+    val retire: CivPlanBlock? = null)
 
 /** Next recurring immigration admission; remaining is the current shortfall below five residents. */
 data class CivImmigration(val remaining: Int, val nextArrivalAt: Long)

@@ -108,6 +108,7 @@ interface CivsUiHost {
     fun foundingAllowed(): Boolean
     fun transferHome(player: Player): CompletableFuture<Unit>
     fun workerStatus(workerId: UUID): String
+    fun workerStatusInputs(workerId: UUID): List<String> = emptyList()
     fun buildingStatus(buildingId: UUID): String
     fun buildingRequest(player: Player, buildingId: UUID): CivsBuildingRequest? = null
     fun giveBuildingRequest(player: Player, buildingId: UUID, material: String): CompletableFuture<Unit>

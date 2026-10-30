@@ -345,6 +345,7 @@ internal class CivsStorageActions(
         authority.cityAction("control_relocate", player, "building" to buildingId, "expected_control" to expectedTarget) { before ->
             val building = before.building(buildingId) ?: throw CivsRejection("building-not-found")
             rejectIf(before.id in records.busy || construction.isPlacing(before.id) || inventoryJournal.pending(before.id), "city-busy")
+            rejectIf(before.pendingControls.orEmpty().any { it.buildingId == buildingId && it.retire != null }, "city-busy")
             rejectIf(before.construction?.buildingId == buildingId, "construction-busy")
             rejectIf(building.phase != BuildingPhase.ACTIVE, "control-relocation-site")
             val result = authority.tracked<Unit>()
@@ -369,6 +370,7 @@ internal class CivsStorageActions(
         }
 
     fun relocateControl(current: Settlement, building: CivBuilding, point: CivPosition): CompletableFuture<Settlement> {
+        rejectIf(current.pendingControls.orEmpty().any { it.buildingId == building.id && it.retire != null }, "city-busy")
         if (point == building.control) controlInstallations.requirePresent(current.worldId, building)
         val placement = controlInstallations.prepare(current.id, current.worldId, current.owner, building.copy(control = point))
         val nativeWorld = requireNotNull(plugin.server.getWorld(current.worldId))

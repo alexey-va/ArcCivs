@@ -124,6 +124,16 @@ object CivsAutonomy {
         return null
     }
 
+    /** Caller supplies fresh capacity pressure; an accepted site or order keeps its existing priority. */
+    internal fun capacityGoal(city: Settlement, maximumLevel: (CivBuilding) -> Int): CivAutonomyGoal? {
+        if (city.autonomy?.paused != false || city.inventory?.mode != CivStorageMode.PHYSICAL || city.pendingDeletion != null ||
+            city.construction != null || city.constructionQueue.orEmpty().isNotEmpty() ||
+            city.buildings.any { it.phase == BuildingPhase.SITE }) return null
+        val warehouse = city.buildings.firstOrNull { it.type == BuildingType.WAREHOUSE && it.phase == BuildingPhase.ACTIVE &&
+            it.level < minOf(it.type.maxLevel, maximumLevel(it), city.level()) } ?: return null
+        return goal(city, warehouse.type, warehouse.level + 1, warehouse.id)
+    }
+
     /** Read-only UI projection of the next goal after the current accepted construction finishes. */
     fun nextGoalAfterCurrent(city: Settlement, maximumLevel: (CivBuilding) -> Int = { it.type.maxLevel }): CivAutonomyGoal? {
         val autonomy = city.autonomy ?: return null

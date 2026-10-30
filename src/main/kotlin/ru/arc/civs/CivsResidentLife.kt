@@ -11,6 +11,8 @@ data class CivResidentLife(
     val childHungerRemainder: Boolean = false,
     val lastLessonAge: Int? = null,
     val education: Map<String, Long>? = null,
+    /** Starts at adoption of this field, never inferred from pre-upgrade awake time. */
+    val adultMinutes: Long? = null,
 )
 
 enum class CivResidentMealSource { CARRIED_BREAD, ABSTRACT_FOOD, CARRIED_FOOD }
@@ -40,6 +42,11 @@ object CivsResidentLife {
     const val MAX_EDUCATION_XP = 10L
     private const val MAX_COUNTER = 1_000_000_000L
 
+    const val MIN_ADULT_LIFESPAN_MINUTES = 7 * 24 * 60L
+    private const val LIFESPAN_VARIATION_MINUTES = 3 * 24 * 60
+    fun lifespanMinutes(worker: CivWorker): Long = MIN_ADULT_LIFESPAN_MINUTES +
+        Math.floorMod(worker.id.hashCode(), LIFESPAN_VARIATION_MINUTES + 1)
+
     fun aptitude(worker: CivWorker): BuildingType = BuildingType.valueOf(
         CivsResidents.professions[Math.floorMod(worker.id.hashCode(), CivsResidents.professions.size)])
 
@@ -49,8 +56,9 @@ object CivsResidentLife {
 
     internal fun minute(worker: CivWorker): CivResidentLife {
         val before = worker.life ?: CivResidentLife()
-        if (before.awakeMinutes == MAX_COUNTER) throw CivsRejection("arithmetic-overflow")
+        if (before.awakeMinutes == MAX_COUNTER || before.adultMinutes == MAX_COUNTER) throw CivsRejection("arithmetic-overflow")
         return before.copy(awakeMinutes = before.awakeMinutes + 1,
+            adultMinutes = if (CivsResidents.isChild(worker)) null else (before.adultMinutes ?: 0) + 1,
             childHungerRemainder = CivsResidents.isChild(worker) && !before.childHungerRemainder)
     }
 
@@ -137,7 +145,7 @@ object CivsResidentLife {
         val cap = learningCap(city, worker)
         val skills = life.education.orEmpty().mapValues { (_, xp) -> minOf(cap, xp) }.takeIf { it.isNotEmpty() }
         return worker.copy(childMinutes = null, skills = skills,
-            life = life.copy(education = null, lastLessonAge = null, childHungerRemainder = false))
+            life = life.copy(education = null, lastLessonAge = null, childHungerRemainder = false, adultMinutes = 0))
     }
 
     fun needs(city: Settlement, worker: CivWorker): CivResidentNeeds {
@@ -173,6 +181,7 @@ object CivsResidentLife {
     internal fun validated(worker: CivWorker) {
         val life = worker.life ?: return
         require(life.awakeMinutes in 0..MAX_COUNTER && life.meals in 0..MAX_COUNTER)
+        require(life.adultMinutes?.let { !CivsResidents.isChild(worker) && it in 0..life.awakeMinutes } != false)
         require(life.lastMealMinute?.let { it in 0..life.awakeMinutes } != false &&
             life.lastRestMinute?.let { it in 0..life.awakeMinutes } != false)
         require(life.lastLessonAge?.let { CivsResidents.isChild(worker) && it in 0..requireNotNull(worker.childMinutes) } != false)

@@ -47,7 +47,7 @@ internal class CivsNativePersistence(
     private data class GroundProof(val id: UUID, val item: ItemProof)
     private data class SlotProof(val position: CivPosition, val type: String, val slot: Int, val item: ItemProof)
     private data class Target(val x: Int, val z: Int, val entities: Boolean,
-        val ground: List<GroundProof>, val slots: List<SlotProof>)
+        val ground: List<GroundProof>, val slots: List<SlotProof>, val absentContainers: List<CivPosition> = emptyList())
     private class Pending(val result: CompletableFuture<Unit>, val leases: MutableList<PaperChunkTicketLease>,
         val tasks: LifecycleTaskScope)
     private val binding by lazy { Binding() }
@@ -69,7 +69,6 @@ internal class CivsNativePersistence(
         // No partial Item tail may migrate to an unjournalled chunk while this asynchronous fence runs.
         require(transfer?.ground.orEmpty().all { it.after == null }) { "Partial ground receipts cannot use this persistence adapter" }
         val world = plugin.server.getWorld(transaction.after.worldId) ?: throw CivsRejection("storage-unavailable")
-        check(plugin.server.version.contains("1.21.11-2568-f57bd86")) { "Unsupported native item persistence runtime: ${plugin.server.version}" }
         val bytes = hashMapOf<CivResidentItem, ByteArray>()
         fun proof(item: CivResidentItem?) = ItemProof(item?.let { bytes.getOrPut(it) { it.stack().serializeAsBytes() } })
         val targets = transfer?.ground.orEmpty().groupBy { (it.position.x shr 4) to (it.position.z shr 4) }.map { (chunk, changes) ->
@@ -79,6 +78,32 @@ internal class CivsNativePersistence(
                 SlotProof(it.container, it.containerType, it.slot, proof(if (before) it.before else it.after))
             })
         }
+        return persistTargets(transaction.cityId, transaction.id, world, targets, if (before) "before-journal" else "after-native")
+    }
+
+    /** The saved retirement intent remains until this fresh chunk record proves the old tile is absent. */
+    fun persistRetiredControl(city: Settlement, receipt: CivControlPlacement): CompletableFuture<Unit> {
+        check(Bukkit.isPrimaryThread())
+        check(!closed)
+        val point = requireNotNull(receipt.retire).position
+        val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("world-unavailable")
+        require(world.isChunkLoaded(point.x shr 4, point.z shr 4) && world.getBlockAt(point.x, point.y, point.z).type.isAir)
+        val replacement = receipt.position
+        require(world.isChunkLoaded(replacement.x shr 4, replacement.z shr 4))
+        val barrel = world.getBlockAt(replacement.x, replacement.y, replacement.z).state as? org.bukkit.block.Barrel
+            ?: throw CivsRejection("control-obstructed")
+        val slots = barrel.inventory.storageContents.mapIndexed { slot, item -> SlotProof(replacement, "BARREL", slot,
+            ItemProof(item?.takeIf { !it.type.isAir && it.amount > 0 }?.serializeAsBytes())) }
+        require(slots.size == STORAGE_SLOTS)
+        val targets = listOf(Target(point.x shr 4, point.z shr 4, false, emptyList(), emptyList(), listOf(point)),
+            Target(replacement.x shr 4, replacement.z shr 4, false, emptyList(), slots)).groupBy { it.x to it.z }.map { (_, group) ->
+            Target(group.first().x, group.first().z, false, emptyList(), group.flatMap { it.slots }, group.flatMap { it.absentContainers })
+        }
+        return persistTargets(city.id, UUID.randomUUID(), world, targets, "control-retirement")
+    }
+
+    private fun persistTargets(cityId: UUID, receiptId: UUID, world: World, targets: List<Target>, phase: String): CompletableFuture<Unit> {
+        check(plugin.server.version.contains("1.21.11-2568-f57bd86")) { "Unsupported native item persistence runtime: ${plugin.server.version}" }
         val chunks = targets.map { PaperChunkKey(world.uid, it.x, it.z) }.distinct()
         require(chunks.size in 1..8)
         val native = binding
@@ -97,8 +122,8 @@ internal class CivsNativePersistence(
             operation.leases.asReversed().forEach { lease -> runCatching { lease.close() }.onFailure {
                 if (problem == null) problem = it else problem!!.addSuppressed(it)
             } }
-            CivsDiagnostics.event("resident_item_persist", "city" to transaction.cityId, "receipt" to transaction.id,
-                "phase" to if (before) "before-journal" else "after-native", "chunks" to chunks.size,
+            CivsDiagnostics.event("resident_item_persist", "city" to cityId, "receipt" to receiptId,
+                "phase" to phase, "chunks" to chunks.size,
                 "elapsed_ms" to (System.nanoTime() - started) / 1_000_000,
                 "result" to if (problem == null) "acknowledged" else "unknown")
             if (problem == null) result.complete(Unit) else result.completeExceptionally(problem!!)
@@ -119,7 +144,7 @@ internal class CivsNativePersistence(
                         check(world.isChunkLoaded(key.x, key.z)) { "Persistence source chunk is unloaded" }
                         val serialStarted = System.nanoTime()
                         native.save(world.getChunkAt(key.x, key.z)) // At most one loaded holder per owner-thread tick.
-                        if (System.nanoTime() - serialStarted >= 10_000_000) CivsDiagnostics.record(plugin.logger, java.util.logging.Level.WARNING, transaction.cityId,
+                        if (System.nanoTime() - serialStarted >= 10_000_000) CivsDiagnostics.record(plugin.logger, java.util.logging.Level.WARNING, cityId,
                             "ArcCivs resident item chunk serialization exceeded 10ms at ${key.x},${key.z}")
                     } else if (io == null && targets.none { native.hasTask(controllers.getValue(it), it.x, it.z) }) {
                         // The pinned scheduleSave registers each chunk task before holder.save returns, including
@@ -305,6 +330,10 @@ internal class CivsNativePersistence(
             }
             val entities = list(data, "block_entities")
             check(entities.size <= 65_536)
+            target.absentContainers.forEach { position ->
+                check(entities.none { value(getInt, it, "x") == position.x && value(getInt, it, "y") == position.y &&
+                    value(getInt, it, "z") == position.z }) { "Retired control still has a persisted block entity" }
+            }
             target.slots.groupBy { it.position }.forEach { (position, proofs) ->
                 val containers = entities.filter { value(getInt, it, "x") == position.x &&
                     value(getInt, it, "y") == position.y && value(getInt, it, "z") == position.z }

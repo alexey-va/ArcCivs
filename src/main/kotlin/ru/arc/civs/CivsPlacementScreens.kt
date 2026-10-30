@@ -45,7 +45,7 @@ internal fun CivsUi.showRemote(player: Player, feedback: Component? = null) {
             tr(player, "network.server-label") to text.literal(remote.server.value),
             tr(player, "label.level") to text.literal(city.level()),
             tr(player, "label.radius") to tr(player, "city.radius", "radius" to city.radius),
-            tr(player, "label.population") to tr(player, "common.fraction", "value" to city.workers.size, "limit" to CivsRules.populationLimit(city)),
+            tr(player, "label.population") to tr(player, "common.fraction", "value" to city.workers.size, "limit" to CivsRules.residentLimit(city)),
             tr(player, "label.buildings") to text.literal(CivsRules.buildingCount(city)),
             tr(player, "label.construction") to constructionText(player, city),
         )),

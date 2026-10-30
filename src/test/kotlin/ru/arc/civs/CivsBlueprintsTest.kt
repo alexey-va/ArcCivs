@@ -17,6 +17,40 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 
 class CivsBlueprintsTest : FunSpec({
+    test("workstation extraction stays on the blueprint executor and retains only bounded detached positions") {
+        val pending = ArrayDeque<Runnable>()
+        val cells = buildMap {
+            for (x in 0..6) for (z in 0..8) for (y in listOf(0, 4)) put(ArcSchematicPoint(x, y, z), "minecraft:stone")
+            put(ArcSchematicPoint(2, 1, 3), "minecraft:furnace[facing=south,lit=false]")
+        }
+        val source = BlueprintCellsSnapshot(ArcSchematicPoint(0, 0, 0), ArcSchematicPoint(6, 4, 8),
+            ArcSchematicPoint(3, 0, 9), cells)
+        var reads = 0
+        val observed = object : ArcSchematicSnapshot by source {
+            override fun blocks(): List<ArcSchematicBlock> { reads++; return source.blocks() }
+        }
+        val building = CivBuilding(UUID(0, 1), BuildingType.SMELTERY, 1, CivPosition(20, 63, 20), 0,
+            "fixture/workstations", CivBox(CivPosition(17, 63, 11), CivPosition(23, 67, 19)),
+            CivPosition(20, 64, 20), BuildingPhase.ACTIVE, control = CivPosition(21, 64, 19))
+        val libraries = BlueprintLibraries(executor = Executor { pending.addLast(it) })
+        every { libraries.source.load(building.schematicId, ArcSchematicContentPolicy.IGNORE_ENTITIES_AND_BIOMES) } returns
+            CompletableFuture.completedFuture(observed)
+        libraries.subject.use { blueprints ->
+            val result = blueprints.workstations(building)
+            result.isDone shouldBe false
+            reads shouldBe 0
+            var steps = 0
+            while (pending.isNotEmpty()) { check(steps++ < 20); pending.removeFirst().run() }
+            val points = result.join()
+            reads shouldBe 1
+            points.isNotEmpty() shouldBe true
+            (points.size <= CivsWorkstations.MAXIMUM_POINTS) shouldBe true
+            points.all { it.material == "minecraft:furnace" && it.standing != building.control } shouldBe true
+            verify(exactly = 0) { libraries.source.transform(any(), any()) }
+            verify(exactly = 0) { libraries.source.captureSource(any(), any()) }
+        }
+    }
+
     test("infrastructure preparation keeps paid spine barriers skipped and verifies every new shoulder cell") {
         MockBukkitTestRuntime.open().use {
             val id = UUID.randomUUID()

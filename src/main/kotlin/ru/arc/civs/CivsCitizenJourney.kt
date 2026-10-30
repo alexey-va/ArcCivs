@@ -19,7 +19,7 @@ internal data class CitizenPlan(val token: CitizenToken, val storage: CivPositio
     val type: BuildingType?, val workMillis: Long, val idleReason: String?, val completeAtWorkplace: Boolean = false,
     val courier: CivCourierPlan? = null, val worldWork: CivWorldWork? = null, val suppliesNeeded: Boolean = false,
     val autonomousWork: CivBuilding? = null, val industryWork: CivIndustryWork? = null,
-    val pendingStockDelivery: Stock? = null) {
+    val pendingStockDelivery: Stock? = null, val workstation: CivWorkstation? = null) {
     val spawnOrigin: CivPosition get() = if (courier?.cargo?.sourceWorkerId != null) storage else courier?.cargo?.sourceEntrance ?: storage
     fun travelTarget(phase: CitizenPhase): CivPosition =
         if (phase == CitizenPhase.TO_WORK || phase == CitizenPhase.RETURNING && completeAtWorkplace) requireNotNull(workplace) else storage

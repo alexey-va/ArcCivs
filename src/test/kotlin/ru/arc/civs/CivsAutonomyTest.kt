@@ -58,6 +58,39 @@ class CivsAutonomyTest : FunSpec({
         CivsAutonomy.nextGoal(capped) shouldBe upgrade
     }
 
+    test("physical capacity pressure can select the next supported existing warehouse upgrade") {
+        val warehouse = autonomyBuilding(BuildingType.WAREHOUSE, level = 2, phase = BuildingPhase.ACTIVE)
+        val hall = autonomyBuilding(BuildingType.TOWN_HALL, level = 3, phase = BuildingPhase.ACTIVE)
+        val city = autonomyCity().copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = listOf(hall, warehouse))
+        val before = city.copy()
+        CivsAutonomy.capacityGoal(city) { 3 } shouldBe
+            CivAutonomyGoal(BuildingType.WAREHOUSE, 3, warehouse.id, Stock(), Stock())
+        CivsAutonomy.capacityGoal(city) { 2 } shouldBe null
+        CivsAutonomy.capacityGoal(city.copy(buildings = listOf(hall.copy(level = 2), warehouse))) { 3 } shouldBe null
+        city shouldBe before
+    }
+
+    test("warehouse capacity recovery preserves accepted sites FIFO and ordinary upgrade limits") {
+        val warehouse = autonomyBuilding(BuildingType.WAREHOUSE, level = 2, phase = BuildingPhase.ACTIVE)
+        val hall = autonomyBuilding(BuildingType.TOWN_HALL, level = 3, phase = BuildingPhase.ACTIVE)
+        val gate = autonomyBuilding(BuildingType.GATE)
+        val city = autonomyCity().copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+            buildings = listOf(hall, warehouse))
+        for (blocked in listOf(city.copy(inventory = null), city.copy(autonomy = null),
+            city.copy(autonomy = CivAutonomy(paused = true)), city.copy(pendingDeletion = CivDeletion(null)),
+            city.copy(buildings = city.buildings + gate), city.copy(constructionQueue = listOf(gate.id)),
+            city.copy(construction = autonomyOrder(warehouse.copy(level = 3), 1)),
+            city.copy(buildings = listOf(hall, warehouse.copy(level = 3))))) {
+            CivsAutonomy.capacityGoal(blocked) { 3 } shouldBe null
+        }
+        val queued = city.copy(buildings = city.buildings +
+            autonomyBuilding(BuildingType.BUILDER_HUT, phase = BuildingPhase.ACTIVE) + gate,
+            constructionQueue = listOf(gate.id))
+        CivsAutonomy.nextGoal(queued)?.buildingId shouldBe gate.id
+        queued.constructionQueue shouldBe listOf(gate.id)
+    }
+
     test("the plan board follows the first house and existing boards are never duplicated") {
         val beforeBoard = CivsAutonomy.baseProfile.takeWhile { it != BuildingType.PLAN_BOARD }
             .map { autonomyBuilding(it, phase = BuildingPhase.ACTIVE) }

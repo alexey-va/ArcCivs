@@ -164,6 +164,9 @@ internal class CivsCityDiagnostics(
                 "workers.status.construction-paused", "workers.status.waiting-materials", "workers.status.placing")) "workers.status.waiting" else status
     }
 
+    fun workerStatusInputs(workerId: UUID): List<String> =
+        if (workerStatus(workerId) == "workers.status.waiting-inputs") citizens.statusInputs(workerId) else emptyList()
+
     fun buildingStatus(buildingId: UUID): String {
         val city = records.cities.values.firstOrNull { it.building(buildingId) != null } ?: return "building-status.paused"
         val building = requireNotNull(city.building(buildingId))

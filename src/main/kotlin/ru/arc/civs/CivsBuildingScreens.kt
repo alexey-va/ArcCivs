@@ -490,6 +490,10 @@ internal fun CivsUi.buildingStatus(player: Player, city: Settlement, building: C
     queuePosition(city, building.id)?.let { return tint(tr(player, "building-status.queued", "position" to it), STOCK) }
     val state = host.buildingStatus(building.id).removePrefix("building-status.")
     val key = "building-status.$state"
+    if (state == "waiting-inputs") {
+        val inputs = city.workers.filter { it.assignment == building.id }.flatMap { host.workerStatusInputs(it.id) }.distinct()
+        if (inputs.isNotEmpty()) return tint(text.status(player, "workers.status.waiting-inputs", inputs), statusColor(key))
+    }
     val label = listOf(key, "workers.status.$state").firstOrNull { it in text.keys("ru") } ?: "workers.status.unavailable"
     return tint(tr(player, label,
         "position" to queuePosition(city, building.id)), statusColor(key))

@@ -77,7 +77,7 @@ class CivsPopulationTest : FunSpec({
         city.workers.groupingBy { it.homeId }.eachCount().values.sorted() shouldBe listOf(1, 3, 3)
     }
 
-    test("child matures on the fortieth active minute and cannot work before then") {
+    test("child matures after three observed active hours and cannot work before then") {
         val f = PopulationFixture(houses = 1)
         var city = f.city
         repeat(20) { city = f.minute(city) }
@@ -87,10 +87,10 @@ class CivsPopulationTest : FunSpec({
             .reason shouldBe "child-cannot-work"
         val assigned = CivsRules.autoAssign(city, city.owner, 100_000)
         assigned.workers.first { it.id == childId }.assignment shouldBe null
-        repeat(39) { city = f.minute(city) }
-        city.workers.first { it.id == childId }.childMinutes shouldBe 39
+        repeat(CivsPopulation.ADULT_MINUTES - 1) { city = f.minute(city) }
+        city.workers.first { it.id == childId }.childMinutes shouldBe CivsPopulation.ADULT_MINUTES - 1
         val reloaded = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
-        reloaded.workers.first { it.id == childId }.childMinutes shouldBe 39
+        reloaded.workers.first { it.id == childId }.childMinutes shouldBe CivsPopulation.ADULT_MINUTES - 1
         city = f.minute(reloaded)
         val adult = city.workers.first { it.id == childId }
         CivsResidents.isChild(adult) shouldBe false
@@ -188,7 +188,7 @@ class CivsPopulationTest : FunSpec({
         val f = PopulationFixture(houses = 1)
         val worker = f.city.workers.first()
         for (bad in listOf(worker.copy(hunger = -1), worker.copy(hunger = 21),
-            worker.copy(childMinutes = -1), worker.copy(childMinutes = 40),
+            worker.copy(childMinutes = -1), worker.copy(childMinutes = CivsPopulation.ADULT_MINUTES),
             worker.copy(parentIds = setOf(worker.id, popId(999))),
             worker.copy(homeId = popId(999)), worker.copy(parentIds = setOf(popId(999))))) {
             shouldThrow<CivsRejection> { CivsRules.validate(f.city.copy(workers = listOf(bad))) }.reason shouldBe "invalid-state"

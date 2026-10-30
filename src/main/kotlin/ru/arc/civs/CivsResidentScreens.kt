@@ -30,7 +30,7 @@ internal fun CivsUi.residentRoster(player: Player, residents: List<CivWorker>, w
 internal fun CivsUi.showWorkers(player: Player, page: Int = 0, error: Component? = null) {
     val city = city(player) ?: return
     val current = page.coerceIn(0, lastPage(city.workers.size))
-    val limit = minOf(CivsRules.populationLimit(city), CivsRules.beds(city))
+    val limit = minOf(CivsRules.residentLimit(city), CivsRules.beds(city))
     present(player, "civs.workers", "workers.title", listOfNotNull(
         body(player, "workers.help"), presentation.summary(Component.join(Component.newline(), listOf(
             detail(player, "label.population", tint(tr(player, "common.fraction", "value" to city.workers.size, "limit" to limit), PEOPLE)),
@@ -255,5 +255,6 @@ internal fun CivsUi.showAssignments(player: Player, workerId: UUID, page: Int = 
 
 internal fun CivsUi.workerStatus(player: Player, worker: CivWorker): Component {
     val status = host.workerStatus(worker.id)
-    return tint(text.status(player, status), statusColor(status))
+    return tint(text.status(player, status, if (status == "workers.status.waiting-inputs")
+        host.workerStatusInputs(worker.id) else emptyList()), statusColor(status))
 }

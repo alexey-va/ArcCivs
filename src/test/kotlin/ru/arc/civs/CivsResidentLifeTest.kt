@@ -219,7 +219,7 @@ class CivsResidentLifeTest : FunSpec({
             CivsResidentLife.mealPlan(city, city.workers.last())?.let { plan -> city = CivsResidentLife.finishMeal(city, plan) }
         }
         val grown = city.workers.last()
-        grown.childMinutes shouldBe null
+        grown.childMinutes shouldBe 40
         grown.life!!.meals shouldBe 3L
         CivsResidents.hunger(grown) shouldBe 18
         CivsEquipment.plainCount(grown, "BREAD") shouldBe 0

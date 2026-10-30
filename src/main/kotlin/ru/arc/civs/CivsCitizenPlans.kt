@@ -66,6 +66,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         workType == BuildingType.UNIVERSITY && research?.funded != true -> "research-unfunded"
         autonomous && workType in CivsIndustry.processorTypes && industry == null -> "waiting-orders"
         workType == BuildingType.WAREHOUSE && assigned.phase == BuildingPhase.ACTIVE -> "waiting-orders"
+        builder && order == null && city.constructionQueue.orEmpty().isNotEmpty() -> "queued-construction"
         builder && order == null -> "no-construction"
         builder && !CivsRules.builderCanWork(city, assigned) -> "building-unavailable"
         builder && order?.phase == ConstructionPhase.WAITING_MATERIALS -> "waiting-materials"

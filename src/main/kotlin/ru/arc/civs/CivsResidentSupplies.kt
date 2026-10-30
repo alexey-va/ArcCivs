@@ -53,6 +53,14 @@ internal class CivsResidentSupplies(
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
         supply.craftJobs(city.id)[worker.id]?.takeIf { CivsCarpentry.valid(city, worker, it) }
 
+    /** Recipe context only; status and public scene reads never capture native inventories. */
+    internal fun workStatusInputs(city: Settlement, worker: CivWorker): List<String> {
+        val building = worker.assignment?.let(city::building) ?: return emptyList()
+        val inputs = craftPlan(city, worker)?.inputs ?: if (building.type == BuildingType.SAWMILL) return emptyList()
+            else CivsProduction.inputs(city, building)
+        return CivsEquipment.storageInputs(worker, inputs).keys.ifEmpty { inputs.keys }.toList()
+    }
+
     fun craftObservationCurrent(city: Settlement): Boolean {
         val snapshot = supply.craftObservation(city.id) ?: return false
         val observation = snapshot.inputKey as? CivSupplyObservation ?: return false
@@ -97,6 +105,8 @@ internal class CivsResidentSupplies(
                 val worker = current.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
                 val job = requireCraftJob(current, worker, jobId)
                 rejectIf(job.buildingId != assignment || job.cycle != cycle, "stale-delivery")
+                val selected = citizenPlan(current, worker) ?: throw CivsRejection("stale-delivery")
+                citizens.requireSelectedWorkDelivery(cityId, workerId, selected.token.copy(craftJobId = job.id), job)
                 citizens.requireStorageArrival(cityId, workerId, assignment)
                 val equipment = if (requireNotNull(CivsCarpentry.recipe(job)).stripping) CivsEquipment.strippedWithAxe(worker) else null
                 completed = CivsRules.deliver(current, current.owner, workerId, assignment, cycle, nextAt, at,
