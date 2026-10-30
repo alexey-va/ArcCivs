@@ -580,8 +580,11 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 val roll = java.util.concurrent.ThreadLocalRandom.current().nextInt(100)
                 val output = CivsWorksites.generatorOutput(roll, roll != 99 || Bukkit.createBlockData("minecraft:iron_ore").isPreferredTool(tool(worker)))
                 execution.discoveryAdmissions = 0
-                return work(worker, building, CivWorkApproach(standing), emptyList(), outputs = mapOf(output to 1L),
-                    status = "digging-mine", duration = CivsMineFallback.DURATION_MILLIS, toolUses = 1)
+                val cause = execution.blockedSections.toSortedMap().values.firstOrNull()
+                    ?: execution.lastDenial ?: denial
+                return CivsMineFallback.withCause(work(worker, building, CivWorkApproach(standing), emptyList(),
+                    outputs = mapOf(output to 1L), status = "digging-mine",
+                    duration = CivsMineFallback.DURATION_MILLIS, toolUses = 1), cause)
             }
         }
         return null

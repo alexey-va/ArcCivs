@@ -191,6 +191,7 @@ object CivsRules {
 
     fun deliveryInterval(city: Settlement, building: CivBuilding): Long =
         if (city.autonomy != null && isBuilder(city, building)) BUILDER_SESSION_INTERVAL
+        else if (building.type == BuildingType.SMELTERY) CivsResearch.smelteryWorkMillis(city)
         else deliveryInterval(effectiveWorkType(city, building))
 
     fun workRequired(type: BuildingType, targetLevel: Int): Int {
@@ -534,7 +535,7 @@ object CivsRules {
                 val credit = current.workCredit ?: 0
                 val room = minOf(MAX_BUILDER_WORK_CREDIT, current.workRequired - current.workDone) - credit
                 check(room > 0, "construction-credit-full")
-                construction = current.copy(workCredit = credit + minOf(BUILDER_SESSION_ROWS, room),
+                construction = current.copy(workCredit = credit + minOf(CivsResearch.builderSessionRows(city), room),
                     phase = if (current.phase == ConstructionPhase.CONSTRUCTING) ConstructionPhase.READY_TO_PLACE else current.phase)
             } else {
                 check(current.phase == ConstructionPhase.CONSTRUCTING, "construction-not-working")

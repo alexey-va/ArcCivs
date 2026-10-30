@@ -43,19 +43,41 @@ class CivsIdleEntranceTest : FunSpec({
                 }
             }
             // A valid exterior target six blocks from the old barrel needs the excluded door.
-            route(control, control.copy(z = control.z - 6)).failure shouldBe "no-path"
+            // A native no-path prefix can approach the wall, but cannot turn its end into arrival outside.
+            val oldTarget = control.copy(z = control.z - 6)
+            val blocked = route(control, oldTarget)
+            blocked.failure shouldBe null
+            blocked.continuation shouldBe true
+            blocked.continuationReason shouldBe "no-path"
+            val frontier = requireNotNull(blocked.endpoint)
+            (frontier == oldTarget.point()) shouldBe false
+            var oldAt = Location(world, origin.x, origin.y, origin.z)
+            repeat(600) { blocked.move(oldAt, 1.0) { true }?.let { next ->
+                citizenPacketSupported(world, next.point()) shouldBe true
+                citizenPacketBodyClear(world, next.point(), false) shouldBe true
+                citizenPacketStepClear(world, oldAt.point(), next.point(), false) shouldBe true
+                oldAt = next
+            } }
+            blocked.finished shouldBe true
+            blocked.failure shouldBe null
+            oldAt.point() shouldBe frontier
+            citizenArrived(oldAt, Location(world, oldTarget.x + .5, oldTarget.y.toDouble(), oldTarget.z + .5)) shouldBe false
             val anchor = citizenIdleAnchor(city, hut)
             anchor shouldBe hut.entrance
             citizenIdleAnchor(city.copy(autonomy = CivAutonomy()), hut) shouldBe anchor
             val target = anchor.copy(x = anchor.x - 6)
             val motion = route(anchor, target)
             motion.failure shouldBe null
+            motion.continuation shouldBe false
+            motion.continuationReason shouldBe null
+            motion.endpoint shouldBe target.point()
             var at = Location(world, origin.x, origin.y, origin.z)
             repeat(600) { motion.move(at, 1.0) { true }?.let { at = it } }
             motion.finished shouldBe true
             motion.failure shouldBe null
             at.x shouldBe target.x + .5
             at.z shouldBe target.z + .5
+            citizenArrived(at, Location(world, target.x + .5, target.y.toDouble(), target.z + .5)) shouldBe true
             citizenPacketBodyClear(world, CitizenPoint(at.x, at.y, at.z), false) shouldBe true
         }
     }

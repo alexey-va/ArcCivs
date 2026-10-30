@@ -12,8 +12,10 @@ internal data class CivTerrainSurface(
     fun at(x: Int, z: Int): CivTerrainSurfaceColumn? = columns[civsTerrainKey(x, z)]
 }
 
+/** Water metadata is opt-in survey evidence; a water column always remains non-natural. */
 internal data class CivTerrainSurfaceColumn(val groundY: Int, val natural: Boolean, val loaded: Boolean = true,
-    val topY: Int = groundY)
+    val topY: Int = groundY, val waterTopY: Int? = null, val waterBottomY: Int? = null,
+    val dirtPath: Boolean = false)
 
 /** Native capture covers [supportY, maxOf(surfaceY, groundY) + 2]. */
 internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int, val floorY: Int,
@@ -21,7 +23,8 @@ internal data class CivTerraformColumn(val x: Int, val z: Int, val groundY: Int,
     val supportY: Int = floorY - CivsAutonomousTerraform.MAXIMUM_CHANGE)
 
 internal data class CivTerraformDraft(val building: CivBuilding, val columns: List<CivTerraformColumn>,
-    val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess())
+    val route: List<CivPosition>, val groundY: Int, val access: CivAutonomousAccess = CivAutonomousAccess(),
+    val waterFoundations: List<CivWaterFoundation> = emptyList())
 
 /** Exact native state; [supportSafe] permits retaining a solid block, never changing it. */
 internal data class CivTerraformCell(val position: CivPosition, val data: String, val safe: Boolean,
@@ -32,6 +35,43 @@ internal fun civsTerrainKey(x: Int, z: Int): Long = (x.toLong() shl 32) xor (z.t
 internal data class CivTerraformOption(val building: CivBuilding, val effort: Long, val streetFrontage: Boolean = false)
 internal data class CivRouteSearchStats(val expanded: Int, val enqueued: Int, val peakQueue: Int,
     val discovered: Int, val elapsedMillis: Long, val outcome: String, val from: CivPosition, val to: CivPosition)
+
+internal fun civsGeneratedWaterInfrastructure(building: CivBuilding): Boolean =
+    building.type in setOf(BuildingType.WALL, BuildingType.GATE) && building.level == 1 && building.control == null &&
+        building.schematicId == "civs/infrastructure/v1/${building.type.name.lowercase()}/${building.id}"
+
+/** The generated palette has only stable full blocks; partial, falling and container blocks cannot become fill. */
+internal fun civsPaidWaterFoundationBlock(state: String): Boolean = state.substringBefore("[") in setOf(
+    "minecraft:stone", "minecraft:cobblestone", "minecraft:stone_bricks",
+    "minecraft:oak_log", "minecraft:spruce_log", "minecraft:dark_oak_log",
+)
+
+internal fun civsWaterFoundationColumns(building: CivBuilding, foundations: List<CivWaterFoundation>,
+    earthworks: List<CivPlanBlock> = emptyList()): Map<Long, CivWaterFoundation> {
+    if (foundations.isEmpty()) return emptyMap()
+    CivsRules.check(civsGeneratedWaterInfrastructure(building) && foundations.size <= 256, "invalid-plan")
+    val columns = foundations.associateBy { civsTerrainKey(it.x, it.z) }
+    CivsRules.check(columns.size == foundations.size && foundations.all { f ->
+        f.waterTopY.toLong() - f.bottomY in 1L..12L && f.floorY >= f.waterTopY &&
+            f.floorY.toLong() - f.bottomY in 1L..12L &&
+            building.bounds.contains(f.x, f.bottomY + 1, f.z) && building.bounds.contains(f.x, f.floorY, f.z)
+    } && earthworks.none { civsTerrainKey(it.position.x, it.position.z) in columns }, "invalid-plan")
+    return columns
+}
+
+/** Full saved plans must contain every paid fill cell; a runtime batch validates only its own immutable cells. */
+internal fun civsValidateWaterFoundations(plan: CivPlacementPlan, complete: Boolean = true) {
+    val columns = civsWaterFoundationColumns(plan.building, plan.terrain?.waterFoundations.orEmpty(), plan.terrain?.blocks.orEmpty())
+    if (columns.isEmpty()) return
+    val cells = plan.blocks.associateBy { it.position }
+    for (f in columns.values) for (y in f.bottomY + 1..f.floorY) {
+        val cell = cells[CivPosition(f.x, y, f.z)]
+        CivsRules.check(cell != null || !complete, "invalid-plan")
+        if (cell != null) CivsRules.check(civsPaidWaterFoundationBlock(cell.after) &&
+            (if (y <= f.waterTopY) cell.before.substringBefore("[") == "minecraft:water"
+                else cell.before in setOf("minecraft:air", "minecraft:cave_air", "minecraft:void_air")), "invalid-plan")
+    }
+}
 
 /** Finite cut/fill terraces and a graded, three-block-wide connection to an existing entrance. */
 internal object CivsAutonomousTerraform {
@@ -86,9 +126,25 @@ internal object CivsAutonomousTerraform {
     fun draft(city: Settlement, option: CivTerraformOption, surface: CivTerrainSurface,
         access: CivAutonomousAccess = CivAutonomousAccess(), additionalObstacles: List<CivBox> = emptyList(),
         infrastructureFloors: Map<Long, Int> = emptyMap(), reservedRoute: List<CivPosition>? = null,
-        preferredRoads: Set<Long> = emptySet(), inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
+        preferredRoads: Set<Long> = emptySet(), waterFoundations: List<CivWaterFoundation> = emptyList(),
+        inspectRoute: (CivRouteSearchStats) -> Unit = {}): CivTerraformDraft {
         val building = option.building
+        val waterColumns = civsWaterFoundationColumns(building, waterFoundations)
+        waterColumns.values.forEach { f ->
+            val native = surface.at(f.x, f.z) ?: throw CivsRejection("autonomy-terrain")
+            if (!native.loaded) throw CivsRejection("chunks-unloaded")
+            if (native.natural || native.waterTopY != f.waterTopY || native.waterBottomY != f.bottomY ||
+                infrastructureFloors[civsTerrainKey(f.x, f.z)] != f.floorY) throw CivsRejection("autonomy-terrain")
+        }
         val standing = access.standing(city, building.id)
+        val preservedDirtPaths = if (building.type != BuildingType.GATE) emptyMap() else buildMap<Long, Int> {
+            access.routes.values.flatten().forEach { feet -> for (dx in -1..1) for (dz in -1..1) {
+                val x = feet.x + dx; val z = feet.z + dz
+                val native = surface.at(x, z)
+                if (native?.loaded == true && native.dirtPath && abs(native.groundY.toLong() - (feet.y.toLong() - 1)) <= 1)
+                    put(civsTerrainKey(x, z), native.groundY)
+            } }
+        }
         if (!building.type.isInfrastructure && standing.values.any { CivsAutonomousGeometry.horizontalContains(building.bounds, it) })
             throw CivsRejection("building-overlap")
         val obstacles = (city.buildings + listOfNotNull(city.construction?.plannedBuilding))
@@ -109,6 +165,7 @@ internal object CivsAutonomousTerraform {
             }
         }.firstOrNull()) ?: throw CivsRejection("autonomy-no-path",
             mapOf("stage" to "route-search") + routeFailures.mapValues { it.value.toString() })
+        if (route.any { civsTerrainKey(it.x, it.z) in waterColumns }) throw CivsRejection("autonomy-no-path")
         val columns = linkedMapOf<Long, CivTerraformColumn>()
         val centerline = route.associateBy { civsTerrainKey(it.x, it.z) }
         val profile = roadProfile(route)
@@ -122,15 +179,18 @@ internal object CivsAutonomousTerraform {
             if (protected != null && ground != protected.y - 1) throw CivsRejection("autonomy-no-path",
                 mapOf("stage" to "retained-grade", "x" to "$x", "z" to "$z",
                     "floor" to "$ground", "retained" to "${protected.y - 1}"))
-            val retained = preserve || protected != null
+            val pathFloor = preservedDirtPaths[key]?.takeIf { abs(it.toLong() - ground) <= 1 }
+            val retained = preserve || protected != null || pathFloor != null
+            val targetGround = if (protected == null && pathFloor != null) pathFloor else ground
+            val targetFloor = if (pathFloor != null) targetGround else floor
             val control = building.control?.let { it.x == x && it.z == z } == true && city.building(building.id) != null
             if (!retained && !native.natural && !control) throw CivsRejection("autonomy-terrain")
             if (!retained && abs(native.groundY - ground) > MAXIMUM_CHANGE) throw CivsRejection("autonomy-slope")
-            if (floor <= surface.minHeight || ground + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
+            if (targetFloor <= surface.minHeight || targetGround + 2 >= surface.maxHeight) throw CivsRejection("outside-world")
             val existing = columns[key]
             // Existing entrances and roads keep their whole column, including support below the surface.
             if (existing?.preserve == true) return
-            columns[key] = CivTerraformColumn(x, z, ground, floor, native.topY, retained)
+            columns[key] = CivTerraformColumn(x, z, targetGround, targetFloor, native.topY, retained)
         }
         // Centreline first establishes the exact grade; shoulders follow the nearest route cell.
         // Both are interleaved by progress, so a worker never needs a future terrace to start work.
@@ -190,6 +250,7 @@ internal object CivsAutonomousTerraform {
         val floor = minOf(building.anchor.y, building.bounds.min.y - 1)
         for (x in building.bounds.min.x..building.bounds.max.x) for (z in building.bounds.min.z..building.bounds.max.z)
             if (building.type.isInfrastructure) {
+                if (civsTerrainKey(x, z) in waterColumns) continue // Paid blueprint cells own this complete foundation.
                 val ground = infrastructureFloors[civsTerrainKey(x, z)] ?: throw CivsRejection("invalid-plan")
                 add(x, z, ground, ground)
             } else add(x, z, building.anchor.y, floor)
@@ -197,7 +258,7 @@ internal object CivsAutonomousTerraform {
             (maxOf(it.surfaceY, it.groundY) + 2 - maxOf(surface.minHeight, it.floorY - MAXIMUM_CHANGE) + 1).toLong()
         }
         if (count > MAXIMUM_CAPTURE_CELLS) throw CivsRejection("autonomy-search-budget")
-        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access)
+        return CivTerraformDraft(building, columns.values.toList(), route, building.anchor.y, access, waterFoundations.toList())
     }
 
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
@@ -261,13 +322,16 @@ internal object CivsAutonomousTerraform {
                 !CivsAutonomousGeometry.horizontalContains(draft.building.bounds, CivPosition(x, ground, z)))
                 change(at(x, ground, z), "minecraft:grass_block[snowy=false]")
         }
-        val points = result.keys + draft.route
+        val waterColumns = civsWaterFoundationColumns(draft.building, draft.waterFoundations, result.values.toList())
+        val points = result.keys + draft.route + waterColumns.values.flatMap { f ->
+            listOf(CivPosition(f.x, f.bottomY + 1, f.z), CivPosition(f.x, f.floorY, f.z))
+        }
         if (points.isEmpty()) return CivTerraformPlan(draft.building.bounds, emptyList(), emptyList(), draft.groundY, 0, 0)
         val bounds = CivBox(CivPosition(points.minOf { it.x }, points.minOf { it.y }, points.minOf { it.z }),
             CivPosition(points.maxOf { it.x }, points.maxOf { it.y }, points.maxOf { it.z }))
         val blocks = result.values.toList()
         return CivTerraformPlan(bounds, blocks, draft.route.toList(), draft.groundY,
-            blocks.count { air(it.after) }, blocks.count { !air(it.after) })
+            blocks.count { air(it.after) }, blocks.count { !air(it.after) }, draft.waterFoundations.takeIf { it.isNotEmpty() }?.toList())
     }
 
     /** Three-wide road surface. Equal-distance shoulders use the lower grade, never a raised curb. */

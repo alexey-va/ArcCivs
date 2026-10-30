@@ -341,7 +341,7 @@ internal class CivsBuildingRequests(
                             requireNotNull(cells), executor, building, adminPlacement = sitePlan.adminPlacement)
                     else if (city.autonomy != null && building.phase == BuildingPhase.SITE)
                         autonomousPlacement.prepareExisting(city, CivBlueprint(target, city.worldId, snapshot,
-                            requireNotNull(cells), emptyList(), bytes)).thenApply { it.terrain }
+                            requireNotNull(cells), emptyList(), bytes), sitePlan.terrain?.waterFoundations.orEmpty()).thenApply { it.terrain }
                     else CompletableFuture.completedFuture(sitePlan.terrain)
                     terrain.thenCompose { preparation -> world.capture(city.id, city.owner, city.worldId,
                         target, requireNotNull(cells), building, preparation, adminPlacement = sitePlan.adminPlacement) }

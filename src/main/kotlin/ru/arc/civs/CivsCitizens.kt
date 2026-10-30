@@ -630,6 +630,17 @@ class CivsCitizens(
         return true
     }
 
+    /** Capacity observations can wake only this exact accepted shipment; delivery still proves actual arrival. */
+    internal fun retryCargoDelivery(cityId: UUID, workerId: UUID, shipmentId: UUID): Boolean {
+        checkCitizenMainThread()
+        val actor = actors[workerId]?.takeIf { it.cityId == cityId && it.npc.isValid } ?: return true
+        if (actor.plan.courier?.let { it.carrying && it.cargo.id == shipmentId } != true) return true
+        // A completed future may still await the actor drain. Keep its capacity wake until failDelivery has installed the pause.
+        if (actor.cycle.phase == CitizenPhase.DELIVERING) return false
+        if (actor.cycle.phase == CitizenPhase.PAUSED && actor.cycle.reason == "storage-full") actor.cycle.resume()
+        return true
+    }
+
     /** Rechecked by the item receipt owner after waiting for another city commit. */
     internal fun requireStorageArrival(cityId: UUID, workerId: UUID, buildingId: UUID) {
         checkCitizenMainThread()

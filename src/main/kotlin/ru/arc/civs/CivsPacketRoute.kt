@@ -81,6 +81,8 @@ internal class CitizenPacketRoute(
         private set
     var continuation = false
         private set
+    var continuationReason: String? = null
+        private set
     internal var blockedPositions: List<CivPosition> = emptyList()
         private set
     var waitingForCollision = false
@@ -245,6 +247,7 @@ internal class CitizenPacketRoute(
         }
         searching = false
         continuation = result.continuation
+        continuationReason = result.continuationReason
         preparationPhase = if (continuation) "ready-segment" else "ready"
         asyncCancellation = null
         releaseSearch()
@@ -290,6 +293,10 @@ internal class CitizenPacketRoute(
         var remaining = stride
         var moved = false
         var earned = 0.0
+        fun finishSegment() {
+            if (continuation && forwardProgress + earned <= .000001) fail("no-progress")
+            else finished = true
+        }
         var usedGravity = false
         var previousDirection: org.bukkit.util.Vector? = null
         var steppedStair = false
@@ -299,7 +306,7 @@ internal class CitizenPacketRoute(
         for (segment in 0 until 8) {
             if (segment > 0) straightenCorridor(CitizenPoint(point.x, point.y, point.z))
             var entry = path.firstOrNull()
-            if (entry == null) { finished = true; break }
+            if (entry == null) { finishSegment(); break }
             if (!entry.profileChecked && entry.profileTerrain == null) {
                 entry.profileChecked = true
                 prepareStepProfile(entry, point)
@@ -395,7 +402,7 @@ internal class CitizenPacketRoute(
                 abs(point.x - to.x) < .000001 && abs(point.z - to.z) < .000001 &&
                 nextEntry != null && nextEntry.action in listOf(CitizenRouteAction.WALK, CitizenRouteAction.STEP) &&
                 nextEntry.point.y <= to.y + .0001) path.removeFirst()
-            if (path.isEmpty()) { finished = true; break }
+            if (path.isEmpty()) { finishSegment(); break }
             if (remaining < .000001 || advance < .000001) break
         }
         if (!moved) {

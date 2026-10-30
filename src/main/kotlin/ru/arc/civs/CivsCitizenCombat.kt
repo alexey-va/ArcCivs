@@ -107,11 +107,12 @@ internal class CivsCitizenCombat(
         if (actor.plan.type != BuildingType.GUARD_TOWER || actor.plan.idleReason != null || actor.attacker != null) return false
         actor.cycle.deferWork(now)
         val home = worker.assignment?.let(city::building) ?: return false
+        val radius = CivsResearch.patrolRadius(city).toDouble()
         val posts = city.buildings.filter { it.phase == BuildingPhase.ACTIVE && it.type in setOf(BuildingType.ROAD, BuildingType.GATE) }
             .flatMap { building -> building.transit.orEmpty().let { cells ->
                 if (cells.isEmpty()) listOf(building.entrance) else listOf(cells.first(), cells[cells.size / 2], cells.last())
             } }
-            .filter { it.point().distanceSquared(home.entrance.point()) <= 32.0 * 32.0 }
+            .filter { it.point().distanceSquared(home.entrance.point()) <= radius * radius }
             .distinct().sortedWith(compareBy<CivPosition> { it.x }.thenBy { it.z }).let { points ->
                 if (points.size <= 4) points else listOf(0, points.size / 3, points.size * 2 / 3, points.lastIndex).map(points::get)
             }

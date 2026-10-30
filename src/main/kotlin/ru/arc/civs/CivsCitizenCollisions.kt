@@ -55,7 +55,8 @@ internal class CivsCitizenCollisions(
         for (x in kotlin.math.floor(to.x - halfWidth).toInt()..kotlin.math.floor(to.x + halfWidth).toInt())
             for (z in kotlin.math.floor(to.z - halfWidth).toInt()..kotlin.math.floor(to.z + halfWidth).toInt())
                 if (!citizenRoutePointAllowed(city, allowed, CivPosition(x, kotlin.math.floor(to.y).toInt(), z), routes.routeMine(actor, city))) return false
-        return citizenControlStepClear(city, from.point(), to.point())
+        return citizenControlStepClear(city, from.point(), to.point()) &&
+            actor.mineVisit?.passage?.allows?.invoke(to.point()) != false
     }
 
     fun residentMoveAllowed(actor: CitizenActor, from: Location, to: Location): Boolean =
@@ -214,6 +215,7 @@ internal class CivsCitizenCollisions(
 
     /** An enclosed body may relocate, but its injury, cargo and observed-work receipts stay untouched. */
     private fun recoverTerrainOverlap(actor: CitizenActor, city: Settlement, now: Long): Boolean {
+        if (actor.mineVisit != null) return false
         val clock = recoveryClock()
         if (runtime.recoveryBudget == 0 || actor.nextRecoveryAt?.let { clock < it } == true ||
             life.residentLifePending(actor) || actor.supplyPickup != null || logistics.collectedPending(actor) ||

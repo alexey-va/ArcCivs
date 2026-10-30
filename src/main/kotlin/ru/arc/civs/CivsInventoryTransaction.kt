@@ -58,7 +58,8 @@ data class CivResidentTransfer(val playerId: UUID, val workerId: UUID,
 data class CivStoragePlan(val inventoryAfter: CivInventory, val changes: List<CivInventorySlotChange>,
     val playerDebit: CivPlayerDebit? = null, val residentTransfer: CivResidentTransfer? = null,
     val worldChanges: List<CivPlanBlock>? = null, val mine: CivMineReceipt? = null,
-    val autoSupplyBuildingId: UUID? = null)
+    val autoSupplyBuildingId: UUID? = null, val cargoDropoff: CivCargoDropoffReceipt? = null,
+    val cargoPickup: CivCargoPickupReceipt? = null)
 data class CivStorageSupplyPlan(val plan: CivStoragePlan, val result: CivsSupplyResult)
 data class CivResidentTransferPlan(val plan: CivStoragePlan, val worker: CivWorker)
 data class CivCorpseTransferPlan(val worker: CivWorker, val transfer: CivResidentTransfer?)
@@ -80,6 +81,10 @@ data class CivInventoryTransaction(
     val autoSupplyBuildingId: UUID? = null,
     /** Exact internal container move; absent in all older receipts. */
     val containerRelocation: CivContainerRelocation? = null,
+    /** Native cargo conservation and destination proof; absent in every historical receipt. */
+    val cargoDropoff: CivCargoDropoffReceipt? = null,
+    /** Exact native depot evacuation debit; absent from historical and ordinary pickups. */
+    val cargoPickup: CivCargoPickupReceipt? = null,
 ) {
     fun validated(): CivInventoryTransaction = apply {
         require(id != null && cityId != null && after != null && changes != null)
@@ -88,7 +93,7 @@ data class CivInventoryTransaction(
         require(after.inventory != null || resurrection != null || collected != null || forestry != null || upkeep != null ||
             autonomousVisual != null || containerRelocation != null || after.autonomy != null && residentTransfer != null)
         require(listOfNotNull(playerDebit, residentTransfer, resurrection, collected, forestry, upkeep, autonomousVisual, mine,
-            autoSupplyBuildingId, containerRelocation).size <= 1)
+            autoSupplyBuildingId, containerRelocation, cargoDropoff, cargoPickup).size <= 1)
         containerRelocation?.let {
             require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
@@ -119,6 +124,14 @@ data class CivInventoryTransaction(
                 it.work.forestry == null && it.work.upkeep == null)
             if (it.workerBefore != null) require(changes.isEmpty() && worldChanges.orEmpty().isEmpty())
             it.validated(after)
+        }
+        cargoDropoff?.let {
+            require(worldChanges.isNullOrEmpty())
+            it.validated(after, changes)
+        }
+        cargoPickup?.let {
+            require(worldChanges.isNullOrEmpty())
+            it.validated(after, changes)
         }
         residentTransfer?.validated(after)
         require(worldChanges.orEmpty().size <= 128 && worldChanges.orEmpty().map { it.position }.distinct().size == worldChanges.orEmpty().size)

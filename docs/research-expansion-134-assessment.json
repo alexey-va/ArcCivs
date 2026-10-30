@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "title": "ArcCivs research expansion and supported infrastructure: prospective economic assessment",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "All figures are scenarios and not measured per-city throughput. The four existing research IDs, costs, durations and accepted v1/v2 terms remain unchanged.",
+    "Twelve proposed new one-time research projects have tier durations 30, 60 and 120 observed work sessions of 60 seconds per branch. Four branches require 840 nominal active minutes; old four add 21 minutes. Sleep, hunger, travel, staffing, funding and inactive chunks extend the time.",
+    "New project materials are debited once via existing inventory receipts. New Auto project demand must not trigger its own automatic material grant; ordinary courier supply remains. Existing Auto grants for construction, food and other workloads remain and may indirectly supply shared stocks; historical item provenance is not tracked.",
+    "Physical total one-time new project item consumption per city is listed separately by material; item value is not converted into currency. Legacy closed stock uses its existing nativeCost mapping and must retain exact accepted cost through migration.",
+    "At most one new tier per branch is effective; effects do not stack. Builder credits 64 to 80/96/128 rows per observed session; native placement caps and per-block material debit stay unchanged. Smeltery intervals 60 to 54/48/42 seconds give ideal exclusive-recipe throughput multipliers 1.111111/1.25/1.428571 before travel, staffing, inputs and capacity.",
+    "Meal bonuses alter hunger restored or regeneration threshold, potentially reducing future bread use; amounts are not coins. Watch radii 32 to 40/48/64 affect route choice and may alter exposure, resident losses and mob loot; realized change is unknown.",
+    "For 1/10/16 cities, assume 0.25/1/4 active hours per city-day as illustrative low/base/high. In the ideal fully staffed and continuously supplied Smeltery, cycles per city-day before are 15/60/240 and at tier III about 21.43/85.71/342.86. Recipes are alternatives, not additive; their exact input and output remain unchanged.",
+    "Current EconomyShopGUI SELL and AutoSellChests remain current observed alternatives; the owner plans SELL removal and a contracts transition. Neither route is assumed to monetize every item, and no item-to-Vault exchange rate is invented.",
+    "External rewards, player XP, premium tokens and direct Vault payments do not change. Expanded item throughput and reduced consumption may indirectly affect current sales or future contracts; adoption, demand and conversion are unknown.",
+    "Standing individual projects retain saved project id, original price, required work, funding, progress and pause; v1/v2 remain valid and legacy v3 migrates to validated v4 with the existing native mapping. Retries must not debit twice.",
+    "Water foundation cells and open gate leaves are normal paid construction items. Direct block/item quantities and any existing Auto demand top-ups may change with terrain and route; no free foundation or new grant path is introduced."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "proposed_new_projects": {
+    "BUILDING_METHODS_I": {
+      "COBBLESTONE": 64,
+      "BREAD": 8
+    },
+    "BUILDING_METHODS_II": {
+      "COBBLESTONE": 128,
+      "IRON_INGOT": 8
+    },
+    "BUILDING_METHODS_III": {
+      "COBBLESTONE": 256,
+      "IRON_INGOT": 16,
+      "GLASS": 16
+    },
+    "FURNACE_PRACTICE_I": {
+      "RAW_IRON": 8,
+      "CHARCOAL": 8
+    },
+    "FURNACE_PRACTICE_II": {
+      "RAW_IRON": 16,
+      "CHARCOAL": 16,
+      "GLASS": 8
+    },
+    "FURNACE_PRACTICE_III": {
+      "RAW_IRON": 32,
+      "CHARCOAL": 32,
+      "GLASS": 16
+    },
+    "COMMUNAL_MEALS_I": {
+      "BREAD": 16,
+      "COBBLESTONE": 32
+    },
+    "COMMUNAL_MEALS_II": {
+      "BREAD": 32,
+      "COBBLESTONE": 64,
+      "GLASS": 8
+    },
+    "COMMUNAL_MEALS_III": {
+      "BREAD": 64,
+      "COBBLESTONE": 128,
+      "GLASS": 16
+    },
+    "CITY_WATCH_I": {
+      "IRON_INGOT": 8,
+      "COBBLESTONE": 64
+    },
+    "CITY_WATCH_II": {
+      "IRON_INGOT": 16,
+      "COBBLESTONE": 128,
+      "GLASS": 8
+    },
+    "CITY_WATCH_III": {
+      "IRON_INGOT": 32,
+      "COBBLESTONE": 256,
+      "GLASS": 16
+    }
+  },
+  "new_project_total_items": {
+    "COBBLESTONE": 1120,
+    "BREAD": 120,
+    "IRON_INGOT": 80,
+    "GLASS": 88,
+    "RAW_IRON": 56,
+    "CHARCOAL": 56
+  },
+  "duration_sessions_by_tier": [
+    30,
+    60,
+    120
+  ],
+  "live_ledger_reference": {
+    "captured_at_epoch_ms": 1793350965345,
+    "hours": 168,
+    "records": 4443,
+    "operations": 18478,
+    "players": 25,
+    "mixed_currency_totals_used": false,
+    "vault": {
+      "mint": 32602087.08493799,
+      "burn": 35237659.44,
+      "unclassified_operations": 1999,
+      "classified_amount_ratio": 0.23010521913292858
+    },
+    "tokens": {
+      "mint": 137,
+      "burn": 36,
+      "unclassified_operations": 8,
+      "classified_amount_ratio": 0.791907514450867
+    },
+    "coverage_note": "Network-shared server-player shards; classifications have substantial unknown callers and totals do not establish new research throughput or ordinary-player income."
+  },
+  "conclusion": "Keep old accepted and future four base terms, add real receipt-funded optional branches with bounded effects, and measure actual item flows and player-facing results after activation; unknown indirect monetary effects are not claimed zero."
+}

@@ -203,7 +203,8 @@ internal class CivsResidentNavigation(
             job.capture = null
             // A route or permission failure says nothing about other routes' captured shapes.
             // Native change events, local blocked-step refresh and the bounded TTL own invalidation.
-            if (job.route.failure == "no-path") terrain.refreshObstacles(job.route.worldId, job.route.blockedPositions)
+            if (job.route.failure == "no-path" || job.route.continuationReason == "no-path")
+                terrain.refreshObstacles(job.route.worldId, job.route.blockedPositions)
             job.terrain.clear()
             iterator.remove()
         }

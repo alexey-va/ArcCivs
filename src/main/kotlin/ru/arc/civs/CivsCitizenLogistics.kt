@@ -100,7 +100,11 @@ internal class CivsCitizenLogistics(
     fun travelForSupplies(actor: CitizenActor, city: Settlement, world: World, target: CivPosition, now: Long,
                                   resumeWork: Boolean = false) {
         runtime.statuses[actor.workerId] = if (actor.outputReturn != null) "returning-output" else "moving-to-storage"
-        if (now < actor.supplyRetryAt) { runtime.statuses[actor.workerId] = "waiting-materials"; return }
+        if (now < actor.supplyRetryAt) {
+            runtime.statuses[actor.workerId] = if (actor.outputReturn != null &&
+                actor.supplyFailure == (actor.outputReturn to "storage-full")) "storage-full" else "waiting-materials"
+            return
+        }
         if (routes.arrivedAt(actor, city, world, target)) {
             routes.cancelRoute(actor)
             citizenControlBuilding(city, target)?.let { beginSupplies(actor, it.id, now, resumeWork) }
@@ -147,8 +151,8 @@ internal class CivsCitizenLogistics(
             val error = (completion.error as? CompletionException)?.cause ?: completion.error
             if (error != null) {
                 actor.foodSource = null
-                actor.supplyRetryAt = now + 1_000
                 val reason = CivsDiagnostics.rejection(error)?.reason ?: "unexpected-failure"
+                actor.supplyRetryAt = now + if (completion.pickup.returnOutputs && reason == "storage-full") 5_000 else 1_000
                 if (completion.pickup.returnOutputs && error is CivsRejection && reason == "storage-full" &&
                     actor.outputReturn == completion.pickup.buildingId) {
                     // No transfer was admitted; allow fresh useful work to replace an idle detour plan.
@@ -366,7 +370,13 @@ internal class CivsCitizenLogistics(
                     couriers.releaseCourierSource(actor, now)
                     actor.cycle.failPickup((error as? CivsRejection)?.reason, now)
                 }
-                else actor.cycle.failDelivery((error as? CivsRejection)?.reason, now)
+                else {
+                    val rejection = error as? CivsRejection
+                    val delay = rejection?.values?.get("retry_millis")?.toLongOrNull()
+                        ?.takeIf { rejection?.reason == "storage-full" && actor.plan.courier?.carrying == true }
+                        ?: 5_000L
+                    actor.cycle.failDelivery(rejection?.reason, now, delay)
+                }
                 if (error !is CivsRejection) runtime.logFailure(actor, "delivery", error)
             } else {
                 val worker = completion.city?.workers?.find { it.id == actor.workerId }

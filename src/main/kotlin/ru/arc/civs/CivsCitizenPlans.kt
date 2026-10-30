@@ -85,7 +85,7 @@ internal fun citizenPlan(city: Settlement, worker: CivWorker, courier: CivCourie
         storage, workplace, workType,
         if (workType == BuildingType.GUARD_TOWER || workType == BuildingType.TAVERN) Long.MAX_VALUE
         else if (builder && (order?.payment != null || city.autonomy != null)) CivsRules.BUILDER_SESSION_INTERVAL
-        else workType?.let(CivsRules::deliveryInterval) ?: 0,
+        else assigned?.let { CivsRules.deliveryInterval(city, it) } ?: 0,
         reason, builder || city.inventory != null || collecting,
         autonomousWork = assigned?.takeIf { autonomous && reason == null && it.type != BuildingType.FORESTER &&
             (CivsRules.resource(it.type) != null || industry != null || it.type == BuildingType.UNIVERSITY) }, industryWork = industry)

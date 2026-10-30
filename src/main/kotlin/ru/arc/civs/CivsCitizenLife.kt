@@ -170,7 +170,7 @@ internal class CivsCitizenLife(
             if (future.isCompletedExceptionally || future.isCancelled) return failed("delivery-${tavernFutureFailure(future)}")
             val saved = future.join()
             val fed = saved.workers.firstOrNull { it.id == guest.workerId } ?: return failed("delivered-guest-missing")
-            visit.plan = CivsResidentLife.mealPlan(saved, fed, visit.building.id, residentFoods) ?: return failed("delivered-meal-unavailable")
+            visit.plan = CivsResidentLife.mealPlan(saved, fed, visit.building.id, residentFoods, accepted = visit.plan) ?: return failed("delivered-meal-unavailable")
             visit.servedAt = now
             visit.arrivedAt = now
             CivsDiagnostics.event("tavern_meal_served", "city" to city.id, "keeper" to worker.id,
@@ -348,11 +348,13 @@ internal class CivsCitizenLife(
             }
             val seat = tavern?.let { diningSeat(actor, it, world) }
             val definition = source?.material?.let(residentFoods::definition)
-            val order = if (seat != null && tavern != null && source != null && definition != null)
+            val researchNutrition = CivsResearch.breadNutrition(city).takeIf { source?.material == "BREAD" }
+            val nutrition = definition?.let { maxOf(it.nutrition, researchNutrition ?: it.nutrition) }
+            val order = if (seat != null && tavern != null && source != null && definition != null && nutrition != null)
                 CivResidentMeal(city.revision, worker.id, tavern.id, worker.life?.meals ?: 0L,
                     if (source.material == "BREAD") CivResidentMealSource.CARRIED_BREAD else CivResidentMealSource.CARRIED_FOOD,
-                    minOf(CivsResidentFood.BATCH, (15 - CivsResidents.hunger(worker) + definition.nutrition - 1) / definition.nutrition),
-                    source.material, definition.nutrition, definition.consumeMillis) else null
+                    minOf(CivsResidentFood.BATCH, (15 - CivsResidents.hunger(worker) + nutrition - 1) / nutrition),
+                    source.material, nutrition, definition.consumeMillis, researchNutrition) else null
             val plan = order ?: CivsResidentLife.mealPlan(city, worker, fallback, residentFoods) ?: return false
             val building = city.building(plan.buildingId) ?: return false
             val target = seat?.approach?.takeIf { order != null } ?: CivPosition(at.blockX, at.blockY, at.blockZ)
@@ -365,7 +367,7 @@ internal class CivsCitizenLife(
                 foodSource = source.takeIf { order != null })
             actor.mealVisit = visit
         } else if (visit.foodSource == null || visit.servedAt != null) {
-            val current = CivsResidentLife.mealPlan(city, worker, visit.plan.buildingId, residentFoods)
+            val current = CivsResidentLife.mealPlan(city, worker, visit.plan.buildingId, residentFoods, accepted = visit.plan)
             if (current == null || visit.plan.copy(cityRevision = current.cityRevision) != current) {
                 stopMeal(actor)
                 return false

@@ -70,6 +70,28 @@ internal class CivsContainerIndex(
         return entries.getValue(city.id).positions
     }
 
+    /** Bounded coverage proof for city-wide stock policies; never loads or rescans a chunk. */
+    fun covered(city: Settlement, maximumChunks: Int = 256): Boolean {
+        val entry = entries[city.id] ?: return false
+        if (entry.geometry != Geometry(city.worldId, city.buildings.map(CivBuilding::bounds),
+                city.buildings.mapNotNull(CivBuilding::control), city.inventory?.containers.orEmpty())) return false
+        val world = server.getWorld(city.worldId) ?: return false
+        val checked = hashSetOf<ChunkKey>()
+        fun covered(x: Int, z: Int): Boolean {
+            val key = ChunkKey(city.worldId, x, z)
+            if (!checked.add(key)) return true
+            return checked.size <= maximumChunks && key in entry.chunks && key in chunks && world.isChunkLoaded(x, z)
+        }
+        for (point in entry.geometry.controls + entry.geometry.registered)
+            if (!covered(point.x shr 4, point.z shr 4)) return false
+        // Long roads and perimeter pieces are not implicit storage. Explicit controls/registered holders above still count.
+        for (building in city.buildings.filter { it.phase == BuildingPhase.ACTIVE && !it.type.isInfrastructure })
+            for (x in (building.bounds.min.x shr 4)..(building.bounds.max.x shr 4))
+                for (z in (building.bounds.min.z shr 4)..(building.bounds.max.z shr 4))
+                    if (!covered(x, z)) return false
+        return true
+    }
+
     /** Contents events start from chunk membership, never a scan across every city. */
     fun citiesAt(worldId: UUID, position: CivPosition): Set<UUID> =
         citiesInChunk(worldId, position.x shr 4, position.z shr 4).filterTo(linkedSetOf()) { id ->

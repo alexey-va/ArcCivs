@@ -173,6 +173,29 @@ class CivsWorldTest : FunSpec({
         }
     }
 
+    test("autonomous route validation reports a partial no-path as unreachable rather than a search budget") {
+        worldScenario(collisionWorld = true) { s ->
+            val from = CivPosition(0, 64, 0)
+            val building = worldBuilding(worldBox(8, 9)).copy(entrance = CivPosition(4, 64, 0))
+            val depot = worldBuilding(worldBox(-5, -3)).copy(phase = BuildingPhase.ACTIVE)
+            val city = worldCity(s.world.uid, depot)
+            s.cities += city
+            for (x in 3..5) for (z in -1..1) if (x != 4 || z != 0)
+                for (y in 64..67) s.world.getBlockAt(x, y, z).type = Material.STONE
+            val probe = CitizenPacketRoute(s.world, from.location(s.world), building.entrance.location(s.world),
+                { true }, { _, _ -> true }, { 1.0 })
+            // Direct expand() advances one native capture operation, not one complete search slice.
+            repeat(2_000) { if (probe.searching) probe.expand() }
+            probe.searching shouldBe false
+            probe.continuationReason shouldBe "no-path"
+            probe.endpoint shouldBe CitizenPoint(2.5, 64.0, .5)
+            val validation = s.subject.autonomousRoute(city, building, from, java.util.concurrent.Executor(Runnable::run))
+            repeat(100) { if (!validation.isDone) s.scheduler.tick() }
+            failureReason(validation) shouldBe "autonomy-no-path"
+            s.world.getBlockAt(3, 64, 0).type shouldBe Material.STONE
+        }
+    }
+
     test("autonomous revalidation accepts changed stair states without mutating terrain") {
         worldScenario { s ->
             val position = CivPosition(0, 64, 0)

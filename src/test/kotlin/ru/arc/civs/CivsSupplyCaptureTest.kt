@@ -115,6 +115,40 @@ class CivsSupplyCaptureTest : FunSpec({
         }
     }
 
+    test("surplus alone requires coverage beyond known holders without rejecting ordinary local courier evidence") {
+        supplyCaptureScenario { h ->
+            val complete = h.capture()
+            complete.complete shouldBe true
+            h.storage.supplyCaptureCurrent(h.city, complete, requireComplete = true) shouldBe true
+            h.city = h.city.copy(buildings = h.city.buildings.map {
+                if (it.id == h.warehouse.id) it.copy(bounds = CivBox(it.bounds.min, it.bounds.max.copy(x = 32))) else it
+            })
+            val partial = h.capture()
+            partial.stores.values.all { it.unavailable == 0 } shouldBe true
+            partial.complete shouldBe false // The known loaded holders alone cannot prove the rest of the building empty.
+            h.storage.supplyCaptureCurrent(h.city, partial) shouldBe true
+            h.storage.supplyCaptureCurrent(h.city, partial, requireComplete = true) shouldBe false
+        }
+    }
+
+    test("a registered outside chest is included once and its events invalidate only the city-wide stock proof") {
+        supplyCaptureScenario { h ->
+            val registered = CivPosition(3, 64, 0)
+            h.city = h.city.copy(inventory = requireNotNull(h.city.inventory).copy(containers = listOf(registered)))
+            h.nodes.getValue(registered).contents[0] = ItemStack(Material.OAK_LOG, 64)
+            val first = h.capture()
+            first.complete shouldBe true
+            first.plainStock shouldBe mapOf("OAK_LOG" to 64L)
+            h.nodes.getValue(registered).reads shouldBe 1
+            h.storage.supplyCaptureCurrent(h.city, first, requireComplete = true) shouldBe true
+            h.storage.supplyPickup(h.pickup(registered))
+            h.storage.supplyCaptureCurrent(h.city, first) shouldBe true
+            h.storage.supplyCaptureCurrent(h.city, first, requireComplete = true) shouldBe false
+            val next = h.capture()
+            h.storage.supplyCaptureCurrent(h.city, next, requireComplete = true) shouldBe true
+        }
+    }
+
     test("an event between native reads rejects only the changed building in the completed capture") {
         supplyCaptureScenario { h ->
             val cursor = h.storage.startSupplyCapture(h.city)

@@ -63,7 +63,11 @@ internal class CivsAutonomousPlacement(
                     blueprints.prepare(city.style, type, type.maxLevel, id, city.worldId, CivPosition(0, 0, 0), 2, 0)
                 first.thenCombine(last) { x, y -> x.building to y.building }
             }
-            val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall)) { access, surface -> access to surface }
+            val frame = CivsSettlementLayout.frame(city)
+            val waterColumns = (listOf(frame.core) + frame.gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
+                (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
+            }
+            val inputs = loadAccess(city).thenCombine(world.autonomousHeightField(city, hall, hall, waterColumns)) { access, surface -> access to surface }
             CompletableFuture.allOf(*templates.values.toTypedArray()).thenCombineAsync(inputs, { _, input ->
                 CivsSettlementPlans.prepare(city, templates.mapValues { it.value.join() }, input.second, input.first)
             }, executor)
@@ -79,7 +83,8 @@ internal class CivsAutonomousPlacement(
         admit(Search(city, plot.building.type, 1, plot.building.id, reservation = plot))
 
     /** Legacy, player-pinned SITE plans retain their exact anchor and receive the same durable earthworks. */
-    fun prepareExisting(city: Settlement, blueprint: CivBlueprint): CompletableFuture<CivAutonomousDesign> {
+    fun prepareExisting(city: Settlement, blueprint: CivBlueprint,
+        waterFoundations: List<CivWaterFoundation> = emptyList()): CompletableFuture<CivAutonomousDesign> {
         val previous = city.building(blueprint.building.id)
         if (previous?.phase != BuildingPhase.SITE || previous.entrance != blueprint.building.entrance ||
             previous.rotation != blueprint.building.rotation)
@@ -90,7 +95,8 @@ internal class CivsAutonomousPlacement(
             it.building.entrance == blueprint.building.entrance }
         return admit(Search(city, blueprint.building.type, blueprint.building.level, blueprint.building.id, blueprint, previous,
             infrastructure = blueprint.building.type.isInfrastructure, reservation = reserved,
-            pinnedRoute = adopted?.routes?.get(blueprint.building.id.toString())))
+            pinnedRoute = adopted?.routes?.get(blueprint.building.id.toString()),
+            pinnedWaterFoundations = waterFoundations.toList()))
     }
 
     private fun admit(job: Search): CompletableFuture<CivAutonomousDesign> = synchronized(jobs) {
@@ -134,7 +140,8 @@ internal class CivsAutonomousPlacement(
     private inner class Search(val city: Settlement, val type: BuildingType, val level: Int, val buildingId: UUID,
         private val pinned: CivBlueprint? = null, private val previous: CivBuilding? = null,
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
-        private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null) {
+        private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null,
+        private val pinnedWaterFoundations: List<CivWaterFoundation> = emptyList()) {
         private val adopted = CivsSettlementPlans.current(city)
         @Volatile private var resolvedCatalogEntry: String? = catalogEntry
         @Volatile private var familiesTried = emptyList<String>()
@@ -169,6 +176,9 @@ internal class CivsAutonomousPlacement(
             "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples,
             "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted)
 
+        private fun frame(): CivSettlementFrame = CivsPerimeterCrossings.adapt(
+            CivsSettlementLayout.frame(city), access.routes.values + adopted?.routes.orEmpty().values, access.infrastructure)
+
         fun start() {
             phase = "access"
             await(loadAccess(city)) { snapshot -> access = snapshot; catalog() }
@@ -179,13 +189,16 @@ internal class CivsAutonomousPlacement(
             if (infrastructure && pinned == null) {
                 val hall = city.buildings.first { it.type == BuildingType.TOWN_HALL }
                 phase = "surface"
-                await(world.autonomousHeightField(city, hall, hall)) { field ->
+                val waterColumns = (frame().wallObstacles + frame().gates.map { it.passage }).flatMapTo(hashSetOf()) { box ->
+                    (box.min.x..box.max.x).flatMap { x -> (box.min.z..box.max.z).map { z -> civsTerrainKey(x, z) } }
+                }
+                await(world.autonomousHeightField(city, hall, hall, waterColumns)) { field ->
                     surface = field; columns = field.columns.size
                     val pavingRoutes = (access.routes.filterKeys { id -> city.building(id)?.type?.isInfrastructure == false }.values +
                         adopted?.routes.orEmpty().values).distinct()
                     val reservedCity = city.copy(buildings = city.buildings + adopted?.plots.orEmpty()
                         .filter { city.building(it.building.id) == null }.map { it.building.copy(bounds = it.envelope) })
-                    val plan = CivsSettlementLayout.infrastructure(reservedCity, CivsSettlementLayout.frame(city), field,
+                    val plan = CivsSettlementLayout.infrastructure(reservedCity, frame(), field,
                         (access.routes.values + pavingRoutes).distinct(), access.infrastructure, pavingRoutes, access.routes.values)
                     rejections.putAll(plan.rejected)
                     blockers = plan.blockers
@@ -216,7 +229,8 @@ internal class CivsAutonomousPlacement(
                 if (infrastructure) pieces = mapOf(pinned.building.id to CivSettlementPiece(pinned.building.id,
                     pinned.building.type, pinned.building.bounds, pinned.building.entrance,
                     pinned.cells.filterNot { it.isBarrier }.map { CivSettlementBlock(
-                        CivPosition(it.position.x, it.position.y, it.position.z), it.blockData) }, pinned.building.transit.orEmpty()))
+                        CivPosition(it.position.x, it.position.y, it.position.z), it.blockData) }, pinned.building.transit.orEmpty(),
+                    pinnedWaterFoundations))
                 candidates = listOf(CivsAutonomousCandidate(pinned.building.copy(bounds =
                     CivsAutonomousGeometry.futureBounds(city, pinned.building))))
                 captureSurface()
@@ -242,7 +256,7 @@ internal class CivsAutonomousPlacement(
                 city.worldId, CivPosition(0, 0, 0), 2, 0)
             await(current.thenCombineAsync(future, { a, b -> a.building to b.building }, executor)) { pair ->
                 templates = pair
-                candidates = CivsSettlementLayout.candidates(city, pair.first, pair.second, access)
+                candidates = CivsSettlementLayout.candidates(city, pair.first, pair.second, access, frame())
                 frontageCandidates = candidates.size
                 if (candidates.isEmpty()) candidates = infill()
                 captureSurface()
@@ -277,7 +291,7 @@ internal class CivsAutonomousPlacement(
             val seen = candidates.mapTo(hashSetOf()) { it.building.anchor to it.building.rotation }
             // Filter the detached surface before the 64-result cap. A shoreline must
             // not let the first unavailable yards hide a connected dry inner plot.
-            return CivsSettlementLayout.infill(city, pair.first, pair.second, access, eligible = { building ->
+            return CivsSettlementLayout.infill(city, pair.first, pair.second, access, frame(), eligible = { building ->
                 (building.anchor to building.rotation) !in seen && (!terrainKnown ||
                     CivsAutonomousTerraform.options(city, listOf(CivsAutonomousCandidate(building)), surface).isNotEmpty())
             })
@@ -298,7 +312,8 @@ internal class CivsAutonomousPlacement(
             }
             if (this::surface.isInitialized) { gradeSurface(); return }
             phase = "surface"
-            await(world.autonomousHeightField(city, first.building, previous)) { field ->
+            val waterColumns = pinnedWaterFoundations.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+            await(world.autonomousHeightField(city, first.building, previous, waterColumns)) { field ->
                 surface = field
                 columns = field.columns.size
                 gradeSurface()
@@ -345,11 +360,12 @@ internal class CivsAutonomousPlacement(
                 // A captured SITE omits skipped cells from its writes. Its immutable transit
                 // retains the exact standing grade for those already-paid road columns.
                 piece?.transit.orEmpty().forEach { putIfAbsent(civsTerrainKey(it.x, it.z), it.y - 1) }
+                piece?.waterFoundations.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.floorY) }
             }
             val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access,
                 (if (pinned != null && !infrastructure && pinnedRoute == null) emptyList()
-                    else CivsSettlementLayout.frame(city).wallObstacles) + futureObstacles,
-                infrastructureFloors,
+                    else frame().wallObstacles) + futureObstacles,
+                infrastructureFloors, waterFoundations = piece?.waterFoundations.orEmpty(),
                 reservedRoute = if (reservation == null) pinnedRoute else adopted?.routes?.get(buildingId.toString())
                     ?: throw CivsRejection("invalid-plan"),
                 preferredRoads = access.routes.values.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }) }

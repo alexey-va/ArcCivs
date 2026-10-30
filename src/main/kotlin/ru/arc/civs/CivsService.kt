@@ -305,7 +305,12 @@ class CivsService(
         cityResearch = CivsCityResearch(this,
             records,
             tasks = tasks,
-            storage = storage)
+            storage = storage,
+            researchSupply = { city ->
+                val snapshot = supply.observation(city.id)
+                val observation = snapshot?.inputKey as? CivSupplyObservation
+                snapshot?.takeIf { observation != null && storage.supplyCaptureCurrent(city, observation.capture) }
+            })
         cityPlans = CivsCityPlans(this,
             records,
             tasks = tasks,
@@ -320,6 +325,7 @@ class CivsService(
                 it.isChunkLoaded(position.x shr 4, position.z shr 4) }
                 ?.getBlockAt(position.x, position.y, position.z)?.let { world.canModify(city.owner, it) } == true
         }
+        worksites.forestrySurplus = residentSupplies::forestrySurplus
         worksites.mutationBlocked = citizens::growthBlocked
         worksites.residentFeet = citizens::residentFeet
         citizens.residentLifeEnabled = true
@@ -639,6 +645,7 @@ class CivsService(
         cityId: UUID, prepare: (Settlement) -> CivStoragePlan?,
         sourcePlayer: Player? = null,
         keepViewersOpen: Boolean = false,
+        freshAdmission: ((Settlement) -> Unit)? = null,
         transition: (Settlement, CivInventory) -> Settlement,
     ): CompletableFuture<Settlement> {
         checkMain()
@@ -659,12 +666,16 @@ class CivsService(
                 return CompletableFuture.completedFuture(city)
             }
             require(after.revision == city.revision + 1)
+            if (prepared.cargoPickup != null) requireNotNull(freshAdmission)
             CivInventoryTransaction(id, city.id, city.revision, after, prepared.changes, prepared.playerDebit,
                 prepared.residentTransfer, prepared.worldChanges, mine = prepared.mine,
-                autoSupplyBuildingId = prepared.autoSupplyBuildingId)
+                autoSupplyBuildingId = prepared.autoSupplyBuildingId, cargoDropoff = prepared.cargoDropoff,
+                cargoPickup = prepared.cargoPickup)
                 .also { storage.seal(it, keepViewersOpen) }
         } catch (failure: Exception) { storage.unlock(id); throw failure }
-        return inventoryJournal.submit(tx)
+        return if (tx.cargoPickup != null)
+            inventoryJournal.submitCargoPickup(city, tx) { requireNotNull(freshAdmission)(city) }
+        else inventoryJournal.submit(tx)
     }
 
     /** Native player-only operations share the existing exact receipt without inventing town stock. */

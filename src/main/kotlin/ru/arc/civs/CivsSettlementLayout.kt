@@ -28,6 +28,7 @@ internal data class CivSettlementPiece(
     val entrance: CivPosition,
     val blocks: List<CivSettlementBlock>,
     val transit: List<CivPosition> = emptyList(),
+    val waterFoundations: List<CivWaterFoundation> = emptyList(),
 )
 
 internal data class CivSettlementInfrastructure(
@@ -266,7 +267,8 @@ internal object CivsSettlementLayout {
             plan.building.type != building.type || plan.building.anchor != building.anchor ||
             plan.building.bounds != building.bounds || plan.building.rotation != building.rotation) return@mapNotNull null
         CivSettlementPiece(building.id, building.type, building.bounds, building.entrance,
-            plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty())
+            plan.blocks.map { CivSettlementBlock(it.position, it.after) }, building.transit.orEmpty(),
+            plan.terrain?.waterFoundations.orEmpty())
     }.distinctBy { it.id }
 
     /**
@@ -301,20 +303,33 @@ internal object CivsSettlementLayout {
             acceptedTransit.forEach { (key, feet) -> put(key, feet.y - 1) }
             routes.flatten().forEach { feet -> putIfAbsent(key(feet), feet.y - 1) }
         }
-        val preservedRoads = retainedRoutes.flatten().associate { key(it) to it.y - 1 }.filter { (column, floor) ->
-            surface.at((column shr 32).toInt(), column.toInt())?.let {
-                it.loaded && it.groundY == floor && it.topY == floor
-            } == true
+        val preservedRoads = buildMap<Long, Int> {
+            for (feet in retainedRoutes.flatten()) {
+                val floor = feet.y - 1
+                surface.at(feet.x, feet.z)?.takeIf { it.loaded && it.groundY == floor && it.topY == floor }
+                    ?.let { putIfAbsent(key(feet), floor) }
+                // The recorded route is its centreline. Preserve only actual dirt-path shoulders,
+                // not arbitrary non-natural blocks near the route.
+                for (dx in -1..1) for (dz in -1..1) {
+                    val x = feet.x + dx; val z = feet.z + dz
+                    val c = surface.at(x, z) ?: continue
+                    if (c.loaded && c.dirtPath && c.topY == c.groundY && abs(c.groundY - floor) <= 1)
+                        putIfAbsent(key(x, z), c.groundY)
+                }
+            }
         }
         val retainedFloors = accepted.flatMap { it.blocks }.groupBy { key(it.position) }
-            .mapValues { (_, cells) -> cells.minOf { it.position.y } }
+            .mapValues { (_, cells) -> cells.minOf { it.position.y } } +
+            accepted.flatMap { it.waterFoundations }.associate { key(it.x, it.z) to it.floorY }
         val wood = wood(city.style)
         val stone = if (city.style == "nordic") "minecraft:cobblestone" else "minecraft:stone_bricks"
         val path = "minecraft:cobblestone"
         fun ground(x: Int, z: Int): Int? {
             val c = surface.at(x, z)
             if (c == null || !c.loaded) { reject("chunks-unloaded"); return null }
-            if (!c.natural && key(x, z) !in preservedRoads) { reject("protected-terrain"); return null }
+            val water = c.waterTopY != null && c.waterBottomY != null && c.topY == c.waterTopY &&
+                c.groundY == c.waterTopY && c.waterTopY.toLong() - c.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong()
+            if (!c.natural && !water && key(x, z) !in preservedRoads) { reject("protected-terrain"); return null }
             val point = CivPosition(x, c.groundY, z)
             val obstructing = protectedBuildings.filterValues { contains(it, point) }
             if (obstructing.isNotEmpty()) {
@@ -323,10 +338,15 @@ internal object CivsSettlementLayout {
             }
             return routeFloors[key(x, z)] ?: c.groundY
         }
-        fun add(type: BuildingType, cells: List<CivSettlementBlock>, hint: CivPosition, transit: List<CivPosition> = emptyList()) {
-            if (cells.isEmpty()) return
+        fun add(type: BuildingType, cells: List<CivSettlementBlock>, hint: CivPosition, transit: List<CivPosition> = emptyList(),
+            reportRejection: Boolean = true): Boolean {
+            if (cells.isEmpty()) return false
             val bounds = box(cells.map { it.position })
-            val floors = cells.groupBy { key(it.position) }.mapValues { (_, column) -> column.minOf { it.position.y } }
+            val floors = cells.groupBy { key(it.position) }.mapValues { (column, group) ->
+                transit.firstOrNull { key(it) == column }?.y?.minus(1)
+                    ?: surface.at((column shr 32).toInt(), column.toInt())?.waterTopY
+                    ?: group.minOf { it.position.y }
+            }
             for ((column, y) in floors) {
                 val x = (column shr 32).toInt(); val z = column.toInt()
                 for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
@@ -334,7 +354,10 @@ internal object CivsSettlementLayout {
                     val other = floors[neighbour] ?: retainedFloors[neighbour] ?: routeFloors[neighbour] ?:
                         if (type == BuildingType.WALL && frame.wallObstacles.any { contains(it, CivPosition(x + dx, y, z + dz)) })
                             surface.at(x + dx, z + dz)?.groundY else null
-                    if (other != null && abs(other - y) > 1) { reject("infrastructure-slope", CivPosition(x, y, z)); return }
+                    if (other != null && abs(other - y) > 1) {
+                        if (reportRejection) reject("infrastructure-slope", CivPosition(x, y, z))
+                        return false
+                    }
                 }
             }
             val approaches = buildList {
@@ -346,21 +369,33 @@ internal object CivsSettlementLayout {
                 }
             }.mapNotNull { p ->
                 val native = surface.at(p.x, p.z) ?: return@mapNotNull null
-                if (!city.contains(p.x, p.z) || !native.loaded || !native.natural && key(p) !in acceptedTransit ||
+                if (!city.contains(p.x, p.z) || !native.loaded ||
+                    !native.natural && key(p) !in acceptedTransit && key(p) !in preservedRoads ||
                     occupied.any { contains(it, p) } || frame.wallObstacles.any { contains(it, p) } ||
                     pieces.any { contains(it.bounds, p) && it.transit.none { feet -> key(feet) == key(p) } }) return@mapNotNull null
-                val y = acceptedTransit[key(p)]?.y ?: native.groundY + 1
+                val y = acceptedTransit[key(p)]?.y ?: preservedRoads[key(p)]?.plus(1) ?: native.groundY + 1
                 val edge = key(p.x.coerceIn(bounds.min.x, bounds.max.x), p.z.coerceIn(bounds.min.z, bounds.max.z))
                 if (abs(y - 1 - requireNotNull(floors[edge])) > 1) return@mapNotNull null
                 p.copy(y = y)
             }
             val entrance = approaches.minWithOrNull(compareBy<CivPosition> { manhattan(it, frame.origin) }
                 .thenBy { manhattan(it, hint) }.thenBy { it.x }.thenBy { it.z })
-            if (entrance == null) { reject("infrastructure-no-approach", bounds.min); return }
+            if (entrance == null) {
+                if (reportRejection) reject("infrastructure-no-approach", bounds.min)
+                return false
+            }
             val identity = "${city.id}:layout:$VERSION:${type.name}:${bounds.min.x}:${bounds.min.z}:${bounds.max.x}:${bounds.max.z}"
+            val waterFoundations = floors.mapNotNull { (column, floor) ->
+                val x = (column shr 32).toInt(); val z = column.toInt()
+                val c = surface.at(x, z) ?: return@mapNotNull null
+                val top = c.waterTopY ?: return@mapNotNull null
+                val bottom = c.waterBottomY ?: return@mapNotNull null
+                CivWaterFoundation(x, z, floor, top, bottom)
+            }
             pieces += CivSettlementPiece(UUID.nameUUIDFromBytes(identity.toByteArray(StandardCharsets.UTF_8)),
-                type, bounds, entrance, cells, transit)
+                type, bounds, entrance, cells, transit, waterFoundations)
             cells.forEach { used += key(it.position) }
+            return true
         }
         // Gates own their threshold. Adjacent roads stop at it, avoiding overlapping building boxes.
         for (gate in frame.gates) {
@@ -372,11 +407,17 @@ internal object CivsSettlementLayout {
             for (x in gate.passage.min.x..gate.passage.max.x) for (z in gate.passage.min.z..gate.passage.max.z) {
                 val nativeY = ground(x, z)
                 if (nativeY == null) { valid = false; continue }
-                val y = routeFloors[key(x, z)] ?: crossing.minWithOrNull(compareBy<CivPosition> {
+                val y = preservedRoads[key(x, z)] ?: routeFloors[key(x, z)] ?: crossing.minWithOrNull(compareBy<CivPosition> {
                     abs(it.x - x) + abs(it.z - z)
                 }.thenBy { it.x }.thenBy { it.z })?.let { routeFloors.getValue(key(it)) } ?: nativeY
-                if (abs(y - nativeY) > CivsAutonomousTerraform.MAXIMUM_CHANGE) { reject("infrastructure-slope"); valid = false; continue }
-                cells += CivSettlementBlock(CivPosition(x, y, z), path)
+                val water = surface.at(x, z)?.takeIf { it.waterTopY != null && it.waterBottomY != null }
+                if (abs(y - nativeY) > CivsAutonomousTerraform.MAXIMUM_CHANGE || water != null &&
+                    (y < requireNotNull(water.waterTopY) || y - requireNotNull(water.waterBottomY) > CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH)) {
+                    reject("infrastructure-slope"); valid = false; continue
+                }
+                if (water != null) for (fillY in requireNotNull(water.waterBottomY) + 1 until y)
+                    cells += CivSettlementBlock(CivPosition(x, fillY, z), stone)
+                cells += CivSettlementBlock(CivPosition(x, y, z), if (key(x, z) in preservedRoads) "minecraft:barrier" else path)
                 for (dy in 1..4) cells += CivSettlementBlock(CivPosition(x, y + dy, z), "minecraft:air")
                 transit += CivPosition(x, y + 1, z)
             }
@@ -388,40 +429,68 @@ internal object CivsSettlementLayout {
                     if (if (horizontal) z == gate.center.z else x == gate.center.x)
                         cells += CivSettlementBlock(CivPosition(x, level + 5, z), stone)
                 }
+                // Open leaves preserve the complete public transit rectangle and are usable
+                // by both citizens and players. The surrounding wall owns the side supports.
+                val leaves = transit.filter { if (horizontal) it.z == gate.center.z else it.x == gate.center.x }.toSet()
+                val facing = if (horizontal) "north" else "east"
+                val openGate = "minecraft:${wood}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
+                for (i in cells.indices) if (cells[i].position in leaves && cells[i].after == "minecraft:air")
+                    cells[i] = cells[i].copy(after = openGate)
                 add(BuildingType.GATE, cells, gate.center.copy(y = level + 1), transit)
             }
         }
-        // Split each actual perimeter strip into short, non-overlapping construction boxes.
+        // Keep clear 24-column orders stable; split failed dry runs without spanning paid pieces or holes.
         for (wall in frame.wallObstacles) {
             val alongX = wall.max.x - wall.min.x >= wall.max.z - wall.min.z
             val first = if (alongX) wall.min.x else wall.min.z
             val last = if (alongX) wall.max.x else wall.max.z
+            fun addWall(columns: List<List<CivSettlementBlock>>) {
+                val cells = columns.flatten()
+                val p = cells.first().position
+                val direction = if (alongX) CivPosition(0, 0, if (p.z < frame.origin.z) 1 else -1)
+                    else CivPosition(if (p.x < frame.origin.x) 1 else -1, 0, 0)
+                val added = add(BuildingType.WALL, cells,
+                    p.copy(x = p.x + direction.x * 3, y = p.y + 1, z = p.z + direction.z * 3), reportRejection = columns.size == 1)
+                // Every smaller order still passes the same validation; only final failures are reported.
+                if (!added && columns.size > 1) {
+                    val middle = columns.size / 2
+                    addWall(columns.take(middle))
+                    addWall(columns.drop(middle))
+                }
+            }
             for (start in first..last step MAXIMUM_PIECE_LENGTH) {
                 val finish = minOf(last, start + MAXIMUM_PIECE_LENGTH - 1)
-                val cells = mutableListOf<CivSettlementBlock>()
-                var valid = true
-                for (axis in start..finish) for (cross in (if (alongX) wall.min.z..wall.max.z else wall.min.x..wall.max.x)) {
-                    val x = if (alongX) axis else cross
-                    val z = if (alongX) cross else axis
-                    if (key(x, z) in acceptedRoads || key(x, z) in oldCrossings) {
-                        reject("route-crosses-wall"); valid = false; continue
+                val columns = mutableListOf<List<CivSettlementBlock>>()
+                fun flush() {
+                    if (columns.isEmpty()) return
+                    addWall(columns.toList())
+                    columns.clear()
+                }
+                for (axis in start..finish) {
+                    val cells = mutableListOf<CivSettlementBlock>()
+                    var valid = true
+                    for (cross in (if (alongX) wall.min.z..wall.max.z else wall.min.x..wall.max.x)) {
+                        val x = if (alongX) axis else cross
+                        val z = if (alongX) cross else axis
+                        if (key(x, z) in acceptedRoads || key(x, z) in oldCrossings) {
+                            reject("route-crosses-wall"); valid = false; continue
+                        }
+                        if (key(x, z) in used) { valid = false; continue }
+                        val y = ground(x, z)
+                        if (y == null) { valid = false; continue }
+                        val water = surface.at(x, z)?.takeIf { it.waterTopY != null && it.waterBottomY != null }
+                        if (water != null) for (fillY in requireNotNull(water.waterBottomY) + 1 until y)
+                            cells += CivSettlementBlock(CivPosition(x, fillY, z), stone)
+                        val middle = if (alongX) (wall.min.z + wall.max.z) / 2 else (wall.min.x + wall.max.x) / 2
+                        for (dy in 0..3) cells += CivSettlementBlock(CivPosition(x, y + dy, z),
+                            if (cross == middle && Math.floorMod(axis, 6) == 0) "minecraft:${wood}_log[axis=y]" else stone)
+                        if (cross == middle || Math.floorMod(axis, 3) == 0)
+                            cells += CivSettlementBlock(CivPosition(x, y + 4, z), if (cross == middle)
+                                "minecraft:${wood}_fence[east=false,north=false,south=false,waterlogged=false,west=false]" else stone)
                     }
-                    if (key(x, z) in used) continue
-                    val y = ground(x, z)
-                    if (y == null) { valid = false; continue }
-                    val middle = if (alongX) (wall.min.z + wall.max.z) / 2 else (wall.min.x + wall.max.x) / 2
-                    for (dy in 0..3) cells += CivSettlementBlock(CivPosition(x, y + dy, z),
-                        if (cross == middle && Math.floorMod(axis, 6) == 0) "minecraft:${wood}_log[axis=y]" else stone)
-                    if (cross == middle || Math.floorMod(axis, 3) == 0)
-                        cells += CivSettlementBlock(CivPosition(x, y + 4, z), if (cross == middle)
-                            "minecraft:${wood}_fence[east=false,north=false,south=false,waterlogged=false,west=false]" else stone)
+                    if (valid) columns += cells else flush()
                 }
-                if (valid && cells.isNotEmpty()) {
-                    val p = cells.first().position
-                    val direction = if (alongX) CivPosition(0, 0, if (p.z < frame.origin.z) 1 else -1)
-                        else CivPosition(if (p.x < frame.origin.x) 1 else -1, 0, 0)
-                    add(BuildingType.WALL, cells, p.copy(x = p.x + direction.x * 3, y = p.y + 1, z = p.z + direction.z * 3))
-                }
+                flush()
             }
         }
         // New work paves a compact centreline. The wider canonical graded corridor remains

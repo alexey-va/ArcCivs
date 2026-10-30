@@ -75,6 +75,15 @@ internal class CivsInventoryJournal(
 
     fun submitCollected(city: Settlement, tx: CivInventoryTransaction): CompletableFuture<Settlement> = submitNative(city, tx)
 
+    /** An evacuation owns the city and its exact source before asynchronous native persistence starts. */
+    fun submitCargoPickup(city: Settlement, tx: CivInventoryTransaction,
+        freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
+        require(tx.cargoPickup != null && tx.cityId == city.id)
+        rejectIf(city.id in busy || city.id in unhealthy || cities[city.id] != city, "city-busy")
+        busy += city.id
+        return submitNative(city, tx, freshAdmission)
+    }
+
     fun submitRelocation(city: Settlement, tx: CivInventoryTransaction,
         freshAdmission: () -> Unit = {}): CompletableFuture<Settlement> {
         require(tx.containerRelocation != null)
@@ -118,6 +127,17 @@ internal class CivsInventoryJournal(
             val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
             rejectIf(current != tx.after.copy(revision = tx.beforeRevision), "stale-delivery")
         }
+        tx.cargoDropoff?.let { receipt ->
+            val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
+            val before = tx.after.copy(workers = tx.after.workers.map {
+                if (it.id == receipt.workerBefore.id) receipt.workerBefore else it
+            }, revision = tx.beforeRevision)
+            rejectIf(current != before, "stale-delivery")
+        }
+        tx.cargoPickup?.let { receipt ->
+            val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
+            rejectIf(current != receipt.before(tx.after), "stale-delivery")
+        }
         val transfer = tx.collected ?: return
         val current = cities[tx.cityId] ?: throw CivsRejection("no-city")
         val worker = current.workers.singleOrNull { it.id == transfer.workerId } ?: throw CivsRejection("stale-delivery")
@@ -133,10 +153,10 @@ internal class CivsInventoryJournal(
     }
 
     private fun requireFreshNative(tx: CivInventoryTransaction) {
-        require(tx.collected != null || tx.containerRelocation != null)
+        require(tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null)
         requireCollectedCity(tx)
         if (tx.collected != null) validateNativeCollected(tx)
-        else when (val state = storage.relocationBeforeState(tx)) {
+        else when (val state = if (tx.cargoPickup != null) storage.cargoPickupBeforeState(tx) else storage.relocationBeforeState(tx)) {
             CivInventoryApplyResult.Applied -> Unit
             is CivInventoryApplyResult.Retry -> throw CivsRejection("storage-unavailable", state.values)
             is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
@@ -186,7 +206,7 @@ internal class CivsInventoryJournal(
             updateHealth()
         }
         runCatching {
-            if (tx.collected != null || tx.containerRelocation != null) {
+            if (tx.collected != null || tx.containerRelocation != null || tx.cargoPickup != null) {
                 if (result != null) {
                     if (tx.collected?.food != null) {
                         val state = storage.collectedBeforeState(tx)
@@ -213,7 +233,10 @@ internal class CivsInventoryJournal(
                 }
             }
             when (val applied = storage.reconcile(tx)) {
-                is CivInventoryApplyResult.Retry -> return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
+                is CivInventoryApplyResult.Retry -> {
+                    if ((tx.cargoDropoff != null || tx.cargoPickup != null)) collectedNextAt[tx.after.worldId] = now() + 5_000
+                    return fail(CivsRejection("inventory-recovery", applied.values), retry = true)
+                }
                 is CivInventoryApplyResult.Conflict -> return fail(CivsRejection("inventory-conflict", applied.values))
                 CivInventoryApplyResult.Applied -> Unit
             }
@@ -232,7 +255,7 @@ internal class CivsInventoryJournal(
                     }
                 }
             }
-            if (tx.collected == null && tx.containerRelocation == null) commit()
+            if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null) commit()
             else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, persistenceFailure ->
                 if (persistenceFailure != null) fail(CivsRejection("inventory-recovery").also { it.initCause(persistenceFailure) },
                     retry = retryCollectedPersistence(tx, persistenceFailure))
@@ -262,7 +285,7 @@ internal class CivsInventoryJournal(
 
     /** Retry the same locked receipt at most once per five seconds; exact mismatches remain blocked. */
     private fun retryCollectedPersistence(tx: CivInventoryTransaction, failure: Throwable): Boolean {
-        if (tx.collected == null && tx.containerRelocation == null ||
+        if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null ||
             generateSequence(failure) { it.cause }.take(8).none { it is CivsNativePersistenceRetry }) return false
         collectedNextAt[tx.after.worldId] = now() + 5_000
         return true
@@ -328,7 +351,8 @@ internal class CivsInventoryJournal(
 
     fun recover() {
         val tx = inventoryRecovery.values.firstOrNull { it.cityId !in busy && it.cityId !in blockedRecovery &&
-            (it.collected == null && it.containerRelocation == null || now() >= (collectedNextAt[it.after.worldId] ?: 0L)) &&
+            (it.collected == null && it.containerRelocation == null && it.cargoDropoff == null && it.cargoPickup == null ||
+                now() >= (collectedNextAt[it.after.worldId] ?: 0L)) &&
             !storage.waitingForPlayer(it) } ?: return
         val city = cities[tx.cityId] ?: run { blockedRecovery += tx.cityId; return }
         busy += city.id
@@ -337,12 +361,15 @@ internal class CivsInventoryJournal(
             if (city.revision == tx.beforeRevision) applyInventory(tx, null)
             else if (city.revision >= tx.after.revision && (city.revision != tx.after.revision || city == tx.after)) {
                 if (city.revision == tx.after.revision || tx.residentTransfer != null || tx.resurrection != null || tx.collected != null ||
-                    tx.containerRelocation != null) when (val applied = storage.reconcile(tx)) {
-                    is CivInventoryApplyResult.Retry -> { busy -= city.id; unhealthy += city.id; return@runCatching }
+                    tx.containerRelocation != null || tx.cargoDropoff != null || tx.cargoPickup != null) when (val applied = storage.reconcile(tx)) {
+                    is CivInventoryApplyResult.Retry -> {
+                        if ((tx.cargoDropoff != null || tx.cargoPickup != null)) collectedNextAt[tx.after.worldId] = now() + 5_000
+                        busy -= city.id; unhealthy += city.id; return@runCatching
+                    }
                     is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", applied.values)
                     CivInventoryApplyResult.Applied -> Unit
                 }
-                if (tx.collected == null && tx.containerRelocation == null) {
+                if (tx.collected == null && tx.containerRelocation == null && tx.cargoDropoff == null && tx.cargoPickup == null) {
                     requestResurrectionAdmission(tx)
                     finishInventory(tx, null)
                 } else persistCollectedReceipt(tx).whenCompleteSync(tasks) { _, failure ->

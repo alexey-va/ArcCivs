@@ -38,7 +38,11 @@ internal class CivsSupplyPlanning(
                 id to CivSupplyStore(id, building.entrance, requireNotNull(building.control), observed.stock,
                     CivsLogistics.desiredStock(city, building),
                     CivsProduction.material(building).takeIf { building.phase == BuildingPhase.ACTIVE && !CivsRules.isBuilder(city, building) },
-                    observed.capacity, building.type)
+                    observed.capacity, building.type,
+                    redistributionDepot = city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+                        CivsAutoStorageMigration.ready(city) &&
+                        building.phase == BuildingPhase.ACTIVE && building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
+                        observed.unavailable == 0 && observed.containers in 1..64 && observed.key.upgradingOrder == null)
             }.toMap()
             requests = CivsLogistics.requests(city) { stores?.get(it)?.stock.orEmpty() }
             // The universe also includes arbitrary plain excess such as gravel and dirt.

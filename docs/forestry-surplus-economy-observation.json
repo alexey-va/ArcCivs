@@ -1,0 +1,108 @@
+{
+  "source": "arc_ops_server",
+  "server": "classic",
+  "economyHours": 168,
+  "economyLimit": 20,
+  "observedAt": "2026-10-30T10:27:37.026Z",
+  "since": "2026-10-23T10:27:37.026Z",
+  "ledgerSchemaVersion": 2,
+  "windowBoundary": {
+    "exact": true,
+    "excludedCrossingRecords": 0,
+    "excludedCrossingOperations": 0,
+    "excludedCrossingAbsoluteAmount": 0,
+    "excludedFutureRecords": 0,
+    "excludedFutureOperations": 0,
+    "excludedFutureAbsoluteAmount": 0,
+    "evidence": "records crossing since or extending past generatedAt are excluded because their amount cannot be split exactly"
+  },
+  "coverage": {
+    "oldest": 1792751259136,
+    "newest": 1793355784556,
+    "records": 5144,
+    "operations": 19191,
+    "players": 26,
+    "attempts": 148,
+    "enrichedRecords": 5144
+  },
+  "ledgerScope": "network-shared server-player shards",
+  "currencies": [
+    {
+      "currency": "tokens",
+      "minted": 135,
+      "burned": 36,
+      "operations": 72,
+      "records": 72,
+      "players": 14,
+      "sourceCoverage": {
+        "unclassifiedOperations": 8,
+        "unclassifiedAbsoluteAmount": 36,
+        "classifiedOperationRatio": 0.8888888888888888,
+        "classifiedAmountRatio": 0.7894736842105263
+      },
+      "selectedConcentration": [
+        {
+          "source": "voting",
+          "income": 90,
+          "expense": 0,
+          "players": 4,
+          "mintDistribution": {
+            "players": 4,
+            "topPlayerShare": 0.7,
+            "p50": 9,
+            "p90": 63,
+            "p99": 63
+          }
+        }
+      ]
+    },
+    {
+      "currency": "vault",
+      "minted": 33195316.912097,
+      "burned": 35247183.559999995,
+      "operations": 19119,
+      "records": 5072,
+      "players": 26,
+      "sourceCoverage": {
+        "unclassifiedOperations": 1999,
+        "unclassifiedAbsoluteAmount": 62886235.14999995,
+        "classifiedOperationRatio": 0.8954443224017993,
+        "classifiedAmountRatio": 0.23583776408879265
+      },
+      "selectedConcentration": [
+        {
+          "source": "treasure",
+          "income": 1280750.135732998,
+          "expense": 0,
+          "players": 15,
+          "mintDistribution": {
+            "players": 15,
+            "topPlayerShare": 0.924404827681249,
+            "p50": 3066.426179,
+            "p90": 48504.330044,
+            "p99": 1183931.6085250014
+          }
+        },
+        {
+          "source": "voting",
+          "income": 30000,
+          "expense": 0,
+          "players": 4,
+          "mintDistribution": {
+            "players": 4,
+            "topPlayerShare": 0.7,
+            "p50": 3000,
+            "p90": 21000,
+            "p99": 21000
+          }
+        }
+      ]
+    }
+  ],
+  "legacyMixedCurrencyTotalsIgnored": true,
+  "limitations": [
+    "Read-only seven-day aggregate context; no ArcCivs-specific causation or attribution.",
+    "Unknown source coverage is material, especially Vault; activity buckets are not session durations.",
+    "No live surplus policy, item/production throughput, runtime delivery or player acceptance was exercised."
+  ]
+}

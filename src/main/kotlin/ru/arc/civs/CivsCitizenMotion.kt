@@ -62,6 +62,11 @@ internal class CivsCitizenMotion(
                     actor.route?.progressTick = runtime.navigationTick
                     continue
                 }
+                // A ready neighbour collision can yield on the next admitted frame;
+                // the existing cooldown, real-progress and corridor guards still own admission.
+                if (actor.plan.idleReason == null && actor.social.visit == null &&
+                    actor.route?.motion?.waitingForCollision == true && actor.collisionResident != null &&
+                    runtime.actors[actor.collisionResident]?.social?.visit == null && collisions.beginResidentYield(actor)) continue
             }
             if (actor.residentYield != null) {
                 // A skipped separation-budget frame is still owned by the bounded yield.
@@ -134,6 +139,7 @@ internal class CivsCitizenMotion(
             // Stop on the first valid arrival tick, including at any usable side of a barrel.
             // Waiting for the coarse work pulse used to keep walking around the barrel after arrival.
             val travelTarget = actor.combatDestination ?: actor.foodSource?.let(city::building)?.control ?:
+                actor.mineVisit?.takeIf { it.owns(route.authored) }?.goal ?:
                 if (actor.returningToWarehouse) actor.plan.storage else when (actor.cycle.phase) {
                 CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> actor.plan.travelTarget(actor.cycle.phase)
                 else -> null

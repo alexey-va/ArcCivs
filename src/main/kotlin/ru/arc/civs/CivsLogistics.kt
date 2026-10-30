@@ -18,6 +18,10 @@ data class CivCargo(
     val sourceWorkerId: UUID? = null,
     /** Closed autonomous stock uses the same shipment identity without materializing an item. */
     val stockResource: Resource? = null,
+    /** A native carried shipment may return to another city depot without changing its original identity. */
+    val deliveryBuildingId: UUID? = null,
+    /** Only new native Auto evacuation trips use this proof; historical shipments default to false. */
+    val redistribution: Boolean = false,
 )
 
 data class CivCourierPlan(val cargo: CivCargo, val destinationBuildingId: UUID,
@@ -49,6 +53,10 @@ object CivsLogistics {
         require(cargo.sourceBuildingId != cargo.targetBuildingId &&
             (cargo.sourceBuildingId == cargo.warehouseId || cargo.targetBuildingId == cargo.warehouseId))
         require(cargo.sourceWorkerId == null || cargo.sourceBuildingId != cargo.warehouseId && cargo.targetBuildingId == cargo.warehouseId)
+        require(cargo.deliveryBuildingId == null || city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            cargo.inventoryBacked && cargo.stockResource == null)
+        require(!cargo.redistribution || city.autonomy != null && city.inventory?.mode == CivStorageMode.PHYSICAL &&
+            cargo.sourceWorkerId == null && cargo.stockResource == null)
         require(city.contains(cargo.sourceEntrance.x, cargo.sourceEntrance.z) && cargo.sourceEntrance.y in -4_096..4_096)
     }.isSuccess
 
@@ -152,6 +160,19 @@ object CivsLogistics {
             else candidates[Math.floorMod(worker.completedCycles, candidates.size.toLong()).toInt()]
     }
 
+    internal fun redistributionAllowed(city: Settlement, cargo: CivCargo): Boolean {
+        if (!cargo.redistribution || cargo.inventoryBacked || cargo.deliveryBuildingId != null ||
+            city.autonomy?.paused != false || city.inventory?.mode != CivStorageMode.PHYSICAL ||
+            !CivsAutoStorageMigration.ready(city) || city.pendingDeletion != null || !validCargo(city, cargo)) return false
+        val source = city.building(cargo.sourceBuildingId) ?: return false
+        val target = city.building(cargo.targetBuildingId) ?: return false
+        return source.type == BuildingType.WAREHOUSE && source.phase == BuildingPhase.ACTIVE && source.control != null &&
+            target.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) &&
+            target.phase == BuildingPhase.ACTIVE && target.control != null &&
+            city.construction?.buildingId !in setOf(source.id, target.id) &&
+            withinRoute(city, source.control, target.control)
+    }
+
     /** Equipped and custom items stay personal; real work inputs and sixteen bread stay available. */
     internal fun workerExcess(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap(),
         foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Map<String, Long> {
@@ -216,6 +237,9 @@ object CivsLogistics {
 
     /** A retained source uses its real barrel; a removed source retains its durable departure point. */
     fun destination(city: Settlement, cargo: CivCargo): CivBuilding? {
+        cargo.deliveryBuildingId?.let { id -> city.building(id)?.takeIf {
+            nativeCargoDepot(it) && withinRoute(city, cargo.sourceEntrance, requireNotNull(it.control))
+        }?.let { return it } }
         val source = if (cargo.sourceWorkerId != null) cargo.sourceEntrance else city.building(cargo.sourceBuildingId)?.control ?: cargo.sourceEntrance
         val target = city.building(cargo.targetBuildingId)
         if (target != null && city.construction?.buildingId == target.id && target.type != BuildingType.BUILDER_HUT &&
@@ -235,6 +259,36 @@ object CivsLogistics {
                 withinRoute(city, source, requireNotNull(it.control)) }
     }
 
+    private fun nativeCargoDepot(building: CivBuilding): Boolean = building.phase == BuildingPhase.ACTIVE &&
+        building.type in setOf(BuildingType.WAREHOUSE, BuildingType.TOWN_HALL) && building.control != null
+
+    /** Selection is read-only. The owner supplies current, permitted local room; a partial batch is never rerouted. */
+    internal fun redirectDestination(city: Settlement, cargo: CivCargo, failedDestinationId: UUID, from: CivPosition,
+        room: (UUID, String) -> Long): CivBuilding? {
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL || !cargo.inventoryBacked ||
+            cargo.stockResource != null || !validCargo(city, cargo)) return null
+        return city.buildings.asSequence().filter { it.id != failedDestinationId && nativeCargoDepot(it) &&
+            withinRoute(city, cargo.sourceEntrance, requireNotNull(it.control)) &&
+            withinRoute(city, from, requireNotNull(it.control)) }
+            .sortedWith(compareBy<CivBuilding> { if (it.type == BuildingType.WAREHOUSE) 0 else 1 }
+                .thenBy { distanceSquared(from, requireNotNull(it.control)) }.thenBy { it.id.toString() })
+            .firstOrNull { room(it.id, cargo.material) >= cargo.amount }
+    }
+
+    /** Only the delivery address changes; the accepted item batch, bag and worker token remain intact. */
+    internal fun redirect(city: Settlement, workerId: UUID, expected: CivCargo, destinationId: UUID): Settlement {
+        val worker = city.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
+        reject(city.pendingDeletion != null || city.inventory?.mode != CivStorageMode.PHYSICAL ||
+            worker.cargo != expected || !expected.inventoryBacked || expected.stockResource != null, "stale-delivery")
+        val destination = city.building(destinationId) ?: throw CivsRejection("building-not-found")
+        reject(!nativeCargoDepot(destination) || !withinRoute(city, expected.sourceEntrance, requireNotNull(destination.control)), "stale-delivery")
+        val changed = expected.copy(deliveryBuildingId = destinationId)
+        if (changed == expected) return city
+        return CivsRules.validate(city.copy(workers = city.workers.map {
+            if (it.id == workerId) it.copy(cargo = changed) else it
+        }, revision = Math.addExact(city.revision, 1)))
+    }
+
     /** Automatic cities may place producers on opposite sides; normal supply retains its existing reach. */
     fun maximumTransferDistance(city: Settlement): Int = if (city.autonomy == null) CivsRules.MAX_WORK_ROUTE_DISTANCE
         else (city.radius.toLong() * 2).coerceIn(CivsRules.MAX_WORK_ROUTE_DISTANCE.toLong(), MAX_TRANSFER_DISTANCE.toLong()).toInt()
@@ -243,7 +297,7 @@ object CivsLogistics {
         (from.x.toDouble() - to.x).let { it * it } + (from.y.toDouble() - to.y).let { it * it } +
             (from.z.toDouble() - to.z).let { it * it }
 
-    private fun withinRoute(city: Settlement, from: CivPosition, to: CivPosition): Boolean =
+    internal fun withinRoute(city: Settlement, from: CivPosition, to: CivPosition): Boolean =
         distanceSquared(from, to) <= maximumTransferDistance(city).toDouble() * maximumTransferDistance(city)
 
     fun pickup(city: Settlement, workerId: UUID, cargo: CivCargo,

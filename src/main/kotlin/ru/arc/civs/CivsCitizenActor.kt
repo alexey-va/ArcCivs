@@ -32,6 +32,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var navigationReportAfter = 0L
     var navigationSuppressed = 0
     val mineRouteEpisode = CivsMineRouteEpisode()
+    var mineVisit: CitizenMineVisit? = null
     var turnOrigin: CitizenPoint? = null
     var turnSinceTick = 0L
     var turnAmount = 0f

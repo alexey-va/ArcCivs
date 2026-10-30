@@ -3,6 +3,7 @@ package ru.arc.civs
 import net.kyori.adventure.text.Component
 import org.bukkit.entity.Player
 import ru.arc.civs.CivsDialogPresentation.Action
+import ru.arc.paper.menu.DialogTables.PanelSkin
 import java.util.Locale
 import java.util.UUID
 import ru.arc.civs.CivsUi.Companion.PAGE_SIZE
@@ -27,23 +28,53 @@ internal fun CivsUi.showResearch(player: Player, cityId: UUID, error: Component?
                 add(tint(researchName(player, project.research), PERSONAL))
                 add(researchProgress(player, project))
                 add(researchStatus(player, view, project.research))
-            } ?: add(tr(player, "research.idle"))
+            } ?: add(tr(player, when {
+                view.completed.containsAll(CivResearchId.entries) -> "research.all-complete"
+                view.autonomous -> "research.auto-idle"
+                else -> "research.idle"
+            }))
         })),
-        presentation.paragraph(tr(player, "research.work-help")),
-        if (view.universityId == null) body(player, "reason.university-required") else null,
-        if (view.autonomous) body(player, "research.auto-help") else null,
-        if (!canManageSelected(player, viewedCity)) body(player, "research.read-only") else null,
+        presentation.panel(Component.join(Component.newline(), listOfNotNull(
+            tr(player, if (view.autonomous) "research.auto-help" else "research.work-help"),
+            if (view.universityId == null) tr(player, "reason.university-required") else null,
+            if (!canManageSelected(player, viewedCity)) tr(player, "research.read-only") else null,
+        )), PanelSkin.NAVY),
         error?.let(::body),
     ), buildList {
-        CivResearchId.entries.forEach { id ->
+        CivResearchBranch.entries.forEach { branch ->
+            val ids = CivResearchId.entries.filter { CivsResearch.branch(it) == branch }
+            add(valueButton(player, "research_branch_${branch.name.lowercase(Locale.ROOT)}", "common.destination",
+                tr(player, "research.branch.${branch.name.lowercase(Locale.ROOT)}"), PERSONAL,
+                tr(player, "research.branch-progress", "count" to ids.count { it in view.completed }, "total" to ids.size)) {
+                showResearchBranch(player, cityId, branch)
+            })
+        }
+        add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, cityId) })
+    }, reopen = { showResearch(player, cityId) }, cityId = cityId)
+}
+
+
+internal fun CivsUi.showResearchBranch(player: Player, cityId: UUID, branch: CivResearchBranch) {
+    val view = try { host.research(player, cityId) } catch (failure: Exception) {
+        return showResearch(player, cityId, text.failure(player, failure))
+    }
+    val city = selectedCity(player, cityId) ?: return
+    val ids = CivResearchId.entries.filter { CivsResearch.branch(it) == branch }
+    present(player, "civs.research-branch", "research.title", listOf(
+        body(tint(text.literal(city.name), LAND)),
+        presentation.summary(Component.join(Component.newline(), listOf(
+            tint(tr(player, "research.branch.${branch.name.lowercase(Locale.ROOT)}"), PERSONAL),
+            tr(player, "research.branch-progress", "count" to ids.count { it in view.completed }, "total" to ids.size),
+        ))),
+    ), buildList {
+        ids.forEach { id ->
             add(valueButton(player, "research_${id.name.lowercase(Locale.ROOT)}", "common.destination", researchName(player, id),
                 if (id in view.completed) COMMIT else PERSONAL,
                 researchStatus(player, view, id).append(Component.newline()).append(tr(player, "research.effect.${id.name.lowercase(Locale.ROOT)}"))) {
                 showResearchDetail(player, cityId, id)
             })
         }
-        add(button(player, "industry", "industry.open", STOCK) { showIndustry(player, cityId) })
-    }, reopen = { showResearch(player, cityId) }, cityId = cityId)
+    }, reopen = { showResearchBranch(player, cityId, branch) }, cityId = cityId)
 }
 
 
@@ -62,29 +93,37 @@ internal fun CivsUi.showResearchDetail(player: Player, cityId: UUID, research: C
         presentation.summary(Component.join(Component.newline(), listOfNotNull(
             tint(researchName(player, research), PERSONAL), researchStatus(player, view, research),
             project?.let { researchProgress(player, it) },
+            tr(player, "research.effect.${research.name.lowercase(Locale.ROOT)}"),
         ))),
-        presentation.paragraph(tr(player, "research.effect.${research.name.lowercase(Locale.ROOT)}")),
-        presentation.paragraph(Component.join(Component.newline(), listOfNotNull(
+        presentation.panel(Component.join(Component.newline(), listOfNotNull(
             if (prerequisites.isNotEmpty()) tr(player, "research.prerequisites", "names" to
-                Component.join(text.literal(" · "), prerequisites.map { researchName(player, it) })) else tr(player, "research.materials-prerequisites"),
-            if (research == CivResearchId.ENGINEERING) tr(player, "research.university-level") else null,
-            if (project == null && research !in view.completed && offer != null)
-                tr(player, "research.duration", "sessions" to offer.workRequired) else null,
-        ))),
-        if (research !in view.completed && cost != null) presentation.paragraph(Component.join(Component.newline(), listOf(
-            tint(tr(player, if (project?.funded == true) "research.cost-paid" else "research.cost"), STOCK),
-            researchCost(player, cost),
-        ))) else null,
+                Component.join(text.literal(" · "), prerequisites.map { tint(researchName(player, it), PERSONAL) })) else null,
+            Component.join(Component.newline(), listOf(tr(player, "research.required-buildings")) +
+                (mapOf(BuildingType.UNIVERSITY to CivsResearch.universityLevel(research)) +
+                    CivsResearch.buildingRequirements(research)).map { (type, level) ->
+                    val ready = if (type == BuildingType.UNIVERSITY)
+                        CivsResearch.university(viewedCity)?.level?.let { it >= level } == true
+                    else viewedCity.buildings.any { it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= level }
+                    Component.text(if (ready) "✔ " else "✘ ", if (ready) COMMIT else STOCK)
+                        .append(buildingName(player, type, level))
+                }),
+        )), PanelSkin.NAVY),
         listOfNotNull(
+            if (project == null && research !in view.completed && offer != null)
+                tr(player, "research.duration", "sessions" to tint(text.literal(offer.workRequired), STOCK)) else null,
+            if (research !in view.completed && cost != null)
+                tint(tr(player, if (project?.funded == true) "research.cost-paid" else "research.cost"), STOCK) else null,
+            if (research !in view.completed && cost != null) researchCost(player, cost) else null,
             project?.let { tr(player, when {
                 it.paused -> "research.pause-help"
                 it.funded -> "research.funded-help"
                 view.autonomous -> "research.auto-funding-help"
                 else -> "research.native-funding-help"
             }) },
-            offer?.reason?.takeIf { project == null && research !in view.completed }?.let { text.reason(player, it) },
+            offer?.reason?.takeIf { project == null && research !in view.completed &&
+                it !in setOf("research-prerequisites", "university-level-required") }?.let { text.reason(player, it) },
             if (!canManage) tr(player, "research.read-only") else null,
-        ).takeIf { it.isNotEmpty() }?.let { presentation.paragraph(Component.join(Component.newline(), it)) },
+        ).takeIf { it.isNotEmpty() }?.let { presentation.panel(Component.join(Component.newline(), it), PanelSkin.NAVY) },
         error?.let(::body),
     ), buildList {
         if (canManage && offer?.available == true && view.project == null) add(button(player, "start", "research.start", COMMIT, appearance = Action.START) {
@@ -212,10 +251,10 @@ internal fun CivsUi.researchStatus(player: Player, view: CivResearchView, id: Ci
 
 internal fun CivsUi.researchCost(player: Player, cost: CivResearchCost): Component = Component.join(text.literal(" · "), buildList {
     Resource.entries.filter { cost.stock[it] > 0 }.forEach { resource ->
-        add(tr(player, "industry.amount", "item" to text.resource(player, resource), "amount" to cost.stock[resource]))
+        add(tr(player, "industry.amount", "item" to text.resource(player, resource), "amount" to tint(text.literal(cost.stock[resource]), STOCK)))
     }
-    cost.products.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to count)) }
-    cost.materials.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to count)) }
+    cost.products.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to tint(text.literal(count), STOCK))) }
+    cost.materials.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to tint(text.literal(count), STOCK))) }
 })
 
 
@@ -229,8 +268,8 @@ internal fun CivsUi.industryRecipe(player: Player, autonomous: Boolean, recipe: 
         Resource.entries.filter { recipe.inputStock[it] > 0 }.forEach { resource ->
             add(tr(player, "industry.amount", "item" to text.resource(player, resource), "amount" to recipe.inputStock[resource]))
         }
-        recipe.inputProducts.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to count)) }
-        recipe.inputs.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to count)) }
+        recipe.inputProducts.forEach { (product, count) -> add(tr(player, "industry.amount", "item" to industryProductName(player, product), "amount" to tint(text.literal(count), STOCK))) }
+        recipe.inputs.forEach { (material, count) -> add(tr(player, "industry.amount", "item" to materialName(player, material), "amount" to tint(text.literal(count), STOCK))) }
     }
     return tr(player, "industry.chain", "inputs" to if (inputs.isEmpty()) tr(player, "industry.gathering")
         else Component.join(text.literal(" + "), inputs), "output" to industryOutput(player, autonomous, recipe.output), "amount" to recipe.outputAmount)

@@ -159,11 +159,12 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         return UUID.randomUUID().also { ticket = it }
     }
     fun acceptsCompletion(candidate: UUID): Boolean = phase == CitizenPhase.DELIVERING && ticket == candidate
-    fun failDelivery(reason: String?, now: Long) {
+    fun failDelivery(reason: String?, now: Long, retryDelayMillis: Long = CITIZEN_DELIVERY_RETRY_DELAY_MILLIS) {
         if (phase != CitizenPhase.DELIVERING) return
-        retryTransfer(reason, now, CitizenPhase.READY)
+        retryTransfer(reason, now, CitizenPhase.READY, retryDelayMillis)
     }
-    private fun retryTransfer(reason: String?, now: Long, readyPhase: CitizenPhase) {
+    private fun retryTransfer(reason: String?, now: Long, readyPhase: CitizenPhase,
+        retryDelayMillis: Long = CITIZEN_DELIVERY_RETRY_DELAY_MILLIS) {
         val retryStatus = when (reason) {
             "city-busy", "construction-credit-full" -> "waiting"
             "storage-busy" -> "storage-busy"
@@ -181,7 +182,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         this.reason = retryStatus
         resumePhase = readyPhase
         ticket = null
-        deliveryRetryAt = now + CITIZEN_DELIVERY_RETRY_DELAY_MILLIS
+        deliveryRetryAt = now + retryDelayMillis.coerceIn(CITIZEN_DELIVERY_RETRY_DELAY_MILLIS, 30_000L)
         phase = CitizenPhase.PAUSED
     }
     fun pause(reason: String, now: Long, retainWork: Boolean) {

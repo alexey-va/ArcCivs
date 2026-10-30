@@ -61,6 +61,7 @@ class CivsCourierEarlySegmentTest : FunSpec({
                 withClue("nodes=${first.nodeCount} blocks=${first.capturedBlocks} endpoint=${first.endpoint} failure=${first.failure}") {
                     first.failure shouldBe null
                     first.continuation shouldBe true
+                    first.continuationReason shouldBe "hinted-progress"
                     first.nodeCount shouldBe 512
                 }
                 val endpoint = requireNotNull(first.endpoint)
@@ -103,18 +104,46 @@ class CivsCourierEarlySegmentTest : FunSpec({
         }
     }
 
-    test("a hinted search without eight metres of admitted progress does not emit a short segment") {
+    test("a hinted search below eight metres waits for proven no-path and walks its closest native prefix once") {
         earlySegmentWorld { _, world ->
             val source = CitizenPoint(60.5, 64.0, .5)
             val depot = CitizenPoint(.5, 64.0, .5)
-            val route = CitizenPacketRoute(world, source.location(world), depot.location(world),
+            val control = CivPosition(0, 64, -1)
+            val cycle = CitizenCycle(CitizenToken(UUID.randomUUID(), 23, 0, null), 6_000,
+                pickupAtWorkplace = true, carrying = true).also { it.start() }
+            fun route(from: CitizenPoint, hint: CitizenSearchCorridor?) = CitizenPacketRoute(world,
+                from.location(world), depot.location(world),
                 { it.y == 64 && it.x in 53..62 && it.z in -30..30 }, { _, _ -> true },
-                { CivsPaths.ORDINARY_COST }, corridor = earlySegmentCorridor(source, depot)).also(::prepareEarlySegment)
-            withClue("nodes=${route.nodeCount} blocks=${route.capturedBlocks} failure=${route.failure}") {
-                (route.nodeCount >= 512) shouldBe true
-                route.continuation shouldBe false
-                route.failure shouldBe "no-path"
+                { CivsPaths.ORDINARY_COST }, corridor = hint).also(::prepareEarlySegment)
+            val first = route(source, earlySegmentCorridor(source, depot))
+            withClue("nodes=${first.nodeCount} blocks=${first.capturedBlocks} endpoint=${first.endpoint} reason=${first.continuationReason} failure=${first.failure}") {
+                // Seven metres cannot satisfy the eight-metre hinted fast path. Exhausted no-path is a separate result.
+                (first.nodeCount > 512) shouldBe true
+                first.continuation shouldBe true
+                first.continuationReason shouldBe "no-path"
+                first.failure shouldBe null
+                first.endpoint shouldBe CitizenPoint(53.5, 64.0, .5)
             }
+            val prefixEnd = requireNotNull(first.endpoint)
+            val at = walkEarlySegment(world, first, source)
+            at shouldBe prefixEnd
+            (sqrt(source.distanceSquared(depot)) - sqrt(at.distanceSquared(depot))) shouldBe 7.0
+            citizenAtStorage(world, at, control) shouldBe false
+            citizenNavigationOutcome(CitizenNavigationCompletion(null), citizenAtStorage(world, at, control),
+                6_000, 10_000, false) shouldBe CitizenNavigationOutcome.COMPLETED_OUTSIDE_ARRIVAL
+            cycle.phase shouldBe CitizenPhase.RETURNING
+            cycle.observedWorkMillis shouldBe 0L
+            cycle.beginDelivery(60_000) shouldBe null
+
+            // Continue from the actual walked endpoint to the same depot, without reusing the consumed hint.
+            val stopped = route(at, null)
+            stopped.hasCourierCorridorHint shouldBe false
+            stopped.failure shouldBe "no-path"
+            stopped.continuation shouldBe false
+            stopped.continuationReason shouldBe null
+            stopped.move(at.location(world), 1.0) { true } shouldBe null
+            cycle.phase shouldBe CitizenPhase.RETURNING
+            cycle.beginDelivery(60_000) shouldBe null
         }
     }
 

@@ -65,6 +65,7 @@ internal class CivsAutoSupplies {
             val craftReserves = linkedMapOf<UUID, MutableMap<String, Long>>()
             val desired = linkedMapOf<UUID, MutableMap<String, Long>>()
             fun require(buildingId: UUID, materials: Map<String, Long>) {
+                if (!CivsResearch.automaticGrantAllowed(city, buildingId)) return
                 val target = desired.getOrPut(buildingId, ::linkedMapOf)
                 materials.filterValues { it > 0 }.forEach { (material, count) -> target.merge(material, count, Math::max) }
             }

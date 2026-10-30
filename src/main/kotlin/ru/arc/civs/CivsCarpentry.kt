@@ -86,6 +86,11 @@ internal object CivsCarpentry {
     }.toSet() + listOf("CRIMSON", "WARPED").flatMap {
         listOf("${it}_STEM", "${it}_HYPHAE", "STRIPPED_${it}_STEM", "STRIPPED_${it}_HYPHAE")
     }
+    internal fun timberFamily(material: String): Boolean = material in logs
+    internal fun timberSpecies(material: String): String? = taggedWoods.firstOrNull {
+        material.removePrefix("STRIPPED_").startsWith("${it}_")
+    }
+
     private val generic = setOf("STICK", "CRAFTING_TABLE", "CHEST", "BARREL", "CAMPFIRE", "TRIPWIRE_HOOK",
         "BOOKSHELF", "CHISELED_BOOKSHELF", "LECTERN", "SMITHING_TABLE")
     private fun group(recipe: CivCraftRecipe, input: String): Set<String> = when {

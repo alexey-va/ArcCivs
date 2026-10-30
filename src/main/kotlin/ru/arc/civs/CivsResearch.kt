@@ -2,7 +2,18 @@ package ru.arc.civs
 
 import java.util.UUID
 
-enum class CivResearchId { MATERIALS, METALLURGY, GLASSWORK, ENGINEERING }
+enum class CivResearchId {
+    MATERIALS, METALLURGY, GLASSWORK, ENGINEERING,
+    BUILDING_METHODS_I, BUILDING_METHODS_II, BUILDING_METHODS_III,
+    FURNACE_PRACTICE_I, FURNACE_PRACTICE_II, FURNACE_PRACTICE_III,
+    COMMUNAL_MEALS_I, COMMUNAL_MEALS_II, COMMUNAL_MEALS_III,
+    CITY_WATCH_I, CITY_WATCH_II, CITY_WATCH_III,
+}
+
+enum class CivResearchBranch { INDUSTRY, BUILDING_METHODS, FURNACE_PRACTICE, COMMUNAL_MEALS, CITY_WATCH }
+
+data class CivResearchEffect(val builderSessionRows: Int? = null, val smelteryWorkSeconds: Int? = null,
+    val breadNutrition: Int? = null, val regenerationHunger: Int? = null, val patrolRadius: Int? = null)
 enum class CivIndustryProduct { RAW_IRON, CHARCOAL, GRAVEL, SAND, GLASS, IRON_INGOT, IRON_TOOL_KIT }
 
 /** Distinct currencies. Project acceptance freezes the exact bill in its original city mode. */
@@ -37,18 +48,102 @@ data class CivIndustryBuildingView(val buildingId: UUID, val type: BuildingType,
 data class CivIndustryView(val cityId: UUID, val autonomous: Boolean, val products: Map<CivIndustryProduct, Long>,
     val buildings: List<CivIndustryBuildingView>)
 
-/** Four fixed discoveries; no dynamic graph or wall-clock research scheduler. */
+/** Fixed paid discoveries; all progress remains observed actor work, never elapsed or offline time. */
 object CivsResearch {
-    private const val CURRENT_TERMS_VERSION = 1
-    fun sessions(id: CivResearchId): Int = sessionsV1(id)
+    private data class Extension(val branch: CivResearchBranch, val tier: Int,
+        val buildings: Map<BuildingType, Int>, val prerequisites: Set<CivResearchId>,
+        val materials: Map<String, Long>, val effect: CivResearchEffect)
+
+    private val extensions = mapOf(
+        CivResearchId.BUILDING_METHODS_I to Extension(CivResearchBranch.BUILDING_METHODS, 1,
+            mapOf(BuildingType.BUILDER_HUT to 1, BuildingType.QUARRY to 1), setOf(CivResearchId.MATERIALS),
+            mapOf("COBBLESTONE" to 64L, "BREAD" to 8L), CivResearchEffect(builderSessionRows = 80)),
+        CivResearchId.BUILDING_METHODS_II to Extension(CivResearchBranch.BUILDING_METHODS, 2,
+            mapOf(BuildingType.BUILDER_HUT to 2, BuildingType.WAREHOUSE to 2), setOf(CivResearchId.BUILDING_METHODS_I, CivResearchId.METALLURGY),
+            mapOf("COBBLESTONE" to 128L, "IRON_INGOT" to 8L), CivResearchEffect(builderSessionRows = 96)),
+        CivResearchId.BUILDING_METHODS_III to Extension(CivResearchBranch.BUILDING_METHODS, 3,
+            mapOf(BuildingType.BUILDER_HUT to 2, BuildingType.QUARRY to 2), setOf(CivResearchId.BUILDING_METHODS_II, CivResearchId.ENGINEERING),
+            mapOf("COBBLESTONE" to 256L, "IRON_INGOT" to 16L, "GLASS" to 16L), CivResearchEffect(builderSessionRows = 128)),
+        CivResearchId.FURNACE_PRACTICE_I to Extension(CivResearchBranch.FURNACE_PRACTICE, 1,
+            mapOf(BuildingType.SMELTERY to 1), setOf(CivResearchId.METALLURGY),
+            mapOf("RAW_IRON" to 8L, "CHARCOAL" to 8L), CivResearchEffect(smelteryWorkSeconds = 54)),
+        CivResearchId.FURNACE_PRACTICE_II to Extension(CivResearchBranch.FURNACE_PRACTICE, 2,
+            mapOf(BuildingType.SMELTERY to 2, BuildingType.CRUSHER to 2), setOf(CivResearchId.FURNACE_PRACTICE_I, CivResearchId.GLASSWORK),
+            mapOf("RAW_IRON" to 16L, "CHARCOAL" to 16L, "GLASS" to 8L), CivResearchEffect(smelteryWorkSeconds = 48)),
+        CivResearchId.FURNACE_PRACTICE_III to Extension(CivResearchBranch.FURNACE_PRACTICE, 3,
+            mapOf(BuildingType.SMELTERY to 3), setOf(CivResearchId.FURNACE_PRACTICE_II, CivResearchId.ENGINEERING),
+            mapOf("RAW_IRON" to 32L, "CHARCOAL" to 32L, "GLASS" to 16L), CivResearchEffect(smelteryWorkSeconds = 42)),
+        CivResearchId.COMMUNAL_MEALS_I to Extension(CivResearchBranch.COMMUNAL_MEALS, 1,
+            mapOf(BuildingType.FARM to 1, BuildingType.TAVERN to 1), emptySet(),
+            mapOf("BREAD" to 16L, "COBBLESTONE" to 32L), CivResearchEffect(breadNutrition = 7)),
+        CivResearchId.COMMUNAL_MEALS_II to Extension(CivResearchBranch.COMMUNAL_MEALS, 2,
+            mapOf(BuildingType.FARM to 2, BuildingType.TAVERN to 2), setOf(CivResearchId.COMMUNAL_MEALS_I, CivResearchId.GLASSWORK),
+            mapOf("BREAD" to 32L, "COBBLESTONE" to 64L, "GLASS" to 8L), CivResearchEffect(breadNutrition = 8)),
+        CivResearchId.COMMUNAL_MEALS_III to Extension(CivResearchBranch.COMMUNAL_MEALS, 3,
+            mapOf(BuildingType.TAVERN to 2, BuildingType.HOUSE to 2), setOf(CivResearchId.COMMUNAL_MEALS_II, CivResearchId.ENGINEERING),
+            mapOf("BREAD" to 64L, "COBBLESTONE" to 128L, "GLASS" to 16L), CivResearchEffect(breadNutrition = 8, regenerationHunger = 16)),
+        CivResearchId.CITY_WATCH_I to Extension(CivResearchBranch.CITY_WATCH, 1,
+            mapOf(BuildingType.GUARD_TOWER to 1), setOf(CivResearchId.METALLURGY),
+            mapOf("IRON_INGOT" to 8L, "COBBLESTONE" to 64L), CivResearchEffect(patrolRadius = 40)),
+        CivResearchId.CITY_WATCH_II to Extension(CivResearchBranch.CITY_WATCH, 2,
+            mapOf(BuildingType.GUARD_TOWER to 2, BuildingType.GATE to 1), setOf(CivResearchId.CITY_WATCH_I, CivResearchId.GLASSWORK),
+            mapOf("IRON_INGOT" to 16L, "COBBLESTONE" to 128L, "GLASS" to 8L), CivResearchEffect(patrolRadius = 48)),
+        CivResearchId.CITY_WATCH_III to Extension(CivResearchBranch.CITY_WATCH, 3,
+            mapOf(BuildingType.GUARD_TOWER to 2), setOf(CivResearchId.CITY_WATCH_II, CivResearchId.ENGINEERING),
+            mapOf("IRON_INGOT" to 32L, "COBBLESTONE" to 256L, "GLASS" to 16L), CivResearchEffect(patrolRadius = 64)),
+    )
+
+    fun branch(id: CivResearchId): CivResearchBranch = extensions[id]?.branch ?: CivResearchBranch.INDUSTRY
+    fun tier(id: CivResearchId): Int = extensions[id]?.tier ?: when (id) {
+        CivResearchId.MATERIALS -> 1
+        CivResearchId.METALLURGY, CivResearchId.GLASSWORK -> 2
+        else -> 3
+    }
+    fun universityLevel(id: CivResearchId): Int = extensions[id]?.tier ?: if (id == CivResearchId.ENGINEERING) 2 else 1
+    fun buildingRequirements(id: CivResearchId): Map<BuildingType, Int> = extensions[id]?.buildings?.toMap() ?:
+        if (id == CivResearchId.MATERIALS) mapOf(BuildingType.FORESTER to 1, BuildingType.QUARRY to 1) else emptyMap()
+    fun effect(id: CivResearchId): CivResearchEffect = extensions[id]?.effect ?: CivResearchEffect()
+    fun extended(id: CivResearchId): Boolean = id in extensions
+    fun sessions(id: CivResearchId): Int = extensions[id]?.let { listOf(30, 60, 120)[it.tier - 1] } ?: sessionsV1(id)
+
+    private fun completedEffect(city: Settlement, branch: CivResearchBranch): CivResearchEffect? = city.research?.completed.orEmpty()
+        .mapNotNull { extensions[it] }.filter { it.branch == branch }.maxByOrNull { it.tier }?.effect
+    fun builderSessionRows(city: Settlement): Int = completedEffect(city, CivResearchBranch.BUILDING_METHODS)?.builderSessionRows ?: 64
+    fun smelteryWorkMillis(city: Settlement): Long = (completedEffect(city, CivResearchBranch.FURNACE_PRACTICE)?.smelteryWorkSeconds ?: 60) * 1_000L
+    fun breadNutrition(city: Settlement): Int? = completedEffect(city, CivResearchBranch.COMMUNAL_MEALS)?.breadNutrition
+    fun regenerationHunger(city: Settlement): Int = completedEffect(city, CivResearchBranch.COMMUNAL_MEALS)?.regenerationHunger ?: 18
+    fun patrolRadius(city: Settlement): Int = completedEffect(city, CivResearchBranch.CITY_WATCH)?.patrolRadius ?: 32
+
+    /** Only the historical projects keep their existing automatic simulation supplies. Courier demand is separate. */
+    internal fun automaticGrantAllowed(city: Settlement, buildingId: UUID): Boolean =
+        city.building(buildingId)?.type != BuildingType.UNIVERSITY || city.research?.project?.termsVersion !in setOf(3, 4)
+
+    internal fun automatic(city: Settlement, availableMaterials: Map<String, Long>? = null): CivResearchId? {
+        CivResearchId.entries.firstOrNull { !extended(it) && reason(city, it) == null }?.let { return it }
+        if (availableMaterials == null || CivsAutonomy.legacyStock(city)) return null
+        return extensions.keys.sortedWith(compareBy<CivResearchId> { tier(it) }.thenBy { branch(it).ordinal }.thenBy { it.ordinal })
+            .firstOrNull { id -> reason(city, id) == null && cost(city, id).materials.all { (material, count) ->
+                availableMaterials.getOrDefault(material, 0) >= count
+            } }
+    }
 
     private fun sessionsV1(id: CivResearchId): Int = when (id) {
         CivResearchId.MATERIALS -> 3
         CivResearchId.METALLURGY, CivResearchId.GLASSWORK -> 5
         CivResearchId.ENGINEERING -> 8
+        else -> throw CivsRejection("invalid-research")
     }
 
-    fun cost(city: Settlement, id: CivResearchId): CivResearchCost = costV1(CivsAutonomy.legacyStock(city), id)
+    fun cost(city: Settlement, id: CivResearchId): CivResearchCost = if (extended(id))
+        costV3(CivsAutonomy.legacyStock(city), id) else costV1(CivsAutonomy.legacyStock(city), id)
+
+    private fun costV3(legacy: Boolean, id: CivResearchId): CivResearchCost {
+        val materials = requireNotNull(extensions[id]).materials
+        if (!legacy) return CivResearchCost(materials = materials.toMap())
+        return CivResearchCost(stock = Stock(stone = materials["COBBLESTONE"] ?: 0L, food = materials["BREAD"] ?: 0L),
+            products = materials.filterKeys { it !in setOf("COBBLESTONE", "BREAD") }
+                .mapKeys { CivIndustryProduct.valueOf(it.key) })
+    }
 
     /** Supported historical terms are immutable when a future catalog introduces another version. */
     private fun costV1(autonomous: Boolean, id: CivResearchId): CivResearchCost = if (autonomous) when (id) {
@@ -59,11 +154,13 @@ object CivsResearch {
             products = mapOf(CivIndustryProduct.SAND to 8L, CivIndustryProduct.CHARCOAL to 2L))
         CivResearchId.ENGINEERING -> CivResearchCost(stock = Stock(16, 16, 4),
             products = mapOf(CivIndustryProduct.IRON_INGOT to 8L, CivIndustryProduct.GLASS to 8L, CivIndustryProduct.IRON_TOOL_KIT to 1L))
+        else -> throw CivsRejection("invalid-research")
     } else CivResearchCost(materials = when (id) {
         CivResearchId.MATERIALS -> mapOf("BOOK" to 1L, "PAPER" to 8L, "COBBLESTONE" to 8L)
         CivResearchId.METALLURGY -> mapOf("BOOK" to 1L, "RAW_IRON" to 8L, "CHARCOAL" to 2L)
         CivResearchId.GLASSWORK -> mapOf("BOOK" to 1L, "SAND" to 8L, "CHARCOAL" to 2L)
         CivResearchId.ENGINEERING -> mapOf("BOOK" to 2L, "IRON_INGOT" to 8L, "GLASS" to 8L)
+        else -> throw CivsRejection("invalid-research")
     })
 
     fun view(city: Settlement) = CivResearchView(city.id, city.autonomy != null,
@@ -73,6 +170,7 @@ object CivsResearch {
         CivResearchId.MATERIALS -> emptySet()
         CivResearchId.METALLURGY, CivResearchId.GLASSWORK -> setOf(CivResearchId.MATERIALS)
         CivResearchId.ENGINEERING -> setOf(CivResearchId.METALLURGY, CivResearchId.GLASSWORK)
+        else -> requireNotNull(extensions[id]).prerequisites.toSet()
     }
 
     fun has(city: Settlement, research: CivResearchId): Boolean = research in city.research?.completed.orEmpty()
@@ -94,11 +192,11 @@ object CivsResearch {
         has(city, id) -> "research-completed"
         city.research?.project != null -> "research-busy"
         university(city) == null -> "university-required"
-        id == CivResearchId.ENGINEERING && requireNotNull(university(city)).level < 2 -> "university-level-required"
+        requireNotNull(university(city)).level < universityLevel(id) -> "university-level-required"
         !prerequisites(id).all { has(city, it) } -> "research-prerequisites"
-        id == CivResearchId.MATERIALS && listOf(BuildingType.FORESTER, BuildingType.QUARRY).any { type ->
-            city.buildings.none { it.type == type && it.phase == BuildingPhase.ACTIVE }
-        } -> "research-prerequisites"
+        buildingRequirements(id).any { (type, level) -> city.buildings.none {
+            it.type == type && it.phase == BuildingPhase.ACTIVE && it.level >= level
+        } } -> "research-prerequisites"
         else -> null
     }
 
@@ -109,7 +207,7 @@ object CivsResearch {
     internal fun begin(city: Settlement, research: CivResearchId, projectId: UUID, now: Long): Settlement {
         available(city)
         reason(city, research)?.let { throw CivsRejection(it) }
-        val project = CivResearchProject(projectId, research, cost(city, research), sessions(research), termsVersion = CURRENT_TERMS_VERSION)
+        val project = CivResearchProject(projectId, research, cost(city, research), sessions(research), termsVersion = if (extended(research)) 3 else 1)
         return revise(city, city.copy(research = CivResearchState(city.research?.completed.orEmpty(), project),
             workers = invalidate(city, now)))
     }
@@ -202,15 +300,22 @@ object CivsResearch {
         state.project?.let { project ->
             require(project.id != null && project.research != null && project.research !in state.completed)
             require(prerequisites(project.research).all(state.completed::contains))
-            require(project.workRequired in 1..64 && project.workDone in 0 until project.workRequired)
+            require(project.workRequired in 1..120 && project.workDone in 0 until project.workRequired)
             require(project.funded || project.workDone == 0)
             val cost = project.cost
             val native = !CivsAutonomy.legacyStock(city)
-            val expected = costV1(!native, project.research)
-            val migrated = city.autonomy != null && native && project.termsVersion == 2 &&
-                cost == CivsAutoStorageMigration.nativeCost(costV1(true, project.research))
-            require((project.termsVersion == 1 && cost == expected || migrated) &&
-                project.workRequired == sessionsV1(project.research))
+            if (extended(project.research)) {
+                val migrated = city.autonomy != null && native && project.termsVersion == 4 &&
+                    cost == CivsAutoStorageMigration.nativeCost(costV3(true, project.research))
+                require((project.termsVersion == 3 && cost == costV3(!native, project.research) || migrated) &&
+                    project.workRequired == sessions(project.research))
+            } else {
+                val expected = costV1(!native, project.research)
+                val migrated = city.autonomy != null && native && project.termsVersion == 2 &&
+                    cost == CivsAutoStorageMigration.nativeCost(costV1(true, project.research))
+                require((project.termsVersion == 1 && cost == expected || migrated) &&
+                    project.workRequired == sessionsV1(project.research))
+            }
             require(cost.stock.wood in 0..CivInventory.MAX_AMOUNT && cost.stock.stone in 0..CivInventory.MAX_AMOUNT &&
                 cost.stock.food in 0..CivInventory.MAX_AMOUNT)
             require(cost.products.size <= CivIndustryProduct.entries.size && cost.products.all { (key, amount) -> key != null && amount in 1..64 })

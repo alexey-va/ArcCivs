@@ -555,6 +555,199 @@ class CivsRoadMaintenanceTest : FunSpec({
         }
     }
 
+    test("a descending town hall junction aligns the stair flight without changing the warehouse centreline") {
+        val base = upkeepCity()
+        val road = base.buildings.last()
+        val route = listOf(CivPosition(0, 64, 4), CivPosition(0, 64, 3), CivPosition(0, 64, 2), CivPosition(0, 64, 1),
+            CivPosition(0, 63, 0), CivPosition(1, 63, 0), CivPosition(2, 63, 0), CivPosition(3, 63, 0),
+            CivPosition(4, 63, 0), CivPosition(5, 63, 0))
+        val warehouseRoute = listOf(CivPosition(-1, 64, 4), CivPosition(-1, 64, 3), CivPosition(-1, 64, 2),
+            CivPosition(-2, 64, 2), CivPosition(-2, 64, 1), CivPosition(-3, 64, 1), CivPosition(-4, 64, 1),
+            CivPosition(-5, 64, 1), CivPosition(-6, 64, 1))
+        val house = road.copy(id = UUID(0, 70), type = BuildingType.HOUSE, anchor = CivPosition(9, 62, 0),
+            bounds = CivBox(CivPosition(8, 62, -2), CivPosition(11, 68, 2)), entrance = route.last(), transit = null,
+            schematicId = CivsBlueprints.schematicId(base.style, BuildingType.HOUSE, 1))
+        val warehouse = road.copy(id = UUID(0, 71), type = BuildingType.WAREHOUSE, anchor = CivPosition(-10, 63, 1),
+            bounds = CivBox(CivPosition(-12, 63, -1), CivPosition(-9, 69, 3)), entrance = warehouseRoute.last(), transit = null,
+            schematicId = CivsBlueprints.schematicId(base.style, BuildingType.WAREHOUSE, 1))
+        val city = base.copy(buildings = base.buildings.dropLast(1) + house + warehouse)
+        val plans = listOf(upkeepApproach(city, house, route), upkeepApproach(city, warehouse, warehouseRoute))
+        val repair = requireNotNull(CivsRoadMaintenance.turnOverride(city, house, route))
+        repair.changed() shouldBe listOf(3)
+        repair.descendingTurn(3..3) shouldBe true
+        val workTarget = CivsRoadMaintenance.prepare(city, plans).targets.single { it.routeOverride != null }
+        workTarget.floor shouldBe CivPosition(0, 62, 1)
+        val worker = city.workers.single()
+        val work = CivWorldWork(worker.id, worker.completedCycles, worker.assignment!!, CivPosition(0, 64, 3),
+            listOf(CivPlanBlock(workTarget.floor, "minecraft:dirt", workTarget.after)),
+            status = "repairing-road", focus = workTarget.floor, upkeep = workTarget)
+        val after = CivsRoadMaintenance.complete(city, work, 3_000)
+        CivRoadUpkeepReceipt(worker, city.stock, work, 3_000).validated(after)
+        CivAutonomousAccess.from(after, plans).routes.getValue(warehouse.id) shouldBe warehouseRoute
+        CivAutonomousAccess.from(after, plans).routes.getValue(house.id) shouldBe repair.route
+        val network = CivsRoadMaintenance.prepare(after, plans)
+        network.targets.none { it.routeOverride != null } shouldBe true
+        val targets = network.targets.associateBy { civsTerrainKey(it.floor.x, it.floor.z) }
+        targets.getValue(civsTerrainKey(-1, 2)).after shouldBe "minecraft:dark_oak_planks" // warehouse turn landing
+        for (x in 0..1) targets.getValue(civsTerrainKey(x, 2)).after shouldBe
+            "minecraft:dark_oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+        targets.getValue(civsTerrainKey(-1, 1)).floor.y shouldBe 62
+
+        val witness = requireNotNull(workTarget.junction)
+        val mutableOriginal = repair.originalRoute.toMutableList()
+        val mutableFinal = repair.route.toMutableList()
+        val mutableRepair = repair.copy(originalRoute = mutableOriginal, route = mutableFinal)
+        val mutableOwnerRoute = witness.owners.first().route.toMutableList()
+        val mutableOwners = witness.owners.mapIndexed { index, value ->
+            if (index == 0) value.copy(route = mutableOwnerRoute) else value
+        }.toMutableList()
+        val mutableNeighbours = workTarget.neighbours.toMutableList()
+        val mutableLinked = mutableMapOf<String, CivRoadRouteOverride>()
+        val mutablePrevious = mutableMapOf<String, CivRoadRouteOverride>()
+        val mutableChanges = work.changes.toMutableList()
+        val mutableReceipt = CivRoadUpkeepReceipt(worker, city.stock, work.copy(changes = mutableChanges,
+            upkeep = workTarget.copy(route = mutableFinal, neighbours = mutableNeighbours, routeOverride = mutableRepair,
+                linkedRouteOverrides = mutableLinked, previousRouteOverrides = mutablePrevious,
+                junction = witness.copy(repair = mutableRepair, owners = mutableOwners))), 3_000)
+        val detached = mutableReceipt.detached()
+        detached.validated(after)
+        val detachedJson = Gson().toJson(detached)
+        mutableOriginal.clear(); mutableFinal.clear(); mutableOwnerRoute.clear(); mutableOwners.clear()
+        mutableNeighbours.clear(); mutableChanges.clear()
+        mutableLinked[warehouse.id.toString()] = mutableRepair
+        mutablePrevious[house.id.toString()] = mutableRepair
+        Gson().toJson(detached) shouldBe detachedJson
+        detached.validated(after)
+
+        MockBukkitTestRuntime.open().use { paper ->
+            val world = CivsWorksiteWorldFixture("upkeep-descending-junction", ground = Material.AIR, collisionForData = { data ->
+                if (CivsRoadMaintenance.surface(data.asString)) roadUpkeepBoxes(data).map { it.at(CivPosition(0, 0, 0)) } else null
+            }).also(paper.server::addWorld)
+            for (x in -1..1) for (z in -1..1) world.loadChunk(x, z)
+            for (x in -8..7) for (z in -3..6) for (y in 58..62) world.getBlockAt(x, y, z).type = Material.DIRT
+            var current = city.copy(worldId = world.uid)
+            val nativePlans = plans.map { it.copy(worldId = world.uid) }
+            val immutablePlans = Gson().toJson(nativePlans)
+            CivsRoadMaintenance.prepare(current, nativePlans, proposeCuts = false).targets.forEach { target ->
+                world.getBlockAt(target.floor.x, target.floor.y, target.floor.z)
+                .setBlockData(Bukkit.createBlockData(target.after), false) }
+            val oldStair = CivPosition(0, 63, 1)
+            val sharedShoulder = CivPosition(-1, 63, 1)
+            // Captured native before: this shared shoulder retains the earlier warehouse's flat finish.
+            // The newer merged maintenance recipe would already request a stair at the old height.
+            world.getBlockAt(sharedShoulder.x, sharedShoulder.y, sharedShoulder.z).type = Material.DIRT_PATH
+            world.getBlockAt(oldStair.x, oldStair.y, oldStair.z).blockData.asString shouldBe
+                "minecraft:dark_oak_stairs[facing=south,half=bottom,shape=straight,waterlogged=false]"
+            world.getBlockAt(sharedShoulder.x, sharedShoulder.y, sharedShoulder.z).type shouldBe Material.DIRT_PATH
+            fun cells() = (-8..7).flatMap { x -> (-3..6).flatMap { z -> (58..68).map { y ->
+                CivPosition(x, y, z) to world.getBlockAt(x, y, z).blockData.asString
+            } } }.toMap()
+            val beforeNative = cells()
+            var denied: CivPosition? = null
+            val native = CivsRoadWorld(paper.createSimplePlugin("DescendingJunction"), { listOf(current) },
+                { _, block, _ -> CivPosition(block.x, block.y, block.z) != denied }, { false })
+            val first = CivsRoadMaintenance.prepare(current, nativePlans).targets.single { it.routeOverride != null }
+            val captured = requireNotNull(native.captureRoadUpkeep(current, current.workers.single(), first))
+            captured.changes.any { it.position == oldStair && it.before == beforeNative.getValue(oldStair) && it.after == "minecraft:air" } shouldBe true
+            native.roadUpkeepPending(current, captured) shouldBe true
+            for (unsafe in listOf("minecraft:chest[facing=north,type=single,waterlogged=false]", "minecraft:water[level=0]",
+                "minecraft:dark_oak_stairs[facing=north,half=bottom,shape=straight,waterlogged=true]")) {
+                world.getBlockAt(sharedShoulder.x, sharedShoulder.y, sharedShoulder.z).blockData = Bukkit.createBlockData(unsafe)
+                native.captureRoadUpkeep(current, current.workers.single(), first) shouldBe null
+                shouldThrow<CivsRejection> { native.validateRoadUpkeep(current, captured) }
+                world.getBlockAt(sharedShoulder.x, sharedShoulder.y, sharedShoulder.z).blockData = Bukkit.createBlockData(beforeNative.getValue(sharedShoulder))
+            }
+            denied = sharedShoulder
+            native.captureRoadUpkeep(current, current.workers.single(), first) shouldBe null
+            shouldThrow<CivsRejection> { native.validateRoadUpkeep(current, captured) }.reason shouldBe "lands-denied"
+            denied = null
+            val registered = current.copy(inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(sharedShoulder)))
+            native.captureRoadUpkeep(registered, registered.workers.single(), first) shouldBe null
+            val torch = sharedShoulder.copy(x = sharedShoulder.x - 1)
+            val torchBefore = world.getBlockAt(torch.x, torch.y, torch.z).blockData.asString
+            world.getBlockAt(torch.x, torch.y, torch.z).blockData = Bukkit.createBlockData("minecraft:wall_torch[facing=west]")
+            native.captureRoadUpkeep(current, current.workers.single(), first) shouldBe null
+            world.getBlockAt(torch.x, torch.y, torch.z).blockData = Bukkit.createBlockData(torchBefore)
+            cells() shouldBe beforeNative // Admission and refusals never mutate native blocks.
+
+            val receipts = mutableListOf<CivRoadUpkeepReceipt>()
+            repeat(32) {
+                val prepared = CivsRoadMaintenance.prepare(current, nativePlans)
+                val candidate = prepared.targets.firstNotNullOfOrNull { target ->
+                    native.captureRoadUpkeep(current, current.workers.single(), target)
+                } ?: return@repeat
+                val paidAt = 3_000L + receipts.size * 4_000L
+                native.validateRoadUpkeep(current, candidate)
+                val updated = CivsRoadMaintenance.complete(current, candidate, paidAt)
+                val receipt = CivRoadUpkeepReceipt(current.workers.single(), current.stock, candidate, paidAt)
+                val restored = Gson().fromJson(Gson().toJson(receipt), CivRoadUpkeepReceipt::class.java)
+                restored.before(updated) shouldBe current
+                restored.validated(updated)
+                CivInventoryTransaction(UUID.randomUUID(), current.id, current.revision, updated, emptyList(),
+                    worldChanges = candidate.changes, upkeep = restored).validated()
+                candidate.changes.asReversed().forEach { change ->
+                    val block = world.getBlockAt(change.position.x, change.position.y, change.position.z)
+                    block.blockData.asString shouldBe change.before
+                    block.setBlockData(Bukkit.createBlockData(change.after), false)
+                    native.validateRoadUpkeep(restored.before(updated), restored.work) // Every partial after image recovers.
+                }
+                native.roadUpkeepPending(current, candidate) shouldBe false
+                current = updated
+                receipts += restored
+            }
+            receipts.count { it.work.upkeep?.routeOverride != null } shouldBe 1
+            (receipts.size > 1) shouldBe true
+            current.stock.stone shouldBe city.stock.stone - receipts.size
+            CivAutonomousAccess.from(current, nativePlans).routes.getValue(warehouse.id) shouldBe warehouseRoute
+            Gson().toJson(nativePlans) shouldBe immutablePlans
+            val completed = cells()
+            val paidPositions = receipts.flatMap { it.work.changes }.map { it.position }.toSet()
+            completed.filter { (p, data) -> beforeNative[p] != data }.keys.all { it in paidPositions } shouldBe true
+            repeat(3) {
+                val prepared = CivsRoadMaintenance.prepare(current, nativePlans)
+                prepared.targets.none { it.routeOverride != null } shouldBe true
+                prepared.targets.all { target -> world.getBlockAt(target.floor.x, target.floor.y, target.floor.z).blockData.asString == target.after } shouldBe true
+                prepared.targets.all { native.captureRoadUpkeep(current, current.workers.single(), it) == null } shouldBe true
+                cells() shouldBe completed
+            }
+            (roadHalfStepWalk(world, repair.route) != null) shouldBe true
+            (roadHalfStepWalk(world, repair.route.reversed()) != null) shouldBe true
+            (roadHalfStepWalk(world, warehouseRoute) != null) shouldBe true
+            (roadHalfStepWalk(world, warehouseRoute.reversed()) != null) shouldBe true
+            System.getenv("CIVS_ROAD_PREVIEW_OUT")?.let { directory ->
+                val out = Path.of(directory).also(Files::createDirectories)
+                Files.writeString(out.resolve("descending-junction-replay.json"), GsonBuilder().setPrettyPrinting().create().toJson(mapOf(
+                    "kind" to "production-native-fixture-receipt-replay-not-live-acceptance", "worldOffset" to CivPosition(-1867, 0, -2773),
+                    "originalRoute" to route, "route" to repair.route, "warehouseRoute" to warehouseRoute,
+                    "before" to beforeNative.map { (p, data) -> mapOf("position" to p, "data" to data) },
+                    "after" to completed.map { (p, data) -> mapOf("position" to p, "data" to data) }, "receipts" to receipts)))
+            }
+        }
+
+        // A retained centreline at a conflicting grade is never treated as a disposable shoulder.
+        val crossing = warehouse.copy(id = UUID(0, 72), entrance = CivPosition(-4, 64, 1))
+        val crossingRoute = listOf(CivPosition(2, 64, 1), CivPosition(1, 64, 1), CivPosition(0, 64, 1),
+            CivPosition(-1, 64, 1), CivPosition(-2, 64, 1), CivPosition(-3, 64, 1), crossing.entrance)
+        val crossed = city.copy(buildings = city.buildings.dropLast(1) + crossing)
+        CivsRoadMaintenance.prepare(crossed, listOf(upkeepApproach(crossed, house, route), upkeepApproach(crossed, crossing, crossingRoute)))
+            .targets.none { it.routeOverride != null } shouldBe true
+
+        // A previous independent cut is retained while the new descending run is admitted and recovered.
+        val extended = (9 downTo 5).map { CivPosition(0, if (it == 7) 65 else 64, it) } + route
+        val previous = CivRoadRouteOverride(extended, extended.map { if (it.z == 7) it.copy(y = 64) else it })
+        val withPrevious = city.copy(roadRouteOverrides = mapOf(house.id.toString() to previous))
+        val extendedPlans = listOf(upkeepApproach(withPrevious, house, extended), upkeepApproach(withPrevious, warehouse, warehouseRoute))
+        val next = CivsRoadMaintenance.prepare(withPrevious, extendedPlans).targets.single { it.routeOverride != null }
+        next.routeOverride!!.runs().size shouldBe 2
+        next.junction!!.run shouldBe 8
+        val nextWork = work.copy(upkeep = next, changes = listOf(CivPlanBlock(next.floor, "minecraft:dirt", next.after)), focus = next.floor)
+        val nextAfter = CivsRoadMaintenance.complete(withPrevious, nextWork, 3_000)
+        val nextReceipt = CivRoadUpkeepReceipt(worker, withPrevious.stock, nextWork, 3_000)
+        nextReceipt.before(nextAfter) shouldBe withPrevious
+        Gson().fromJson(Gson().toJson(nextReceipt), CivRoadUpkeepReceipt::class.java).validated(nextAfter)
+        nextAfter.roadRouteOverrides!!.getValue(house.id.toString()).route[2].y shouldBe 64
+    }
+
     test("a paid turn correction preserves historical routes and builds a flat intermediate block between straight flights") {
         val (town, source, originalRoute) = upkeepBend()
         val plan = upkeepApproach(town, source, originalRoute)

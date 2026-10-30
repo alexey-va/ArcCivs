@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "title": "Forestry family surplus admission: 512 stop / 256 resume",
+  "participants": [
+    1,
+    5,
+    10
+  ],
+  "assumptions": [
+    "Only new physical forestry actions use this policy. Cached selected work, persisted tree jobs, accepted receipts, cargo, earned skills, items and requirements retain their existing terms. Other professions do not pause.",
+    "512 raw-timber family items stop new admission; 256 resume. These starting values are operator policy, not measured optima. Raw logs/wood/stems and stripped forms share the pinned carpentry timber family. A supported species confirmed current direct/recipe demand overrides its pause.",
+    "A complete current capture counts every unique indexed warehouse, town-hall, builder and production holder once, plus current plain worker bags once. Carried cargo is already in its bag; an unpicked reservation remains in the native holder. Custom items and inaccessible corpse holdings are not usable plain supply.",
+    "A complete stock proof requires native loaded and cached-index membership for at most256 distinct relevant chunks, at capture start/finish/decision. Registered outside holders count once. Missing/stale/unavailable evidence cannot start or release a latch; a confirmed pause remains until fresh complete stock proves resume. Current authored demand may conservatively exempt only its exact species; an unsupported recipe never becomes an oak substitute or a family-wide release. Unknown observations never become fictitious zero stock.",
+    "Sensitivity only: initially512 family items, no active paid tree or consumer demand; one existing three-log oak/minute for0.25/1/4 active hours/day gives15/60/240 new trees and45/180/720 logs before. After there are zero new trees while the family remains above resume. This is not measured throughput or guaranteed renewable forest.",
+    "Only action count changes. Native drop tables, duration, tool/sapling debit, recipes and payment remain unchanged. Paid trees can overshoot the threshold: this is an admission policy, not an inventory hard cap. Existing tree limits remain2048cells and128cells per batch.",
+    "Direct Vault=0,tokens=0,player XP=0 before and after. Resident skill opportunities decrease with skipped accepted batches; earned skills/health remain intact. For the one-batch-per-tree example a fresh resident gains min(40,15/60/240)=15/40/40 lifetime points before, versus zero while paused. Lifetime caps do not reset daily.",
+    "Current SELL/AutoSell and planned SELL-to-contract remain separate downstream scenarios. No item-to-money exchange rate is invented. The live aggregate ledger is context, not ArcCivs attribution. No grant or native mutation is added by the gate."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": [
+        {
+          "id": "direct_vault",
+          "kind": "mint",
+          "source": "CivsForestrySurplus / CivsForestryWorksite new action admission",
+          "basis": "No currency or player XP award is introduced; existing receipts own completion.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_tokens",
+          "kind": "mint",
+          "source": "CivsForestrySurplus / CivsForestryWorksite new action admission",
+          "basis": "No currency or player XP award is introduced; existing receipts own completion.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "player_xp": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "direct_player_xp",
+          "kind": "mint",
+          "source": "CivsForestrySurplus / CivsForestryWorksite new action admission",
+          "basis": "No currency or player XP award is introduced; existing receipts own completion.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "0",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    },
+    "timber_items": {
+      "minor_per_unit": 1,
+      "flows": [
+        {
+          "id": "three_log_oaks",
+          "kind": "item",
+          "source": "CivsForestryWorksite.captureForestBatch native drops",
+          "basis": "Assumed initially stocked family, no demand and no active paid job; three-log native trees, not telemetry.",
+          "before": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              15,
+              60,
+              240
+            ]
+          },
+          "after": {
+            "enabled": true,
+            "amount_per_event": {
+              "value": "3",
+              "unit": "major"
+            },
+            "events_per_player_day": [
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "prices": []
+}

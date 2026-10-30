@@ -56,13 +56,16 @@ internal class CivsCitizenRoutes(
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+        val visit = actor.mineVisit?.takeIf { idleAnchor == null && it.owns(target) && !actor.sheltering &&
+            actor.attacker == null && actor.foodSource == null && actor.mealVisit == null }
         // A valid hand reach does not depend on the availability of the preferred standing
         // cell. Likewise, any visible side of the real storage barrel is a valid arrival.
         if (idleAnchor == null && !actor.sheltering && !actor.returningToWarehouse &&
             actor.plan.idleReason in listOf(null, "placing") && arrivedAt(actor, city, world, target)) {
             return true
         }
-        val storage = storageForTarget(actor, city, target)
+        // The return must physically reach its original standing before the reserve session resumes.
+        val storage = if (visit != null) null else storageForTarget(actor, city, target)
         if (storage != null) {
             val standing = storageStanding(actor, city, world, target, storage, idleAnchor == null)
             if (standing == null) {
@@ -72,10 +75,10 @@ internal class CivsCitizenRoutes(
             }
             actor.targets[target] = standing
         }
-        val resolved = if (idleAnchor != null && storage == null) target else resolvedTarget(actor, target)
+        val resolved = if (visit != null || idleAnchor != null && storage == null) target else resolvedTarget(actor, target)
         val mine = routeMine(actor, city).takeIf { idleAnchor == null }
-        val workMine = mine?.takeIf { actor.cycle.phase == CitizenPhase.TO_WORK && actor.plan.worldWork?.miningStep != null }
-        val minePassage = workMine?.let { building ->
+        val workMine = mine?.takeIf { visit != null || actor.cycle.phase == CitizenPhase.TO_WORK && actor.plan.worldWork?.miningStep != null }
+        val minePassage = visit?.passage ?: workMine?.let { building ->
             val work = actor.plan.worldWork
             citizenMineRoutePassage(building, work?.miningAccessStep ?: work?.miningStep ?: 0,
                 city.minePlans?.get(building.id.toString()), work?.miningAccessSections)
@@ -102,7 +105,7 @@ internal class CivsCitizenRoutes(
             return false
         }
         val allowed = citizenRouteBuildings(city, actor.plan, target, CivPosition(from.blockX, from.blockY, from.blockZ)) +
-            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id })
+            listOfNotNull(idleAnchor?.let { citizenControlBuilding(city, it)?.id }, visit?.key?.building?.id)
         val idleTransit = idleAnchor != null && !citizenWithinIdleArea(idleAnchor, from.point())
         val mealTarget = actor.mealVisit?.target?.takeIf { it == target }
         val trip = if (actor.collectionSeek == null && actor.collectionHome == null &&
@@ -199,6 +202,14 @@ internal class CivsCitizenRoutes(
 
     /** Fresh route planning still replaces every motion; only the observed same-shipment prefix survives. */
     fun cancelForContinuation(actor: CitizenActor, city: Settlement, route: CitizenRoute) {
+        if (route.motion.continuation && route.motion.finished && route.motion.failure == null)
+            CivsDiagnostics.event("citizen_route_partial", "city" to actor.cityId, "worker" to actor.workerId,
+                "cycle" to actor.plan.token.completedCycles, "phase" to actor.cycle.phase,
+                "reason" to route.motion.continuationReason, "from" to route.from.coordinates(),
+                "actual" to actor.npc.location.point().coordinates(), "endpoint" to route.path?.end?.coordinates(),
+                "authored_goal" to route.authored, "target" to route.target.point().coordinates(),
+                "path_progress" to route.motion.forwardProgress, "path_nodes" to route.motion.nodeCount,
+                "captured_blocks" to route.motion.capturedBlocks, "native_shape_reads" to route.motion.nativeShapeReads)
         val prefix = actor.courierInboundPrefix
         val courier = actor.plan.courier
         if (prefix != null && courier != null && actor.cycle.phase == CitizenPhase.TO_WORK && !courier.carrying)
@@ -214,6 +225,13 @@ internal class CivsCitizenRoutes(
 
     fun pauseNavigation(actor: CitizenActor, status: String, detail: String, target: Location, now: Long,
                                 preflightStanding: CivPosition? = null) {
+        if (actor.mineVisit != null) {
+            actor.mineVisit?.failure = detail
+            cancelRoute(actor)
+            actor.cycle.deferWork(now)
+            runtime.statuses[actor.workerId] = "route-unreachable"
+            return
+        }
         if (actor.workDetour != null) {
             cancelRoute(actor)
             actor.cycle.deferWork(now)
@@ -323,6 +341,8 @@ internal class CivsCitizenRoutes(
             "from" to route?.from?.coordinates(), "target" to target.point().coordinates(), "actual" to actual.coordinates(),
             "distance" to sqrt(actual.distanceSquared(target.point())), "elapsed_ms" to route?.let { now - it.startedAt },
             "path_nodes" to route?.motion?.nodeCount, "path_failure" to route?.motion?.failure,
+            "partial_reason" to route?.motion?.continuationReason, "partial_endpoint" to route?.path?.end?.coordinates(),
+            "authored_goal" to route?.authored,
             "blocked_waypoint" to route?.blockedWaypoint?.coordinates(),
             "searching" to route?.motion?.searching, "collision_wait" to route?.motion?.waitingForCollision,
             "search_state" to route?.motion?.preparationPhase,
@@ -376,7 +396,9 @@ internal class CivsCitizenRoutes(
     fun resolvedTarget(actor: CitizenActor, target: CivPosition): CivPosition = actor.targets[target] ?: target
 
     // Returning after cosmetic work has no worldWork, but still leaves the assigned mine.
-    fun routeMine(actor: CitizenActor, city: Settlement): CivBuilding? = actor.plan.takeIf {
+    fun routeMine(actor: CitizenActor, city: Settlement): CivBuilding? = actor.mineVisit?.takeIf {
+        !actor.sheltering && actor.attacker == null && actor.foodSource == null && actor.mealVisit == null
+    }?.key?.building?.id?.let(city::building) ?: actor.plan.takeIf {
         it.type == BuildingType.QUARRY && it.courier == null && !actor.sheltering &&
             actor.attacker == null && actor.foodSource == null && actor.social.visit == null &&
             actor.collectionSeek == null && actor.collectionHome == null
@@ -412,6 +434,11 @@ internal class CivsCitizenRoutes(
     }
 
     fun arrivedAt(actor: CitizenActor, city: Settlement, world: World, target: CivPosition): Boolean {
+        actor.mineVisit?.takeIf { it.owns(target) }?.let {
+            return citizenControlClear(city, target) && citizenStandable(world, target) &&
+                citizenPacketBodyClear(world, actor.npc.location.point(), false) &&
+                citizenAtSupportedEndpoint(world, actor.npc.location.point(), target)
+        }
         if (!actor.sheltering && actor.plan.token.constructionId != null && target == actor.plan.workplace)
             return citizenStandable(world, target) && citizenControlClear(city, target) &&
                 citizenPacketBodyClear(world, actor.npc.location.point(), false) &&
@@ -458,6 +485,7 @@ internal class CivsCitizenRoutes(
     fun recoverNavigation(actor: CitizenActor, target: Location, now: Long, idleAnchor: CivPosition? = null,
                                   timedOnly: Boolean = false): Boolean {
         val failed = actor.route ?: return false
+        if (actor.mineVisit != null) return false
         val recoveryAnchor = failed.idleAnchor ?: idleAnchor
         val timedOut = observeArrivalWait(actor, failed)
         if (timedOnly && !timedOut) return false

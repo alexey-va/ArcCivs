@@ -11,6 +11,7 @@ internal class CivsCityResearch(
     private val records: CivsCityRecords,
     private val tasks: LifecycleTaskScope,
     private val storage: CivsStorage,
+    private val researchSupply: (Settlement) -> CivSupplySnapshot? = { null },
 ) {
     private var researchCursor = 0
 
@@ -58,7 +59,7 @@ internal class CivsCityResearch(
         val project = city.research?.project
         val future = runCatching {
             if (project == null) {
-                val research = CivResearchId.entries.first { CivsResearch.reason(city, it) == null }
+                val research = automaticResearch(city) ?: return
                 authority.mutate(city.id) { CivsResearch.begin(it, research, UUID.randomUUID(), authority.now()) }
             } else if (CivsAutonomy.legacyStock(city)) authority.mutate(city.id) { CivsResearch.fund(it, project.id, authority.now()) }
             else authority.inventoryMutation(city.id, { current ->
@@ -86,5 +87,45 @@ internal class CivsCityResearch(
         }
     }
 
+    private fun automaticResearch(city: Settlement): CivResearchId? {
+        CivsResearch.automatic(city)?.let { return it }
+        val snapshot = researchSupply(city) ?: return null
+        val observation = snapshot.inputKey as? CivSupplyObservation ?: return null
+        if (!CivsAutoSupplies.observed(city, snapshot) || !storage.supplyCaptureCurrent(city, observation.capture)) return null
+        return CivsResearch.automatic(city, civsResearchAvailableMaterials(city, snapshot))
+    }
+
     private fun rejectIf(condition: Boolean, reason: String) { if (condition) throw CivsRejection(reason) }
+}
+
+/** A conservative admission estimate, never a debit: actual local funding still uses the inventory receipt. */
+internal fun civsResearchAvailableMaterials(city: Settlement, snapshot: CivSupplySnapshot): Map<String, Long> {
+    val university = CivsResearch.university(city)?.control ?: return emptyMap()
+    val active = city.buildings.filter { it.phase == BuildingPhase.ACTIVE }.associateBy { it.id }
+    val radius = snapshot.maximumTransferDistance.toDouble()
+    fun reachable(a: CivPosition, b: CivPosition): Boolean {
+        val dx = a.x.toDouble() - b.x; val dy = a.y.toDouble() - b.y; val dz = a.z.toDouble() - b.z
+        return dx * dx + dy * dy + dz * dz <= radius * radius
+    }
+    val relays = snapshot.stores.values.filter { store -> active[store.id]?.type == BuildingType.WAREHOUSE &&
+        city.workers.any { !CivsResidents.isChild(it) && it.assignment == store.id } && reachable(store.control, university) }
+    val available = linkedMapOf<String, Long>()
+    snapshot.stores.values.filter { store -> store.id in active && (store.control == university ||
+        (store.type == BuildingType.WAREHOUSE || store.outputMaterial != null) &&
+            relays.any { reachable(store.control, it.control) }) }.forEach { store ->
+        store.stock.forEach { (material, count) ->
+            val reserve = maxOf(store.desiredStock[material] ?: 0L, snapshot.stockTargets[store.id]?.get(material) ?: 0L)
+            available.merge(material, (count - reserve).coerceAtLeast(0), Math::addExact)
+        }
+    }
+    // Queued construction and workplace demands retain their existing priority over optional studies.
+    snapshot.requests.forEach { request ->
+        available[request.material] = ((available[request.material] ?: 0L) -
+            (request.needed - request.inTransit).coerceAtLeast(0)).coerceAtLeast(0)
+    }
+    snapshot.craftJobs.values.forEach { job -> job.inputs.forEach { (material, count) ->
+        val carried = city.workers.firstOrNull { it.id == job.workerId }?.let { CivsEquipment.plainCount(it, material).toLong() } ?: 0L
+        available[material] = ((available[material] ?: 0L) - (count - carried).coerceAtLeast(0)).coerceAtLeast(0)
+    } }
+    return available.filterValues { it > 0 }
 }

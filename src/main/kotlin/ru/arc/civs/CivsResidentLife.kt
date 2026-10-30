@@ -18,7 +18,8 @@ enum class CivResidentMealSource { CARRIED_BREAD, ABSTRACT_FOOD, CARRIED_FOOD }
 /** Building is the city context; the actor proves an uninterrupted meal where it actually stands. */
 data class CivResidentMeal(val cityRevision: Long, val workerId: UUID, val buildingId: UUID,
     val mealsBefore: Long, val source: CivResidentMealSource, val amount: Int = 1,
-    val material: String = "BREAD", val nutrition: Int = 6, val consumeMillis: Long = 1_600L) {
+    val material: String = "BREAD", val nutrition: Int = 6, val consumeMillis: Long = 1_600L,
+    val researchBreadNutrition: Int? = null) {
     val durationMillis: Long get() = maxOf(4_000L, amount * consumeMillis)
 }
 
@@ -54,12 +55,17 @@ object CivsResidentLife {
     }
 
     fun mealPlan(city: Settlement, worker: CivWorker, preferredBuildingId: UUID? = null,
-        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): CivResidentMeal? {
+        foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY, accepted: CivResidentMeal? = null): CivResidentMeal? {
         if (city.pendingDeletion != null || city.autonomy?.paused == true || CivsResidents.hunger(worker) > 14 ||
             city.workers.none { it.id == worker.id }) return null
         val material = foods.carried(city, worker) ?: return null
         val food = requireNotNull(foods.definition(material))
-        val amount = minOf((15 - CivsResidents.hunger(worker) + food.nutrition - 1) / food.nutrition,
+        val researchNutrition = if (accepted == null) CivsResearch.breadNutrition(city).takeIf { material == "BREAD" }
+            else accepted.researchBreadNutrition
+        if (researchNutrition != null && (material != "BREAD" || researchNutrition !in setOf(7, 8) ||
+                researchNutrition > (CivsResearch.breadNutrition(city) ?: 6))) return null
+        val nutrition = maxOf(food.nutrition, researchNutrition ?: food.nutrition)
+        val amount = minOf((15 - CivsResidents.hunger(worker) + nutrition - 1) / nutrition,
             foods.available(city, worker, material))
         val building = if (preferredBuildingId != null) city.building(preferredBuildingId)?.takeIf {
             it.type == BuildingType.TOWN_HALL || it.type == BuildingType.TAVERN && it.phase == BuildingPhase.ACTIVE && it.control != null
@@ -68,13 +74,13 @@ object CivsResidentLife {
             ?: city.buildings.firstOrNull { it.type == BuildingType.TOWN_HALL } ?: return null
         return CivResidentMeal(city.revision, worker.id, building.id, worker.life?.meals ?: 0,
             if (material == "BREAD") CivResidentMealSource.CARRIED_BREAD else CivResidentMealSource.CARRIED_FOOD,
-            amount, material, food.nutrition, food.consumeMillis)
+            amount, material, nutrition, food.consumeMillis, researchNutrition)
     }
 
     /** One existing food unit after actual arrival, never work, stock production or profession XP. */
     fun finishMeal(city: Settlement, plan: CivResidentMeal, foods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY): Settlement {
         val worker = city.workers.firstOrNull { it.id == plan.workerId } ?: throw CivsRejection("worker-not-found")
-        if (plan.cityRevision > city.revision || plan.copy(cityRevision = city.revision) != mealPlan(city, worker, plan.buildingId, foods))
+        if (plan.cityRevision > city.revision || plan.copy(cityRevision = city.revision) != mealPlan(city, worker, plan.buildingId, foods, accepted = plan))
             throw CivsRejection("stale-meal")
         val life = worker.life ?: CivResidentLife()
         if (life.meals > MAX_COUNTER - plan.amount) throw CivsRejection("arithmetic-overflow")

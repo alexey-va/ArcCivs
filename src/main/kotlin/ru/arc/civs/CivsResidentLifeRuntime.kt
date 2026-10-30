@@ -125,7 +125,7 @@ internal class CivsResidentLifeRuntime(
 
     private fun pulseRegeneration(active: List<Settlement>, at: Long) {
         active.forEach { city ->
-            val awake = if (city.workers.any(CivsResidents::canRegenerate)) citizens.awakeResidentIds(city.id) else emptySet()
+            val awake = if (city.workers.any { CivsResidents.canRegenerate(it, city) }) citizens.awakeResidentIds(city.id) else emptySet()
             val due = regeneration.observe(city, awake, at)
             if (due.isEmpty() || !regenerationPending.add(city.id)) return@forEach
             runCatching { afterPopulationAvailable(city.id) {
@@ -135,7 +135,7 @@ internal class CivsResidentLifeRuntime(
                 val observed = regeneration.observe(current, citizens.awakeResidentIds(city.id), now()).intersect(due)
                 if (observed.isEmpty()) return@afterPopulationAvailable CompletableFuture.completedFuture(Unit)
                 mutate(city.id) { before ->
-                    val workers = before.workers.map { if (it.id in observed) CivsResidents.regenerate(it) else it }
+                    val workers = before.workers.map { if (it.id in observed) CivsResidents.regenerate(it, before) else it }
                     if (workers == before.workers) before else before.copy(workers = workers, revision = before.revision + 1)
                 }.thenApply { Unit }
             } }.onSuccess { future -> future.whenCompleteSync(tasks) { _, failure ->

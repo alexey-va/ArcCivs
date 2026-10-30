@@ -1619,6 +1619,39 @@ class CivsResidentsRuntimeTest : FunSpec({
         }
     }
 
+    test("a full producer output barrel reports storage full and bounds retries without dropping its bag") {
+        residentRuntime(workerId = UUID(0, 20)) { h ->
+            val farm = h.assignFarm()
+            val npc = h.owner.collisionActors().single()
+            npc.teleport(Location(h.world, 25.5, 64.0, .5))
+            val focus = CivPosition(26, 63, 0)
+            h.work = CivWorldWork(h.workerId, 0, farm.id, CivPosition(27, 64, 0),
+                listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")),
+                outputs = mapOf("WHEAT" to 1L), durationMillis = 1_500, status = "working-field", focus = focus)
+            h.owner.pulse(2_000)
+            val bag = List(CivsEquipment.SLOTS) { slot -> if (slot >= CivsEquipment.BAG) CivResidentItem("COBBLESTONE", 64) else null }
+            h.city = h.city.copy(workers = h.city.workers.map { it.copy(items = bag) })
+            var attempts = 0
+            h.owner.returnResidentOutputs = { _, _, _ ->
+                attempts++
+                CompletableFuture.failedFuture(CivsRejection("storage-full"))
+            }
+            h.owner.pulse(3_500)
+            npc.teleport(Location(h.world, 21.5, 64.0, .5))
+            h.owner.pulse(4_000)
+            attempts shouldBe 1
+            h.owner.pulse(4_050)
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.owner.pulse(7_000)
+            attempts shouldBe 1
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.city.workers.single().items shouldBe bag
+            h.deliveries shouldBe 0
+            h.owner.pulse(9_100)
+            attempts shouldBe 2
+        }
+    }
+
     for (ore in listOf(false, true)) test("full stone stock blocks ordinary stone but permits an accepted ore walk ore=$ore") {
         residentRuntime { h ->
             val producer = h.assignQuarry().copy(production = null,
@@ -2012,24 +2045,40 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.navigationNow = 2_000L
             h.owner.pulse(2_000)
             h.owner.status(h.workerId) shouldBe "workers.status.moving-to-work"
-            if (preparationFailure) requireNotNull(h.routeMotion(h.workerId)).planningFailed("preparation-budget")
-            else for (tick in 1..1_000) {
-                if (h.routeFailure() != null) break
-                h.navigate(advanceMillis = 0)
+            if (preparationFailure) {
+                requireNotNull(h.routeMotion(h.workerId)).planningFailed("preparation-budget")
+                h.routeFailure() shouldBe "preparation-budget"
+                actor.location.toVector() shouldBe origin.toVector()
+                h.failedWorkPositions shouldBe emptyList()
+                h.owner.pulse(2_000)
+                actor.location.toVector() shouldBe origin.toVector()
+            } else {
+                var observedPartial = false
+                for (tick in 1..1_000) {
+                    h.navigate()
+                    if (h.routeMotion(h.workerId)?.continuationReason == "no-path") observedPartial = true
+                    if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                    if (h.deliveries == 1) break
+                }
+                withClue(h.navigationState()) { h.deliveries shouldBe 1 }
+                observedPartial shouldBe true
+                h.failedWorkPositions shouldBe emptyList()
+                citizenCanReachBlock(actor, requireNotNull(first.focus), CITIZEN_MINE_REACH) shouldBe true
+                h.owner.requireWorldWorkArrival(h.city.id, h.workerId, first)
+                h.city.workers.single().completedCycles shouldBe 0L
+                h.commitWork()
+                h.owner.pulse(requireNotNull(h.navigationNow) + 4_000)
+                h.city.workers.single().completedCycles shouldBe 1L
+                h.deliveries shouldBe 1
+                return@residentRuntime
             }
-            withClue(h.navigationState()) { h.routeFailure() shouldBe if (preparationFailure) "preparation-budget" else "no-path" }
-            actor.location.toVector() shouldBe origin.toVector()
-            h.failedWorkPositions shouldBe emptyList()
             h.deliveries shouldBe 0
-
-            h.owner.pulse(2_000)
             h.failedWorkPositions shouldBe listOf(first)
             h.owner.status(h.workerId) shouldBe "workers.status.searching-work"
             h.routeIdentity() shouldBe null
-            actor.location.toVector() shouldBe origin.toVector()
             val selections = h.workPlans
-            h.navigationNow = 2_001L
-            h.owner.pulse(2_001)
+            h.navigationNow = requireNotNull(h.navigationNow) + 1
+            h.owner.pulse(requireNotNull(h.navigationNow))
             (h.workPlans > selections) shouldBe true
             h.work shouldBe alternative
             requireNotNull(h.routeIdentity())

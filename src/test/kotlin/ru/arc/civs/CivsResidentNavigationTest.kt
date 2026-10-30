@@ -101,7 +101,7 @@ class CivsResidentNavigationTest : FunSpec({
     }
 
     for (parallel in listOf(1, 9))
-    test("a close sealed destination is rejected quickly with $parallel mixed routes") {
+    test("a close sealed destination returns only a safe prefix quickly with $parallel mixed routes") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("bounded-close-routes-$parallel").also(paper.server::addWorld)
             for (x in -6..6) for (z in -6..6) world.loadChunk(x, z)
@@ -142,8 +142,9 @@ class CivsResidentNavigationTest : FunSpec({
                 println("navigation-latency sealed parallel=$parallel operationsPerTick=$operationsPerTick ticks=$tick completed=${routes.map { completedAt[it] }} nodes=${routes.map { it.nodeCount }} blocks=${routes.map { it.capturedBlocks }}")
                 withClue("ticks=$tick states=${routes.map { listOf(it.failure, it.nodeCount, it.capturedBlocks) }}") {
                     routes.all { !it.searching } shouldBe true
-                    routes.first().failure shouldBe "no-path"
-                    routes.first().endpoint shouldBe null
+                    routes.first().failure shouldBe null
+                    routes.first().continuationReason shouldBe "no-path"
+                    routes.first().endpoint shouldBe CitizenPoint(1.5, 64.0, .5)
                     (routes.first().capturedBlocks < 256) shouldBe true
                     routes.drop(1).forEachIndexed { index, route ->
                         route.failure shouldBe null
@@ -1621,7 +1622,9 @@ class CivsResidentNavigationTest : FunSpec({
                 { _, _ -> true }, { 1.0 })
             val outside = route(emptyList())
             outside.prepare()
-            outside.failure shouldBe "no-path"
+            outside.failure shouldBe null
+            outside.continuationReason shouldBe "no-path"
+            outside.endpoint shouldBe CitizenPoint(1.5, 64.0, .5)
 
             val indoors = route(listOf(hall))
             indoors.prepare()
@@ -1722,7 +1725,9 @@ class CivsResidentNavigationTest : FunSpec({
                 Location(terrain.world, 5.5, 64.0, .5), { p -> p.x in 0..5 && p.y == 64 && p.z == 0 },
                 { _, _ -> true }, { block -> preferred.cost(block) { 1.0 } })
             tree.prepare()
-            tree.failure shouldBe "no-path"
+            tree.failure shouldBe null
+            tree.continuationReason shouldBe "no-path"
+            tree.endpoint shouldBe CitizenPoint(1.5, 64.0, .5)
         }
     }
 

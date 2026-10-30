@@ -1,5 +1,7 @@
 package ru.arc.civs
 
+import java.util.WeakHashMap
+
 /** Owner-authorized Auto production while physical excavation remains unsafe or unavailable. */
 internal object CivsMineFallback {
     const val DISCOVERY_ADMISSIONS = 16
@@ -11,6 +13,15 @@ internal object CivsMineFallback {
         CivsRules.workplaceAvailable(city, building) &&
         worker.assignment == building.id && !CivsResidents.isChild(worker) && worker.cargo == null &&
         CivsEquipment.slots(worker)[4]?.material?.endsWith("_PICKAXE") == true
+
+    // Transient discovery evidence, deliberately outside the economic work/receipt schema.
+    // Keys stay alive only while the owner retains that exact reserve action; saturation skips the optional visit.
+    private val causes = WeakHashMap<CivWorldWork, CivMineVisitCause>()
+    fun cause(work: CivWorldWork): CivMineVisitCause? = causes[work]
+    fun withCause(work: CivWorldWork, need: CivWorkNeedState?): CivWorldWork = work.also {
+        if (causes.size < 4_096) causes[it] = CivMineVisitCause(need?.status ?: "searching-work",
+            need?.reason ?: "physical-work-unavailable", need?.point, need?.blockMaterial)
+    }
 
     fun matches(work: CivWorldWork): Boolean = work.status == "digging-mine" && work.changes.isEmpty() &&
         work.inputs.isEmpty() && work.outputs.size == 1 && work.outputs.entries.single().let { it.key in OUTPUTS && it.value == 1L } &&

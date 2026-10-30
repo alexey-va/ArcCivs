@@ -41,11 +41,15 @@ internal class CivsCitizenWork(
     private val audience get() = audienceOwner()
     private val life get() = lifeOwner()
     private val constructionWorkplaces = mutableMapOf<UUID, CivPosition>()
+    private val mineVisits = CivsMineVisits(runtime) { routes }
+
+    fun reconcileMineVisit(actor: CitizenActor, city: Settlement) = mineVisits.reconcile(actor, city)
 
     fun retainConstruction(cities: Collection<Settlement>) {
         constructionWorkplaces.keys.retainAll(cities.mapNotNull { it.construction?.id }.toSet())
+        mineVisits.retain(cities)
     }
-    fun clear() = constructionWorkplaces.clear()
+    fun clear() { constructionWorkplaces.clear(); mineVisits.clear() }
 
     fun update(actor: CitizenActor, city: Settlement, world: World, now: Long) {
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
@@ -119,8 +123,10 @@ internal class CivsCitizenWork(
             } else actor.cycle.deferWork(now)
             return
         }
+        if (actor.mineVisit != null && mineVisits.update(actor, city, worker, world, now)) return
         if (returnProducerOutputs(actor, city, worker, world, now)) return
         if (returnFromWorkDetour(actor, city, world, now)) return
+        if (mineVisits.update(actor, city, worker, world, now)) return
         if (CivsResidents.isChild(worker)) {
             if (life.mentor(actor, city, worker, world, now)) return
             leisure.stopCamp(actor, "child-playing")
@@ -293,7 +299,7 @@ internal class CivsCitizenWork(
 
     fun workingTravel(actor: CitizenActor): Boolean = !actor.sheltering &&
         (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, false,
-            purposefulDetour = actor.outputReturn != null || actor.foodSource != null || actor.workDetour != null ||
+            purposefulDetour = actor.mineVisit != null || actor.outputReturn != null || actor.foodSource != null || actor.workDetour != null ||
                 actor.mealVisit != null || actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.idleReason == "waiting-materials"))
 
     fun navigationFailed(actor: CitizenActor): Boolean = actor.route?.let {

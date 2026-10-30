@@ -233,22 +233,67 @@ internal class CivsStoragePlanner(
         return prepareBuildingDebit(city, cargo.sourceBuildingId, mapOf(cargo.material to cargo.amount))
     }
 
+    /** Revalidation is bounded to 64 indexed holders per depot and never accepts an unloaded/denied holder. */
+    fun requireRedistributionCapacity(city: Settlement, cargo: CivCargo, reservations: Collection<CivCourierPlan>,
+        permitted: (CivPosition) -> Boolean) {
+        checkClaim(city)
+        reject(!CivsLogistics.redistributionAllowed(city, cargo), "stale-delivery")
+        val source = depotCapacity(city, cargo.sourceBuildingId, permitted)
+        val target = depotCapacity(city, cargo.targetBuildingId, permitted)
+        reject(source.emptySlots != 0 || target.emptySlots < 2, "stale-delivery")
+        val incoming = (city.workers.mapNotNull(CivWorker::cargo) + reservations.map(CivCourierPlan::cargo))
+            .filter { it.id != cargo.id && CivsLogistics.destination(city, it)?.id == cargo.targetBuildingId }
+            .distinctBy(CivCargo::id)
+        val sizes = (incoming.map(CivCargo::material) + cargo.material).distinct()
+            .associateWith { requireNotNull(stack(it, 1)).maxStackSize }
+        val room = CivSupplyRoom(target, sizes)
+        incoming.forEach { accepted ->
+            if (room.fits(accepted.material) < accepted.amount) room.block() else room.take(accepted.material, accepted.amount)
+            if (accepted.redistribution) room.reserveEmptySlot()
+        }
+        reject(room.freeEmptySlots < 2 || cargo.amount > sizes.getValue(cargo.material) ||
+            room.fits(cargo.material) < cargo.amount, "storage-full")
+        room.take(cargo.material, cargo.amount)
+        reject(room.freeEmptySlots < 1, "storage-full")
+    }
+
+    private fun depotCapacity(city: Settlement, buildingId: UUID, permitted: (CivPosition) -> Boolean): CivSupplyCapacity {
+        val positions = containers.buildingPositions(city, buildingId)
+        reject(positions.isEmpty(), "storage-unavailable")
+        reject(positions.size > 64, "storage-transaction-too-large")
+        var empty = 0
+        val partial = linkedMapOf<String, Long>()
+        positions.forEach { (point, type) ->
+            reject(!permitted(point), "lands-denied")
+            val source = containers.resolve(city, point, type)
+            reject(!source.acceptsInsert, "storage-unavailable")
+            source.inventory.storageContents.forEach { item ->
+                if (isEmpty(item)) empty++ else plain(item)?.let { plain ->
+                    val spare = requireNotNull(item).maxStackSize - plain.amount
+                    if (spare > 0) partial.merge(plain.material, spare.toLong(), Math::addExact)
+                }
+            }
+        }
+        return CivSupplyCapacity(empty, partial)
+    }
+
     /** Free native cargo space excludes named or otherwise custom stacks. */
-    fun cargoRoom(city: Settlement, buildingId: UUID, material: String): Long {
+    fun cargoRoom(city: Settlement, buildingId: UUID, material: String, permitted: (CivPosition) -> Boolean = { true }): Long {
         checkReady()
         if (city.inventory?.mode == CivStorageMode.VIRTUAL) return warehouseSpace(city, buildingId).coerceAtMost(CivsLogistics.MAX_CARGO)
         val maximum = requireNotNull(stack(material, 1)).maxStackSize
         var room = 0L
-        for (source in containers.localSources(city, buildingId).filter { it.acceptsInsert }) for (current in source.inventory.storageContents) {
+        for (source in containers.localSources(city, buildingId).filter { it.acceptsInsert && permitted(it.position) }) for (current in source.inventory.storageContents) {
             room += if (isEmpty(current)) maximum else plain(current)?.takeIf { it.material == material }?.let { maximum - it.amount } ?: 0
             if (room >= CivsLogistics.MAX_CARGO) return CivsLogistics.MAX_CARGO
         }
         return room
     }
 
-    fun prepareCargoDropoff(city: Settlement, cargo: CivCargo, destinationBuildingId: UUID): CivStoragePlan {
+    fun prepareCargoDropoff(city: Settlement, cargo: CivCargo, destinationBuildingId: UUID,
+        permitted: (CivPosition) -> Boolean = { true }): CivStoragePlan {
         require(cargo.amount in 1L..64L)
-        return prepareBuildingCredit(city, destinationBuildingId, cargo.material, cargo.amount)
+        return prepareBuildingCredit(city, destinationBuildingId, cargo.material, cargo.amount, permitted)
     }
 
     /** The returned resident and local storage plan belong in the same durable city receipt. */
@@ -400,13 +445,15 @@ internal class CivsStoragePlanner(
         return plan(inventory, captured).copy(worldChanges = worldChanges.toList(), mine = mine)
     }
 
-    private fun prepareBuildingCredit(city: Settlement, buildingId: UUID, material: String, count: Long): CivStoragePlan {
+    private fun prepareBuildingCredit(city: Settlement, buildingId: UUID, material: String, count: Long,
+        permitted: (CivPosition) -> Boolean = { true }): CivStoragePlan {
         checkClaim(city)
         validateAmounts(mapOf(material to count))
         if (city.building(buildingId) == null) throw CivsRejection("building-not-found")
         if (city.inventory?.mode == CivStorageMode.VIRTUAL) return creditVirtual(city, material, count, buildingId)
         val prepared = mutableListOf<Snapshot>()
-        reject(insert(containers.localSources(city, buildingId).map { snapshot(it).also(prepared::add) }, material, count) != 0L, "storage-full")
+        reject(insert(containers.localSources(city, buildingId).filter { permitted(it.position) }
+            .map { snapshot(it).also(prepared::add) }, material, count) != 0L, "storage-full")
         return plan(requireNotNull(city.inventory), prepared)
     }
 

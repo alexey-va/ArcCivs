@@ -11,9 +11,11 @@ object CivsResidents {
 
     fun health(worker: CivWorker): Double = worker.health ?: 20.0
     fun hunger(worker: CivWorker): Int = worker.hunger ?: 20
-    internal fun canRegenerate(worker: CivWorker): Boolean = hunger(worker) >= 18 &&
-        health(worker) > 0 && health(worker) < maxHealth(worker)
-    internal fun regenerate(worker: CivWorker): CivWorker = if (!canRegenerate(worker)) worker
+    internal fun canRegenerate(worker: CivWorker): Boolean = canRegenerate(worker, null)
+    internal fun canRegenerate(worker: CivWorker, city: Settlement?): Boolean =
+        hunger(worker) >= (city?.let(CivsResearch::regenerationHunger) ?: 18) && health(worker) > 0 && health(worker) < maxHealth(worker)
+    internal fun regenerate(worker: CivWorker): CivWorker = regenerate(worker, null)
+    internal fun regenerate(worker: CivWorker, city: Settlement?): CivWorker = if (!canRegenerate(worker, city)) worker
         else worker.copy(health = minOf(maxHealth(worker), health(worker) + 1.0))
     fun isChild(worker: CivWorker): Boolean = worker.childMinutes != null
     fun legacySex(workerId: UUID): CivSex = if (Math.floorMod(workerId.hashCode(), 2) == 0) CivSex.MALE else CivSex.FEMALE

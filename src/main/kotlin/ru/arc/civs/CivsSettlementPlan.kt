@@ -135,9 +135,10 @@ internal object CivsSettlementPlans {
             projected = projected.copy(buildings = projected.buildings + draft.building.copy(phase = BuildingPhase.SITE))
         }
         val adoptedFrame = if (retained.infrastructure.isEmpty())
-            CivsSettlementPerimeter.adapt(projected, frame, surface, routes, retained.routes.values) else frame
+            CivsSettlementPerimeter.adapt(projected, frame, surface, routes, retained.routes.values)
+            else CivsPerimeterCrossings.adapt(frame, routes.values, retained.infrastructure)
         // A legacy accepted frame keeps its gate approaches. New gates already lie on real exterior routes.
-        for (gate in if (retained.infrastructure.isEmpty()) emptyList() else adoptedFrame.gates) {
+        for (gate in if (retained.infrastructure.isEmpty()) emptyList() else frame.gates) {
             val id = UUID.nameUUIDFromBytes("arccivs-plan/${city.id}/gate/${gate.side}/${gate.center.x}/${gate.center.z}".toByteArray(Charsets.UTF_8))
             val existing = retained.infrastructure.filter { it.type == BuildingType.GATE }.flatMap { it.transit }
                 .firstOrNull { it.x == gate.center.x && it.z == gate.center.z }

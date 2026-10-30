@@ -55,7 +55,7 @@ import java.util.concurrent.CompletableFuture
 
 class CivsBuildingStatusUiTest : FunSpec({
     test("building inspection uses the existing worker label for active mine and travel states") {
-        for (language in listOf("ru", "en")) for (status in listOf("securing-mine", "returning-output", "defending", "retreating")) {
+        for (language in listOf("ru", "en")) for (status in listOf("securing-mine", "returning-output", "defending", "retreating", "no-research", "research-paused", "research-unfunded", "mine-descending", "mine-returning")) {
             withUi { h ->
                 h.player.setLocale(Locale.forLanguageTag(language))
                 val village = autonomousSettlement(h.player, "Mine status")
@@ -94,7 +94,7 @@ class CivsUiTest : FunSpec({
                 CompletableFuture.completedFuture(Unit)
             }
             h.ui.openAutonomous(h.player, village.id)
-            h.click("research"); h.click("research_materials")
+            h.click("research"); h.click("research_branch_industry"); h.click("research_materials")
             h.body() shouldContain village.name
             h.body().contains(personal.name) shouldBe false
             h.click("start"); h.paper.performTicks(2)
@@ -120,6 +120,48 @@ class CivsUiTest : FunSpec({
         }
     }
 
+    test("expanded research branches expose costs and an honest idle status to visitors") {
+        for (language in listOf("ru", "en")) withUi(realHistory = true, decorationFont = "arc:dialog_ui") { h ->
+            h.player.setLocale(Locale.forLanguageTag(language))
+            val personal = settlement(h.player)
+            val baseVillage = autonomousSettlement(h.player, "Research branches")
+            val village = baseVillage.copy(owner = UUID.randomUUID(), buildings = baseVillage.buildings.map {
+                if (it.type == BuildingType.QUARRY) it.copy(phase = BuildingPhase.SITE) else it
+            })
+            h.city = personal
+            every { h.player.hasPermission("arccivs.admin") } returns false
+            every { h.host.settlements() } returns listOf(personal, village)
+            val university = village.buildings.first { it.type == BuildingType.UNIVERSITY }
+            every { h.host.inspectBuilding(h.player, village.id, university.id) } returns village
+            every { h.host.research(h.player, village.id) } returns CivsResearch.view(village)
+            h.ui.openBuildingInspection(h.player, village.id, university.id); h.click("research")
+            h.body() shouldContain if (language == "ru") "Нет активного проекта" else "No active project"
+            val buttons = h.screen.buttons.map { it.id.value }
+            for (branch in listOf("industry", "building_methods", "furnace_practice", "communal_meals", "city_watch"))
+                buttons.contains("research_branch_$branch") shouldBe true
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "research-expanded-overview-$language", h.screen, listOf(640, 360)) }
+            h.click("research_branch_building_methods")
+            h.screen.buttons.map { it.id.value }.contains("research_building_methods_i") shouldBe true
+            h.click("research_building_methods_i")
+            h.body() shouldContain if (language == "ru") "30 мин работы" else "30 min of work"
+            val effect = GsonComponentSerializer.gson().serialize(h.ui.tr(h.player, "research.effect.building_methods_i"))
+            effect shouldContain "yellow"
+            effect shouldContain "+25%"
+            h.body().lowercase() shouldContain if (language == "ru") "университет" else "university"
+            h.body() shouldContain "✔"
+            h.body() shouldContain "✘"
+            // The requirement list must keep its filled panel, not fall back to unframed text.
+            plainText(h.screen.body[2].text).contains("✘") shouldBe true
+            plainText(h.screen.body[2].text).codePoints().anyMatch { it in 0x100000..0x10ffff } shouldBe true
+            h.body() shouldContain "64"
+            h.screen.buttons.map { it.id.value }.contains("start") shouldBe false
+            System.getenv("CIVS_UI_PREVIEW_OUT")?.let { exportUiScreen(it, "research-expanded-detail-$language", h.screen, listOf(640, 360)) }
+            h.click("history"); h.click("research_building_methods_ii")
+            (h.body().count { it == '✘' } >= 3) shouldBe true // University, builder and warehouse are below level 2.
+            verify(exactly = 0) { h.host.beginResearch(any(), any(), any()) }
+        }
+    }
+
     test("Auto visitors can inspect research and closed products without management actions") {
         for (language in listOf("ru", "en")) for (font in listOf("", "arc:dialog_ui")) withUi(realHistory = true, decorationFont = font) { h ->
             h.player.setLocale(Locale.forLanguageTag(language))
@@ -142,15 +184,17 @@ class CivsUiTest : FunSpec({
             h.screen.id shouldBe "civs.research"
             h.body() shouldContain "2 / 5"
             export("research-overview")
-            h.click("research_metallurgy")
+            h.click("research_branch_industry"); h.click("research_metallurgy")
             h.screen.buttons.map { it.id.value } shouldBe emptyList()
             h.body() shouldContain if (language == "ru") "Материалы уже выделены" else "Materials already paid"
             export("research-funded")
             h.click("history"); h.click("research_engineering")
             h.screen.buttons.map { it.id.value } shouldBe emptyList()
-            h.body() shouldContain if (language == "ru") "университет уровня 2" else "level 2 university"
+            h.body().lowercase() shouldContain if (language == "ru") "университет" else "university"
+            h.body() shouldContain "✘"
+            h.body() shouldContain "2"
             export("research-locked")
-            h.click("history"); h.click("industry")
+            h.click("history"); h.click("history"); h.click("industry")
             // Native wrapping and font spacers may split a sentence without changing its meaning.
             h.body().replace(Regex("\\p{Co}"), "").replace(Regex("\\s+"), " ") shouldContain
                 if (language == "ru") "в предметы не превращаются" else "never become inventory items"
@@ -3529,7 +3573,7 @@ class CivsUiTest : FunSpec({
             }
             every { h.host.buildingStatus(building.id) } returns "building-status.future-internal-key"
             h.ui.openBuilding(h.player, base.id, building.id)
-            h.body() shouldContain "Status is updating"
+            h.body() shouldContain "Status unavailable"
             h.body().contains("future-internal-key") shouldBe false
 
             h.player.setLocale(Locale.forLanguageTag("ru-RU"))
@@ -4217,7 +4261,8 @@ private fun exportUiActionBar(directory: String, id: String, component: Componen
 
 private fun uiSourceHashes(): Map<String, String> = listOf(
     "src/main/kotlin/ru/arc/civs/CivsUi.kt", "src/main/kotlin/ru/arc/civs/CivsText.kt", "src/main/resources/locales.yml",
-    "src/main/kotlin/ru/arc/civs/CivsDialogPresentation.kt", "src/main/resources/config.yml",
+    "src/main/kotlin/ru/arc/civs/CivsDialogPresentation.kt", "src/main/kotlin/ru/arc/civs/CivsResearchScreens.kt",
+    "src/main/kotlin/ru/arc/civs/CivsResearch.kt", "src/main/resources/config.yml",
     "src/main/kotlin/ru/arc/civs/CivsResidentLife.kt", "src/main/kotlin/ru/arc/civs/CivsResidents.kt",
     "src/main/resources/materials/ru.json", "src/main/resources/materials/en.json",
 ).associateWith { source ->

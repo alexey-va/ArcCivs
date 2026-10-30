@@ -142,7 +142,7 @@ class CivsStore(
 
     fun savePlan(plan: CivPlacementPlan): CompletableFuture<CivPlacementPlan> {
         val snapshot = plan.copy(building = snapshotBuilding(plan.building), blocks = plan.blocks.toList(), terrain = plan.terrain?.let {
-            it.copy(blocks = it.blocks.toList(), route = it.route.toList())
+            it.copy(blocks = it.blocks.toList(), route = it.route.toList(), waterFoundations = it.waterFoundations?.toList())
         })
         return submit {
             validatePlan(snapshot)
@@ -171,6 +171,9 @@ class CivsStore(
             residentTransfer = transaction.residentTransfer?.let { it.copy(before = it.before.toList(), changes = it.changes.toList()) },
             worldChanges = transaction.worldChanges?.toList(),
             mine = transaction.mine?.detached(),
+            upkeep = transaction.upkeep?.detached(),
+            cargoDropoff = transaction.cargoDropoff?.detached(),
+            cargoPickup = transaction.cargoPickup?.detached(),
             autonomousVisual = transaction.autonomousVisual?.let { it.copy(
                 buildingBefore = snapshotBuilding(it.buildingBefore),
                 mineProgressBefore = it.mineProgressBefore?.toMap(),
@@ -488,6 +491,7 @@ class CivsStore(
     )
 
     private fun validatePlan(plan: CivPlacementPlan) {
+        civsValidateWaterFoundations(plan)
         require(plan.blocks.size in 1..MAX_PLAN_BLOCKS) { "Placement plan block count is invalid" }
         val building = requireNotNull(plan.building) { "Placement plan is missing its building" }
         requireNotNull(plan.id)

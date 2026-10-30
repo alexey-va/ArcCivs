@@ -30,8 +30,23 @@ internal class CivsResidentSupplies(
     private var nextResidentFoodAt = 0L
     private var residentFoodCursor = 0
     private val autoSupplies = CivsAutoSupplies()
+    private val forestrySurplus = CivsForestrySurplus()
+    private val surplusRefreshAt = mutableMapOf<UUID, Long>()
     private var nextAutoSupplyAt = 0L
     private var autoSupplyCursor = 0
+
+    /** New forestry admission observes existing supply evidence; it never scans or moves inventory. */
+    internal fun forestrySurplus(city: Settlement, timber: String): Boolean {
+        val now = authority.now()
+        val decision = forestrySurplus.observe(city, supply.observation(city.id), supply.craftJobs(city.id), now) {
+            storage.supplyCaptureCurrent(city, it, requireComplete = true)
+        }
+        if (decision.familyStock == null && now >= surplusRefreshAt.getOrDefault(city.id, Long.MIN_VALUE)) {
+            supply.request(city.id)
+            surplusRefreshAt[city.id] = now + 5_000L
+        }
+        return decision.blocks(timber)
+    }
 
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
         supply.craftJobs(city.id)[worker.id]?.takeIf { CivsCarpentry.valid(city, worker, it) }
@@ -351,6 +366,8 @@ internal class CivsResidentSupplies(
     }
 
     fun pulseAutoSupplies() {
+        forestrySurplus.retain(records.cities.keys)
+        surplusRefreshAt.keys.retainAll(records.cities.keys)
         if (authority.now() < nextAutoSupplyAt) return
         val candidates = records.cities.values.filter { it.autonomy?.paused == false && CivsAutoStorageMigration.ready(it) &&
             it.id !in records.busy && it.id !in records.unhealthy && it.pendingDeletion == null && !inventoryJournal.pending(it.id) && authority.settlementActive(it) }

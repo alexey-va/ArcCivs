@@ -72,6 +72,7 @@ internal class CivsWorksiteContext(
     var spotSearchPending = false
     var mutationBlocked: (UUID, CivPosition) -> Boolean = { _, _ -> false }
     var residentFeet: (UUID) -> Location? = { null }
+    var forestrySurplus: (Settlement, String) -> Boolean = { _, _ -> false }
     val cached = hashMapOf<UUID, Cached>()
     val needs = hashMapOf<UUID, Need>()
 

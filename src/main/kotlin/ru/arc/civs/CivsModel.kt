@@ -255,6 +255,12 @@ data class BuildingOffer(val type: BuildingType, val level: Int, val schematicId
 
 /** World coordinates; before and after are immutable canonical Bukkit block-data strings. */
 data class CivPlanBlock(val position: CivPosition, val before: String, val after: String)
+/** Paid generated infrastructure fills this exact water column; the natural bed itself is never written. */
+data class CivWaterFoundation(val x: Int, val z: Int, val floorY: Int, val waterTopY: Int, val bottomY: Int) {
+    fun contains(position: CivPosition): Boolean = position.x == x && position.z == z &&
+        position.y > bottomY && position.y <= floorY
+}
+
 /** Journaled earthworks precede the authored schematic; route positions are standing coordinates. */
 data class CivTerraformPlan(
     val bounds: CivBox,
@@ -263,6 +269,7 @@ data class CivTerraformPlan(
     val groundY: Int,
     val cutCount: Int,
     val fillCount: Int,
+    val waterFoundations: List<CivWaterFoundation>? = null,
 )
 data class CivPlacementPlan(
     val id: UUID,

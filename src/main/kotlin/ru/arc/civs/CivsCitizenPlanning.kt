@@ -72,6 +72,7 @@ internal class CivsCitizenPlanning(
             actor.equipmentItems = null
             equipment.setEquipment(actor.npc, nextPlan)
         } else actor.plan = nextPlan
+        workRuntime.reconcileMineVisit(actor, city)
         return true
     }
 

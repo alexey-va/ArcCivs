@@ -43,7 +43,11 @@ internal object CivsAutoStorageMigration {
             buildingMaterials = workplaces.filterValues { it.isNotEmpty() }.takeIf { it.isNotEmpty() }),
             workers = workers, corpses = corpses, autonomy = requireNotNull(city.autonomy).copy(products = null, storage = null),
             research = city.research?.let { state -> state.copy(project = state.project?.let { project ->
-                project.copy(cost = nativeCost(project.cost), termsVersion = 2)
+                project.copy(cost = nativeCost(project.cost), termsVersion = when (project.termsVersion) {
+                    1 -> 2
+                    3 -> 4
+                    else -> project.termsVersion
+                })
             }) }, revision = Math.addExact(city.revision, 1)))
     }
 

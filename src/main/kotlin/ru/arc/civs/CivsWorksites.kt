@@ -57,6 +57,10 @@ internal class CivsWorksites(private val plugin: Plugin, private val worldAccess
         get() = context.residentFeet
         set(value) { context.residentFeet = value }
 
+    internal var forestrySurplus: (Settlement, String) -> Boolean
+        get() = context.forestrySurplus
+        set(value) { context.forestrySurplus = value }
+
     fun plan(city: Settlement, worker: CivWorker): CivWorldWork? = context.plan(city, worker)
     fun rejectStanding(city: Settlement, worker: CivWorker, work: CivWorldWork): Boolean = approaches.rejectStanding(city, worker, work)
     internal fun validateMineReceiptNative(city: Settlement, work: CivWorldWork) = mine.validateMineReceiptNative(city, work)

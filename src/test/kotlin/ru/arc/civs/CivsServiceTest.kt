@@ -3697,7 +3697,12 @@ class CivsServiceTest : FunSpec({
     }
 
     test("courier pickup and unload journal both physical endpoints and persist cargo between them") {
-        serviceScenario { h ->
+        serviceScenario(storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                // Native region persistence is covered separately; this fixture checks service receipt ordering.
+                storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            }
+        }) { h ->
             val home = h.city.buildings.last()
             val warehouse = home.copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
             val smith = home.copy(id = UUID.randomUUID(), type = BuildingType.BLACKSMITH, anchor = CivPosition(20, 64, 0),
@@ -3841,7 +3846,12 @@ class CivsServiceTest : FunSpec({
     }
 
     test("producer returns fitting native output after its journal and a courier then reads the workplace") {
-        serviceScenario { h ->
+        serviceScenario(storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                // Native region persistence is covered separately; this fixture checks service receipt ordering.
+                storage.persistCollectedNative = { _, _ -> CompletableFuture.completedFuture(Unit) }
+            }
+        }) { h ->
             val warehouse = h.city.buildings.last().copy(type = BuildingType.WAREHOUSE, control = CivPosition(10, 63, 0))
             val forester = warehouse.copy(id = UUID.randomUUID(), type = BuildingType.FORESTER, anchor = CivPosition(20, 64, 0),
                 entrance = CivPosition(20, 64, -2), control = CivPosition(20, 63, 0),
@@ -7141,7 +7151,7 @@ private class ServiceMineFallback(private val h: ServiceScenario) {
         val transition: (Settlement, CivInventory) -> Settlement = { before, inventory ->
             CivsRules.finishWorldWork(before, work, h.time).copy(inventory = inventory)
         }
-        return h.service.inventoryMutation(city.id, prepare, null, true, transition)
+        return h.service.inventoryMutation(city.id, prepare, null, true, transition = transition)
     }
 
     fun receipt(): CivInventoryTransaction {
@@ -7310,6 +7320,7 @@ private class ServiceScenario(val paper: MockBukkitTestRuntime, empty: Boolean, 
 
     init {
         every { worldAdapter.canModify(any(), any(), any()) } returns true
+        every { worldAdapter.permitsWaterFoundationMutation(any(), any(), any()) } answers { callOriginal() }
         every { worldAdapter.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
             CompletableFuture.completedFuture(null)
         every { worldAdapter.captureSite(any(), any(), any(), any(), any(), any(), isNull(), any()) } answers {

@@ -265,8 +265,20 @@ class CivsSettlementLayoutTest : FunSpec({
             }
             if (piece.type == BuildingType.GATE) {
                 val cells = piece.blocks.associate { it.position to it.after }
-                for (feet in piece.transit) for (dy in 0..3)
-                    cells[feet.copy(y = feet.y + dy)] shouldBe "minecraft:air"
+                val source = frame.gates.single { it.passage.min.x == piece.bounds.min.x && it.passage.min.z == piece.bounds.min.z }
+                val horizontal = Math.floorMod(source.side + frame.rotation / 90, 2) == 0
+                val facing = if (horizontal) "north" else "east"
+                val openGate = "minecraft:${CivsSettlementLayout.wood(city.style)}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
+                for (feet in piece.transit) for (dy in 0..3) {
+                    val leaf = if (horizontal) feet.z == source.center.z else feet.x == source.center.x
+                    cells[feet.copy(y = feet.y + dy)] shouldBe if (dy == 0 && leaf) openGate else "minecraft:air"
+                }
+                val expectedLeaves = piece.transit.count { if (horizontal) it.z == source.center.z else it.x == source.center.x }
+                val captured = CivPlacementPlan(piece.id, city.id, city.worldId, CivsInfrastructure.building(piece),
+                    piece.blocks.filter { it.after != "minecraft:barrier" }.map { CivPlanBlock(it.position, "minecraft:air", it.after) })
+                ru.arc.paper.testing.MockBukkitTestRuntime.open().use {
+                    CivsMaterials.required(captured)["${CivsSettlementLayout.wood(city.style).uppercase()}_FENCE_GATE"] shouldBe expectedLeaves.toLong()
+                }
             }
         }
         val wet = frame.wallObstacles.first().min
@@ -275,6 +287,140 @@ class CivsSettlementLayoutTest : FunSpec({
         rejection.perimeterClosed shouldBe false
         (rejection.rejected.getValue("protected-terrain") > 0) shouldBe true
         rejection.pieces.flatMap { it.blocks }.none { it.position.x == wet.x && it.position.z == wet.z } shouldBe true
+    }
+
+    test("a protected column splits a dry wall section and paid fragments replay exactly") {
+        val city = layoutFixtureCity()
+        val frame = CivsSettlementLayout.frame(city)
+        val surface = layoutSurface(city, "flat")
+        val start = city.buildings.first().entrance
+        val routes = frame.gates.map { gate ->
+            val corner = CivPosition(start.x, start.y, gate.center.z)
+            layoutAxisRoute(start, corner) + layoutAxisRoute(corner, gate.center.copy(y = start.y)).drop(1)
+        }
+        val intact = CivsSettlementLayout.infrastructure(city, frame, surface, routes)
+        val section = intact.pieces.first { it.type == BuildingType.WALL && it.bounds.max.x - it.bounds.min.x == 23 }
+        val blocked = CivPosition(section.bounds.min.x + 11, 64, (section.bounds.min.z + section.bounds.max.z) / 2)
+        val protected = surface.copy(columns = surface.columns +
+            (civsTerrainKey(blocked.x, blocked.z) to CivTerrainSurfaceColumn(64, false)))
+        val result = CivsSettlementLayout.infrastructure(city, frame, protected, routes)
+        val fragments = result.pieces.filter { it.type == BuildingType.WALL &&
+            CivsAutonomousGeometry.overlaps(it.bounds, section.bounds) }.sortedBy { it.bounds.min.x }
+        fragments.map { it.bounds.min.x..it.bounds.max.x } shouldBe
+            listOf(section.bounds.min.x until blocked.x, blocked.x + 1..section.bounds.max.x)
+        fragments.forEach { piece ->
+            piece.bounds.min.z shouldBe section.bounds.min.z
+            piece.bounds.max.z shouldBe section.bounds.max.z
+        }
+        fragments.flatMap { it.blocks }.map { civsTerrainKey(it.position.x, it.position.z) }.distinct().size shouldBe 23 * 3
+        result.perimeterClosed shouldBe false
+        result.rejected shouldBe mapOf("protected-terrain" to 1)
+        result.rejectionSamples shouldBe emptyMap()
+        intact.pieces.filter { it.id != section.id }.forEach { piece -> result.pieces.single { it.id == piece.id } shouldBe piece }
+        result shouldBe CivsSettlementLayout.infrastructure(city, frame, protected, routes)
+
+        val paid = listOf(fragments.first(), result.pieces.first { it.type == BuildingType.GATE },
+            result.pieces.first { it.type == BuildingType.ROAD })
+        val completed = city.copy(buildings = city.buildings + paid.map { piece ->
+            CivBuilding(piece.id, piece.type, 1, piece.bounds.min, 0, "fixture/infrastructure/${piece.id}",
+                piece.bounds, piece.entrance, BuildingPhase.ACTIVE, transit = piece.transit.takeIf { it.isNotEmpty() })
+        })
+        val ownColumns = paid.flatMap { it.blocks }.groupBy { civsTerrainKey(it.position.x, it.position.z) }
+        val mutated = protected.copy(columns = protected.columns + ownColumns.mapValues { (_, cells) ->
+            CivTerrainSurfaceColumn(cells.filter { it.after != "minecraft:air" }.maxOf { it.position.y }, false)
+        })
+        val replay = CivsSettlementLayout.infrastructure(completed, frame, mutated, routes, paid)
+        replay.pieces.associateBy { it.id } shouldBe result.pieces.associateBy { it.id }
+        replay.perimeterClosed shouldBe false
+        replay.pieces.forEachIndexed { index, piece ->
+            replay.pieces.drop(index + 1).none { CivsAutonomousGeometry.overlaps(piece.bounds, it.bounds) } shouldBe true
+        }
+    }
+
+    test("wall subdivision reports only final unsafe slope columns and their samples") {
+        val city = layoutFixtureCity()
+        val strip = CivBox(CivPosition(0, 64, 30), CivPosition(23, 64, 32))
+        val frame = CivsSettlementLayout.frame(city).copy(wallObstacles = listOf(strip), gates = emptyList())
+        val flat = layoutSurface(city, "flat")
+        val intact = CivsSettlementLayout.infrastructure(city, frame, flat, emptyList()).pieces.single()
+        intact.id shouldBe layoutId("${city.id}:layout:${CivsSettlementLayout.VERSION}:WALL:0:30:23:32")
+        val cliff = flat.copy(columns = flat.columns.mapValues { (column, value) ->
+            if ((column shr 32).toInt() >= 12) value.copy(groundY = 82) else value
+        })
+        val result = CivsSettlementLayout.infrastructure(city, frame, cliff, emptyList())
+        result.rejected shouldBe mapOf("infrastructure-slope" to 2)
+        result.rejectionSamples shouldBe mapOf("infrastructure-slope" to
+            listOf(CivPosition(11, 64, 30), CivPosition(12, 82, 30)))
+        result.perimeterClosed shouldBe false
+        result.pieces.flatMap { it.blocks }.map { civsTerrainKey(it.position.x, it.position.z) }.toSet() shouldBe
+            (0..23).filter { it !in 11..12 }.flatMap { x -> (30..32).map { z -> civsTerrainKey(x, z) } }.toSet()
+    }
+
+    test("generated gate leaves face the crossing and start open for every rotation and supported wood") {
+        for (rotation in listOf(0, 90, 180, 270)) for (style in listOf("caledonia", "nordic", "medievaloak")) {
+            val city = layoutFixtureCity(rotation).copy(style = style)
+            val frame = CivsSettlementLayout.frame(city)
+            val surface = layoutSurface(city, "flat")
+            val plan = CivsSettlementLayout.infrastructure(city, frame, surface, emptyList())
+            for (gate in frame.gates) {
+                val piece = plan.pieces.single { it.type == BuildingType.GATE &&
+                    it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
+                val horizontal = Math.floorMod(gate.side + frame.rotation / 90, 2) == 0
+                val facing = if (horizontal) "north" else "east"
+                val expected = "minecraft:${CivsSettlementLayout.wood(style)}_fence_gate[facing=$facing,in_wall=false,open=true,powered=false]"
+                val leaves = piece.blocks.filter { it.after.contains("_fence_gate[") }
+                leaves.size shouldBe if (horizontal) gate.passage.max.x - gate.passage.min.x + 1
+                    else gate.passage.max.z - gate.passage.min.z + 1
+                leaves.forEach { leaf ->
+                    leaf.after shouldBe expected
+                    piece.transit.any { it == leaf.position } shouldBe true
+                }
+            }
+        }
+    }
+
+    test("a supported water wall plans paid foundation down to the surveyed bottom") {
+        val city = layoutFixtureCity()
+        val original = CivsSettlementLayout.frame(city)
+        val wall = CivBox(CivPosition(30, 64, 30), CivPosition(35, 64, 32))
+        val frame = original.copy(wallObstacles = listOf(wall), gates = emptyList())
+        val base = layoutSurface(city, "flat")
+        val wet = (33..35).flatMap { x -> (30..32).map { z -> civsTerrainKey(x, z) } }.toSet()
+        val surface = base.copy(columns = base.columns.mapValues { (key, value) ->
+            if (key in wet) CivTerrainSurfaceColumn(64, false, waterTopY = 64, waterBottomY = 57) else value
+        })
+        val planned = CivsSettlementLayout.infrastructure(city, frame, surface, emptyList())
+        val wetPieces = planned.pieces.filter { it.waterFoundations.isNotEmpty() }
+        wetPieces.flatMap { it.waterFoundations }.size shouldBe wet.size
+        val cells = wetPieces.flatMap { it.blocks }.associateBy { it.position }
+        for (x in 33..35) for (z in 30..32) for (y in 58..63)
+            cells[CivPosition(x, y, z)]?.after shouldBe "minecraft:stone_bricks"
+        val invalid = surface.copy(columns = surface.columns + (civsTerrainKey(33, 30) to
+            CivTerrainSurfaceColumn(64, false, waterTopY = 64, waterBottomY = 51)))
+        val rejected = CivsSettlementLayout.infrastructure(city, frame, invalid, emptyList())
+        rejected.perimeterClosed shouldBe false
+        rejected.pieces.flatMap { it.waterFoundations }.none { it.x == 33 && it.z == 30 } shouldBe true
+    }
+
+    test("gate keeps the three-wide native path around a retained route") {
+        val city = layoutFixtureCity()
+        val frame = CivsSettlementLayout.frame(city)
+        val gate = frame.gates.first()
+        val route = layoutAxisRoute(gate.center.copy(x = gate.center.x - 6, y = 65),
+            gate.center.copy(x = gate.center.x + 6, y = 65))
+        val pathColumns = route.flatMap { point -> (-1..1).map { dz -> civsTerrainKey(point.x, point.z + dz) } }.toSet()
+        val original = layoutSurface(city, "flat")
+        val surface = original.copy(columns = original.columns.mapValues { (key, value) ->
+            if (key in pathColumns) value.copy(natural = false, dirtPath = true) else value
+        })
+        val result = CivsSettlementLayout.infrastructure(city, frame, surface, listOf(route), retainedRoutes = listOf(route))
+        val passage = result.pieces.single { it.type == BuildingType.GATE &&
+            it.bounds.min.x == gate.passage.min.x && it.bounds.min.z == gate.passage.min.z }
+        val blocks = passage.blocks.associate { it.position to it.after }
+        for (x in gate.passage.min.x..gate.passage.max.x) for (z in gate.passage.min.z..gate.passage.max.z) {
+            if (civsTerrainKey(x, z) in pathColumns)
+                blocks[CivPosition(x, 64, z)] shouldBe "minecraft:barrier"
+        }
     }
 
     test("non-paving retained approaches still protect wall crossings and gate grades") {

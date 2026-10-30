@@ -80,7 +80,10 @@ class CivsNavigationTerrainTest : FunSpec({
                 repeated.failure shouldBe null
                 repeated.nativeShapeReads shouldBe 0
                 misses() shouldBe captured
-                route { it.y == 64 && it.z == 0 && it.x in 0..20 && it.x != 10 }.failure shouldBe "no-path"
+                val denied = route { it.y == 64 && it.z == 0 && it.x in 0..20 && it.x != 10 }
+                denied.failure shouldBe null
+                denied.continuationReason shouldBe "no-path"
+                denied.endpoint shouldBe CitizenPoint(9.5, 64.0, .5)
                 val warmed = route()
                 warmed.nativeShapeReads shouldBe 0
                 val replanned = finish(owner.replan(warmed, Location(world, .5, 64.0, .5)))
@@ -93,7 +96,12 @@ class CivsNavigationTerrainTest : FunSpec({
                 repeat(160) { warmed.move(at, 1.0) { true }?.let { at = it } }
                 (at.x < 10) shouldBe true
                 owner.changed(world.uid, CivPosition(10, 64, 0))
-                route().failure shouldBe "no-path"
+                val blocked = route()
+                blocked.failure shouldBe null
+                blocked.continuationReason shouldBe "no-path"
+                blocked.endpoint shouldBe CitizenPoint(9.5, 64.0, .5)
+                blocked.blockedPositions.isNotEmpty() shouldBe true
+                // A partial no-path also refreshes its frontier when the planner job retires.
                 // Plugins can remove a physical blocker without firing a native event.
                 // Refresh the failed frontier, retaining the rest of the learned corridor.
                 world.getBlockAt(10, 64, 0).type = Material.AIR

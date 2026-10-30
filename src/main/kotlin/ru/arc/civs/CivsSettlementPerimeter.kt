@@ -4,7 +4,7 @@ import java.util.ArrayDeque
 import java.util.UUID
 import kotlin.math.abs
 
-/** A dry separator around the adopted parcels. Produces ordinary wall/gate rectangles, never world writes. */
+/** A bounded separator around adopted parcels. Produces ordinary wall/gate rectangles, never world writes. */
 internal object CivsSettlementPerimeter {
     private val exterior = CivsSettlementLayout.exteriorTypes
     private val neighbours = listOf(-1 to -1, 0 to -1, 1 to -1, -1 to 0, 1 to 0, -1 to 1, 0 to 1, 1 to 1)
@@ -25,7 +25,9 @@ internal object CivsSettlementPerimeter {
         val externalColumns = externalRoutes.flatten().mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
         val retainedFloors = retainedRoutes.flatten().associate { civsTerrainKey(it.x, it.z) to it.y - 1 }
         fun clear(p: CivPosition) = surface.at(p.x, p.z)?.let { it.loaded &&
-            (it.natural || retainedFloors[civsTerrainKey(p.x, p.z)] == it.groundY && it.topY == it.groundY) } == true &&
+            (it.natural || it.waterTopY != null && it.waterBottomY != null && it.topY == it.waterTopY &&
+                it.groundY == it.waterTopY && it.waterTopY.toLong() - it.waterBottomY in 1L..CivsWorld.MAXIMUM_SURFACE_WATER_DEPTH.toLong() ||
+                retainedFloors[civsTerrainKey(p.x, p.z)] == it.groundY && it.topY == it.groundY) } == true &&
             occupied.none { CivsAutonomousGeometry.horizontalContains(it, p) }
         fun gateClear(p: CivPosition) = (-1..1).all { dx -> (-1..1).all { dz ->
             clear(p.copy(x = p.x + dx, z = p.z + dz))
@@ -51,7 +53,8 @@ internal object CivsSettlementPerimeter {
             val eligible = !seeds[i] && clear(p) && if (road) gateClear(p) else gentle
             // A small grid preference removes arbitrary one-cell zigzags among equally short cuts.
             val cost = if (!eligible) Cut.INFINITE else if (road) 100 else
-                10 + if (Math.floorMod(p.x, 4) == 0 || Math.floorMod(p.z, 4) == 0) 0 else 2
+                10 + (if (surface.at(p.x, p.z)?.waterTopY != null) 10 else 0) +
+                    if (Math.floorMod(p.x, 4) == 0 || Math.floorMod(p.z, 4) == 0) 0 else 2
             cut.edge(i * 2, i * 2 + 1, cost)
             if (seeds[i]) cut.edge(source, i * 2, Cut.INFINITE)
             if (i % width == 0 || i % width == width - 1 || i / width == 0 || i / width == height - 1)

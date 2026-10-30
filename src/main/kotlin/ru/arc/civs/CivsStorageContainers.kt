@@ -44,8 +44,8 @@ internal class CivsStorageContainers(
         index.refresh(city, building)
     }
     fun startSupplyCapture(city: Settlement): CivsSupplyCapture = supplyCaptures.start(city)
-    fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null): Boolean =
-        supplyCaptures.current(city, result, buildingIds)
+    fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
+        requireComplete: Boolean = false): Boolean = supplyCaptures.current(city, result, buildingIds, requireComplete)
     fun supplyRevision(cityId: UUID): Long = supplyCaptures.revision(cityId)
     fun invalidateSupply(cityId: UUID, buildingIds: Set<UUID>?) = supplyCaptures.invalidate(cityId, buildingIds)
     fun debug(cityId: UUID?): Map<String, Any?> = mapOf("containerIndex" to index.debug(cityId), "supplyCaptures" to supplyCaptures.debug(cityId))

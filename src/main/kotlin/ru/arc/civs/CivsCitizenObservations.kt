@@ -43,8 +43,19 @@ internal class CivsCitizenObservations(
                     else if (it.arrivedAt == null) "moving-to-tavern" else "eating"}" }
                 if (actor?.collectionHome != null) return "workers.status.moving-to-storage"
                 if (actor?.collectionSeek != null) return "workers.status.walking"
+                actor?.mineVisit?.let { visit ->
+                    val status = runtime.statuses[workerId]?.takeIf { it in setOf("mine-descending", "mine-returning", "route-unreachable", "searching-work") }
+                        ?: if (visit.returning) "mine-returning" else if (visit.target == null) "searching-work" else "mine-descending"
+                    return "workers.status.$status"
+                }
                 if (actor?.returningToWarehouse == true) return "workers.status.moving-to-storage"
-                if (actor?.outputReturn != null) return "workers.status.${if (actor.supplyPickup != null) "loading-cargo" else "returning-output"}"
+                if (actor?.supplyFailure?.second == "storage-full" && actor.supplyRetryAt > runtime.residentObservedAt)
+                    return "workers.status.storage-full"
+                if (actor?.outputReturn != null) return "workers.status.${when {
+                    actor.supplyPickup != null -> "loading-cargo"
+                    actor.supplyFailure == (actor.outputReturn to "storage-full") && actor.supplyRetryAt > runtime.residentObservedAt -> "storage-full"
+                    else -> "returning-output"
+                }}"
                 actor?.social?.visit?.let {
                     return "workers.status.${if (it.partnerId != null) {
                         if (it.conversationAt == null) "meeting" else "talking"

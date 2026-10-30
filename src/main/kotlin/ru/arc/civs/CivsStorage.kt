@@ -8,6 +8,7 @@ import org.bukkit.block.Block
 import org.bukkit.block.BlockState
 import org.bukkit.block.TileState
 import org.bukkit.block.data.BlockData
+import org.bukkit.block.data.type.Barrel as BarrelData
 import org.bukkit.entity.Player
 import org.bukkit.entity.Item
 import org.bukkit.event.EventHandler
@@ -200,8 +201,9 @@ class CivsStorage(private val plugin: Plugin,
     internal fun startSupplyCapture(city: Settlement): CivsSupplyCapture {
         checkReady(); return containers.startSupplyCapture(city)
     }
-    internal fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null): Boolean {
-        checkReady(); return containers.supplyCaptureCurrent(city, result, buildingIds)
+    internal fun supplyCaptureCurrent(city: Settlement, result: CivSupplyCaptureResult, buildingIds: Set<UUID>? = null,
+        requireComplete: Boolean = false): Boolean {
+        checkReady(); return containers.supplyCaptureCurrent(city, result, buildingIds, requireComplete = requireComplete)
     }
     internal fun supplyRevision(cityId: UUID): Long { checkReady(); return containers.supplyRevision(cityId) }
     internal fun rememberAutonomousCapacity(city: Settlement, result: CivSupplyCaptureResult) {
@@ -270,6 +272,26 @@ class CivsStorage(private val plugin: Plugin,
                 workers = transaction.after.workers.map { if (it.id == worker.id) worker else it },
                 revision = claim.city.revision) == claim.city)
             if (collected.food != null) reject(collected.containers.any { !foodCanModify(claim.city, it.container) }, "lands-denied")
+        }
+        transaction.cargoDropoff?.let { receipt ->
+            require(claim.city.workers.single { it.id == receipt.workerBefore.id } == receipt.workerBefore)
+            val cargo = requireNotNull(receipt.workerBefore.cargo)
+            require(transaction.after == CivsLogistics.unload(claim.city, receipt.workerBefore.id, cargo.id, receipt.acceptedAt))
+            when (val state = classifyCargoTransfer(transaction, expectedBefore = true)) {
+                CivInventoryApplyResult.Applied -> Unit
+                is CivInventoryApplyResult.Retry -> throw CivsRejection("storage-unavailable", state.values)
+                is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
+                null -> error("Unclassified cargo delivery")
+            }
+        }
+        transaction.cargoPickup?.let { receipt ->
+            require(receipt.before(transaction.after) == claim.city)
+            when (val state = cargoPickupBeforeState(transaction)) {
+                CivInventoryApplyResult.Applied -> Unit
+                is CivInventoryApplyResult.Retry -> throw CivsRejection("storage-unavailable", state.values)
+                is CivInventoryApplyResult.Conflict -> throw CivsRejection("inventory-conflict", state.values)
+                null -> error("Unclassified cargo pickup")
+            }
         }
         transaction.forestry?.let { require(it.before(transaction.after) == claim.city) }
         transaction.upkeep?.let { require(it.before(transaction.after) == claim.city) }
@@ -368,6 +390,21 @@ class CivsStorage(private val plugin: Plugin,
         claim.positions.keys.forEach { locked.remove(Key(claim.city.worldId, it), transactionId) }
         claim.worldPositions.forEach { lockedWorld.remove(Key(claim.city.worldId, it), transactionId) }
         claim.groundItems.forEach { lockedGround.remove(it, transactionId) }
+    }
+
+    /** Main-thread claim identity; a source fence keeps the same city revision reserved. */
+    internal fun hasClaim(city: Settlement): Boolean {
+        checkMain(); requireOpen()
+        return cityClaims[city.id]?.let(claims::get)?.city == city
+    }
+
+    internal fun cargoPickupBeforeState(transaction: CivInventoryTransaction): CivInventoryApplyResult? {
+        checkMain(); requireOpen()
+        val receipt = transaction.cargoPickup ?: error("Missing cargo pickup proof")
+        val claim = claims[transaction.id]
+        if (cityClaims[transaction.cityId] != transaction.id || claim?.city != receipt.before(transaction.after))
+            return CivInventoryApplyResult.Conflict(mapOf("reason" to "cargo-claim-changed"))
+        return classifyCargoTransfer(transaction, expectedBefore = true)
     }
 
     /** Exact accepted world cells; independent of the native-container index and unloaded chunks. */
@@ -482,6 +519,52 @@ class CivsStorage(private val plugin: Plugin,
     fun cargoRoom(city: Settlement, buildingId: UUID, material: String): Long = planner.cargoRoom(city, buildingId, material)
     fun prepareCargoDropoff(city: Settlement, cargo: CivCargo, destinationBuildingId: UUID): CivStoragePlan =
         planner.prepareCargoDropoff(city, cargo, destinationBuildingId)
+    /** Admission observes only permitted local city holders; it never loads a candidate chunk. */
+    internal fun redirectCargoRoom(city: Settlement, buildingId: UUID, material: String): Long {
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL) return 0
+        return planner.cargoRoom(city, buildingId, material) { foodCanModify(city, it) }
+    }
+
+    internal fun requireRedistributionCapacity(city: Settlement, cargo: CivCargo, reservations: Collection<CivCourierPlan>) =
+        planner.requireRedistributionCapacity(city, cargo, reservations) { foodCanModify(city, it) }
+
+    internal fun prepareRedistributionPickup(city: Settlement, workerId: UUID, cargo: CivCargo,
+        reservations: Collection<CivCourierPlan>, requireArrival: () -> Unit): CivStoragePlan {
+        checkClaim(city)
+        reject(!CivsLogistics.redistributionAllowed(city, cargo) ||
+            city.workers.firstOrNull { it.id == workerId }?.cargo != null, "stale-delivery")
+        requireArrival()
+        requireRedistributionCapacity(city, cargo, reservations)
+        val prepared = planner.prepareCargoPickup(city, cargo)
+        reject(prepared.changes.none { it.before != null && it.after == null }, "stale-delivery")
+        val nativeWorld = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+        val states = prepared.changes.map(CivInventorySlotChange::container).distinct().map { point ->
+            reject(!foodCanModify(city, point), "lands-denied")
+            CivCargoContainerState(point, nativeWorld.getBlockAt(point.x, point.y, point.z).blockData.asString)
+        }
+        requireArrival()
+        return prepared.copy(cargoPickup = CivCargoPickupReceipt(city.workers.single { it.id == workerId }, cargo,
+            requireNotNull(city.building(cargo.sourceBuildingId)), requireNotNull(city.building(cargo.targetBuildingId)), states).detached())
+    }
+
+    internal fun prepareCarriedCargoDropoff(city: Settlement, workerId: UUID, cargo: CivCargo,
+        destinationId: UUID, at: Long, requireArrival: () -> Unit): CivStoragePlan {
+        checkClaim(city)
+        reject(city.inventory?.mode != CivStorageMode.PHYSICAL || !cargo.inventoryBacked || cargo.stockResource != null ||
+            city.workers.firstOrNull { it.id == workerId }?.cargo != cargo ||
+            CivsLogistics.destination(city, cargo)?.id != destinationId, "stale-delivery")
+        requireArrival()
+        val prepared = planner.prepareCargoDropoff(city, cargo, destinationId) { foodCanModify(city, it) }
+        val nativeWorld = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
+        val states = prepared.changes.map(CivInventorySlotChange::container).distinct().map { point ->
+            CivCargoContainerState(point, nativeWorld.getBlockAt(point.x, point.y, point.z).blockData.asString)
+        }
+        requireArrival()
+        val receipt = CivCargoDropoffReceipt(city.workers.single { it.id == workerId },
+            requireNotNull(city.building(destinationId)), at, states).detached()
+        return prepared.copy(cargoDropoff = receipt)
+    }
+
     fun prepareResidentPickup(city: Settlement, workerId: UUID, buildingId: UUID, required: Map<String, Long>): CivResidentTransferPlan =
         planner.prepareResidentPickup(city, workerId, buildingId, required)
     fun prepareResidentReturn(city: Settlement, workerId: UUID, buildingId: UUID,
@@ -615,6 +698,11 @@ class CivsStorage(private val plugin: Plugin,
         if (playerState is CivInventoryApplyResult.Conflict || playerState is CivInventoryApplyResult.Retry) return playerState
         val containerState = classify(transaction, resolved)
         if (containerState is CivInventoryApplyResult.Conflict) return containerState
+        when (val cargoState = classifyCargoTransfer(transaction)) {
+            is CivInventoryApplyResult.Retry -> return cargoState
+            is CivInventoryApplyResult.Conflict -> return cargoState
+            else -> Unit
+        }
         if (transaction.upkeep != null) when (val authority = validateUpkeepNative(transaction)) {
             is CivInventoryApplyResult.Retry -> return authority
             is CivInventoryApplyResult.Conflict -> return authority
@@ -658,7 +746,13 @@ class CivsStorage(private val plugin: Plugin,
                     ?: CivInventoryApplyResult.Retry(mapOf("reason" to "player-write-incomplete"))
             }
             transaction.changes.forEach { change ->
-                val inventory = resolved.getValue(change.container).inventory
+                if ((transaction.cargoDropoff != null || transaction.cargoPickup != null)) when (val state = cargoTransferSlotState(transaction, change)) {
+                    is CivInventoryApplyResult.Retry -> return state
+                    is CivInventoryApplyResult.Conflict -> return state
+                    else -> Unit
+                }
+                val inventory = if (transaction.cargoDropoff == null && transaction.cargoPickup == null) resolved.getValue(change.container).inventory
+                    else containers.resolve(transaction.after, change.container, change.containerType).inventory
                 if (!matches(inventory.getItem(change.slot), change.after)) {
                     inventory.setItem(change.slot, change.after?.let { stack(it.material, it.amount) })
                 }
@@ -694,12 +788,14 @@ class CivsStorage(private val plugin: Plugin,
 
     fun apply(transaction: CivInventoryTransaction): CivInventoryApplyResult = reconcile(transaction)
 
-    /** Each admitted batch has two fences: source before the journal, native after before city credit. */
+    /** Collected transfers fence both states; typed cargo persists its native credit before city debit. */
     internal fun persistCollected(transaction: CivInventoryTransaction, beforeJournal: Boolean = false): CompletableFuture<Unit> {
         checkMain(); requireOpen()
-        if (transaction.collected == null && transaction.containerRelocation == null) return CompletableFuture.completedFuture(Unit)
+        if (transaction.collected == null && transaction.containerRelocation == null && transaction.cargoDropoff == null && transaction.cargoPickup == null)
+            return CompletableFuture.completedFuture(Unit)
         fun checkState() {
             val state = if (transaction.containerRelocation != null) classifyRelocation(transaction, beforeJournal)
+                else if (transaction.cargoDropoff != null || transaction.cargoPickup != null) classifyCargoTransfer(transaction, beforeJournal)
                 else classifyCollected(transaction, beforeJournal)
             when (state) {
                 CivInventoryApplyResult.Applied -> Unit
@@ -928,6 +1024,50 @@ class CivsStorage(private val plugin: Plugin,
     private fun worldDetails(transaction: CivInventoryTransaction, cell: CivPlanBlock, reason: String): Map<String, String> = mapOf(
         "reason" to reason, "world" to transaction.after.worldId.toString(), "x" to cell.position.x.toString(),
         "y" to cell.position.y.toString(), "z" to cell.position.z.toString())
+
+    private fun cargoTransferSlotState(transaction: CivInventoryTransaction, change: CivInventorySlotChange,
+        expectedBefore: Boolean = false): CivInventoryApplyResult? {
+        val states = transaction.cargoDropoff?.containers ?: transaction.cargoPickup?.containers
+            ?: return CivInventoryApplyResult.Applied
+        val source = try { containers.resolve(transaction.after, change.container, change.containerType) } catch (failure: CivsRejection) {
+            return if (failure.reason == "storage-unavailable") CivInventoryApplyResult.Retry(failure.values)
+                else CivInventoryApplyResult.Conflict(failure.values)
+        }
+        val current = source.inventory.getItem(change.slot)
+        if (!expectedBefore && matches(current, change.after)) return CivInventoryApplyResult.Applied
+        if (!matches(current, change.before))
+            return CivInventoryApplyResult.Conflict(details(transaction.after, change, "cargo-slot-drift"))
+        val nativeWorld = plugin.server.getWorld(transaction.after.worldId)
+            ?: return CivInventoryApplyResult.Retry(mapOf("reason" to "world-unloaded"))
+        val expected = states.firstOrNull { it.position == change.container }?.blockData
+        if (expected == null || !cargoContainerStateMatches(
+                nativeWorld.getBlockAt(change.container.x, change.container.y, change.container.z).blockData, expected))
+            return CivInventoryApplyResult.Conflict(details(transaction.after, change, "cargo-container-state-changed"))
+        if (!source.acceptsInsert || !foodCanModify(transaction.after, change.container))
+            return CivInventoryApplyResult.Retry(details(transaction.after, change, "cargo-lands-denied"))
+        return if (expectedBefore) CivInventoryApplyResult.Applied else null
+    }
+
+    private fun cargoContainerStateMatches(current: BlockData, expected: String): Boolean {
+        val captured = try { Bukkit.createBlockData(expected) } catch (_: IllegalArgumentException) { return false }
+        if (current.material != captured.material) return false
+        val actual = current.clone()
+        // Viewer open/close changes no holder or item authority; every other native property stays exact.
+        if (actual is BarrelData && captured is BarrelData) actual.isOpen = captured.isOpen
+        return actual.asString == captured.asString
+    }
+
+    private fun classifyCargoTransfer(transaction: CivInventoryTransaction, expectedBefore: Boolean = false): CivInventoryApplyResult? {
+        if (transaction.cargoDropoff == null && transaction.cargoPickup == null) return CivInventoryApplyResult.Applied
+        var pending = false
+        for (change in transaction.changes) when (val state = cargoTransferSlotState(transaction, change, expectedBefore)) {
+            is CivInventoryApplyResult.Retry -> return state
+            is CivInventoryApplyResult.Conflict -> return state
+            CivInventoryApplyResult.Applied -> Unit
+            null -> pending = true
+        }
+        return if (pending) null else CivInventoryApplyResult.Applied
+    }
 
     private fun classify(transaction: CivInventoryTransaction, sources: Map<CivPosition, Source>): CivInventoryApplyResult? {
         var pending = false

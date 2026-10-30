@@ -47,6 +47,7 @@ internal class CivsConstructionRuntime(
                                   val containersChanged: Boolean, val physicsCells: List<CivPlanBlock>,
                                   val batch: CivBuildBatch? = null, val nextWorkplace: CivPosition? = null,
                                   val roadSurfaces: Set<CivPosition> = emptySet()) {
+        val capturedCells = plan.blocks.associateBy(CivPlanBlock::position)
         var repairing = false
         var feedbackFailed = false
     }
@@ -138,6 +139,8 @@ internal class CivsConstructionRuntime(
         if (block.type == Material.BEDROCK) return false
         if (!access.repairing &&
             (block.getState(false) as? org.bukkit.block.Container)?.inventory?.isEmpty == false) return false
+        if (!access.repairing && !world.permitsWaterFoundationMutation(access.plan,
+                access.capturedCells[position] ?: return false, block)) return false
         // Preflight can precede this write by many ticks; Lands authority must still be current.
         return world.canModify(city.owner, block, if (access.repairing) block.type else access.materials.getValue(position))
     }

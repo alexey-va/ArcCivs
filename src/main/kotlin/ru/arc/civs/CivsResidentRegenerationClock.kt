@@ -11,7 +11,7 @@ internal class CivsResidentRegenerationClock {
     fun clear() { observations.clear() }
 
     fun observe(city: Settlement, awake: Set<UUID>, at: Long): Set<UUID> {
-        val eligible = city.workers.filter { it.id in awake && CivsResidents.canRegenerate(it) }
+        val eligible = city.workers.filter { it.id in awake && CivsResidents.canRegenerate(it, city) }
         if (eligible.isEmpty()) {
             observations.remove(city.id)
             return emptySet()

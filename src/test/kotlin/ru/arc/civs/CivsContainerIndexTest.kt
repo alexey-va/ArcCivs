@@ -92,6 +92,53 @@ class CivsContainerIndexTest : FunSpec({
         world.isChunkLoaded(1, 0) shouldBe false
     }
 
+    test("coverage needs native loaded and indexed membership without rescanning or loading a missing warehouse chunk") {
+        city = city.copy(buildings = listOf(city.buildings.single().copy(type = BuildingType.WAREHOUSE,
+            phase = BuildingPhase.ACTIVE, bounds = CivBox(CivPosition(0, 64, 0), CivPosition(31, 66, 15)))))
+        val far = world.getBlockAt(20, 64, 0).also { it.type = Material.CHEST }
+        tiles += far
+        world.unloadChunk(1, 0)
+        index.update(city)
+        index.covered(city) shouldBe false
+        world.isChunkLoaded(1, 0) shouldBe false
+        reads shouldBe listOf(0 to 0)
+        world.loadChunk(1, 0)
+        index.covered(city) shouldBe false // Native loaded alone is not evidence of indexed tile entities.
+        val chunk = world.getChunkAt(1, 0)
+        index.load(chunk)
+        index.covered(city) shouldBe true
+        index.covered(city, maximumChunks = 1) shouldBe false
+        index.unload(chunk)
+        index.covered(city) shouldBe false // Cached membership alone can also be absent while native is still loaded.
+        index.load(chunk)
+        world.unloadChunk(1, 0)
+        index.covered(city) shouldBe false
+        world.isChunkLoaded(1, 0) shouldBe false
+        reads shouldBe listOf(0 to 0, 1 to 0, 1 to 0)
+    }
+
+    test("long infrastructure does not widen stock coverage while registered outside holders are mandatory") {
+        val hall = city.buildings.single()
+        val pieces = listOf(BuildingType.ROAD, BuildingType.WALL, BuildingType.GATE).map { type ->
+            hall.copy(id = UUID.randomUUID(), type = type, phase = BuildingPhase.ACTIVE, control = null,
+                bounds = CivBox(CivPosition(-100_000, 63, 0), CivPosition(100_000, 70, 0)))
+        }
+        city = city.copy(buildings = listOf(hall) + pieces)
+        index.update(city)
+        index.covered(city) shouldBe true
+        reads shouldBe listOf(0 to 0)
+        val registered = CivPosition(20, 64, 0)
+        city = city.copy(inventory = requireNotNull(city.inventory).copy(containers = listOf(registered)))
+        index.update(city)
+        index.covered(city) shouldBe false
+        world.isChunkLoaded(1, 0) shouldBe false
+        world.loadChunk(1, 0)
+        index.load(world.getChunkAt(1, 0))
+        index.covered(city) shouldBe true
+        index.covered(city, maximumChunks = 1) shouldBe false
+        reads shouldBe listOf(0 to 0, 0 to 0, 1 to 0)
+    }
+
     test("geometry changes reclassify height and extent while registered outside storage remains compatible") {
         val inside = world.getBlockAt(2, 64, 0).also { it.type = Material.CHEST }
         val above = world.getBlockAt(2, 67, 0).also { it.type = Material.BARREL }
