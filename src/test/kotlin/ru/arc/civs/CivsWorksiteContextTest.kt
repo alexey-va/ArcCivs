@@ -81,7 +81,21 @@ class CivsWorksiteContextTest : FunSpec({
                 shouldThrow<CivsRejection> { runtime.validate(city, work) }.reason shouldBe "stale-worksite"
                 shouldThrow<CivsRejection> { runtime.validateAutonomousVisualReceiptNative(autoCity, visual) }.reason shouldBe "stale-worksite"
                 world.getBlockAt(neighbour.x, neighbour.y, neighbour.z).type = Material.STONE
-                runtime.validate(city, work)
+                shouldThrow<CivsRejection> { runtime.validate(city, work) }.reason shouldBe "stale-worksite"
+                // Native rejection discards discovery proof; match the owning worker's retry lifecycle.
+                runtime.invalidate(worker.id)
+                val retry = contextNext(runtime, city)
+                retry.workerId shouldBe work.workerId
+                retry.cycle shouldBe work.cycle
+                retry.focus shouldBe work.focus
+                retry.changes shouldBe work.changes
+                retry.inputs shouldBe work.inputs
+                retry.outputs shouldBe work.outputs
+                retry.miningStep shouldBe work.miningStep
+                retry.miningOrdinal shouldBe work.miningOrdinal
+                runtime.validate(city, retry)
+                runtime.validateAutonomousVisualReceiptNative(autoCity,
+                    CivsAutonomousWorksites.visual(autoCity, mine, retry))
             }
             world.getBlockAt(target.x, target.y, target.z).type shouldBe Material.STONE
             world.getBlockAt(neighbour.x, neighbour.y, neighbour.z).type shouldBe if (liquid) Material.WATER else Material.STONE
