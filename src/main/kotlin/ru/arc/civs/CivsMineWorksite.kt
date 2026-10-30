@@ -5,6 +5,7 @@ import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.World
 import org.bukkit.block.Block
+import org.bukkit.block.data.type.Fence
 import org.bukkit.inventory.ItemStack
 import java.util.UUID
 import org.bukkit.HeightMap
@@ -237,34 +238,44 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
 
     private fun mineOwnedBlock(city: Settlement, building: CivBuilding, local: CivPosition, data: String): Boolean {
         val state = city.minePlans?.get(building.id.toString())
+        val fence = Bukkit.createBlockData(data) as? Fence
+        fun matches(expected: String?): Boolean {
+            if (expected == data) return true
+            if (expected == null || fence == null) return false
+            val paid = Bukkit.createBlockData(expected) as? Fence ?: return false
+            if (paid.material != fence.material) return false
+            // Neighbour changes update connections; the paid cell's kind and remaining state stay exact.
+            paid.allowedFaces.forEach { paid.setFace(it, fence.hasFace(it)) }
+            return paid.asString == fence.asString
+        }
         fun owned(mine: CivBuilding, proof: CivMinePlanState?, legacyProgress: Long?, at: CivPosition): Boolean {
-            if (proof?.seals?.get(CivsMineProgress.key(at)) == data) return true
+            if (matches(proof?.seals?.get(CivsMineProgress.key(at)))) return true
             val current = CivsMinePlan.forBuilding(mine, proof?.version ?: CivsMinePlan.VERSION)
-            if (proof != null && current?.expectedAt(at, proof.nextStep,
-                    proof.sectionSteps.orEmpty(), mine.rotation) == data) return true
+            if (proof != null && matches(current?.expectedAt(at, proof.nextStep,
+                    proof.sectionSteps.orEmpty(), mine.rotation))) return true
             CivsMineProgress.v5State(proof)?.let { old ->
-                if (old.seals?.get(CivsMineProgress.key(at)) == data || CivsMinePlan.forBuilding(mine, 5)?.expectedAt(
-                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation) == data) return true
+                if (matches(old.seals?.get(CivsMineProgress.key(at))) || matches(CivsMinePlan.forBuilding(mine, 5)?.expectedAt(
+                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation))) return true
             }
             CivsMineProgress.v6State(proof)?.let { old ->
-                if (old.seals?.get(CivsMineProgress.key(at)) == data || CivsMinePlan.forBuilding(mine, 6)?.expectedAt(
-                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation) == data) return true
+                if (matches(old.seals?.get(CivsMineProgress.key(at))) || matches(CivsMinePlan.forBuilding(mine, 6)?.expectedAt(
+                        at, old.nextStep, old.sectionSteps.orEmpty(), mine.rotation))) return true
             }
             val legacy = current?.legacyCompleted(legacyProgress ?: 0L)?.get(at)
-            if (legacy != null && Bukkit.createBlockData(legacy).also { value ->
+            if (legacy != null && matches(Bukkit.createBlockData(legacy).also { value ->
                 value.rotate(when (Math.floorMod(mine.rotation / 90, 4)) {
                     1 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_90
                     2 -> org.bukkit.block.structure.StructureRotation.CLOCKWISE_180
                     3 -> org.bukkit.block.structure.StructureRotation.COUNTERCLOCKWISE_90
                     else -> org.bukkit.block.structure.StructureRotation.NONE
                 })
-            }.asString == data) return true
+            }.asString)) return true
             val versions = listOf(2 to (proof?.takeIf { it.version == 2 }?.nextStep ?: proof?.v2Step),
                 3 to (proof?.takeIf { it.version == 3 }?.nextStep ?: proof?.v3Step),
                 4 to (proof?.takeIf { it.version == 4 }?.nextStep ?: proof?.v4Step),
                 5 to (proof?.takeIf { it.version == 5 && it.sectionSteps == null }?.nextStep ?: proof?.v5Step))
             return versions.any { (version, prefix) -> prefix != null && prefix > 0 &&
-                CivsMinePlan.forBuilding(mine, version)?.expectedAt(at, prefix, emptyMap(), mine.rotation) == data }
+                matches(CivsMinePlan.forBuilding(mine, version)?.expectedAt(at, prefix, emptyMap(), mine.rotation)) }
         }
         if (owned(building, state, city.mineProgress?.get(building.id.toString()), local)) return true
         val worldPoint = CivsWorksiteLayouts.point(building, local)
@@ -295,13 +306,16 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             before in setOf(Material.STONE, Material.COBBLESTONE)
         val paidLiquidSeal = sealing && cell.after == "minecraft:cobblestone" && before in setOf(Material.WATER, Material.LAVA)
         val lavaClearance = clearingLava && before == Material.LAVA && cell.after == "minecraft:air" && local in plan.positions
+        val ownedBefore = !before.isAir && mineOwnedBlock(city, building, local, cell.before)
         if (!before.isAir && before !in WEEDS && !CivsMineSafety.natural(before) && !generatorFace && !paidLiquidSeal && !lavaClearance &&
-            !mineOwnedBlock(city, building, local, cell.before)) return denied("mine-foreign-block")
+            !ownedBefore) return denied("mine-foreign-block")
         val saved = city.minePlans?.get(building.id.toString())
-        val restoredSolid = Bukkit.createBlockData(cell.after).material.isSolid && saved?.let {
+        val after = Bukkit.createBlockData(cell.after).material
+        val restoredSolid = after.isSolid && saved?.let {
             CivsMinePlan.forBuilding(building, it.version)?.expectedAt(local, it.nextStep, it.sectionSteps.orEmpty(), building.rotation)
         } == cell.after
-        if (generatorFace || restoredSolid) return true
+        // Removing an exact paid block reuses its existing mine opening instead of requiring untouched ground above it.
+        if (generatorFace || restoredSolid || ownedBefore && after.isAir) return true
         val required = CivsMineSafety.requiredCover(plan, ordinal, local)
         if (required == 0) return true
         val cap = civsProtectedBuildings(city).filter { it.id != building.id && CivsAutonomousGeometry.horizontalContains(it.bounds, point) }

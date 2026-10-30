@@ -42,7 +42,7 @@ internal class CivsCitizenCollisions(
             !citizenResidentNudgeClear(npc, from, to)) return false
         if (!residentRouteStepAllowed(actor, city, from, to)) return false
         npc.teleport(to)
-        actor.route?.trip?.let { actor.courierInboundPrefix?.observe(from.point(), npc.location.point(), it) }
+        actor.route?.trip?.let { actor.courierInboundPrefix?.observe(from.point(), npc.location.point(), it, recordGround = true) }
         actor.footsteps.reset()
         return true
     }

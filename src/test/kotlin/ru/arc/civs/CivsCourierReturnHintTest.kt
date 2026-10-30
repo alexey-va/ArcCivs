@@ -172,6 +172,75 @@ class CivsCourierReturnHintTest : FunSpec({
             prefix.finish(updated, currentCargo.copy(inventoryBacked = true), warehouse.id, second, actual) shouldBe null
         }
 
+    test("a long observed return line captures no unwalked adjacent probe centres and reaches its exact depot") {
+        MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
+            val world = CivsWorksiteWorldFixture("courier-single-observed-lane").also(paper.server::addWorld)
+            for (x in -1..4) for (z in -1..1) world.loadChunk(x, z)
+            val city = pathsCity().copy(worldId = world.uid, radius = 128)
+            val trip = CivsPaths().begin(city)
+            val trace = (0..60).map { CivPosition(it, 63, 0) }
+            trace.forEach { ground ->
+                world.getBlockAt(ground.x, ground.y, ground.z).type = Material.COBBLESTONE
+            }
+            val depot = CitizenPoint(.5, 64.0, .5)
+            val source = CitizenPoint(60.5, 64.0, .5)
+            val inbound = CitizenPacketRoute(world, depot.location(world), source.location(world),
+                { it.y == 64 && it.x in -2..62 && it.z == 0 }, { _, _ -> true }, { 1.0 }).also(::prepareHintRoute)
+            var inboundAt = depot.location(world)
+            trip.observe(inboundAt.point())
+            repeat(1_000) {
+                if (!inbound.finished) inbound.move(inboundAt, 1.0) { true }?.let { nextAt ->
+                    citizenPacketSupported(world, nextAt.point()) shouldBe true
+                    citizenPacketBodyClear(world, nextAt.point(), false) shouldBe true
+                    citizenPacketStepClear(world, inboundAt.point(), nextAt.point(), false) shouldBe true
+                    inboundAt = nextAt
+                    trip.observe(inboundAt.point())
+                }
+            }
+            inbound.finished shouldBe true
+            inboundAt.point() shouldBe source
+            (trip.walked.size >= 50) shouldBe true
+            val cargo = returnHintCargo(city)
+            val hint = requireNotNull(CitizenCourierReturnHint.capture(city, cargo, trip, depot, source))
+            val corridor = requireNotNull(hint.corridor(city, cargo, source, depot))
+            fun route() = CitizenPacketRoute(world, source.location(world), depot.location(world),
+                { it.y == 64 && it.x in -2..62 && it.z in -3..3 }, { _, _ -> true }, { 1.0 }, corridor = corridor)
+            val probeRoute = route()
+            val search = probeRoute.newSearch()
+            val terrain = hashMapOf<CivPosition, CitizenTerrainBlock>()
+            fun capture(probes: List<CitizenSearchProbe>): List<CitizenSearchCapture> {
+                val cursor = CitizenNavigationCapture(probeRoute, probes, terrain)
+                repeat(100_000) { if (cursor.step()) return cursor.result }
+                error("Native return-line capture exceeded its bounded operation count")
+            }
+            val initial = search.advance(emptyList())
+            val next = search.advance(capture(initial.probes))
+            val captured = capture(next.probes)
+            val interior = captured.map { it.probe.node }.filter { it.x in 8..52 }
+            (interior.size >= 40) shouldBe true
+            withClue("interior=${interior.size} off-line=${interior.filter { it.z != 0 }.take(8)}") {
+                interior.filter { it.z != 0 } shouldBe emptyList()
+            }
+            val returning = route().also(::prepareHintRoute)
+            returning.failure shouldBe null
+            returning.continuation shouldBe false
+            returning.endpoint shouldBe depot
+            var at = source.location(world)
+            repeat(1_000) {
+                if (!returning.finished) returning.move(at, 1.0) { true }?.let { nextAt ->
+                    citizenPacketSupported(world, nextAt.point()) shouldBe true
+                    citizenPacketBodyClear(world, nextAt.point(), false) shouldBe true
+                    citizenPacketStepClear(world, at.point(), nextAt.point(), false) shouldBe true
+                    at = nextAt
+                }
+            }
+            returning.finished shouldBe true
+            at.point() shouldBe depot
+            (returning.capturedBlocks <= CivsNavigationSettings().maximumCapturedBlocks) shouldBe true
+            trace.all { world.getBlockAt(it.x, it.y, it.z).type == Material.COBBLESTONE } shouldBe true
+        }
+    }
+
     test("one observed courier corridor reduces long return capture without changing native search authority") {
         MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
             val world = CivsWorksiteWorldFixture("courier-return-corridor").also(paper.server::addWorld)

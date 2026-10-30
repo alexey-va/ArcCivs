@@ -38,6 +38,7 @@ class CivsCourierYieldTest : FunSpec({
             val actor = runtime.actors.getValue(courierId)
             requireNotNull(actor.courierInboundPrefix)
             val route = requireNotNull(actor.route)
+            val walkedBeforeYield = requireNotNull(route.trip).walked.toSet()
             val progress = route.motion.forwardProgress
             val before = courier.location
             if (ownedYield) {
@@ -58,6 +59,7 @@ class CivsCourierYieldTest : FunSpec({
                 actor.residentYield shouldBe null
                 yielding.steps shouldBe 25
                 (before.distance(courier.location) > 1.2) shouldBe true
+                requireNotNull(route.trip).walked shouldBe walkedBeforeYield
                 // The passer leaves after the physical yield, without publishing
                 // a cargo or work acknowledgement for either resident.
                 h.owner.collisionActors().single { it.uniqueId == h.workerId }

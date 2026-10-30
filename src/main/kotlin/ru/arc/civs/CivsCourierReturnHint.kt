@@ -24,7 +24,7 @@ internal class CitizenSearchCorridor private constructor(
                 for (dx in -radius..radius) for (dz in -radius..radius)
                     columns += civsTerrainKey(x + dx, z + dz)
             }
-            walked.forEach { add(it.x, it.z, 1) }
+            walked.forEach { add(it.x, it.z, 0) }
             for ((index, endpoint) in listOf(from, to).withIndex()) {
                 val nearest = walked.minByOrNull { it.copy(y = it.y + 1).point().distanceSquared(endpoint) } ?: return null
                 val target = nearest.copy(y = nearest.y + 1).point()
@@ -117,9 +117,15 @@ internal class CitizenCourierInboundPrefix private constructor(
         segmentObserved = false
     }
 
-    fun observe(from: CitizenPoint, to: CitizenPoint, trip: CivsPaths.Trip) {
+    fun observe(from: CitizenPoint, to: CitizenPoint, trip: CivsPaths.Trip, recordGround: Boolean = false) {
         // Trip only clears a previously nonempty observation set on its 256-cell overflow.
         if (actual.distanceSquared(from) > .25 || segmentObserved && trip.walked.isEmpty()) walked = null
+        if (recordGround) walked = walked?.let { previous ->
+            val ground = listOf(from, to).map {
+                CivPosition(floor(it.x).toInt(), citizenSupportY(it.y), floor(it.z).toInt())
+            }.filter(trip.network.geometry::outside)
+            (previous + ground).takeIf { (it + trip.walked).size <= CivsPaths.MAX_TRIP_CELLS }
+        }
         segmentObserved = segmentObserved || trip.walked.isNotEmpty()
         actual = to
     }

@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "title": "ArcCivs0.1.131: restore exact paid mine ownership across upgrades and native fence connections",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "Live0.1.130 mine currently produces only the existing Auto fallback at its storage stance: all35captured mining commits havezero world changes andno mining step. This is not proof of real excavation/descent. The same mine earlier performed real native workY30–33.",
+    "The saved mine plan contains exact previous-level building geometry, paid prefixes, section progress and v5/v6 proofs. Native loaded captures show DARK_OAK_FENCE at a rejected landing and the old shaft structure beneath thin-cover refusals. Ownership must be proved for the exact old paid coordinate; material similarity or city membership alone is insufficient.",
+    "Only dynamic fence connection properties may be normalized when comparing an actual fence against exact paid expected data. Material, waterlogging and all meaningful state remain checked; foreign fences and blocks without a paid witness stay protected.",
+    "An exact paid owned preexisting cell may use the existing ownership repair path without re-demanding natural cover above an already excavated owned shaft. Native loaded state, protection, hazards, current mine geometry, receipt revalidation and item authority remain. No accepted bill, durable cursor or work prefix is rewritten/reset.",
+    "Before/after configured rates remain unchanged: fallback is one exclusive6-second95percentCOBBLESTONE/4percentCOAL/1percentRAW_IRON roll; native excavation keeps existing two-second batches, actual tool uses, supports and native block drops. They are alternative exclusive actions, never additive income. Ideal ceilings600fallbackrolls/hour versus1800nativeactions/hour are existing separate ceilings, not observed yield or identical item mixes.",
+    "Eligible native work consumes real existing blocks and support materials. Existing getDrops(tool) output handling and exact inventory receipts are preserved; no invented refund, replacement grant or output multiplier is added. Removed owned fences must follow the same native item-conservation contract as any accepted existing mine batch.",
+    "Direct changes are separately0Vault,0premiumtokens,0playerXP. No prices, contracts, quotas or production limits change. Current network SELL prohibition and separate active contracts are preserved; faster native progress is not converted into invented money income.",
+    "Actual repaired descent and sustained throughput require post-restart native observation; fallback receipts and intended focus coordinates must not be reported as actual descent."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "item_conservation": {
+    "new_grants": 0,
+    "refunds_added": 0,
+    "per_accepted_native_batch_quantity_change": 0,
+    "native_tool_drops_preserved": true,
+    "receipts_and_authority_preserved": true
+  },
+  "existing_work_rates": {
+    "fallback_ms": 6000,
+    "native_batch_ms": 2000,
+    "exclusive_actions": true
+  },
+  "realized_throughput_delta": null,
+  "conclusion": "Restore legitimately paid native mine work without broad ownership trust or economic parameter changes; verify actual descent separately."
+}

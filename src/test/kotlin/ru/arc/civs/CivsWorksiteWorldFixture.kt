@@ -176,7 +176,7 @@ internal open class CivsWorksiteWorldFixture(name: String, private val ground: M
 
 /** The pinned parser omits ladder/connected-wall properties and every BlockData.rotate operation.
  * Supply known mine states and captured static states; unknown states still use its strict parser. */
-internal class CivsWorksiteServerFixture : ServerMock() {
+internal open class CivsWorksiteServerFixture : ServerMock() {
     override fun createBlockData(data: String): BlockData {
         val timberState = TIMBER_LOG_STATE.matchEntire(data)
             ?: TIMBER_PLANKS_STATE.matchEntire(data)
