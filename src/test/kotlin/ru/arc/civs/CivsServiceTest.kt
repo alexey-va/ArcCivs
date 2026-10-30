@@ -1294,6 +1294,133 @@ class CivsRoadGradeRecoveryServiceTest : FunSpec({
     }
 })
 
+class CivsAutonomousInfrastructureFallbackTest : FunSpec({
+    test("a proven unavailable new industry site gives paid infrastructure one attempt in the same request") {
+        infrastructureFallbackScenario { h, city, placement, development ->
+            val ordinary = CompletableFuture<CivAutonomousDesign>()
+            val infrastructure = CompletableFuture<CivAutonomousDesign>()
+            every { placement.search(any(), BuildingType.CRUSHER, 1, any()) } returns ordinary
+            every { placement.infrastructure(city) } returns infrastructure
+            development.pulse(); h.tick()
+            h.tickUntil("ordinary site search admitted") { development.debug(city.id)["request"] != null }
+            val request = development.debug(city.id)["request"]
+            (request != null) shouldBe true
+            verify(exactly = 1) { placement.search(city, BuildingType.CRUSHER, 1, any()) }
+            verify(exactly = 0) { placement.infrastructure(any()) }
+            ordinary.completeExceptionally(CivsRejection("autonomy-no-site")); h.tick()
+            verify(exactly = 1) { placement.infrastructure(city) }
+            development.debug(city.id)["request"] shouldBe request
+            h.time += 5_001; development.pulse(); h.tick()
+            verify(exactly = 1) { placement.search(any(), any(), any(), any()) }
+            verify(exactly = 1) { placement.infrastructure(any()) }
+
+            val at = CivPosition(60, 64, 0)
+            val wall = CivBuilding(UUID.randomUUID(), BuildingType.WALL, 1, at, 0,
+                "civs/infrastructure/v1/wall/fallback", CivBox(at, at.copy(x = 62, y = 68)),
+                at.copy(z = -1), BuildingPhase.SITE)
+            every { h.worldAdapter.captureAutonomousSite(any(), any(), any(), any(), any(), any()) } returns CompletableFuture()
+            infrastructure.complete(CivAutonomousDesign(CivBlueprint(wall, city.worldId,
+                mockk(relaxed = true), emptyList(), emptyList(), byteArrayOf()))); h.tick()
+            verify(exactly = 1) { h.worldAdapter.captureAutonomousSite(city.id, city.owner, city.worldId,
+                wall, emptyList(), null) }
+            h.service.settlements().single() shouldBe city
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    test("an unavailable perimeter backs off for five minutes without starving ordinary retries") {
+        infrastructureFallbackScenario { h, city, placement, development ->
+            every { placement.search(any(), any(), any(), any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+            every { placement.infrastructure(any()) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-no-site", mapOf("reason" to "autonomy-terrain")))
+            development.pulse(); h.tick()
+            verify(exactly = 1) { placement.infrastructure(city) }
+            h.time += 30_001; development.pulse(); h.tick()
+            verify(exactly = 2) { placement.search(any(), BuildingType.CRUSHER, 1, any()) }
+            verify(exactly = 1) { placement.infrastructure(any()) }
+            h.time += 300_001; development.pulse(); h.tick() // The expired full-plan retry runs first.
+            h.time += 30_001; development.pulse(); h.tick()
+            verify(exactly = 2) { placement.infrastructure(city) }
+            h.service.settlements().single() shouldBe city
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    for (reason in listOf("world-busy", "chunks-unloaded"))
+    test("a temporary ordinary search failure never starts infrastructure reason=$reason") {
+        infrastructureFallbackScenario { h, city, placement, development ->
+            every { placement.search(any(), any(), any(), any()) } returns
+                CompletableFuture.failedFuture(CivsRejection(reason))
+            development.pulse(); h.tick()
+            verify(exactly = 1) { placement.search(city, BuildingType.CRUSHER, 1, any()) }
+            verify(exactly = 0) { placement.infrastructure(any()) }
+            h.service.settlements().single() shouldBe city
+            h.saves shouldBe emptyList()
+        }
+    }
+
+    test("a failed existing board refit never falls back to infrastructure") {
+        infrastructureFallbackScenario(refit = true) { h, city, placement, development ->
+            val board = city.buildings.single { it.type == BuildingType.PLAN_BOARD }
+            every { h.blueprints.preparePlanBoardRefit(board, city.worldId) } returns
+                CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+            development.pulse(); h.tick()
+            verify(exactly = 1) { h.blueprints.preparePlanBoardRefit(board, city.worldId) }
+            verify(exactly = 0) { placement.infrastructure(any()) }
+            verify(exactly = 0) { placement.search(any(), any(), any(), any()) }
+            h.service.settlements().single() shouldBe city
+            h.saves shouldBe emptyList()
+        }
+    }
+})
+
+private fun infrastructureFallbackScenario(refit: Boolean = false,
+    action: (ServiceScenario, Settlement, CivsAutonomousPlacement, CivsAutonomousDevelopment) -> Unit) {
+    mockkConstructor(CivsAutonomousPlacement::class)
+    try {
+        serviceScenario { h ->
+            val types = CivsAutonomy.baseProfile + listOf(BuildingType.HOUSE, BuildingType.HOUSE,
+                BuildingType.UNIVERSITY, BuildingType.SMELTERY)
+            val buildings = types.mapIndexed { index, type ->
+                val at = CivPosition(-30 + index % 4 * 20, 64, -30 + index / 4 * 20)
+                CivBuilding(UUID.randomUUID(), type, minOf(2, type.maxLevel), at, 0,
+                    if (type == BuildingType.PLAN_BOARD) {
+                        if (refit) CivsPlanBoardBlueprint.LEGACY_SCHEMATIC_ID else CivsPlanBoardBlueprint.SCHEMATIC_ID
+                    } else CivsBlueprints.schematicId("nordic", type, minOf(2, type.maxLevel)),
+                    CivBox(at.copy(x = at.x - 2, y = 63, z = at.z - 2), at.copy(x = at.x + 2, y = 68, z = at.z + 2)),
+                    at.copy(z = at.z - 3), BuildingPhase.ACTIVE, at)
+            }
+            val paid = listOf(-10, 10).map { z ->
+                val at = CivPosition(-60, 64, z)
+                CivBuilding(UUID.randomUUID(), BuildingType.WALL, 1, at, 0, "civs/infrastructure/v1/wall/paid",
+                    CivBox(at, at.copy(x = -58, y = 68)), at.copy(x = -61), BuildingPhase.ACTIVE)
+            }
+            val city = CivsRules.validate(h.city.copy(autonomy = CivAutonomy(layoutHalfWidth = 56), workers = emptyList(),
+                stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL), buildings = buildings + paid,
+                research = CivResearchState(CivResearchId.entries.toSet())))
+            CivsAutonomy.nextGoal(city)?.type shouldBe if (refit) BuildingType.PLAN_BOARD else BuildingType.CRUSHER
+            val placement = CivsService::class.java.getDeclaredField("autonomousPlacement").also { it.isAccessible = true }
+                .get(h.service) as CivsAutonomousPlacement
+            every { placement.plan(any()) } returns CompletableFuture.failedFuture(CivsRejection("autonomy-no-site"))
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            h.start()
+            h.paper.addPlayer("PerimeterObserver").teleport(Location(h.world, 0.5, 65.0, 0.5))
+            val development = autonomousDevelopment(h.service)
+            development.pulseAccessRepair(); h.tick()
+            if (!refit) {
+                h.time += 5_001; development.pulse(); h.tick()
+                verify(exactly = 1) { placement.plan(any()) }
+                h.time += 30_001
+            } else h.time += 5_001
+            development.accessReady(city) shouldBe true
+            h.service.settlements().single() shouldBe city
+            h.saves shouldBe emptyList()
+            action(h, city, placement, development)
+        }
+    } finally { unmockkConstructor(CivsAutonomousPlacement::class) }
+}
+
 class CivsServiceTest : FunSpec({
     test("operator terrain capture rejects an unready service and a worker outside the selected city without native access") {
         serviceScenario { h ->

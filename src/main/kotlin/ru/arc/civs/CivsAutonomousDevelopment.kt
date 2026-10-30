@@ -121,7 +121,7 @@ internal class CivsAutonomousDevelopment(
         }
     }
 
-    /** One search/commit per city, fair admission across cities; native capture uses the shared world budget. */
+    /** One planning request per city, fair admission across cities; native capture uses the shared world budget. */
     fun pulse() {
         if (now() < nextAutonomyAt) return
         nextAutonomyAt = now() + 5_000
@@ -135,8 +135,8 @@ internal class CivsAutonomousDevelopment(
         val ordinary = CivsAutonomy.nextGoal(city, blueprints::maximumLevel)
         val adopted = CivsSettlementPlans.current(city)
         val checked = autonomyLayoutChecked[city.id]
-        val infrastructure = CivsAutonomy.infrastructureDue(city, ordinary) &&
-            (checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second)
+        val layoutCheckDue = checked == null || !civsSameBuildingLayout(checked.first, city.buildings) || now() >= checked.second
+        var infrastructure = CivsAutonomy.infrastructureDue(city, ordinary) && layoutCheckDue
         if (!infrastructure && ordinary == null && adopted != null) { developmentFinished(city.id); return }
         var goal = if (infrastructure || ordinary == null) CivsAutonomy.goal(city, BuildingType.ROAD, 1, null) else requireNotNull(ordinary)
         val existing = if (infrastructure) null else goal.buildingId?.let(city::building)
@@ -204,8 +204,20 @@ internal class CivsAutonomousDevelopment(
                 blueprints.preparePlanBoardRefit(existing, city.worldId).thenApply { CivAutonomousDesign(it, null) }
             else blueprints.prepareUpgrade(existing, goal.targetLevel, city.worldId).thenApply { CivAutonomousDesign(it, null) }
         }.getOrElse { CompletableFuture.failedFuture(it) }
-        prepared.whenCompleteSync(tasks) { blueprint, failure ->
-            if (autonomyRequests[city.id] != request) return@whenCompleteSync
+        fun completed(blueprint: CivAutonomousDesign?, failure: Throwable?) {
+            if (autonomyRequests[city.id] != request) return
+            // A blocked first-level industry must not indefinitely hide unfinished paid infrastructure.
+            // Keep the same request, terrain guards and settled-layout backoff; no accepted plot moves.
+            if (failure != null && !infrastructure && existing == null && adopted == null && ordinary?.targetLevel == 1 &&
+                CivsDiagnostics.rejection(failure)?.reason == "autonomy-no-site" && layoutCheckDue &&
+                CivsAutonomy.infrastructureDue(city, null)) {
+                infrastructure = true
+                goal = CivsAutonomy.goal(city, BuildingType.ROAD, 1, null)
+                autonomyProgress[city.id] = CivsAutonomyView("searching", goal.type, goal.targetLevel)
+                runCatching { autonomousPlacement.infrastructure(city) }.getOrElse { CompletableFuture.failedFuture(it) }
+                    .whenCompleteSync(tasks) { design, error -> completed(design, error) }
+                return
+            }
             if (failure != null) {
                 autonomyRequests.remove(city.id)
                 if (infrastructure) autonomyLayoutChecked[city.id] = city.buildings.toList() to (now() + 300_000)
@@ -216,7 +228,7 @@ internal class CivsAutonomousDevelopment(
                         "pieces" to city.buildings.count { it.type.isInfrastructure })
                     if (ordinary == null) pulseAutonomousDecoration(city)
                 } else autonomyFailed(city.id, goal, failure)
-                return@whenCompleteSync
+                return
             }
             if (infrastructure) goal = CivsAutonomy.goal(city, requireNotNull(blueprint).blueprint.building.type, 1, null)
             runCatching { afterCityAvailable(city.id) {
@@ -245,6 +257,7 @@ internal class CivsAutonomousDevelopment(
                 autonomyFailed(city.id, goal, it)
             }
         }
+        prepared.whenCompleteSync(tasks) { blueprint, failure -> completed(blueprint, failure) }
     }
 
     private val decorationCursor = linkedMapOf<UUID, Int>()

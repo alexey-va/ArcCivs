@@ -136,7 +136,10 @@ internal class CivsAutonomousPlacement(
         private val infrastructure: Boolean = false, private val reservation: CivSettlementPlot? = null,
         private val pinnedRoute: List<CivPosition>? = null, private val catalogEntry: String? = null) {
         private val adopted = CivsSettlementPlans.current(city)
-        private var resolvedCatalogEntry: String? = catalogEntry
+        @Volatile private var resolvedCatalogEntry: String? = catalogEntry
+        @Volatile private var familiesTried = emptyList<String>()
+        private var alternatives: Iterator<String>? = null
+        @Volatile private var attempted = 0
         val result = CompletableFuture<CivAutonomousDesign>()
         @Volatile var temporaryCapture = false
         @Volatile var pending: CompletableFuture<*>? = null
@@ -163,7 +166,8 @@ internal class CivsAutonomousPlacement(
             "surface_columns" to columns, "phase" to phase, "rejections" to rejections.toSortedMap(),
             "selected_anchor" to selected?.anchor, "fixed" to (pinned != null), "layout_blockers" to blockers,
             "candidate_source" to candidateSource, "frontage_candidates" to frontageCandidates,
-            "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples)
+            "infill_candidates" to infillCandidates, "grading_samples" to gradingSamples,
+            "catalog_source" to resolvedCatalogEntry, "families_tried" to familiesTried, "attempted" to attempted)
 
         fun start() {
             phase = "access"
@@ -220,7 +224,13 @@ internal class CivsAutonomousPlacement(
             }
             resolvedCatalogEntry = catalogEntry ?: reservation?.building?.schematicId?.takeIf { it.startsWith("civs/v2/") }
                 ?: blueprints.autonomousSource(city.style, type)
-            val entry = resolvedCatalogEntry
+            loadTemplates(resolvedCatalogEntry)
+        }
+
+        private fun loadTemplates(entry: String?) {
+            phase = "catalog"
+            resolvedCatalogEntry = entry
+            if (entry != null) familiesTried = familiesTried + entry
             val current = if (entry != null) blueprints.prepareEntry(entry, buildingId, city.worldId,
                 CivPosition(0, 0, 0), 2, 0) else blueprints.prepare(city.style, type, level, buildingId, city.worldId,
                 CivPosition(0, 0, 0), 2, 0)
@@ -237,6 +247,25 @@ internal class CivsAutonomousPlacement(
                 if (candidates.isEmpty()) candidates = infill()
                 captureSurface()
             }
+        }
+
+        /** A new, unreserved site may change family; accepted geometry and all native budgets stay fixed. */
+        private fun nextFamily(): Boolean {
+            if (resolvedCatalogEntry == null || catalogEntry != null || infrastructure || pinned != null || previous != null ||
+                reservation != null || adopted != null || city.autonomy?.plan != null || level != 1 ||
+                city.building(buildingId) != null || attempted >= MAXIMUM_OPTIONS) return false
+            val remaining = alternatives ?: blueprints.autonomousAlternatives(city.style, type)
+                .filterNot { it == resolvedCatalogEntry }.distinct().take(MAXIMUM_OPTIONS).iterator().also { alternatives = it }
+            if (!remaining.hasNext()) return false
+            candidates = emptyList()
+            options = emptyList()
+            next = 0
+            infillTried = false
+            templates = null
+            selected = null
+            candidateSource = "frontage"
+            loadTemplates(remaining.next())
+            return true
         }
 
         private fun infill(): List<CivsAutonomousCandidate> {
@@ -263,26 +292,34 @@ internal class CivsAutonomousPlacement(
             }
 
         private fun captureSurface() {
-            val first = candidates.firstOrNull() ?: return fail("autonomy-no-site")
+            val first = candidates.firstOrNull() ?: run {
+                if (!nextFamily()) fail("autonomy-no-site")
+                return
+            }
+            if (this::surface.isInitialized) { gradeSurface(); return }
             phase = "surface"
             await(world.autonomousHeightField(city, first.building, previous)) { field ->
                 surface = field
                 columns = field.columns.size
-                phase = "grading"
-                options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
-                    else grade(candidates).take(MAXIMUM_OPTIONS)
-                attempt()
+                gradeSurface()
             }
+        }
+
+        private fun gradeSurface() {
+            phase = "grading"
+            options = if (infrastructure && pinned != null) listOf(CivTerraformOption(pinned.building, 0))
+                else grade(candidates).take(MAXIMUM_OPTIONS - attempted)
+            attempt()
         }
 
         private fun attempt() {
             if (result.isDone) return
-            if (next >= options.size) {
-                // Reuse this detached surface. The two tiers share the original 64 native-attempt budget.
-                if (!infillTried && templates != null && next < MAXIMUM_OPTIONS) {
+            if (next >= options.size || attempted >= MAXIMUM_OPTIONS) {
+                // Every tier and family shares this detached surface and the original 64-attempt budget.
+                if (!infillTried && templates != null && attempted < MAXIMUM_OPTIONS) {
                     val extra = infill()
                     candidates = candidates + extra
-                    options = options + grade(extra).take(MAXIMUM_OPTIONS - next)
+                    options = options + grade(extra).take(MAXIMUM_OPTIONS - attempted)
                     if (next < options.size) { attempt(); return }
                 }
                 val reason = when {
@@ -290,9 +327,11 @@ internal class CivsAutonomousPlacement(
                     rejections.containsKey("autonomy-search-budget") -> "autonomy-search-budget"
                     else -> "autonomy-no-site"
                 }
+                if (reason == "autonomy-no-site" && nextFamily()) return
                 return fail(reason)
             }
             val option = options[next++]
+            attempted++
             selected = option.building
             phase = "grading"
             val piece = pieces[option.building.id]
@@ -346,7 +385,7 @@ internal class CivsAutonomousPlacement(
 
         private fun fail(reason: String) {
             result.completeExceptionally(CivsRejection(reason, rejections.mapValues { it.value.toString() } +
-                mapOf("attempted" to next.toString(), "options" to options.size.toString())))
+                mapOf("attempted" to attempted.toString(), "options" to options.size.toString())))
         }
 
         private fun retry(failure: Throwable) {

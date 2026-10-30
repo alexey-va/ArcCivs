@@ -110,6 +110,10 @@ class CivsBlueprints(
         if (type == BuildingType.PLAN_BOARD || !catalog.present) null
         else catalog.autonomous(style, type)?.id ?: throw CivsRejection("blueprint-unavailable")
 
+    internal fun autonomousAlternatives(style: String, type: BuildingType): List<String> =
+        if (type == BuildingType.PLAN_BOARD || !catalog.present) emptyList()
+        else catalog.autonomousAlternatives(style, type).map { it.id }
+
     fun maximumLevel(building: CivBuilding): Int = catalog.entry(building.schematicId)?.maxLevel ?: building.type.maxLevel
 
     fun prepareEntry(entryId: String, buildingId: UUID, worldId: UUID, placement: CivPosition, facing: Int,

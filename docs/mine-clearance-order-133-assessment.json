@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.133: recover planned mine clearance and unavailable automatic building sites",
+  "participants": [1, 10, 16],
+  "assumptions": [
+    "Fresh Auto2 native captures show a previously excavated landing at Y43 with adjacent AIR at feet height and STONE above it. The safety frontier requests a farther seal through that blocked head space before the planned head-space excavation can run. Repeated six-second fallback receipts do not prove physical mine progress.",
+    "The correction only orders already-planned shaft or landing body clearance before its dependent AIR-wall seal in the same exposed column. The original unfinished safety obligation remains durable and is checked again against fresh native geometry. Liquid, foreign blocks, unplanned clearance, unrelated galleries, native line of sight, body access, tool use, protection and item receipts remain authoritative.",
+    "Per accepted action, quantities and rates are unchanged: the existing exclusive six-second fallback roll uses 95 percent COBBLESTONE, 4 percent COAL and 1 percent RAW_IRON, or a two-second native action uses the actual tool and native drops. The ideal ceilings remain 600 fallback rolls per hour or 1800 native actions per hour; they are exclusive alternatives and exclude movement, supplies and safety work.",
+    "For 1, 10 or 16 cities with one miner and 0.25, 1 or 4 active hours per day, direct net mint and burn changes remain separately zero Vault, zero premium tokens and zero player XP. Restored access can change realized native item throughput, which has not been measured and has no assumed monetary conversion.",
+    "A new unaccepted automatic site may try another current capable curated family after the preferred family cannot fit. Existing sites, adopted plots, explicit choices and upgrades retain their exact family. Every eventual accepted blueprint keeps its own native material bill and ordinary construction debit. The existing Auto-only demand top-up remains available under its normal native receipts, eight-material receipt limit and one-stack per-material buffer; ordinary player-supplied towns do not gain this behavior. Different accepted families can require different normal Auto material top-ups, so total item issuance is not claimed unchanged or zero. The finite total of 64 native placement attempts is shared across families, and one captured surface is reused. The selected family and exact bill must be read back after admission; a surface candidate is not native admission.",
+    "After the final unavailable new-site search, one existing bounded infrastructure search may run under the same request and normal five-minute layout backoff. It neither completes a paid piece again nor bypasses water, foreign blocks, occupied routes, queue, material or fresh native checks.",
+    "No new issuance path, manual QA grant, refund, changed per-cell construction charge, multiplier or changed stock limit is added. Existing Auto-only top-ups, native support debits, durable progress and inventory authority are retained. Current network SELL policy and separate contracts are unchanged.",
+    "Acceptance requires physical native progress past the blocked landing after activation, with the retained safety obligation resolved. A selected target, fallback output, successful build or empty blocked-section list alone is insufficient."
+  ],
+  "currencies": {
+    "vault": {"minor_per_unit": 100, "flows": []},
+    "tokens": {"minor_per_unit": 1, "flows": []}
+  },
+  "prices": [],
+  "player_xp": {"before": 0, "after": 0},
+  "item_conservation": {
+    "new_grant_paths": 0,
+    "manual_qa_grants": 0,
+    "existing_auto_demand_topups_preserved": true,
+    "refunds_added": 0,
+    "per_accepted_native_batch_quantity_change": 0,
+    "native_tool_drops_preserved": true,
+    "receipts_and_authority_preserved": true
+  },
+  "existing_work_rates": {"fallback_ms": 6000, "native_batch_ms": 2000, "exclusive_actions": true},
+  "realized_throughput_delta": null,
+  "conclusion": "Resolve the clearance dependency while retaining native safety and exact item accounting; verify physical progress separately."
+}

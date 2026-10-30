@@ -471,6 +471,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             requireCivs(mineMutationAllowed(city, building, world, cell, ordinal, generator = work.miningGenerator,
                 sealing = sealing, planVersion = plan.version, clearingLava = clearingLava) == true, "protected-area")
         }
+        val oldFrontier = validateLandingClearanceFrontier(city, building, world, plan, work, ordinal)
         // Removing liquid opens no new rock face; adjacent flows may drain after this exact source is removed.
         if (clearingLava) return
         val excavations = pending.filter { Bukkit.createBlockData(it.after).material.isAir }
@@ -480,6 +481,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val frontier = mineFrontier(city, building, world, plan, around, excavations,
             accessStep = work.miningAccessStep ?: work.miningStep ?: 0, reserved = reserved,
             sectionSteps = work.miningAccessSections.orEmpty()) ?: throw CivsRejection("protected-area")
+        requireCivs((oldFrontier + frontier).distinct().size <= 54, "stale-worksite")
         val deferred = work.miningDeferredSeals.orEmpty()
         requireCivs(deferred.size <= 54 && deferred.all { p -> frontier.any { it.block == p && it.material == Material.COBBLESTONE } }, "stale-worksite")
         for (task in frontier) {
@@ -492,6 +494,48 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             if (task.block in deferred && neighbour.type.isAir) continue
             requireCivs(!mineProtectionNeeded(neighbour, task.material), "stale-worksite")
         }
+    }
+
+    /** Only the two body cuts of this exact landing column can unlock an occluded AIR seal. */
+    private fun pendingLandingClearance(plan: CivsMinePlan, exposed: CivPosition, access: Long,
+        sections: Map<String, Long>): String? {
+        val floor = plan.floors.firstOrNull { exposed.y in it.feetY..it.feetY + 1 } ?: return null
+        val section = "${floor.index}/shaft/landing"
+        if (section !in plan.sections || !plan.sectionReady(section, access, sections)) return null
+        val bodyCuts = (0..1).map { height ->
+            plan.cutOrdinals[exposed.copy(y = floor.feetY + height)].orEmpty()
+                .firstOrNull { plan.section(it) == section } ?: return null
+        }
+        return section.takeIf { bodyCuts.any { !plan.completed(it, access, sections) } }
+    }
+
+    /** The old opening remains a receipt fence while its own body clearance makes the seal reachable. */
+    private fun validateLandingClearanceFrontier(city: Settlement, building: CivBuilding, world: World,
+        plan: CivsMinePlan, work: CivWorldWork, ordinal: Int): List<MineProtection> {
+        val previous = city.minePlans?.get(building.id.toString())?.excavation ?: return emptyList()
+        if (work.status != "digging-mine" || work.miningExcavation != previous ||
+            plan.steps[ordinal].stage != "shaft" || plan.steps[ordinal].branch != "landing") return emptyList()
+        val floor = plan.floors.firstOrNull { it.index == plan.steps[ordinal].floor } ?: return emptyList()
+        if (previous.y !in floor.feetY..floor.feetY + 1) return emptyList()
+        val access = work.miningAccessStep ?: work.miningStep ?: 0
+        val sections = work.miningAccessSections.orEmpty()
+        val tasks = mineFrontier(city, building, world, plan, previous, emptySet(),
+            accessStep = access, sectionSteps = sections) ?: throw CivsRejection("protected-area")
+        requireCivs(tasks.size <= 54, "stale-worksite")
+        for (task in tasks) {
+            if (task.transferFooting) continue
+            val opening = observeMineHazard(world, CivsWorksiteLayouts.point(building, task.exposed))
+                ?: throw CivsRejection("chunks-unloaded")
+            if (!mineExposed(task, emptySet(), opening)) continue
+            val block = observeMineHazard(world, CivsWorksiteLayouts.point(building, task.block))
+                ?: throw CivsRejection("chunks-unloaded")
+            val dependent = task.material == Material.COBBLESTONE &&
+                pendingLandingClearance(plan, task.exposed, access, sections) == plan.section(ordinal)
+            if (dependent) requireCivs(!block.isLiquid && (block.type.isAir || block.type == Material.COBBLESTONE ||
+                CivsMineSafety.natural(block.type) || mineOwnedBlock(city, building, task.block, block.blockData.asString)), "stale-worksite")
+            requireCivs(!mineProtectionNeeded(block, task.material) || dependent && block.type.isAir, "stale-worksite")
+        }
+        return tasks
     }
 
     fun mine(city: Settlement, worker: CivWorker, building: CivBuilding, world: World): CivWorldWork? {
@@ -668,6 +712,16 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 // Keep the oldest opening until its actual AIR shell can be reached.
                 // Lower ladder clearance must not replace this durable repair target.
                 execution.unsealedExcavation = it.point.takeIf { mineSafety[worker.id]?.deferredAirWalls?.isNotEmpty() == true }
+                val scan = mineSafety[worker.id]
+                val clearance = scan?.let { old -> old.frontier.asSequence().filter { task -> task.block in old.deferredAirWalls }
+                    .mapNotNull { task -> pendingLandingClearance(geometry, task.exposed, access = execution.prefix,
+                        sections = execution.sections) }.firstOrNull() }
+                if (clearance != null && execution.selected != clearance) {
+                    // Resume the named dependency on the next bounded pulse, before any unrelated section.
+                    execution.selected = clearance
+                    context.spotSearchPending = true
+                    return context.blocked(worker, "searching-work")
+                }
             }
             // Keep a completed previous check across bounded pulses. A receipt's
             // excavation invalidate clears it even when progress did not move.
@@ -1066,7 +1120,8 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 val lowerRowEnd = geometry.lowerClearanceEnd(task.exposed)
                 if (!context.spotSearchPending && failure?.status == "worksite-no-access" &&
                     task.material == Material.COBBLESTONE && block.type.isAir &&
-                    (hiddenByCurrentCut || lowerRowEnd > 0 && !geometry.completed(lowerRowEnd - 1, access, sections))) {
+                    (hiddenByCurrentCut || lowerRowEnd > 0 && !geometry.completed(lowerRowEnd - 1, access, sections) ||
+                        pendingLandingClearance(geometry, task.exposed, access, sections) != null)) {
                     scan.deferredAirWalls += task.block
                     scan.next++
                     context.blocked(worker, "searching-work")

@@ -62,7 +62,14 @@ internal class CivBlueprintCatalog private constructor(
     }
 
     /** New automatic buildings may mix styles; accepted revisions never use this selection again. */
-    fun autonomous(style: String, type: BuildingType): CivBlueprintCatalogEntry? {
+    fun autonomous(style: String, type: BuildingType): CivBlueprintCatalogEntry? = autonomousEntries(style, type).firstOrNull()
+
+    /** Only unaccepted automatic sites may try another capable family after the preferred footprint cannot fit. */
+    fun autonomousAlternatives(style: String, type: BuildingType): List<CivBlueprintCatalogEntry> =
+        autonomousEntries(style, type).drop(1).sortedWith(compareBy<CivBlueprintCatalogEntry> { if (it.style == style) 0 else 1 }
+            .thenBy { it.size[0].toLong() * it.size[2] }.thenBy { it.id })
+
+    private fun autonomousEntries(style: String, type: BuildingType): List<CivBlueprintCatalogEntry> {
         val required = when (type) {
             BuildingType.TOWN_HALL, BuildingType.UNIVERSITY, BuildingType.SMELTERY, BuildingType.CRUSHER -> 3
             else -> minOf(2, type.maxLevel)
@@ -70,7 +77,7 @@ internal class CivBlueprintCatalog private constructor(
         val available = current.filter { it.type == type && it.level == 1 }
         val capable = available.filter { it.maxLevel >= required }.ifEmpty { available }
         return capable.sortedWith(compareBy<CivBlueprintCatalogEntry> { if (it.style == style) 0 else 1 }
-            .thenByDescending { it.maxLevel }.thenBy { it.style }.thenBy { it.family }.thenBy { it.id }).firstOrNull()
+            .thenByDescending { it.maxLevel }.thenBy { it.style }.thenBy { it.family }.thenBy { it.id })
     }
 
     fun upgrade(id: String, targetLevel: Int): CivBlueprintCatalogEntry? = byId[id]?.let { source ->

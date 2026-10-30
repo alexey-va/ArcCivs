@@ -37,6 +37,19 @@ class CivsBlueprintCatalogTest : FunSpec({
         catalog.upgrade(old.first()["schematicId"].asString, 3)?.id shouldBe old.last()["schematicId"].asString
         catalog.upgrade(old.first()["schematicId"].asString, 4) shouldBe null
     }
+    test("automatic alternatives prefer compact capable families and never reuse a retained revision") {
+        val preferred = catalogFamily("caledonia", BuildingType.CRUSHER, "masonry/crusher")
+        val compact = catalogFamily("compact", BuildingType.CRUSHER, "masonry/crusher").onEach {
+            it.add("size", Gson().toJsonTree(listOf(6, 8, 9)))
+        }
+        val incapable = catalogFamily("tiny", BuildingType.CRUSHER, "masonry/crusher", maximum = 1)
+        val retained = catalogFamily("old", BuildingType.CRUSHER, "masonry/crusher", revision = "b".repeat(20))
+        val catalog = parseCatalog(preferred + compact + incapable, retained)
+        catalog.autonomous("caledonia", BuildingType.CRUSHER)?.id shouldBe preferred.first()["schematicId"].asString
+        catalog.autonomousAlternatives("caledonia", BuildingType.CRUSHER).map { it.id } shouldBe
+            listOf(compact.first()["schematicId"].asString)
+        catalog.upgrade(preferred.first()["schematicId"].asString, 3)?.id shouldBe preferred.last()["schematicId"].asString
+    }
     test("frame drift and absent check evidence fail closed before source loading") {
         for (mutation in listOf<(JsonObject) -> Unit>(
             { it.add("origin", Gson().toJsonTree(listOf(2, 2, 9))) },

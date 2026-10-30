@@ -1,9 +1,11 @@
 package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
+import io.kotest.assertions.withClue
 import io.kotest.matchers.shouldBe
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.block.Chest
@@ -19,6 +21,107 @@ import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.Executor
+
+class CivsAutonomousFamilyFallbackTest : FunSpec({
+    test("a new catalog search tries a compact capable family after the preferred envelope cannot fit") {
+        InfrastructurePlacementScenario().use { s ->
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 50, compact to 0))
+            val large = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 50).building
+            CivsSettlementLayout.candidates(s.city, large, large).isEmpty() shouldBe true
+            CivsSettlementLayout.infill(s.city, large, large).isEmpty() shouldBe true
+            val result = s.planner.search(s.city, BuildingType.CRUSHER, 1, id)
+            spatialFailure(result) shouldBe "test-selected-infrastructure-draft"
+            s.drafts.single().building.schematicId shouldBe compact
+            s.drafts.single().building.id shouldBe id
+            s.drafts.single().route.first() shouldBe s.city.buildings.single().entrance
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+        }
+    }
+
+    test("a compact family reuses the captured surface after every preferred terrain footprint is blocked") {
+        InfrastructurePlacementScenario().use { s ->
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 3, compact to 0))
+            val large = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 3).building
+            val grown = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 3).building
+            val choices = CivsSettlementLayout.candidates(s.city, large, grown) +
+                CivsSettlementLayout.infill(s.city, large, grown)
+            choices.isNotEmpty() shouldBe true
+            s.keepFamilyPatch(compact, id, 0)
+            CivsAutonomousTerraform.options(s.city, choices, s.surface).isEmpty() shouldBe true
+            CivsSettlementLayout.infill(s.city, large, grown, eligible = { building ->
+                CivsAutonomousTerraform.options(s.city, listOf(CivsAutonomousCandidate(building)), s.surface).isNotEmpty()
+            }).isEmpty() shouldBe true
+            val result = s.planner.search(s.city, BuildingType.CRUSHER, 1, id)
+            spatialFailure(result) shouldBe "test-selected-infrastructure-draft"
+            s.drafts.single().building.schematicId shouldBe compact
+            s.drafts.single().building.id shouldBe id
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+        }
+    }
+
+    test("all families share one sixty four draft and native attempt budget") {
+        InfrastructurePlacementScenario().use { s ->
+            s.city = s.city.copy(autonomy = CivAutonomy(layoutHalfWidth = 32))
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 4, compact to 0))
+            s.keepFamilyPatch(preferred, id, 4)
+            val small = familyPlacementBlueprint(compact, id, s.city.worldId, CivPosition(0, 0, 0), 0, 1, 0).building
+            val smallGrown = familyPlacementBlueprint(compact, id, s.city.worldId, CivPosition(0, 0, 0), 0, 3, 0).building
+            val compactChoices = CivsSettlementLayout.infill(s.city, small, smallGrown, eligible = { building ->
+                CivsAutonomousTerraform.options(s.city, listOf(CivsAutonomousCandidate(building)), s.surface).isNotEmpty()
+            })
+            val compactOptions = CivsAutonomousTerraform.options(s.city, compactChoices, s.surface).size
+            withClue("compact choices=${compactChoices.size} options=$compactOptions dry columns=${s.surface.columns.count { it.value.natural }}") {
+                (compactOptions >= CivsAutonomousPlacement.MAXIMUM_OPTIONS) shouldBe true
+            }
+            every { s.world.captureTerraform(any(), any(), any(), any()) } answers {
+                s.drafts += arg<CivTerraformDraft>(1)
+                CompletableFuture.failedFuture(CivsRejection("lands-denied"))
+            }
+            val result = s.planner.search(s.city, BuildingType.CRUSHER, 1, id)
+            spatialFailure(result) shouldBe "autonomy-no-site"
+            s.drafts.map { it.building.schematicId }.toSet() shouldBe setOf(preferred, compact)
+            s.drafts.all { it.building.id == id } shouldBe true
+            (s.drafts.size <= CivsAutonomousPlacement.MAXIMUM_OPTIONS) shouldBe true
+            @Suppress("UNCHECKED_CAST")
+            val terminal = (s.planner.debug(s.city.id)["last"] as List<Map<String, Any?>>).single()
+            terminal["attempted"] shouldBe CivsAutonomousPlacement.MAXIMUM_OPTIONS
+            terminal["catalog_source"] shouldBe compact
+            terminal["families_tried"] shouldBe listOf(preferred, compact)
+            s.accessLoads shouldBe 1
+            verify(exactly = 1) { s.world.autonomousHeightField(any(), any(), any()) }
+            s.planner.debug()["jobs"] shouldBe 0
+        }
+    }
+
+    test("an accepted pinned catalog site never tries another family when its exact terrain is blocked") {
+        InfrastructurePlacementScenario().use { s ->
+            val preferred = "civs/v2/fixture/crusher/preferred/l1"
+            val compact = "civs/v2/fixture/crusher/compact/l1"
+            val id = s.familyCatalog(linkedMapOf(preferred to 0, compact to 0))
+            val pinned = familyPlacementBlueprint(preferred, id, s.city.worldId, CivPosition(14, 64, 12), 0, 1, 0)
+            s.city = CivsRules.validate(s.city.copy(buildings = s.city.buildings +
+                pinned.building.copy(phase = BuildingPhase.SITE)))
+            val before = s.city
+            s.surface = s.surface.copy(columns = s.surface.columns.mapValues { (_, column) -> column.copy(natural = false) })
+            val result = s.planner.prepareExisting(s.city, pinned)
+            spatialFailure(result) shouldBe "autonomy-no-site"
+            verify(exactly = 0) { s.blueprints.autonomousAlternatives(any(), any()) }
+            verify(exactly = 0) { s.blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) }
+            s.drafts shouldBe emptyList()
+            s.city shouldBe before
+            s.city.building(id)?.schematicId shouldBe preferred
+            s.city.building(id)?.bounds shouldBe pinned.building.bounds
+        }
+    }
+})
 
 class CivsAutonomousPlacementTest : FunSpec({
     test("a one-level plan board reserves its actual catalog volume without requesting a nonexistent upgrade") {
@@ -502,24 +605,75 @@ class CivsAutonomousPlacementTest : FunSpec({
 private class InfrastructurePlacementScenario : AutoCloseable {
     var city = spatialCity(UUID.randomUUID()).copy(autonomy = CivAutonomy(layoutHalfWidth = 24))
     var access = CivAutonomousAccess()
-    val surface = CivTerrainSurface(-64, 320, buildMap {
+    var surface = CivTerrainSurface(-64, 320, buildMap {
         for (x in -96..96) for (z in -96..96) put(civsTerrainKey(x, z), CivTerrainSurfaceColumn(64, true))
     })
     val drafts = mutableListOf<CivTerraformDraft>()
-    private val world = mockk<CivsWorld>()
-    private val blueprints = mockk<CivsBlueprints>()
+    val world = mockk<CivsWorld>()
+    val blueprints = mockk<CivsBlueprints>()
+    var accessLoads = 0
     private val tasks = LifecycleTaskScope(TestTaskScheduler())
     val planner = CivsAutonomousPlacement(blueprints, world, Executor(Runnable::run),
-        loadAccess = { CompletableFuture.completedFuture(access) })
+        loadAccess = { accessLoads++; CompletableFuture.completedFuture(access) })
     init {
         every { blueprints.autonomousSource(any(), any()) } returns null
-        every { world.autonomousHeightField(any(), any(), any()) } returns CompletableFuture.completedFuture(surface)
+        every { world.autonomousHeightField(any(), any(), any()) } answers { CompletableFuture.completedFuture(surface) }
         every { world.captureTerraform(any(), any(), any(), any()) } answers {
             drafts += arg<CivTerraformDraft>(1)
             CompletableFuture.failedFuture(CivsRejection("test-selected-infrastructure-draft"))
         }
     }
     override fun close() { planner.close(); tasks.close() }
+}
+
+private fun InfrastructurePlacementScenario.familyCatalog(families: Map<String, Int>): UUID {
+    val id = UUID.randomUUID()
+    every { blueprints.autonomousSource(any(), BuildingType.CRUSHER) } returns families.keys.first()
+    every { blueprints.autonomousAlternatives(any(), BuildingType.CRUSHER) } returns families.keys.drop(1)
+    every { blueprints.maximumLevel(any()) } returns 3
+    every { blueprints.prepareEntry(any(), any(), any(), any(), any(), any()) } answers {
+        val entry = firstArg<String>()
+        CompletableFuture.completedFuture(familyPlacementBlueprint(entry, arg(1), arg(2), arg(3), arg<Int?>(5) ?: 0,
+            1, families.getValue(entry)))
+    }
+    every { blueprints.prepareUpgrade(any(), any(), any()) } answers {
+        val building = firstArg<CivBuilding>()
+        CompletableFuture.completedFuture(familyPlacementBlueprint(building.schematicId, building.id, arg(2),
+            building.anchor, building.rotation, arg(1), families.getValue(building.schematicId)))
+    }
+    return id
+}
+
+/** Catalog metadata only; these scenarios deliberately stop before native capture accepts any cell. */
+private fun familyPlacementBlueprint(entry: String, id: UUID, world: UUID, anchor: CivPosition, rotation: Int,
+    level: Int, padding: Int): CivBlueprint {
+    val blueprint = spatialBlueprint(id, world, anchor, rotation, level)
+    val corners = listOf(-2 - padding to -4 - padding, 2 + padding to -4 - padding,
+        -2 - padding to -1, 2 + padding to -1).map { (x, z) ->
+        CivsBlueprintGeometry.rotate(ArcSchematicPoint(x, 0, z), rotation / 90).let {
+            CivPosition(anchor.x + it.x, anchor.y, anchor.z + it.z)
+        }
+    }
+    val bounds = CivBox(CivPosition(corners.minOf { it.x }, blueprint.building.bounds.min.y, corners.minOf { it.z }),
+        CivPosition(corners.maxOf { it.x }, blueprint.building.bounds.max.y, corners.maxOf { it.z }))
+    return blueprint.copy(building = blueprint.building.copy(type = BuildingType.CRUSHER, schematicId = entry,
+        bounds = bounds))
+}
+
+/** Keep one real detached terrace and its connected lane dry; all other columns stay protected. */
+private fun InfrastructurePlacementScenario.keepFamilyPatch(entry: String, id: UUID, padding: Int) {
+    val current = familyPlacementBlueprint(entry, id, city.worldId, CivPosition(0, 0, 0), 0, 1, padding).building
+    val grown = familyPlacementBlueprint(entry, id, city.worldId, CivPosition(0, 0, 0), 0, 3, padding).building
+    val choices = CivsSettlementLayout.candidates(city, current, grown).ifEmpty {
+        CivsSettlementLayout.infill(city, current, grown)
+    }
+    val patch = CivsAutonomousTerraform.options(city, choices, surface).asSequence().mapNotNull { option ->
+        runCatching { CivsAutonomousTerraform.draft(city, option, surface, access,
+            CivsSettlementLayout.frame(city).wallObstacles) }.getOrNull()
+    }.first()
+    val dry = patch.columns.mapTo(hashSetOf()) { civsTerrainKey(it.x, it.z) }
+    surface = surface.copy(columns = surface.columns.mapValues { (key, value) -> value.copy(natural = key in dry) })
+    CivsAutonomousTerraform.options(city, choices, surface).isNotEmpty() shouldBe true
 }
 
 private class AutonomousSpatialScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
