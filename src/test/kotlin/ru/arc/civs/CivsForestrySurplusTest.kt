@@ -142,6 +142,64 @@ class CivsForestrySurplusTest : FunSpec({
         missing.blocks("OAK_LOG") shouldBe true
     }
 
+    test("cached forestry diagnostics explain current and unknown decisions without rechecking or mutating inventory") {
+        val city = surplusDemand(surplusCity(), mapOf("SPRUCE_LOG" to 64L))
+        val snapshot = surplusSnapshot(city, mapOf("OAK_LOG" to 600L))
+        val before = Gson().toJson(city) to Gson().toJson(snapshot)
+        val policy = CivsForestrySurplus()
+        var currentChecks = 0
+        policy.observe(city, snapshot, emptyMap(), SURPLUS_NOW) { currentChecks++; true }
+        fun row(now: Long = SURPLUS_NOW + 500): Map<*, *> = (policy.debug(city.id, now)["entries"] as List<*>).single() as Map<*, *>
+        row()["reason"] shouldBe "timber-family-surplus"
+        row()["paused"] shouldBe true
+        row()["familyStock"] shouldBe 600L
+        row()["neededSpecies"] shouldBe listOf("SPRUCE_LOG")
+        row()["snapshotAgeMillis"] shouldBe 500L
+        row()["decisionAgeMillis"] shouldBe 500L
+        policy.debug(null, SURPLUS_NOW + 1_000)["freshNativeRead"] shouldBe false
+        currentChecks shouldBe 1
+        policy.observe(city, snapshot, emptyMap(), SURPLUS_NOW + 1_000) { currentChecks++; false }
+        row(SURPLUS_NOW + 1_200)["reason"] shouldBe "capture-not-current"
+        row()["familyStock"] shouldBe null
+        row()["paused"] shouldBe true
+        policy.observe(city, null, emptyMap(), SURPLUS_NOW + 2_000) { error("Missing observations cannot check native state") }
+        row()["reason"] shouldBe "observation-missing"
+        row()["snapshotAgeMillis"] shouldBe null
+        row()["familyStock"] shouldBe null
+        row()["paused"] shouldBe true
+        currentChecks shouldBe 2
+        (Gson().toJson(city) to Gson().toJson(snapshot)) shouldBe before
+    }
+
+    test("cached forestry diagnostics distinguish stale inputs age coverage and unavailable holders and prune bounded cities") {
+        val city = surplusCity()
+        val snapshot = surplusSnapshot(city, mapOf("OAK_LOG" to 600L))
+        val evidence = snapshot.inputKey as CivSupplyObservation
+        val policy = CivsForestrySurplus()
+        fun reason(candidate: CivSupplySnapshot?, now: Long = SURPLUS_NOW): String {
+            policy.observe(city, candidate, emptyMap(), now) { true }
+            val entry = (policy.debug(city.id, now)["entries"] as List<*>).single() as Map<*, *>
+            return entry["reason"] as String
+        }
+        reason(snapshot.copy(inputKey = evidence.copy(capture = evidence.capture.copy(complete = false)))) shouldBe "capture-incomplete"
+        reason(snapshot.copy(inputKey = evidence.copy(inputs = Unit))) shouldBe "supply-inputs-changed"
+        reason(snapshot.copy(inputKey = evidence.copy(capture = evidence.capture.copy(stores = evidence.capture.stores.mapValues {
+            (_, store) -> store.copy(unavailable = 1)
+        })))) shouldBe "holder-unavailable"
+        reason(snapshot, SURPLUS_NOW + 15_001) shouldBe "capture-age-invalid"
+        var last = city
+        repeat(130) { index ->
+            last = city.copy(id = UUID(5, index.toLong()))
+            policy.observe(last, null, emptyMap(), SURPLUS_NOW) { error("No native proof is requested") }
+        }
+        policy.debug(null, SURPLUS_NOW)["total"] shouldBe 128
+        (policy.debug(null, SURPLUS_NOW)["entries"] as List<*>).size shouldBe 8
+        policy.debug(null, SURPLUS_NOW)["truncated"] shouldBe true
+        policy.debug(city.id, SURPLUS_NOW)["total"] shouldBe 0
+        policy.retain(setOf(last.id))
+        policy.debug(null, SURPLUS_NOW)["total"] shouldBe 1
+    }
+
     test("one native holder shared by two building keys is read and aggregated once") {
         val city = surplusCity()
         val holder = requireNotNull(city.buildings.first().control)

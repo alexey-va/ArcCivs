@@ -1245,6 +1245,8 @@ class CivsService(
 
     override fun removeMember(player: Player, memberId: UUID): CompletableFuture<Unit> = membership.removeMember(player, memberId)
 
+    internal fun forestrySurplusDebug(cityId: UUID?): Map<String, Any?> = residentSupplies.forestrySurplusDebug(cityId)
+
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? = residentSupplies.craftPlan(city, worker)
 
     internal fun craftRequired(city: Settlement, buildingId: UUID): Map<String, Long> = residentSupplies.craftRequired(city, buildingId)

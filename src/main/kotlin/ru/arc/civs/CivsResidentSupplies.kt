@@ -48,6 +48,8 @@ internal class CivsResidentSupplies(
         return decision.blocks(timber)
     }
 
+    internal fun forestrySurplusDebug(cityId: UUID?): Map<String, Any?> = forestrySurplus.debug(cityId, authority.now())
+
     internal fun craftPlan(city: Settlement, worker: CivWorker): CivCraftJob? =
         supply.craftJobs(city.id)[worker.id]?.takeIf { CivsCarpentry.valid(city, worker, it) }
 

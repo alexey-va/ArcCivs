@@ -5,7 +5,22 @@ import java.util.UUID
 /** New physical tree admission only. Inventory and accepted tree/receipt ownership stay with their existing owners. */
 internal class CivsForestrySurplus {
     private val paused = hashSetOf<UUID>()
-    fun retain(ids: Set<UUID>) { paused.retainAll(ids) }
+    private data class Observation(val decision: Decision, val evaluatedAt: Long, val captureStartedAt: Long?)
+    private val observations = linkedMapOf<UUID, Observation>()
+    fun retain(ids: Set<UUID>) { paused.retainAll(ids); observations.keys.retainAll(ids) }
+
+    /** Last admission decisions only: no inventory, chunk or current-proof callbacks run during debug. */
+    fun debug(cityId: UUID?, now: Long): Map<String, Any?> {
+        val selected = if (cityId == null) observations.entries.toList() else observations.entries.filter { it.key == cityId }
+        return mapOf("source" to "cached-forestry-admission", "freshNativeRead" to false,
+            "maximumCities" to MAXIMUM_DIAGNOSTIC_CITIES, "total" to selected.size, "truncated" to (selected.size > 8),
+            "entries" to selected.take(8).map { (id, observed) -> mapOf("city" to id,
+                "evaluatedAtMillis" to observed.evaluatedAt, "decisionAgeMillis" to (now - observed.evaluatedAt).coerceAtLeast(0),
+                "snapshotAgeMillis" to observed.captureStartedAt?.let { (now - it).coerceAtLeast(0) },
+                "reason" to observed.decision.reason, "paused" to observed.decision.paused,
+                "familyStock" to observed.decision.familyStock, "neededSpecies" to observed.decision.needed.sorted(),
+                "uncertainSpecies" to observed.decision.uncertainSpecies.sorted()) })
+    }
 
     internal data class Decision(val familyStock: Long?, val paused: Boolean, val needed: Set<String>, val reason: String,
         val uncertainSpecies: Set<String> = emptySet()) {
@@ -16,21 +31,33 @@ internal class CivsForestrySurplus {
 
     fun observe(city: Settlement, snapshot: CivSupplySnapshot?, jobs: Map<UUID, CivCraftJob>, now: Long,
         current: (CivSupplyCaptureResult) -> Boolean): Decision {
+        fun remember(decision: Decision): Decision {
+            observations.remove(city.id)
+            observations[city.id] = Observation(decision, now,
+                (snapshot?.inputKey as? CivSupplyObservation)?.capture?.startedAtMillis)
+            if (observations.size > MAXIMUM_DIAGNOSTIC_CITIES) observations.remove(observations.keys.first())
+            return decision
+        }
         fun unknown(reason: String): Decision {
             // Unknown stock cannot start or release a latch. Current authored demand may only loosen its exact species.
             val requested = demand(city, emptyMap(), jobs)
-            return Decision(null, city.id in paused, requested.needed, reason, requested.uncertainSpecies)
+            return remember(Decision(null, city.id in paused, requested.needed, reason, requested.uncertainSpecies))
         }
         val mode = city.inventory?.mode ?: if (city.autonomy != null) CivStorageMode.PHYSICAL else null
         if (mode != CivStorageMode.PHYSICAL || city.pendingDeletion != null) {
             paused -= city.id
-            return Decision(null, false, emptySet(), "not-physical")
+            return remember(Decision(null, false, emptySet(), "not-physical"))
         }
         val evidence = snapshot?.inputKey as? CivSupplyObservation ?: return unknown("observation-missing")
         val started = evidence.capture.startedAtMillis ?: return unknown("capture-age-missing")
         val native = evidence.capture.plainStock ?: return unknown("unique-stock-missing")
-        if (!evidence.capture.complete || !CivsAutoSupplies.observed(city, snapshot) || evidence.capture.cityId != city.id ||
-            now - started !in 0..MAXIMUM_AGE_MILLIS || !current(evidence.capture)) return unknown("observation-stale-or-unavailable")
+        if (evidence.capture.cityId != city.id || snapshot.cityId != city.id) return unknown("observation-city-mismatch")
+        if (!evidence.capture.complete) return unknown("capture-incomplete")
+        if (evidence.inputs != civSupplyInputs(city)) return unknown("supply-inputs-changed")
+        if (evidence.capture.stores.values.any { it.unavailable != 0 }) return unknown("holder-unavailable")
+        if (!CivsAutoSupplies.observed(city, snapshot)) return unknown("capture-stores-incomplete")
+        if (now - started !in 0..MAXIMUM_AGE_MILLIS) return unknown("capture-age-invalid")
+        if (!current(evidence.capture)) return unknown("capture-not-current")
         if (city.workers.any { it.cargo?.let { cargo -> !cargo.inventoryBacked || cargo.stockResource != null } == true })
             return unknown("cargo-migration-pending")
         val holdings = native.toMutableMap()
@@ -42,8 +69,8 @@ internal class CivsForestrySurplus {
         val requested = demand(city, holdings, jobs)
         val stop = if (city.id in paused) family > RESUME_AT else family >= STOP_AT
         if (stop) paused += city.id else paused -= city.id
-        return Decision(family, stop, requested.needed, if (stop) "timber-family-surplus" else "below-surplus",
-            requested.uncertainSpecies)
+        return remember(Decision(family, stop, requested.needed, if (stop) "timber-family-surplus" else "below-surplus",
+            requested.uncertainSpecies))
     }
 
     /** Expand only species-specific requirements through the pinned recipe catalog. Generic wood inputs
@@ -95,5 +122,6 @@ internal class CivsForestrySurplus {
         const val STOP_AT = 512L
         const val RESUME_AT = 256L
         const val MAXIMUM_AGE_MILLIS = 15_000L
+        private const val MAXIMUM_DIAGNOSTIC_CITIES = 128
     }
 }

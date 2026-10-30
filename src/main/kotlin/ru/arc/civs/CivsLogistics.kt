@@ -207,8 +207,12 @@ object CivsLogistics {
     internal fun workerWorkReserve(city: Settlement, worker: CivWorker, craftInputs: Map<String, Long> = emptyMap()): Map<String, Long> {
         val building = worker.assignment?.let(city::building)
         if (building == null) return emptyMap()
-        val inputs = if (CivsRules.isBuilder(city, building)) CivsMaterials.unpaid(city.construction?.materials.orEmpty())
-            else if (building.type == BuildingType.SAWMILL) craftInputs else CivsProduction.inputs(city, building)
+        val inputs = when {
+            CivsRules.isBuilder(city, building) -> CivsMaterials.unpaid(city.construction?.materials.orEmpty())
+            building.type == BuildingType.SAWMILL -> craftInputs
+            building.type == BuildingType.BLACKSMITH && craftInputs.isNotEmpty() -> craftInputs
+            else -> CivsProduction.inputs(city, building)
+        }
         return inputs + when (building.type) {
             BuildingType.FARM -> mapOf((when (CivsProduction.material(building)) {
                 "CARROT" -> "CARROT"; "POTATO" -> "POTATO"; else -> "WHEAT_SEEDS"
