@@ -89,12 +89,13 @@ class CivsPopulationTest : FunSpec({
         assigned.workers.first { it.id == childId }.assignment shouldBe null
         repeat(CivsPopulation.ADULT_MINUTES - 1) { city = f.minute(city) }
         city.workers.first { it.id == childId }.childMinutes shouldBe CivsPopulation.ADULT_MINUTES - 1
+        city.workers.first { it.id == childId }.homeId shouldBe home
         val reloaded = CivsRules.validate(Gson().fromJson(Gson().toJson(city), Settlement::class.java))
         reloaded.workers.first { it.id == childId }.childMinutes shouldBe CivsPopulation.ADULT_MINUTES - 1
         city = f.minute(reloaded)
         val adult = city.workers.first { it.id == childId }
         CivsResidents.isChild(adult) shouldBe false
-        adult.homeId shouldBe home
+        adult.homeId shouldBe f.city.buildings.first().id // A grown single frees the full family house's child bed.
         adult.parentIds!!.size shouldBe 2
         val working = CivsRules.assign(city, city.owner, childId, city.buildings.first().id, 100_000)
         working.workers.first { it.id == childId }.assignment shouldBe city.buildings.first().id

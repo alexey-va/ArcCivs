@@ -72,6 +72,24 @@ object CivsPopulation {
             families += CivFamily(parents.first.id, parents.second.id, house.id, 0)
         }
 
+        // Reserve a child's place without separating an existing young family.
+        // One move per city minute is enough; the normal allocator keeps this bed free.
+        val youngParents = residents.filter(CivsResidents::isChild).flatMapTo(hashSetOf()) { it.parentIds.orEmpty() }
+        val communalHomes = homes.values.filter { it.phase == BuildingPhase.ACTIVE &&
+            it.type in setOf(BuildingType.TAVERN, BuildingType.TOWN_HALL) }
+            .sortedBy { if (it.type == BuildingType.TAVERN) 0 else 1 }
+        for (family in families) {
+            val home = houses.firstOrNull { it.id == family.homeId } ?: continue
+            if (residents.count { it.homeId == home.id } < houseBeds(home)) continue
+            val single = residents.indexOfFirst { it.homeId == home.id && !CivsResidents.isChild(it) &&
+                it.id !in paired && it.id !in youngParents }
+            if (single < 0) continue
+            val destination = communalHomes.firstOrNull { communal -> residents.count { it.homeId == communal.id } <
+                if (communal.type == BuildingType.TOWN_HALL) IMMIGRANT_POPULATION else houseBeds(communal) } ?: break
+            residents[single] = residents[single].copy(homeId = destination.id)
+            break
+        }
+
         for (index in residents.indices) {
             val resident = residents[index]
             // Family members keep their home. Singles in communal housing move into

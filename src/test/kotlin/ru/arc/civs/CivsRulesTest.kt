@@ -382,8 +382,10 @@ class CivsRulesTest : FunSpec({
         repeat(CivsPopulation.BIRTH_MINUTES * 4 + 1) { activeMinute() }
         city.workers.size shouldBe 7
         city.workers.count(CivsResidents::isChild) shouldBe 2
-        repeat(CivsPopulation.ADULT_MINUTES * 4) { activeMinute() }
-        city.workers.size shouldBe 12
+        repeat(CivsPopulation.ADULT_MINUTES * 5) { activeMinute() }
+        city.workers.count { !CivsResidents.isChild(it) } shouldBe 12
+        city.workers.count(CivsResidents::isChild) shouldBe 2
+        city.workers.size shouldBe CivsRules.residentLimit(city)
         CivsRules.immigrate(city, owner, uuid(112), "Thirteenth", 1_000_000) shouldBe city
         rejects("population-natural") { CivsRules.recruit(city, owner, uuid(112), "Thirteenth") }
         city = CivsRules.assign(city, owner, uuid(104), uuid(3), 1_000)
