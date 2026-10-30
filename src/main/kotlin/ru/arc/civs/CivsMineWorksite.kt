@@ -382,7 +382,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         catch (failure: CivsRejection) {
             // A failed final observation supersedes an earlier completed scan. Keep
             // its exact action/approach proof but re-read this frontier next pulse.
-            mineSafety[work.workerId]?.next = 0
+            mineSafety.remove(work.workerId)
             mineCovers.remove(work.workerId)
             throw failure
         }
@@ -1067,18 +1067,31 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val execution = mineExecutions[building.id]
         val access = execution?.prefix ?: effectiveProgress
         val sections = execution?.sections?.toMap().orEmpty()
-        val tasks = mineFrontier(city, building, world, geometry, around, excavations, worker, access,
-            sectionSteps = sections) ?: return null
-        val scan = mineSafety[worker.id]?.takeIf { it.building == building && it.target == around && it.progress == progress &&
-            it.excavation == excavations.singleOrNull() && it.accessProgress == access && it.sections == sections && it.frontier == tasks }
-            ?: MineSafetyScan(building, around, progress, excavations.singleOrNull(), access, tasks, sections)
+        // Resume before recapturing the component: that bounded preamble can itself spend a slice.
+        // A completed frontier survives only while this exact current action's approach is pending.
+        val scan = mineSafety[worker.id]?.takeIf { previous ->
+            previous.building == building && previous.target == around && previous.progress == progress &&
+                excavations.size <= 1 && previous.excavation == excavations.singleOrNull() &&
+                previous.accessProgress == access && previous.sections == sections &&
+                (previous.next < previous.frontier.size || execution?.ordinal?.toLong() == progress &&
+                    geometry.steps.getOrNull(progress.toInt()) == step &&
+                    approaches.workSpots[worker.id]?.let { search ->
+                        search.buildingId == building.id && search.ladder && search.allowOwn &&
+                            search.target == CivsWorksiteLayouts.point(building, previous.excavation ?: previous.target)
+                    } == true)
+        } ?: run {
+            val tasks = mineFrontier(city, building, world, geometry, around, excavations, worker, access,
+                sectionSteps = sections) ?: return null
+            MineSafetyScan(building, around, progress, excavations.singleOrNull(), access, tasks, sections)
                 .also { mineSafety[worker.id] = it }
+        }
+        val tasks = scan.frontier
         repeat(context.mineChecksRemaining) {
+            val task = tasks.getOrNull(scan.next) ?: return null
             if (context.nanoTime() >= context.discoveryBudget.deadline) {
                 context.spotSearchPending = true
                 return context.blocked(worker, "searching-work")
             }
-            val task = tasks.getOrNull(scan.next) ?: return null
             context.mineChecksRemaining--
             val exposed = CivsWorksiteLayouts.point(building, task.exposed)
             val opening = observeMineHazard(world, exposed) ?: return context.blocked(worker, "worksite-unloaded", point = exposed)

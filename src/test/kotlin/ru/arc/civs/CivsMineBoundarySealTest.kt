@@ -17,13 +17,14 @@ import java.nio.file.Files
 import java.util.UUID
 import java.util.concurrent.Executor
 
+// Geometry and receipt oracles count admitted slices; controlled deadline yield is covered in CivsSpatialWorkReviewTest.
 class CivsMineBoundarySealTest : FunSpec({
     test("the rotated step215 cuts its occluding native cell then repairs the hidden AIR boundary after save and restart") {
         withMineBoundary { world, mine, original, access, plugin ->
             var city = original
-            var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+            var runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
             val worker = city.workers.single()
-            val cut = nextBoundaryWork(runtime, city, world)
+            var cut = nextBoundaryWork(runtime, city, world)
             cut.status shouldBe "digging-mine"
             cut.changes.single().position shouldBe BOUNDARY_CUT
             cut.changes.single().before shouldBe "minecraft:stone"
@@ -41,6 +42,11 @@ class CivsMineBoundarySealTest : FunSpec({
             world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y, BOUNDARY_CUT.z).type shouldBe Material.STONE
             city shouldBe original
             world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type = Material.AIR
+            shouldThrow<CivsRejection> { runtime.validate(city, cut) }.reason shouldBe "stale-worksite"
+            runtime.invalidate(worker.id)
+            val refreshedCut = nextBoundaryWork(runtime, city, world)
+            assertSameBoundaryAction(cut, refreshedCut)
+            cut = refreshedCut
 
             val directory = Files.createTempDirectory("mine-boundary-step215-")
             try {
@@ -70,7 +76,7 @@ class CivsMineBoundarySealTest : FunSpec({
                         CivsEquipment.plainCount(worker, "COBBLESTONE") + 1
 
                     city = CivsStore(directory, Executor { it.run() }).use { it.load().join().single() }
-                    runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+                    runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
                     val seal = nextBoundaryWork(runtime, city, world)
                     seal.status shouldBe "securing-mine"
                     seal.changes.single().position shouldBe BOUNDARY_WALL
@@ -107,8 +113,8 @@ class CivsMineBoundarySealTest : FunSpec({
     test("Auto scenery cuts a deferred AIR frontier then repairs it without replaying a cosmetic receipt") {
         withMineBoundary { world, mine, original, access, plugin ->
             var city = CivsRules.validate(original.copy(inventory = null, autonomy = CivAutonomy()))
-            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
-            val cut = nextBoundaryWork(runtime, city, world)
+            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
+            var cut = nextBoundaryWork(runtime, city, world)
             cut.autonomousVisual shouldBe true
             cut.status shouldBe "digging-mine"
             cut.focus shouldBe BOUNDARY_CUT
@@ -119,6 +125,11 @@ class CivsMineBoundarySealTest : FunSpec({
             shouldThrow<CivsRejection> { runtime.applyAutonomousVisual(city, cut) }.reason shouldBe "stale-worksite"
             world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y, BOUNDARY_CUT.z).type shouldBe Material.STONE
             world.getBlockAt(BOUNDARY_WALL.x, BOUNDARY_WALL.y, BOUNDARY_WALL.z).type = Material.AIR
+            shouldThrow<CivsRejection> { runtime.validate(city, cut) }.reason shouldBe "stale-worksite"
+            runtime.invalidate(cut.workerId)
+            val refreshedCut = nextBoundaryWork(runtime, city, world)
+            assertSameBoundaryAction(cut, refreshedCut)
+            cut = refreshedCut
             val next = CivsRules.finishAutonomousVisual(city, cut)
             runtime.applyAutonomousVisual(city, cut)
             world.getBlockAt(BOUNDARY_CUT.x, BOUNDARY_CUT.y, BOUNDARY_CUT.z).type shouldBe Material.AIR
@@ -143,7 +154,7 @@ class CivsMineBoundarySealTest : FunSpec({
             var city = original
             val otherWall = CivPosition(-89, 62, -39)
             world.getBlockAt(otherWall.x, otherWall.y, otherWall.z).type = Material.AIR
-            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
             fun commit(work: CivWorldWork) {
                 runtime.validate(city, work)
                 val after = CivsRules.finishWorldWork(city, work, 100_000 + work.cycle * 5_000)
@@ -190,7 +201,7 @@ class CivsMineBoundarySealTest : FunSpec({
             val worker = original.workers.single().let { worker -> worker.copy(items =
                 CivsEquipment.slots(worker).map { it?.takeUnless { item -> item.material == "COBBLESTONE" } }) }
             val city = CivsRules.validate(original.copy(workers = listOf(worker)))
-            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false })
+            val runtime = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L })
             repeat(128) { runtime.pulse(listOf(city)) }
             runtime.plan(city, worker) shouldBe null
             runtime.idleReason(city, worker) shouldBe "waiting-cobblestone"
@@ -204,6 +215,19 @@ class CivsMineBoundarySealTest : FunSpec({
 
 private val BOUNDARY_CUT = CivPosition(-89, 62, -40)
 private val BOUNDARY_WALL = CivPosition(-88, 62, -40)
+
+private fun assertSameBoundaryAction(expected: CivWorldWork, actual: CivWorldWork) {
+    actual.workerId shouldBe expected.workerId
+    actual.cycle shouldBe expected.cycle
+    actual.buildingId shouldBe expected.buildingId
+    actual.status shouldBe expected.status
+    actual.focus shouldBe expected.focus
+    actual.changes shouldBe expected.changes
+    actual.inputs shouldBe expected.inputs
+    actual.outputs shouldBe expected.outputs
+    actual.miningStep shouldBe expected.miningStep
+    actual.miningOrdinal shouldBe expected.miningOrdinal
+}
 
 private fun nextBoundaryWork(runtime: CivsWorksites, city: Settlement, world: CivsWorksiteWorldFixture): CivWorldWork {
     repeat(256) {

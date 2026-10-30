@@ -1571,7 +1571,7 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         // retrying this blocked floor repair.
                         runtime.plan(city, city.workers.single())?.let { runtime.invalidate(workerId) }
                         runtime.invalidate(workerId)
-                        val first = nextWork()
+                        var first = nextWork()
                         first.changes.single().position shouldBe lower
                         first.changes.single().after shouldBe "minecraft:air"
                         first.inputs shouldBe emptyMap()
@@ -1586,6 +1586,17 @@ class CivsSpatialWorkReviewTest : FunSpec({
                         city.workers.single().completedCycles shouldBe 0L
                         world.getBlockAt(lower.x, lower.y, lower.z).type shouldBe Material.GRAVEL
                         world.getBlockAt(wall.x, wall.y, wall.z).type = Material.STONE
+                        shouldThrow<CivsRejection> { runtime.validate(city, first) }.reason shouldBe "stale-worksite"
+                        runtime.invalidate(workerId)
+                        val refreshed = nextWork()
+                        refreshed.workerId shouldBe first.workerId
+                        refreshed.cycle shouldBe first.cycle
+                        refreshed.focus shouldBe first.focus
+                        refreshed.changes shouldBe first.changes
+                        refreshed.inputs shouldBe first.inputs
+                        refreshed.outputs shouldBe first.outputs
+                        refreshed.miningStep shouldBe first.miningStep
+                        first = refreshed
                         citizenCanReachBlock(world, Location(world, first.standing.x + .5, first.standing.y + 1.62,
                             first.standing.z + .5), lower, CITIZEN_MINE_REACH) shouldBe true
                         commit(first)

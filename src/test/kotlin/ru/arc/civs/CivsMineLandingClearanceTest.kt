@@ -7,12 +7,126 @@ import io.kotest.matchers.shouldBe
 import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
+import org.mockbukkit.mockbukkit.block.BlockMock
+import org.mockbukkit.mockbukkit.world.Coordinate
 import ru.arc.core.BukkitTaskScheduler
 import ru.arc.core.LifecycleTaskScope
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Files
 import java.util.concurrent.Executor
+
+class CivsMineSafetySliceTest : FunSpec({
+    test("an unfinished shaft safety cursor advances after its native component capture consumes a slice") {
+        withLandingClearance(worldFactory = { MineComponentClockWorld() }, nanoTime = { (it as MineComponentClockWorld).clock() }) { f ->
+            val world = f.world as MineComponentClockWorld
+            val worker = f.city.workers.single()
+            val before = CivsEquipment.plainCount(worker, "COBBLESTONE")
+            world.watchComponent(mineSliceComponent(f, CivsWorksiteLayouts.point(f.mine, f.excavation)), charge = true)
+            mineSlicePulse(f)
+            withClue("the real shaft component must consume the first slice: ${f.runtime.debug()}") {
+                world.chargedComponents shouldBe 1
+                f.runtime.plan(f.city, worker) shouldBe null
+                (mineSliceEntry(f)["mineSafety"] as Map<*, *>)["next"] shouldBe 0
+                val budget = f.runtime.debug()["remainingPulseBudget"] as Map<*, *>
+                budget["standingChecks"] shouldBe 32
+                budget["rays"] shouldBe 8
+            }
+            mineSlicePulse(f)
+            world.chargedComponents shouldBe 1
+            withClue("the retained old cursor must advance on its next admitted slice: ${f.runtime.debug()}") {
+                val resumed = mineSliceEntry(f)["mineSafety"] as Map<*, *>
+                ((resumed["next"] as Number).toInt() > 0 || f.runtime.plan(f.city, worker) != null) shouldBe true
+            }
+            // Dependency selection may then change the scan identity from31 to2090.
+            // The existing fixture's bounded native-work helper covers those legitimate phases.
+            val work = f.runtime.plan(f.city, worker) ?: f.nextWork()
+            work.status shouldBe "digging-mine"
+            work.changes.single().position shouldBe MINE_SLICE_MAIN
+            // The old opening changes, while the selected main target remains unchanged STONE.
+            f.block(LANDING_FAR_WALL).type = Material.WATER
+            shouldThrow<CivsRejection> { f.runtime.validate(f.city, work) }
+            f.block(MINE_SLICE_MAIN).type shouldBe Material.STONE
+            mineSliceEntry(f)["mineSafety"] shouldBe null
+            f.block(LANDING_FAR_WALL).type = Material.AIR
+            f.runtime.invalidate(worker.id)
+            world.watchComponent(mineSliceComponent(f, MINE_SLICE_MAIN), charge = true)
+            val captures = world.chargedComponents
+            mineSlicePulse(f)
+            world.chargedComponents shouldBe captures + 1
+            f.runtime.plan(f.city, worker) shouldBe null
+            val fresh = nextMineSliceWork(f)
+            world.chargeComponents = false
+            f.commit(fresh)
+            f.block(MINE_SLICE_MAIN).type shouldBe Material.COBBLESTONE
+            CivsEquipment.plainCount(f.city.workers.single(), "COBBLESTONE") shouldBe before
+            f.city.workers.single().completedCycles shouldBe worker.completedCycles + 1
+        }
+    }
+
+    test("a completed shaft frontier resumes its exact pending main approach before rebuilding native topology") {
+        withLandingClearance(worldFactory = { MineComponentClockWorld() }, nanoTime = { (it as MineComponentClockWorld).clock() }) { f ->
+            val world = f.world as MineComponentClockWorld
+            val worker = f.city.workers.single()
+            val before = CivsEquipment.plainCount(worker, "COBBLESTONE")
+            world.watchComponent(mineSliceComponent(f, MINE_SLICE_MAIN), charge = false)
+            val mainLocal = CivsMinePlan.localPoint(f.mine, MINE_SLICE_MAIN)
+            val mainOrdinal = f.plan.steps.indices.first {
+                f.plan.steps[it].point == mainLocal && f.plan.steps[it].after == "minecraft:cobblestone"
+            }.toLong()
+            // Expire at the first clock query after the last real MAIN frontier task.
+            // Completion metadata must reach the approach before another native deadline gate.
+            world.expireMainOnce = setup@{
+                val entry = (f.runtime.debug(setOf(worker.id))["entries"] as List<*>).singleOrNull() as? Map<*, *>
+                    ?: return@setup false
+                val safety = entry["mineSafety"] as? Map<*, *>
+                safety?.get("target") == "${mainLocal.x},${mainLocal.y},${mainLocal.z}" &&
+                    safety["progress"] == mainOrdinal && (safety["next"] as Number).toInt() > 0 &&
+                    safety["nextTask"] == null
+            }
+            for (admission in 1..256) {
+                mineSlicePulse(f)
+                if (world.setupExpiries == 1) break
+                withClue("setup must expire before main admission: ${f.runtime.debug()}") {
+                    f.runtime.plan(f.city, worker) shouldBe null
+                }
+            }
+            withClue("completed frontier plus native pending main setup: ${f.runtime.debug()}") {
+                world.setupExpiries shouldBe 1
+                (world.componentCaptures > 0) shouldBe true
+                f.runtime.plan(f.city, worker) shouldBe null
+                (mineSliceEntry(f)["candidateSearch"] != null) shouldBe true
+                val search = mineSliceEntry(f)["candidateSearch"] as Map<*, *>
+                search["target"] shouldBe "3,42,9"
+                search["building"] shouldBe f.mine.id.toString()
+                search["ladder"] shouldBe true
+                search["allowOwn"] shouldBe true
+                (mineSliceEntry(f)["mineSafety"] as Map<*, *>)["nextTask"] shouldBe null
+            }
+            world.chargeComponents = true
+            val work = nextMineSliceWork(f)
+            work.status shouldBe "digging-mine"
+            work.changes.single().position shouldBe MINE_SLICE_MAIN
+            world.chargedComponents shouldBe 0
+            // A cached main approach cannot authorize liquid at another old frontier cell.
+            f.block(LANDING_FAR_WALL).type = Material.WATER
+            shouldThrow<CivsRejection> { f.runtime.validate(f.city, work) }
+            f.block(MINE_SLICE_MAIN).type shouldBe Material.STONE
+            mineSliceEntry(f)["mineSafety"] shouldBe null
+            f.block(LANDING_FAR_WALL).type = Material.AIR
+            world.chargeComponents = false
+            f.runtime.invalidate(worker.id)
+            val fresh = f.nextWork()
+            fresh.changes.single().position shouldBe MINE_SLICE_MAIN
+            fresh.outputs shouldBe mapOf("COBBLESTONE" to 1L)
+            fresh.inputs shouldBe mapOf("COBBLESTONE" to 1L)
+            f.commit(fresh)
+            f.block(MINE_SLICE_MAIN).type shouldBe Material.COBBLESTONE
+            CivsEquipment.plainCount(f.city.workers.single(), "COBBLESTONE") shouldBe before
+            f.city.workers.single().completedCycles shouldBe worker.completedCycles + 1
+        }
+    }
+})
 
 class CivsMineLandingClearanceTest : FunSpec({
     test("a captured one-high landing prioritizes its own paid body clearance then seals the old frontier across reload") {
@@ -135,14 +249,89 @@ class CivsMineLandingClearanceTest : FunSpec({
 private val LANDING_EXCAVATION = CivPosition(-3, -27, -9)
 private val LANDING_NECK = CivPosition(4, 43, 9)
 private val LANDING_FAR_WALL = CivPosition(5, 43, 9)
+private val MINE_SLICE_MAIN = CivPosition(3, 42, 9)
+
+/** Selective native cost: only one complete real shaft component probe spends three milliseconds. */
+private class MineComponentClockWorld : CivsWorksiteWorldFixture("mine-safety-slice") {
+    var nanos = 0L
+        private set
+    var chargeComponents = false
+    var expireMainOnce: (() -> Boolean)? = null
+    var setupExpiries = 0
+        private set
+    var chargedComponents = 0
+        private set
+    var componentCaptures = 0
+        private set
+    private var component = emptyList<CivPosition>()
+    private var nextComponentCell = 0
+    fun clock(): Long {
+        if (expireMainOnce?.invoke() == true) {
+            expireMainOnce = null
+            setupExpiries++
+            nanos += 3_000_000L
+        }
+        return nanos
+    }
+    fun watchComponent(points: List<CivPosition>, charge: Boolean) {
+        points.size shouldBe 36
+        component = points
+        nextComponentCell = 0
+        chargeComponents = charge
+    }
+    override fun getBlockAt(point: Coordinate): BlockMock {
+        val cell = CivPosition(point.x, point.y, point.z)
+        if (component.isNotEmpty()) {
+            nextComponentCell = if (cell == component[nextComponentCell]) nextComponentCell + 1
+                else if (cell == component.first()) 1 else 0
+            if (nextComponentCell == component.size) {
+                componentCaptures++
+                if (chargeComponents) { chargedComponents++; nanos += 3_000_000L }
+                nextComponentCell = 0
+            }
+        }
+        return super.getBlockAt(point)
+    }
+}
+
+private fun mineSliceComponent(f: LandingClearanceFixture, point: CivPosition): List<CivPosition> {
+    val state = f.city.minePlans!!.getValue(f.mine.id.toString())
+    f.plan.sectionCount("spine", state.nextStep, state.sectionSteps.orEmpty()) shouldBe
+        f.plan.sections.getValue("spine").size.toLong()
+    val effect = CivsMinePlan.localPoint(f.mine, point)
+    ((effect.x to effect.z) in f.plan.shaftColumns) shouldBe true
+    return (maxOf(f.plan.lowest, effect.y)..minOf(f.plan.bottom.y, effect.y + 1)).flatMap { y ->
+        f.plan.shaftColumns.map { (x, z) -> CivsWorksiteLayouts.point(f.mine, CivPosition(x, y, z)) }
+    }
+}
+
+private fun mineSliceEntry(f: LandingClearanceFixture): Map<*, *> =
+    (f.runtime.debug(setOf(f.city.workers.single().id))["entries"] as List<*>).single() as Map<*, *>
+
+private fun mineSlicePulse(f: LandingClearanceFixture) {
+    val rays = f.world.rayTraces
+    f.runtime.pulse(listOf(f.city))
+    (f.world.rayTraces - rays <= 8) shouldBe true
+}
+
+private fun nextMineSliceWork(f: LandingClearanceFixture): CivWorldWork {
+    repeat(8) {
+        mineSlicePulse(f)
+        f.runtime.plan(f.city, f.city.workers.single())?.let { return it }
+    }
+    return withClue("a native component slice must advance real work: ${f.runtime.debug()}") {
+        requireNotNull(f.runtime.plan(f.city, f.city.workers.single()))
+    }
+}
 
 private class LandingClearanceFixture(val world: CivsWorksiteWorldFixture, val mine: CivBuilding, var city: Settlement,
-    val access: CivsWorld, val plugin: org.bukkit.plugin.Plugin, val directory: java.nio.file.Path) {
+    val access: CivsWorld, val plugin: org.bukkit.plugin.Plugin, val directory: java.nio.file.Path,
+    private val nanoTime: () -> Long = { 0L }) {
     val plan = requireNotNull(CivsMinePlan.forBuilding(mine))
     val excavation = LANDING_EXCAVATION
     var runtime = freshRuntime()
     fun block(point: CivPosition) = world.getBlockAt(point.x, point.y, point.z)
-    private fun freshRuntime(preferUnrelated: Boolean = false) = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = { 0L }).also {
+    private fun freshRuntime(preferUnrelated: Boolean = false) = CivsWorksites(plugin, access, { _, _ -> emptyMap() }, { _, _ -> false }, nanoTime = nanoTime).also {
         val owner = CivsWorksites::class.java.getDeclaredField("mine").also { field -> field.isAccessible = true }.get(it) as CivsMineWorksite
         val state = city.minePlans!!.getValue(mine.id.toString())
         // A valid ready gallery must yield to the specific dependency, including after restart.
@@ -192,9 +381,10 @@ private class LandingClearanceFixture(val world: CivsWorksiteWorldFixture, val m
     }
 }
 
-private fun withLandingClearance(action: (LandingClearanceFixture) -> Unit) = failOnUnsupportedMockBukkitOperation {
+private fun withLandingClearance(worldFactory: () -> CivsWorksiteWorldFixture = { CivsWorksiteWorldFixture("native-landing-one-high") },
+    nanoTime: (CivsWorksiteWorldFixture) -> Long = { 0L }, action: (LandingClearanceFixture) -> Unit) = failOnUnsupportedMockBukkitOperation {
     MockBukkitTestRuntime.open(CivsWorksiteServerFixture()).use { paper ->
-        val world = CivsWorksiteWorldFixture("native-landing-one-high").also(paper.server::addWorld)
+        val world = worldFactory().also(paper.server::addWorld)
         val plugin = paper.createSimplePlugin("MineLandingClearance")
         val previous = spatialBuilding("caledonia", "miner", 1, CivPosition(0, 70, 0), 180)
             .copy(entrance = CivPosition(0, 71, 0), control = CivPosition(0, 71, 7))
@@ -253,7 +443,7 @@ private fun withLandingClearance(action: (LandingClearanceFixture) -> Unit) = fa
             CivsStore(directory, Executor { it.run() }).use { it.save(city).join() }
             LifecycleTaskScope(BukkitTaskScheduler(plugin)).use { tasks ->
                 CivsWorld(plugin, tasks) { listOf(city) }.use { access ->
-                    action(LandingClearanceFixture(world, mine, city, access, plugin, directory))
+                    action(LandingClearanceFixture(world, mine, city, access, plugin, directory) { nanoTime(world) })
                 }
             }
         } finally { directory.toFile().deleteRecursively() }
