@@ -1724,8 +1724,13 @@ class CivsResidentsRuntimeTest : FunSpec({
             h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
             h.city.workers.single().items shouldBe bag
             h.deliveries shouldBe 0
+            val localWalk = requireNotNull(h.routeIdentity())
             h.owner.pulse(9_100)
-            attempts shouldBe 2
+            // Retry expiry must not cancel the admitted local walk and send the worker back to a full barrel.
+            attempts shouldBe 1
+            (h.routeIdentity() === localWalk) shouldBe true
+            h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
+            h.city.workers.single().items shouldBe bag
         }
     }
 
