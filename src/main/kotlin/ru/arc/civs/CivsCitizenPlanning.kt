@@ -120,7 +120,8 @@ internal class CivsCitizenPlanning(
             return base.copy(workMillis = 0, workplace = if (base.completeAtWorkplace)
                 currentActor.plan.workplace ?: base.workplace else base.workplace)
         }
-        if (base.type == BuildingType.BUILDER_HUT && base.idleReason == "no-construction" && CivsRoadMaintenance.eligible(city)) {
+        if (base.type == BuildingType.BUILDER_HUT && base.idleReason in setOf("no-construction", "queued-construction") &&
+            CivsRoadMaintenance.eligible(city)) {
             workPlan(city, worker)?.takeIf { it.upkeep != null }?.let { work ->
                 base = base.copy(workplace = work.standing, workMillis = work.durationMillis, idleReason = null,
                     completeAtWorkplace = true, worldWork = work)
