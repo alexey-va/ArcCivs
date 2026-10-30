@@ -144,9 +144,13 @@ internal class CivsCitizenMotion(
                 CitizenPhase.TO_STORAGE, CitizenPhase.TO_WORK, CitizenPhase.RETURNING -> actor.plan.travelTarget(actor.cycle.phase)
                 else -> null
             }
+            val physicalFood = actor.foodPickupSource?.takeIf {
+                actor.combatDestination == null && actor.foodSource == it.buildingId
+            }
             if (travelTarget != null && !actor.sheltering && actor.mealVisit == null && actor.tavernService == null && actor.collectionSeek == null && actor.collectionHome == null &&
                 (actor.returningToWarehouse || actor.plan.idleReason in listOf(null, "placing")) &&
-                routes.arrivedAt(actor, city, npc.world, travelTarget)) {
+                (physicalFood?.let { civsCanReachContainer(npc.location, it.container) }
+                    ?: routes.arrivedAt(actor, city, npc.world, travelTarget))) {
                 motion.cancel()
                 route.trip?.let { paths.complete(city, it) }
                 route.completion = CitizenNavigationCompletion(null)
