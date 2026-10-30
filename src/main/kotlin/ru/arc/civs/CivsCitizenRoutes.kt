@@ -180,8 +180,7 @@ internal class CivsCitizenRoutes(
         val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return
         if (worker.assignment != courier.cargo.warehouseId ||
             city.building(courier.cargo.warehouseId)?.type != BuildingType.WAREHOUSE) return
-        val route = actor.route?.takeIf { !it.intermediate && it.authored == actor.plan.workplace &&
-            it.motion.forwardProgress > 0.0 } ?: return
+        val route = actor.route?.takeIf { !it.intermediate && it.authored == actor.plan.workplace } ?: return
         val destination = city.building(courier.destinationBuildingId)?.control ?: return
         val trip = route.trip ?: return
         val prefix = actor.courierInboundPrefix
@@ -193,7 +192,7 @@ internal class CivsCitizenRoutes(
             actor.courierReturnHint = prefix.finish(city, courier.cargo, courier.destinationBuildingId,
                 trip, actor.npc.location.point(), standing.point())
         } else {
-            if (!citizenAtStorage(actor.npc.world, route.from, destination)) return
+            if (route.motion.forwardProgress <= 0.0 || !citizenAtStorage(actor.npc.world, route.from, destination)) return
             actor.courierReturnHint = CitizenCourierReturnHint.capture(city, courier.cargo, trip, route.from, actor.npc.location.point())
         }
     }

@@ -3,6 +3,8 @@
   "title": "ArcCivs 0.1.132: start courier return on an existing native-validated useful segment",
   "assumptions": [
     "Five measured forester visits under0.1.131 used the retained hint and matched exact pickup/dropoff item quantities. Arrival-to-return-ready was1.248360–3.644861seconds; native pickup itself136–145ms. Ready is not a direct observation of the first movement tick. These are measured samples, not a guaranteed throughput or income rate.",
+    "A second native observation under0.1.131 found an owned25step yield followed by a no-progress replan and source pickup104ms later. The replan retained the same genuinely observed inbound prefix and trip but reset the current motion counter to0. The old outer capture gate discarded that valid prefix, leaving corridor_hint=false and3.549seconds of return preparation. Source native interaction reach was valid only at the later actual point; this correction does not widen reach or create arrival credit.",
+    "Try the existing validated inbound-prefix finish independently of the current motion episode progress. Its exact identity, geometry, continuity, endpoint, cell-limit and tombstone checks remain mandatory. If no valid prefix exists, the fallback Trip-based capture still requires positive progress of the current motion. No generic cancel, external teleport, invalid prefix or old trip is revived; the return remains a new native A* search.",
     "Only an initial preferred-corridor search may publish its existing native-validated continuation early, checked every512expandednodes and only after at least8metres of goal-distance improvement. A full goal found first keeps priority. An unsuitable partial endpoint leaves the existing search running; it does not produce a new error or a forced movement.",
     "The existing continuation mechanism owns physical movement, revalidates body/step/permissions, then requests an ordinary hintless route to the same exact native depot. Reaching an intermediate segment is not cargo delivery. No route, work, or inventory acknowledgement is synthesized.",
     "Existing hard search-budget partial selection retains its2metre minimum improvement. Node, capture, observation-prefix, shared wall-time, exact destination, native road costs and wider-search limits remain unchanged. No unchecked reversed path, teleport, extra capture budget or new movement owner is introduced.",
@@ -53,7 +55,9 @@
     "hard_budget_segment_minimum_goal_distance_gain_blocks": 2,
     "continuation_reuses_hint": false,
     "fixed_native_destination_exact": true,
-    "native_body_step_permissions_and_road_costs_unchanged": true
+    "native_body_step_permissions_and_road_costs_unchanged": true,
+    "valid_observed_prefix_independent_of_current_motion_episode": true,
+    "trip_only_fallback_requires_current_motion_progress": true
   },
   "realized_throughput_delta": null,
   "conclusion": "No direct currency, grant, output quantity or payment change. Earlier physical departure uses the existing validated continuation; latency and throughput require runtime acceptance."
