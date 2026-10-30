@@ -6,6 +6,8 @@ import org.bukkit.entity.Monster
 import ru.arc.paper.npc.PacketPlayerNpc
 import java.util.UUID
 
+internal data class CitizenOutputFullPause(val buildingId: UUID, val retryAt: Long)
+
 /** Mutable runtime identity and in-flight activity state for one admitted resident. */
 internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: UUID, val npc: PacketPlayerNpc, var plan: CitizenPlan) {
     val instanceId: UUID = UUID.randomUUID()
@@ -59,6 +61,7 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var nextPlayAt = 0L
     var supplyPickup: CitizenSupplyPickup? = null
     var outputReturn: UUID? = null
+    var outputFullPause: CitizenOutputFullPause? = null
     var supplyFailure: Pair<UUID, String>? = null
     var supplyRetryAt = 0L
     var collectionCycle: Long? = null

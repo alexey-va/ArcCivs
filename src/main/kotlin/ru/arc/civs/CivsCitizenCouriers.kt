@@ -121,6 +121,7 @@ internal class CivsCitizenCouriers(
     fun sourceOffersCargo(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean {
         val excess = CivsLogistics.workerExcess(city, worker, craftPlan(city, worker)?.inputs.orEmpty(), residentFoods)
         if (excess.isEmpty()) return false
+        if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true) return true
         if (CivsAutonomy.legacyStock(city)) return true
         val searchingMine = actor.plan.type == BuildingType.QUARRY && actor.plan.idleReason == "searching-work" &&
             actor.plan.token.assignmentId == worker.assignment && worker.assignment?.let(city::building)?.type == BuildingType.QUARRY

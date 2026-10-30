@@ -152,10 +152,13 @@ internal class CivsCitizenLogistics(
             if (error != null) {
                 actor.foodSource = null
                 val reason = CivsDiagnostics.rejection(error)?.reason ?: "unexpected-failure"
-                actor.supplyRetryAt = now + if (completion.pickup.returnOutputs && reason == "storage-full") 5_000 else 1_000
-                if (completion.pickup.returnOutputs && error is CivsRejection && reason == "storage-full" &&
-                    actor.outputReturn == completion.pickup.buildingId) {
-                    // No transfer was admitted; allow fresh useful work to replace an idle detour plan.
+                val definiteOutputFull = completion.pickup.returnOutputs && error is CivsRejection && reason == "storage-full" &&
+                    actor.outputReturn == completion.pickup.buildingId
+                actor.supplyRetryAt = if (definiteOutputFull) 0 else
+                    now + if (completion.pickup.returnOutputs && reason == "storage-full") 5_000 else 1_000
+                if (definiteOutputFull) {
+                    // This rejected output transfer owns its own cooldown; food/tool receipts cannot clear it.
+                    actor.outputFullPause = CitizenOutputFullPause(completion.pickup.buildingId, now + 5_000)
                     actor.outputReturn = null
                     routes.cancelRoute(actor)
                 }
@@ -168,7 +171,10 @@ internal class CivsCitizenLogistics(
             } else {
                 actor.supplyFailure = null
                 actor.foodSource = null
-                if (completion.pickup.returnOutputs) actor.outputReturn = null
+                if (completion.pickup.returnOutputs) {
+                    actor.outputReturn = null
+                    actor.outputFullPause = null
+                }
                 val city = completion.city ?: continue
                 val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: continue
                 if (completion.pickup.resumeWork && workInputsReady(city, worker)) actor.cycle.arrive(now)

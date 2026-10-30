@@ -65,6 +65,9 @@ internal class CivsCitizenObservations(
         }
         if (actor.collectionHome != null) return "moving-to-storage"
         if (actor.collectionSeek != null) return "walking"
+        if (actor.supplyPickup != null) return "loading-cargo"
+        if (actor.outputFullPause?.let { it.buildingId == worker.assignment } == true &&
+            actor.cycle.phase !in setOf(CitizenPhase.PICKING_UP, CitizenPhase.DELIVERING)) return "storage-full"
         actor.mineVisit?.let { visit ->
             return runtime.statuses[actor.workerId]?.takeIf { it in setOf("mine-descending", "mine-returning", "route-unreachable", "searching-work") }
                 ?: if (visit.returning) "mine-returning" else if (visit.target == null) "searching-work" else "mine-descending"
@@ -157,6 +160,7 @@ internal class CivsCitizenObservations(
                         "status" to actor.combatStatus, "target" to actor.combatDestination),
                     "food" to mapOf("source" to actor.foodSource, "pickup_pending" to (actor.supplyPickup != null),
                         "retry_at" to actor.supplyRetryAt),
+                    "output_full" to actor.outputFullPause?.let { mapOf("building" to it.buildingId, "retry_at" to it.retryAt) },
                     "meal" to (mapOf("building" to actor.mealVisit?.plan?.buildingId, "source" to actor.mealVisit?.plan?.source,
                         "target" to actor.mealVisit?.target, "started_at" to actor.mealVisit?.startedAt,
                         "arrived_at" to actor.mealVisit?.arrivedAt, "observed_at" to actor.mealVisit?.observedAt,
@@ -254,7 +258,7 @@ internal class CivsCitizenObservations(
         }
     }
 
-    /** Explicit public opt-in: at most 48 live carriers, requested IDs only; no planning or world reads. */
+    /** Explicit public opt-in: bounded live carriers, requested IDs only; no planning or world reads. */
     fun sceneEntityInformation(text: CivsText, bounds: ArcSceneBounds, entityIds: Set<String>, limit: Int): List<ArcSceneEntityInfo> {
         checkCitizenMainThread()
         require(limit in 1..64 && entityIds.size <= 64)

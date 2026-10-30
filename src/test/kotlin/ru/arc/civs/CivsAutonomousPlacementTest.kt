@@ -355,7 +355,8 @@ class CivsAutonomousPlacementTest : FunSpec({
         }
     }
 
-    test("activating a road SITE keeps skipped paid spine grades and captures only new shoulders") {
+    for (skipHeadroom in listOf(true, false))
+    test("activating a road SITE keeps its paid spine grade with skipped headroom=$skipHeadroom") {
         spatialScenario { s ->
             val paid = (0..16).map { CivPosition(0, 65, it) }
             val forester = s.city.buildings.single().copy(id = UUID.randomUUID(), type = BuildingType.FORESTER,
@@ -365,7 +366,8 @@ class CivsAutonomousPlacementTest : FunSpec({
                 CivBox(CivPosition(-1, 64, 8), CivPosition(1, 66, 12)), CivPosition(-2, 65, 10),
                 buildList {
                     for (x in -1..1) for (z in 8..12) for (y in 64..66) add(CivSettlementBlock(CivPosition(x, y, z),
-                        if (x == 0) "minecraft:barrier" else if (y == 64) "minecraft:cobblestone" else "minecraft:air"))
+                        if (x == 0 && (y == 64 || skipHeadroom)) "minecraft:barrier"
+                        else if (y == 64) "minecraft:cobblestone" else "minecraft:air"))
                 }, (-1..1).flatMap { x -> (8..12).map { z -> CivPosition(x, 65, z) } })
             val building = CivsInfrastructure.building(piece)
             val cells = piece.blocks.map { cell -> ArcSchematicBlock(
@@ -380,13 +382,13 @@ class CivsAutonomousPlacementTest : FunSpec({
             s.finish(activation)
             val design = activation.join()
             design.blueprint.building.transit shouldBe piece.transit
-            design.blueprint.cells.filter { it.position.x == 0 }.all { it.isBarrier } shouldBe true
+            design.blueprint.cells.filter { it.position.x == 0 && it.position.y == 64 }.all { it.isBarrier } shouldBe true
             val terrain = requireNotNull(design.terrain)
             terrain.blocks.none { it.position.x == 0 && it.position.z in 8..12 } shouldBe true
             val capture = s.worldAccess.capture(s.city.id, s.city.owner, s.city.worldId,
                 design.blueprint.building, design.blueprint.cells, site, terrain)
             s.finish(capture)
-            capture.join().blocks.none { it.position.x == 0 && it.position.z in 8..12 } shouldBe true
+            capture.join().blocks.none { it.position.x == 0 && it.position.y == 64 && it.position.z in 8..12 } shouldBe true
             paid.drop(1).forEach { p -> s.world.getBlockAt(p.x, p.y - 1, p.z).type shouldBe Material.DIRT_PATH }
         }
     }

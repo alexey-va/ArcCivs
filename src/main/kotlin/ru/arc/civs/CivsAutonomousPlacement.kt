@@ -359,9 +359,9 @@ internal class CivsAutonomousPlacement(
                 piece?.blocks?.groupBy { civsTerrainKey(it.position.x, it.position.z) }?.forEach { (column, cells) ->
                     put(column, cells.minOf { it.position.y })
                 }
-                // A captured SITE omits skipped cells from its writes. Its immutable transit
-                // retains the exact standing grade for those already-paid road columns.
-                piece?.transit.orEmpty().forEach { putIfAbsent(civsTerrainKey(it.x, it.z), it.y - 1) }
+                // Skipped paid floors can still have AIR writes above them. Transit, rather
+                // than the lowest remaining write, owns each public column's exact grade.
+                piece?.transit.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.y - 1) }
                 piece?.waterFoundations.orEmpty().forEach { put(civsTerrainKey(it.x, it.z), it.floorY) }
             }
             val draft = try { CivsAutonomousTerraform.draft(city, option, surface, access,

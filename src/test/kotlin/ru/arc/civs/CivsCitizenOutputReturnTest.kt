@@ -60,7 +60,7 @@ class CivsCitizenOutputReturnTest : FunSpec({
             val couriers = CivsCitizenCouriers(runtime, { error("unused routes") }, { error("unused leisure") },
                 { error("unused work") }, { error("unused logistics") }, CivsPaths(), CivsResidentFoods.BREAD_ONLY,
                 { _, _ -> null }, CivsNavigationSettings())
-            for (scenario in listOf("searching", "full-stack", "no-capacity", "paused", "real-idle", "other-profession")) {
+            for (scenario in listOf("searching", "output-full", "full-stack", "no-capacity", "paused", "real-idle", "other-profession")) {
                 val worker = h.city.workers.single().copy(items = List(CivsEquipment.SLOTS) { slot -> when {
                     slot == 4 -> CivResidentItem("IRON_PICKAXE", 1)
                     slot == 9 -> CivResidentItem("COBBLESTONE", if (scenario == "full-stack") 64 else 33)
@@ -79,6 +79,7 @@ class CivsCitizenOutputReturnTest : FunSpec({
                     if (scenario == "other-profession") BuildingType.FORESTER else BuildingType.QUARRY, 0,
                     if (scenario == "real-idle") "waiting-orders" else "searching-work", worldWork = blockedWork)
                 val actor = CitizenActor(city.id, worker.id, city.worldId, mockk(relaxed = true), plan)
+                if (scenario == "output-full") actor.outputFullPause = CitizenOutputFullPause(quarry.id, 9_000)
                 if (scenario == "paused") actor.cycle.pause("route-unreachable", 1_000, false)
                 if (scenario == "no-capacity") citizenHasCapacity(city, plan) shouldBe false
                 couriers.sourceOffersCargo(actor, city, worker) shouldBe (scenario != "searching")
@@ -87,7 +88,7 @@ class CivsCitizenOutputReturnTest : FunSpec({
     }
 
     for (reason in listOf("storage-full", "inventory-recovery", "storage-unavailable", "wrapped-storage-full"))
-    test("an idle miner reconsiders cached ladder work only after a definite output return $reason") {
+    test("an idle miner retains its bag and transfer identity after output return $reason") {
         residentRuntime { h ->
             val quarry = h.assignQuarry().copy(level = 2,
                 schematicId = "civs/minecolonies/caledonia/fundamentals/miner2")
@@ -139,12 +140,13 @@ class CivsCitizenOutputReturnTest : FunSpec({
                 IllegalStateException("Transfer outcome is uncertain", CivsRejection("storage-full"))
                 else CivsRejection(reason))
             h.owner.pulse(4_000)
+            val outputPause = ((h.owner.debug(h.city.id, h.workerId)["entries"] as List<*>).single() as Map<*, *>)["output_full"]
+            (outputPause != null) shouldBe (reason == "storage-full")
             if (reason == "storage-full") {
-                currentPlan()["focus"] shouldBe focus
-                currentPlan()["standing"] shouldBe h.work!!.standing
-                currentPlan()["mining_step"] shouldBe 4L
-                currentPlan()["idle_reason"] shouldBe null
-                h.phase() shouldBe CitizenPhase.TO_WORK
+                currentPlan()["focus"] shouldBe null
+                currentPlan()["idle_reason"] shouldBe "waiting-orders"
+                h.phase() shouldBe CitizenPhase.IDLE
+                h.owner.status(h.workerId) shouldBe "workers.status.storage-full"
                 citizenHasCapacity(h.city, citizenPlan(h.city, h.city.workers.single())!!.copy(worldWork = h.work)) shouldBe true
             } else {
                 currentPlan()["focus"] shouldBe null

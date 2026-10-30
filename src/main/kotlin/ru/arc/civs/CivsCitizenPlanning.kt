@@ -31,7 +31,9 @@ internal class CivsCitizenPlanning(
     fun currentPlan(actor: CitizenActor, city: Settlement, worker: CivWorker): CitizenPlan? {
         if (city.inventory != null && actor.plan.courier?.let { !it.carrying && it.cargo.sourceWorkerId != null } == true)
             return plan(city, worker)
-        val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null || actor.tavernService != null || actor.outputReturn != null) &&
+        val outputPaused = workRuntime.outputFullPause(actor, city, worker) != null
+        val acceptedDetour = (actor.workDetour != null || actor.mealVisit != null || actor.tavernService != null ||
+            actor.outputReturn != null || actor.foodSource != null || outputPaused) &&
             worker.assignment == actor.plan.token.assignmentId && worker.completedCycles == actor.plan.token.completedCycles
         return if (actor.supplyPickup != null || logistics.collectedPending(actor) || acceptedDetour) actor.plan
             else citizenCurrentPlan(actor.plan, actor.cycle.phase) { plan(city, worker) }
@@ -100,8 +102,11 @@ internal class CivsCitizenPlanning(
             return base
         }
         val building = worker.assignment?.let(city::building)
-        val nativeAuto = building?.let { CivsAutonomousWorksites.supports(city, it) } == true && base.autonomousWork != null
         val actor = runtime.actors[worker.id]
+        // A full output holder is a known pause, not a request for another mine/worksite search.
+        if (actor != null && workRuntime.outputFullPause(actor, city, worker) != null)
+            return base.copy(idleReason = "storage-full")
+        val nativeAuto = building?.let { CivsAutonomousWorksites.supports(city, it) } == true && base.autonomousWork != null
         val session = if (nativeAuto && actor != null) {
             val required = CivsResidents.workDuration(worker, base.workMillis)
             actor.autonomousVisualSession?.takeIf { it.token == base.token && it.building == building }?.also {

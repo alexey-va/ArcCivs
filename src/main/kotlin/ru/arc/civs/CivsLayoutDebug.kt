@@ -243,7 +243,9 @@ internal class CivsLayoutDebug(
         internal fun surfaceRow(surface: CivTerrainSurface, started: Long, completed: Long): Map<String, Any?> {
             val columns = surface.columns.entries.sortedBy { it.key }.map { (key, column) ->
                 mapOf("x" to (key shr 32).toInt(), "z" to key.toInt(), "ground_y" to column.groundY,
-                    "top_y" to column.topY, "loaded" to column.loaded, "natural" to column.natural)
+                    "top_y" to column.topY, "loaded" to column.loaded, "natural" to column.natural,
+                    "dirt_path" to column.dirtPath, "water_top_y" to column.waterTopY,
+                    "water_bottom_y" to column.waterBottomY)
             }
             val loaded = surface.columns.values.count { it.loaded }
             if (loaded == 0) throw CivsRejection("terrain-chunks-unloaded")

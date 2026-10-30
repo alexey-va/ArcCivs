@@ -308,7 +308,7 @@ internal class CivsCitizenWork(
         actor.npc.location.point(), actor.workHandoff, runtime.navigationTick)
 
     fun workingTravel(actor: CitizenActor): Boolean = !actor.sheltering &&
-        !(actor.outputReturn == null && actor.supplyFailure?.second == "storage-full" && actor.route?.idleAnchor != null) &&
+        !(actor.outputFullPause != null && actor.route?.idleAnchor != null) &&
         (actor.returningToWarehouse || citizenWorkingTravel(actor.plan, actor.cycle.phase, false,
             purposefulDetour = actor.mineVisit != null || actor.outputReturn != null || actor.foodSource != null || actor.workDetour != null ||
                 actor.mealVisit != null || actor.plan.type == BuildingType.BUILDER_HUT && actor.plan.idleReason == "waiting-materials"))
@@ -318,26 +318,44 @@ internal class CivsCitizenWork(
             it.motion.navigating && !it.motion.searching && runtime.navigationTick - it.progressTick >= 40
     } == true
 
+    /** Reconcile only observed bag contents and assignment; retry expiry does not end a full-store pause. */
+    fun outputFullPause(actor: CitizenActor, city: Settlement, worker: CivWorker): CitizenOutputFullPause? {
+        val pause = actor.outputFullPause ?: return null
+        val building = worker.assignment?.let(city::building)
+        if (city.inventory != null && worker.assignment == pause.buildingId && worker.cargo == null &&
+            building?.phase == BuildingPhase.ACTIVE && building.control != null && actor.plan.courier == null &&
+            couriers.sourceOffersCargo(actor, city, worker)) return pause
+        actor.outputFullPause = null
+        if (actor.route?.idleAnchor != null && actor.foodSource == null && actor.mealVisit == null &&
+            actor.social.visit == null) routes.cancelRoute(actor)
+        if (actor.supplyFailure == (pause.buildingId to "storage-full")) {
+            actor.supplyFailure = null
+            actor.supplyRetryAt = 0
+        }
+        return null
+    }
+
     /** Ordinary output leaves its bag only after the producer reaches its own workplace. */
     private fun returnProducerOutputs(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
         val building = worker.assignment?.let(city::building)?.takeIf { it.phase == BuildingPhase.ACTIVE && it.control != null }
+        val fullOutput = outputFullPause(actor, city, worker)
         if (city.inventory == null || building == null || actor.plan.courier != null ||
             actor.cycle.phase in setOf(CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP, CitizenPhase.CLOSED) ||
-            actor.plan.worldWork?.status == "waiting-tool") {
+            actor.plan.worldWork?.status == "waiting-tool" && fullOutput == null) {
             if (actor.outputReturn != null) { actor.outputReturn = null; routes.cancelRoute(actor) }
             return false
         }
         // Only a definite full-barrel rejection releases outputReturn in drainSupplies.
         // An uncertain accepted transfer keeps its existing pin and never enters leisure.
-        val fullOutput = actor.outputReturn == null && actor.supplyFailure == (building.id to "storage-full")
         if (!couriers.sourceOffersCargo(actor, city, worker)) {
-            if (actor.outputReturn != null || fullOutput && actor.route?.idleAnchor != null) routes.cancelRoute(actor)
+            if (actor.outputReturn != null) routes.cancelRoute(actor)
             actor.outputReturn = null
-            if (fullOutput) { actor.supplyFailure = null; actor.supplyRetryAt = 0 }
             return false
         }
-        if (fullOutput && now < actor.supplyRetryAt) {
+        if (fullOutput != null && actor.outputReturn == null &&
+            (now < fullOutput.retryAt || actor.route?.idleAnchor != null)) {
             actor.cycle.deferWork(now)
+            // Finish an admitted local walk before retrying; a five-second timer must not cut it short.
             leisure.wander(actor, city, world, now)
             runtime.statuses[actor.workerId] = "storage-full"
             return true

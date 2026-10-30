@@ -152,6 +152,17 @@ class CivsLayoutDebugTest : FunSpec({
         }
     }
 
+    test("detached replay preserves path and water evidence used by the production terrain solver") {
+        val surface = CivTerrainSurface(-64, 320, linkedMapOf(
+            civsTerrainKey(0, 0) to CivTerrainSurfaceColumn(63, false, dirtPath = true),
+            civsTerrainKey(1, 0) to CivTerrainSurfaceColumn(63, false, waterTopY = 63, waterBottomY = 58),
+        ))
+        val columns = CivsLayoutDebug.surfaceRow(surface, 10, 20)["columns"] as List<*>
+        (columns[0] as Map<*, *>)["dirt_path"] shouldBe true
+        (columns[1] as Map<*, *>)["water_top_y"] shouldBe 63
+        (columns[1] as Map<*, *>)["water_bottom_y"] shouldBe 58
+    }
+
     test("optional native surface preserves partial coverage and empty loaded coverage is a structured failure") {
         val surface = CivTerrainSurface(-64, 320, linkedMapOf(
             civsTerrainKey(-2, 3) to CivTerrainSurfaceColumn(63, true, topY = 68),
