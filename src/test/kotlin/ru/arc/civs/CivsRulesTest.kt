@@ -373,12 +373,16 @@ class CivsRulesTest : FunSpec({
             city = construct(fund(city, CivsRules.cost(upgrade.type, level)), upgrade)
         }
         var nextResident = 105
-        // Families share a one-birth-per-minute lane; the second family's fourth
-        // turn follows on minute 81 when another resident already lives in the first home.
-        repeat(CivsPopulation.BIRTH_MINUTES * 4 + 1) {
+        fun activeMinute() {
             city = CivsPopulation.advance(city, city.workers.mapTo(hashSetOf()) { it.id }, { _, id, _ -> "Resident ${id.leastSignificantBits}" },
                 { uuid(nextResident++) })
         }
+        // The nursery stays visible throughout the longer childhood; it cannot fill
+        // the adult workforce during the former eighty-minute growth window.
+        repeat(CivsPopulation.BIRTH_MINUTES * 4 + 1) { activeMinute() }
+        city.workers.size shouldBe 7
+        city.workers.count(CivsResidents::isChild) shouldBe 2
+        repeat(CivsPopulation.ADULT_MINUTES * 4) { activeMinute() }
         city.workers.size shouldBe 12
         CivsRules.immigrate(city, owner, uuid(112), "Thirteenth", 1_000_000) shouldBe city
         rejects("population-natural") { CivsRules.recruit(city, owner, uuid(112), "Thirteenth") }
