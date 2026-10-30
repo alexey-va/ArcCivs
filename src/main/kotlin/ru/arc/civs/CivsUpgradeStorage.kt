@@ -15,13 +15,15 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
             item?.validated()?.let { delta.merge(it.material to it.data, sign * it.amount, Math::addExact) }
         }
         containers.forEach { holder ->
+            val local = civsRelocationLocal(building, holder.position)
             require(holder.type in CIVS_STORAGE_TYPES && storagePositionAllowed(city, holder.position, holder.type) &&
-                (holder.position == building.control || building.bounds.contains(holder.position.x, holder.position.y, holder.position.z)) &&
-                city.buildings.none { it.id != building.id && it.control == holder.position })
+                (if (local) city.buildings.none { it.id != building.id && it.control == holder.position }
+                else civsRelocationExternalReceiver(city, building, holder.position)))
             require(holder.blockData.substringBefore('[') == "minecraft:${holder.type.lowercase()}" &&
                 holder.blockData.length in 1..CivsStore.MAX_BLOCK_STATE_CHARS)
             require(holder.before.size == STORAGE_SLOTS && holder.after.size == STORAGE_SLOTS)
-            if (holder.after.any { it != null }) {
+            // A foreign holder is credit-only, including an attempted complete debit to an empty after-image.
+            if (!local || holder.after.any { it != null }) {
                 require(civsRetainContainerState(holder.blockData))
                 holder.before.zip(holder.after).forEach { (before, after) ->
                     require(before == null || after != null && before.material == after.material && before.data == after.data &&
@@ -30,7 +32,8 @@ data class CivContainerRelocation(val building: CivBuilding, val containers: Lis
             }
             holder.before.forEach { count(it, -1) }; holder.after.forEach { count(it, 1) }
         }
-        require(containers.any { it.before.any { item -> item != null } && it.after.all { item -> item == null } })
+        require(containers.any { civsRelocationLocal(building, it.position) &&
+            it.before.any { item -> item != null } && it.after.all { item -> item == null } })
         require(changes().isNotEmpty() && delta.values.all { it == 0L }) { "Container relocation must conserve exact native items" }
     }
 
@@ -46,6 +49,23 @@ private val retainedChest = Regex("minecraft:(?:trapped_)?chest\\[facing=(north|
 private val retainedBarrel = Regex("minecraft:barrel\\[facing=(north|south|east|west|up|down),open=(true|false)]")
 internal fun civsRetainContainerState(state: String): Boolean = retainedChest.matches(state) || retainedBarrel.matches(state)
 internal fun civsRetainedContainer(cell: CivPlanBlock): Boolean = cell.before == cell.after && civsRetainContainerState(cell.before)
+
+internal fun civsRelocationLocal(building: CivBuilding, position: CivPosition): Boolean =
+    position == building.control || building.bounds.contains(position.x, position.y, position.z)
+
+/** Other existing buildings may receive exact items, but never lend slots from a retiring or building site. */
+internal fun civsRelocationExternalReceiver(city: Settlement, building: CivBuilding, position: CivPosition): Boolean {
+    if (civsRelocationLocal(building, position) || city.pendingControls.orEmpty().any {
+            it.retire != null && (it.position == position || it.retire.position == position)
+        }) return false
+    val construction = city.construction
+    if (construction != null && (city.building(construction.buildingId)?.let { civsRelocationLocal(it, position) } == true ||
+            construction.plannedBuilding?.let { civsRelocationLocal(it, position) } == true)) return false
+    return city.buildings.any { receiver ->
+        receiver.id != building.id && receiver.phase == BuildingPhase.ACTIVE && !receiver.type.isInfrastructure &&
+            civsRelocationLocal(receiver, position) && city.buildings.none { it.id != receiver.id && it.control == position }
+    }
+}
 
 /** A barrel viewer may close after journal admission; only that canonical presentation bit may drift. */
 internal fun civsSameRelocationContainerState(actual: String, expected: String): Boolean {
@@ -67,7 +87,7 @@ internal fun civsNativeContainerAcceptsInsert(city: Settlement, position: CivPos
     return !old.bounds.contains(position.x, position.y, position.z)
 }
 
-private fun relocationChestPartner(position: CivPosition, state: String): CivPosition? {
+internal fun relocationChestPartner(position: CivPosition, state: String): CivPosition? {
     val chest = retainedChest.matchEntire(state) ?: return null
     if (chest.groupValues[2] == "single") return null
     val sign = if (chest.groupValues[2] == "left") 1 else -1
@@ -77,30 +97,39 @@ private fun relocationChestPartner(position: CivPosition, state: String): CivPos
     return position.copy(x = position.x - z * sign, z = position.z + x * sign)
 }
 
-/** Detached all-or-nothing packing; native holders stay untouched until the existing receipt is durable. */
-internal fun civsPlanContainerRelocation(building: CivBuilding, target: CivBuilding,
-    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): CivContainerRelocation? {
-    require(holders.size <= CivContainerRelocation.MAX_CONTAINERS)
+internal fun civsRelocationRetained(building: CivBuilding, target: CivBuilding,
+    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): Set<CivPosition> {
     val byPosition = holders.associateBy { it.position }
-    val retained = holders.filter { holder ->
+    fun unchanged(holder: CivRelocatedContainer): Boolean = if (civsRelocationLocal(building, holder.position))
+        future[holder.position] == holder.blockData else holder.position !in future && !civsRelocationLocal(target, holder.position)
+    return holders.filter { holder ->
         if (holder.position == building.control) return@filter holder.position == target.control && holder.type == "BARREL"
-        if (!civsRetainContainerState(holder.blockData) || future[holder.position] != holder.blockData) return@filter false
+        if (!civsRetainContainerState(holder.blockData) || !unchanged(holder)) return@filter false
         val chest = retainedChest.matchEntire(holder.blockData) ?: return@filter true
         val part = chest.groupValues[2]
         if (part == "single") return@filter true
         val partner = relocationChestPartner(holder.position, holder.blockData)?.let(byPosition::get)
         partner != null && partner.type == holder.type && relocationChestPartner(partner.position, partner.blockData) == holder.position &&
             retainedChest.matchEntire(partner.blockData)?.groupValues?.get(1) == chest.groupValues[1] &&
-            future[partner.position] == partner.blockData
+            unchanged(partner)
     }.mapTo(hashSetOf(), CivRelocatedContainer::position)
-    val sources = holders.filter { it.position !in retained && it.before.any { item -> item != null } }
+}
+
+/** Detached all-or-nothing packing; native holders stay untouched until the existing receipt is durable. */
+internal fun civsPlanContainerRelocation(building: CivBuilding, target: CivBuilding,
+    future: Map<CivPosition, String>, holders: List<CivRelocatedContainer>): CivContainerRelocation? {
+    require(holders.size <= CivContainerRelocation.MAX_CONTAINERS)
+    val retained = civsRelocationRetained(building, target, future, holders)
+    val sources = holders.filter { civsRelocationLocal(building, it.position) && it.position !in retained &&
+        it.before.any { item -> item != null } }
     if (sources.isEmpty()) return null
     val destinations = holders.filter { it.position in retained }
+    val destinationGroups = destinations.partition { civsRelocationLocal(building, it.position) }.toList()
     val slots = destinations.associate { it.position to it.before.toMutableList() }
     for (source in sources) for (item in source.before.filterNotNull()) {
         var remaining = item.amount
         val maximum = item.stack().maxStackSize
-        for (empty in listOf(false, true)) for (destination in destinations) for (slot in 0 until STORAGE_SLOTS) {
+        for (group in destinationGroups) for (empty in listOf(false, true)) for (destination in group) for (slot in 0 until STORAGE_SLOTS) {
             val values = slots.getValue(destination.position)
             val current = values[slot]
             if (remaining == 0 || (current == null) != empty || current != null &&

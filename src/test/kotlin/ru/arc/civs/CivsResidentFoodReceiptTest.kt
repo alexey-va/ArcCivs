@@ -553,16 +553,163 @@ class CivsUpgradeStorageReceiptTest : FunSpec({
     test("insufficient exact native room rejects the whole evacuation before any write") {
         f.configure()
         f.fillSource()
+        val receiver = f.addReceiver()
+        repeat(STORAGE_SLOTS) { f.inventory(receiver.anchor).setItem(it, ItemStack(Material.DIRT, 64)) }
         repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
         val before = f.allItems()
+        val external = f.items(receiver.anchor)
         val city = f.h.city
         val id = UUID.randomUUID()
         f.h.storage.reserve(city, id)
         shouldThrow<CivsRejection> { f.h.storage.prepareUpgradeRelocation(city, f.target, f.future) }.reason shouldBe "storage-full"
         f.allItems() shouldBe before
+        f.items(receiver.anchor) shouldBe external
         f.h.city shouldBe city
         verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
         f.h.storage.unlock(id)
+    }
+
+    for (receiverType in listOf("chest", "control", "double"))
+    test("a full upgrade evacuates exact custom items into another ACTIVE building's $receiverType once") {
+        f.configure()
+        f.fillSource()
+        repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
+        val receiver = f.addReceiver()
+        val point = if (receiverType == "control") requireNotNull(receiver.control) else receiver.anchor
+        if (receiverType == "control") {
+            f.inventory(point).clear()
+            repeat(STORAGE_SLOTS) { f.inventory(receiver.anchor).setItem(it, ItemStack(Material.DIRT, 64)) }
+        }
+        if (receiverType == "double") {
+            val partner = point.copy(x = point.x - 1)
+            f.h.world.loadChunk(partner.x shr 4, partner.z shr 4)
+            f.chest(point, "south", "left"); f.chest(partner, "south", "right")
+            f.h.city = f.h.city.copy(inventory = f.h.city.inventory!!.copy(
+                containers = f.h.city.inventory!!.containers + partner))
+            f.h.storage.replaceCities(listOf(f.h.city))
+        }
+        f.inventory(point).setItem(0, f.inventory(f.source).getItem(0)!!.clone().also { it.amount = 2 })
+        val before = f.h.city
+        val source = f.items(f.source)
+        val oldDestination = f.items(f.destination)
+        val existing = f.items(point)
+        val tx = f.prepare()
+        tx.containerRelocation!!.containers.any { it.position == point } shouldBe true
+        f.items(f.source) shouldBe source
+        f.items(point) shouldBe existing
+        val moved = f.h.journal.submitRelocation(before, tx)
+        f.h.ticks()
+        moved.join() shouldBe tx.after
+        f.h.storage.lock(tx)
+        f.h.storage.reconcile(tx) shouldBe CivInventoryApplyResult.Applied
+        f.h.storage.unlock(tx.id)
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(f.destination) shouldBe oldDestination
+        f.items(point)[0] shouldBe requireNotNull(source[0]).copy(amount = 9)
+        f.inventory(point).getItem(0)!!.itemMeta.persistentDataContainer.get(
+            org.bukkit.NamespacedKey(f.h.plugin, "keepsake"), org.bukkit.persistence.PersistentDataType.STRING) shouldBe "native-metadata"
+        tx.after.stock shouldBe before.stock
+        tx.after.workers shouldBe before.workers
+        tx.after.inventory shouldBe before.inventory
+        val external = tx.containerRelocation!!.containers.filter { !civsRelocationLocal(f.building, it.position) }
+        fun totals(values: Collection<List<CivResidentItem?>>) = values.flatten().filterNotNull()
+            .groupingBy { it.material to it.data }.fold(0L) { sum, item -> sum + item.amount }
+        totals(listOf(source) + external.map(CivRelocatedContainer::before)) shouldBe totals(external.map { f.items(it.position) })
+        verify(exactly = 1) { f.h.store.saveInventoryTransaction(tx) }
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
+    }
+
+    test("an external native holder cannot be completely debited even by an otherwise conserving receipt") {
+        f.configure()
+        f.fillSource()
+        val receiver = f.addReceiver()
+        val tx = f.prepare()
+        val proof = tx.containerRelocation!!
+        val destination = proof.containers.single { it.position == f.destination }
+        val item = requireNotNull(destination.after[0])
+        val credited = destination.copy(after = destination.after.mapIndexed { slot, value ->
+            if (slot == 0) item.copy(amount = item.amount + 1) else value
+        })
+        val foreign = CivRelocatedContainer(receiver.anchor, "CHEST", f.state("east"),
+            List(STORAGE_SLOTS) { if (it == 0) item.copy(amount = 1) else null }, List(STORAGE_SLOTS) { null })
+        shouldThrow<IllegalArgumentException> { tx.copy(containerRelocation = proof.copy(containers =
+            proof.containers.map { if (it.position == credited.position) credited else it } + foreign)).validated() }
+    }
+
+    for (excluded in listOf("retiring", "replaced", "construction", "inactive", "denied", "unloaded"))
+    test("an external $excluded holder never receives an upgrade evacuation") {
+        f.configure()
+        f.fillSource()
+        repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
+        val receiver = f.addReceiver(if (excluded == "construction") BuildingType.WAREHOUSE else BuildingType.SMELTERY,
+            if (excluded == "unloaded") CivPosition(-8, 64, 8) else CivPosition(0, 64, 8))
+        var future = f.future
+        when (excluded) {
+            "retiring" -> {
+                f.h.world.getBlockAt(receiver.anchor.x, receiver.anchor.y, receiver.anchor.z).type = Material.BARREL
+                f.h.city = CivsRules.validate(f.h.city.copy(pendingControls = listOf(CivControlPlacement(receiver.id,
+                    requireNotNull(receiver.control), "minecraft:air", retire = CivPlanBlock(receiver.anchor,
+                        f.h.world.getBlockAt(receiver.anchor.x, receiver.anchor.y, receiver.anchor.z).blockData.asString, "minecraft:air")))))
+            }
+            "replaced" -> future = future + (receiver.anchor to "minecraft:air")
+            "construction" -> {
+                f.beginUpgrade(receiver)
+                f.h.city = CivsRules.validate(f.h.city)
+            }
+            "inactive" -> f.h.city = CivsRules.validate(f.h.city.copy(buildings = f.h.city.buildings.map {
+                if (it.id == receiver.id) it.copy(phase = BuildingPhase.SITE) else it
+            }))
+            "denied" -> f.h.storage.foodCanModify = { _, point -> point != receiver.anchor }
+            else -> f.h.world.unloadChunk(receiver.anchor.x shr 4, receiver.anchor.z shr 4)
+        }
+        f.h.storage.replaceCities(listOf(f.h.city))
+        val city = f.h.city
+        val original = if (excluded == "unloaded") null else f.items(receiver.anchor)
+        val source = f.items(f.source)
+        val id = UUID.randomUUID()
+        f.h.storage.reserve(city, id)
+        shouldThrow<CivsRejection> { f.h.storage.prepareUpgradeRelocation(city, f.target, future) }.reason shouldBe "storage-full"
+        if (excluded != "unloaded") {
+            f.items(receiver.anchor) shouldBe original
+        } else f.h.world.isChunkLoaded(receiver.anchor.x shr 4, receiver.anchor.z shr 4) shouldBe false
+        f.items(f.source) shouldBe source
+        f.h.city shouldBe city
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+        f.h.storage.unlock(id)
+    }
+
+    test("a cross-building relocation replays a mixed exact native image without changing stock or workers") {
+        f.configure()
+        f.fillSource()
+        repeat(STORAGE_SLOTS) { f.inventory(f.destination).setItem(it, ItemStack(Material.DIRT, 64)) }
+        val receiver = f.addReceiver()
+        val original = f.items(f.source)
+        val before = f.h.city
+        val tx = f.prepare()
+        val root = Files.createTempDirectory("civs-cross-building-relocation-")
+        val accepted = try {
+            CivsStore(root, Executor(Runnable::run)).use { store ->
+                store.saveInventoryTransaction(tx).join()
+                store.loadInventoryTransactions().join().single().also { it shouldBe tx }
+            }
+        } finally { root.toFile().deleteRecursively() }
+        accepted.containerRelocation!!.changes().filter {
+            it.container == f.source && it.slot == 0 || it.container == receiver.anchor && it.slot == 1
+        }.forEach { f.inventory(it.container).setItem(it.slot, it.after?.stack()) }
+        f.h.storage.unlock(tx.id)
+        every { f.h.store.loadInventoryTransactions() } returns CompletableFuture.completedFuture(listOf(accepted))
+        every { f.h.store.loadConsumedItems() } returns CompletableFuture.completedFuture(CivConsumedItemIndex.EMPTY)
+        val boot = f.h.journal.bootstrap()
+        f.h.ticks(); boot.join()
+        repeat(2) { f.h.journal.recover(); f.h.ticks() }
+        f.items(f.source).all { it == null } shouldBe true
+        f.items(receiver.anchor) shouldBe original
+        f.h.city shouldBe accepted.after
+        f.h.city.stock shouldBe before.stock
+        f.h.city.workers shouldBe before.workers
+        f.h.journal.pendingCount shouldBe 0
+        verify(exactly = 0) { f.h.store.saveInventoryTransaction(any()) }
+        verify(exactly = 1) { f.h.store.deleteInventoryTransaction(tx.id) }
     }
 
     for (drift in listOf("slot", "facing", "building", "authority"))
@@ -886,16 +1033,31 @@ private class UpgradeStorageFixture : AutoCloseable {
         chest(source, "south"); chest(destination, "east")
         h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
         repeat(STORAGE_SLOTS) { inventory(control).setItem(it, ItemStack(Material.STONE, 64)) }
+        repeat(STORAGE_SLOTS) { h.barrel.setItem(it, ItemStack(Material.STONE, 64)) }
         h.city = CivsRules.validate(h.city.copy(stock = Stock(), buildings = h.city.buildings + building,
             inventory = CivInventory(CivStorageMode.PHYSICAL, containers = listOf(source, destination))))
         h.storage.replaceCities(listOf(h.city))
         h.storage.relocationCurrentCity = { h.city.takeIf { city -> city.id == it } }
     }
-    fun chest(point: CivPosition, facing: String) {
+    fun addReceiver(type: BuildingType = BuildingType.WAREHOUSE, point: CivPosition = CivPosition(0, 64, 8)): CivBuilding {
+        h.world.loadChunk(point.x shr 4, point.z shr 4)
+        val receiver = building.copy(id = UUID.randomUUID(), type = type, level = 1, anchor = point,
+            bounds = CivBox(point.copy(x = point.x - 1, z = point.z - 1), point.copy(x = point.x + 2, y = 68, z = point.z + 1)),
+            entrance = point.copy(z = point.z + 2), control = point.copy(x = point.x + 2))
+        chest(point, "east")
+        val marker = requireNotNull(receiver.control)
+        h.world.getBlockAt(marker.x, marker.y, marker.z).type = Material.BARREL
+        repeat(STORAGE_SLOTS) { inventory(marker).setItem(it, ItemStack(Material.STONE, 64)) }
+        h.city = CivsRules.validate(h.city.copy(buildings = h.city.buildings + receiver,
+            inventory = h.city.inventory!!.copy(containers = h.city.inventory!!.containers + point)))
+        h.storage.replaceCities(listOf(h.city))
+        return receiver
+    }
+    fun chest(point: CivPosition, facing: String, part: String = "single") {
         val block = h.world.getBlockAt(point.x, point.y, point.z)
         block.type = Material.CHEST
         (block.state as org.bukkit.block.Chest).also {
-            it.blockData = org.bukkit.Bukkit.createBlockData(state(facing))
+            it.blockData = org.bukkit.Bukkit.createBlockData(state(facing, part))
             it.update(true, false)
         }
     }
@@ -922,14 +1084,15 @@ private class UpgradeStorageFixture : AutoCloseable {
         return CivInventoryTransaction(id, before.id, before.revision, before.copy(revision = before.revision + 1),
             emptyList(), containerRelocation = proof).validated().also { h.storage.seal(it) }
     }
-    fun beginUpgrade() {
+    fun beginUpgrade(upgrading: CivBuilding = building) {
         val city = h.city.copy(autonomy = null, buildings = h.city.buildings.map {
             if (it.type == BuildingType.TOWN_HALL) it.copy(level = 2) else it
         })
-        val order = CivConstruction(UUID.randomUUID(), building.id, 2, 1, 0, ConstructionPhase.CONSTRUCTING,
-            Stock(), plannedBuilding = target, batches = CivConstructionBatches(1, 16), materials = mapOf("STONE" to 1L),
+        val upgrade = upgrading.copy(level = upgrading.level + 1, phase = BuildingPhase.CONSTRUCTING)
+        val order = CivConstruction(UUID.randomUUID(), upgrading.id, upgrade.level, 1, 0, ConstructionPhase.CONSTRUCTING,
+            Stock(), plannedBuilding = upgrade, batches = CivConstructionBatches(1, 16), materials = mapOf("STONE" to 1L),
             payment = CivConstructionPayment())
-        h.city = CivsRules.reserveBuild(city, city.owner, target, order)
+        h.city = CivsRules.reserveBuild(city, city.owner, upgrade, order)
         h.storage.updateCity(h.city)
     }
     override fun close() = h.close()

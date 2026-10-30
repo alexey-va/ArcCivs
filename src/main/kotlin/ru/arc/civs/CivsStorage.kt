@@ -452,15 +452,59 @@ class CivsStorage(private val plugin: Plugin,
         reject(positions.size > CivContainerRelocation.MAX_CONTAINERS, "storage-transaction-too-large")
         reject(positions.keys.map { (it.x shr 4) to (it.z shr 4) }.distinct().size > 8, "storage-transaction-too-large")
         val world = plugin.server.getWorld(city.worldId) ?: throw CivsRejection("storage-unavailable")
-        val holders = positions.map { (point, type) ->
+        fun capture(point: CivPosition, type: String?): CivRelocatedContainer {
             reject(!foodCanModify(city, point), "lands-denied")
             val holder = containers.resolve(city, point, type)
             val contents = holder.inventory.storageContents.map(CivResidentItem::of)
             require(contents.size == STORAGE_SLOTS)
-            CivRelocatedContainer(point, holder.type, world.getBlockAt(point.x, point.y, point.z).blockData.asString,
+            return CivRelocatedContainer(point, holder.type, world.getBlockAt(point.x, point.y, point.z).blockData.asString,
                 contents, contents)
         }
-        return civsPlanContainerRelocation(building, target, future, holders)?.also { it.validated(city) }
+        val holders = positions.map { (point, type) -> capture(point, type) }.toMutableList()
+        fun plan() = civsPlanContainerRelocation(building, target, future, holders)?.also { it.validated(city) }
+        val full = try { return plan() } catch (failure: CivsRejection) {
+            if (failure.reason != "storage-full") throw failure
+            failure
+        }
+        val retained = civsRelocationRetained(building, target, future, holders)
+        val outputMaximums = holders.filter { it.position !in retained }.flatMap { it.before.filterNotNull() }
+            .distinctBy { it.material to it.data }.associate { (it.material to it.data) to it.stack().maxStackSize }
+        val candidates = containers.positions(city).filter { (point, _) ->
+            point !in positions && point !in future && !civsRelocationLocal(target, point) &&
+                civsRelocationExternalReceiver(city, building, point)
+        }
+        val captured = mutableMapOf<CivPosition, CivRelocatedContainer?>()
+        fun receiver(point: CivPosition): CivRelocatedContainer? {
+            if (point in captured) return captured[point]
+            if (point !in candidates || captured.size >= CivContainerRelocation.MAX_CONTAINERS) return null
+            val value = if (!world.isChunkLoaded(point.x shr 4, point.z shr 4) || !foodCanModify(city, point)) null
+            else try { capture(point, candidates[point]) } catch (failure: CivsRejection) {
+                if (failure.reason !in setOf("storage-unavailable", "storage-container-invalid", "not-authorized")) throw failure
+                null
+            }
+            captured[point] = value
+            return value
+        }
+        // ponytail: at most 32 additional indexed reads; larger searches need sliced discovery, not chunk loads.
+        for (point in candidates.keys.sortedWith(compareBy<CivPosition>(
+                { it.point().distanceSquared(building.entrance.point()) }, { it.x }, { it.y }, { it.z }))) {
+            if (holders.size == CivContainerRelocation.MAX_CONTAINERS) break
+            if (holders.any { it.position == point }) continue
+            val holder = receiver(point) ?: continue
+            val partner = relocationChestPartner(point, holder.blockData)
+            val group = if (partner == null) listOf(holder) else listOf(holder, receiver(partner) ?: continue)
+            if (holders.size + group.size > CivContainerRelocation.MAX_CONTAINERS ||
+                (holders + group).map { (it.position.x shr 4) to (it.position.z shr 4) }.distinct().size > 8) continue
+            val unchanged = civsRelocationRetained(building, target, future, holders + group)
+            if (group.any { it.position !in unchanged } || group.none { destination -> destination.before.any { slot ->
+                    slot == null || slot.amount < (outputMaximums[slot.material to slot.data] ?: 0)
+                } }) continue
+            holders += group
+            try { return plan() } catch (failure: CivsRejection) {
+                if (failure.reason != "storage-full") throw failure
+            }
+        }
+        throw full
     }
 
     /** Evacuate only the old control into existing holders; an uncreated replacement never receives items. */
