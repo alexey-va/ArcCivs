@@ -106,7 +106,8 @@ internal class CitizenNavigationSearch(
     fun advance(captures: List<CitizenSearchCapture>): CitizenSearchResult {
         val began = System.nanoTime()
         fun result(probes: List<CitizenSearchProbe> = emptyList(), path: List<CitizenPlannedStep>? = null,
-                   failure: String? = null) = CitizenSearchResult(probes, visited, path, failure, System.nanoTime() - began,
+                   failure: String? = null, continuation: Boolean = false) = CitizenSearchResult(probes, visited, path, failure,
+            System.nanoTime() - began, continuation,
             blockedPositions = if (failure == "no-path") blockedPositions.toList() else emptyList())
         if (cancelled.get()) return result(failure = "cancelled")
         for (capture in captures) {
@@ -146,12 +147,22 @@ internal class CitizenNavigationSearch(
             }
             if (++visited > settings.maximumNodes) return finishAtBudget("search-budget")
             val node = entry.node
-            if (node.x == floor(target.x).toInt() && node.z == floor(target.z).toInt() && abs(node.y - target.y) <= .5) {
+            if (atGoal(node)) {
                 if (goal?.let { entry.cost < it.cost } != false) goal = entry
             } else {
                 val known = neighbourhoods[node]
                 if (known == null) requested[node] = entry
                 else expand(entry, known)?.let { return result(failure = it) }
+            }
+            // Only the initial hinted return may leave on useful native progress before the hard budget.
+            // Its caller walks this segment, then starts an ordinary search to the unchanged depot.
+            if (preferredCorridor != null && goal == null && visited % HINTED_PROGRESS_INTERVAL == 0) {
+                val endpoint = progressEndpoint(HINTED_PROGRESS_GAIN)
+                if (endpoint != null && !atGoal(endpoint)) {
+                    val path = pathTo(endpoint)
+                        ?: return result(failure = if (cancelled.get()) "cancelled" else "broken-path")
+                    return result(path = path, continuation = true)
+                }
             }
         }
         pending = requested
@@ -177,15 +188,21 @@ internal class CitizenNavigationSearch(
      * The caller must walk this segment and continue to the original goal; it is not an arrival. */
     fun finishAtBudget(reason: String): CitizenSearchResult {
         if (cancelled.get()) return CitizenSearchResult(emptyList(), visited, failure = "cancelled")
-        val distance = sqrt(origin.distanceSquared(target))
-        if (distance <= settings.closeRouteDistance) return CitizenSearchResult(emptyList(), visited, failure = reason)
-        val closest = costs.keys.asSequence().filter { it != start && it in parents }
-            .filter { distance - sqrt(it.point().distanceSquared(target)) >= 2.0 }
-            .minWithOrNull(compareBy<CitizenSearchNode> { it.point().distanceSquared(target) }.thenBy { costs.getValue(it) })
-            ?: return CitizenSearchResult(emptyList(), visited, failure = reason)
+        val closest = progressEndpoint(2.0) ?: return CitizenSearchResult(emptyList(), visited, failure = reason)
         val path = pathTo(closest) ?: return CitizenSearchResult(emptyList(), visited, failure = "broken-path")
         return CitizenSearchResult(emptyList(), visited, path = path, continuation = true)
     }
+
+    private fun progressEndpoint(minimumGain: Double): CitizenSearchNode? {
+        val distance = sqrt(origin.distanceSquared(target))
+        if (distance <= settings.closeRouteDistance) return null
+        return costs.keys.asSequence().filter { it != start && it in parents }
+            .filter { distance - sqrt(it.point().distanceSquared(target)) >= minimumGain }
+            .minWithOrNull(compareBy<CitizenSearchNode> { it.point().distanceSquared(target) }.thenBy { costs.getValue(it) })
+    }
+
+    private fun atGoal(node: CitizenSearchNode): Boolean = node.x == floor(target.x).toInt() &&
+        node.z == floor(target.z).toInt() && abs(node.y - target.y) <= .5
 
     private fun pathTo(endpoint: CitizenSearchNode): List<CitizenPlannedStep>? {
         val reverse = ArrayDeque<CitizenPlannedStep>()
@@ -275,6 +292,8 @@ internal class CitizenNavigationSearch(
 
     companion object {
         const val MAXIMUM_NODES = 4096
+        private const val HINTED_PROGRESS_INTERVAL = 512
+        private const val HINTED_PROGRESS_GAIN = 8.0
         private const val LOCAL_ROUTE_DISTANCE = 32.0
         private const val WEIGHTED_ROUTE_DISTANCE = 64.0
         private const val MAXIMUM_HEURISTIC_WEIGHT = 2.0

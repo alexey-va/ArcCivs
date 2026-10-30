@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "title": "ArcCivs 0.1.132: start courier return on an existing native-validated useful segment",
+  "assumptions": [
+    "Five measured forester visits under0.1.131 used the retained hint and matched exact pickup/dropoff item quantities. Arrival-to-return-ready was1.248360–3.644861seconds; native pickup itself136–145ms. Ready is not a direct observation of the first movement tick. These are measured samples, not a guaranteed throughput or income rate.",
+    "Only an initial preferred-corridor search may publish its existing native-validated continuation early, checked every512expandednodes and only after at least8metres of goal-distance improvement. A full goal found first keeps priority. An unsuitable partial endpoint leaves the existing search running; it does not produce a new error or a forced movement.",
+    "The existing continuation mechanism owns physical movement, revalidates body/step/permissions, then requests an ordinary hintless route to the same exact native depot. Reaching an intermediate segment is not cargo delivery. No route, work, or inventory acknowledgement is synthesized.",
+    "Existing hard search-budget partial selection retains its2metre minimum improvement. Node, capture, observation-prefix, shared wall-time, exact destination, native road costs and wider-search limits remain unchanged. No unchecked reversed path, teleport, extra capture budget or new movement owner is introduced.",
+    "Accepted cargo quantities and metadata, native receipt fences, production headroom, recipes, work timers, Trails multiplier, item drops and payment remain unchanged. Direct changes are separately0Vault,0premiumtokens,0playerXP,0newitemgrants.",
+    "The network SELL prohibition and separate contracts remain unchanged. Faster physical logistics is not a sale or measured income increase. Runtime latency and realized throughput are observed separately."
+  ],
+  "participants": [
+    1,
+    1,
+    1
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "item_conservation": {
+    "recovery_grants_before": 0,
+    "recovery_grants_after": 0,
+    "extra_item_mint": 0,
+    "extra_item_burn": 0,
+    "accepted_cargo_quantity_change": 0,
+    "native_receipts_and_acknowledgements_preserved": true
+  },
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "search_limits": {
+    "retained_observed_cells": 256,
+    "new_search_budget": false,
+    "maximum_search_nodes": 4096,
+    "maximum_captured_blocks": 32768,
+    "shared_preparation_budget_ms": 4,
+    "source_anchor_blocks": 12,
+    "warehouse_destination_anchor_blocks": 64,
+    "access_tube_half_width_columns": 2,
+    "observed_column_radius": 0,
+    "early_segment_initial_preferred_corridor_only": true,
+    "early_segment_check_interval_expanded_nodes": 512,
+    "early_segment_minimum_goal_distance_gain_blocks": 8,
+    "hard_budget_segment_minimum_goal_distance_gain_blocks": 2,
+    "continuation_reuses_hint": false,
+    "fixed_native_destination_exact": true,
+    "native_body_step_permissions_and_road_costs_unchanged": true
+  },
+  "realized_throughput_delta": null,
+  "conclusion": "No direct currency, grant, output quantity or payment change. Earlier physical departure uses the existing validated continuation; latency and throughput require runtime acceptance."
+}

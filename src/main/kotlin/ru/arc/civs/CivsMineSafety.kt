@@ -4,7 +4,10 @@ import org.bukkit.Material
 
 /** Bounded per-column cover observation; a roof or tree is never a terrain-depth measurement. */
 internal class CivMineCover(val world: java.util.UUID, val building: java.util.UUID, val x: Int, val z: Int,
-    val top: Int, val minimum: Int) {
+    val top: Int, val minimum: Int,
+    /** Null is ordinary natural-only cover; an empty list is an eligible landing without a lower-level proof. */
+    val historicalAuthority: List<CivMineLevelWitness>? = null,
+    val historicalFloors: Set<Int> = emptySet()) {
     var next = top
         private set
     var ground: Int? = null
@@ -12,10 +15,11 @@ internal class CivMineCover(val world: java.util.UUID, val building: java.util.U
     var finished = false
         private set
 
-    fun step(read: (Int) -> Material) {
+    fun step(historicalFloorCurrent: (Int) -> Boolean = { false }, read: (Int) -> Material) {
         if (finished) return
         val material = read(next)
-        if (CivsMineSafety.natural(material)) { ground = next; finished = true; return }
+        if (CivsMineSafety.natural(material) || material == Material.COBBLESTONE &&
+            next in historicalFloors && historicalFloorCurrent(next)) { ground = next; finished = true; return }
         next--
         if (next < minimum || top - next >= CivsMineSafety.MAXIMUM_COVER_READS) finished = true
     }

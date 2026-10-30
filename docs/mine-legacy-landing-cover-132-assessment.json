@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "title": "ArcCivs0.1.132: preserve depth reference of exact accepted lower-level shaft landings",
+  "participants": [
+    1,
+    10,
+    16
+  ],
+  "assumptions": [
+    "Live0.1.131 removed55real native mine blocks at focusY51–63 and physically reachedY60.7, then returned to surface with additional zero-change fallback receipts. Current level2 progress31 and eight blocked sections prove that this recovery alone did not restore continued descent.",
+    "Fresh native captures show an already excavated column with accepted lower-level COBBLESTONE landing floors atY62,58,54,50 and naturalSTONE startingY49. A scan using only the current first natural block mistakes the bottom of that old shaft for the original terrain depth. The target atY49 andY45 is new natural stone, not an owned old fence; broadening paid ownership is not the fix.",
+    "Only current shaft/landing cover checks may use a depth reference from the same exact world-column lower-level accepted landing FLOOR, declared in saved lower-level geometry and covered by its durable accepted proof. The actual native COBBLESTONE block data must match the expected floor exactly. Arbitrary roofs, seals, current/new floor proof and material or city membership alone do not establish this authority.",
+    "The existing cover-distance requirement still applies. A paid floor only one or five blocks above the current ceiling is insufficient when six are required. New galleries and entrances retain natural-only cover checks. No paidAIR-to-arbitrarysolid ownership rule is added; native foreign blocks and protected geology remain guarded.",
+    "Any cover cache must preserve whether this historical depth reference was admitted so it cannot authorize an ordinary gallery in the same column. Final native receipt validation observes the current proof and block state again. Existing loaded-only reads,64read cap and shared discovery budget, protection, body access, liquid/frontier guards and work/cargo authority remain.",
+    "Configured rates remain unchanged: one exclusive6second95percentCOBBLESTONE/4percentCOAL/1percentRAW_IRON fallback roll, or existing2second native batches with actual tool uses and native getDrops(tool). The existing ideal ceilings600fallbackrolls/hour and1800nativeactions/hour are exclusive alternatives, not measured output or additional grants.",
+    "Direct changes are separately0Vault,0premiumtokens,0playerXP. Native block drops, support-material debits and exact receipts remain; no refund, free replacement, multiplier, changed bill, durable cursor reset or item grant is introduced. Current network SELL prohibition and separate active contracts remain.",
+    "Continued physical descent and native excavation are post-restart acceptance requirements. A fallback receipt, search target or intended focus alone does not prove descent; measured logistics or excavation is not assumed money income."
+  ],
+  "currencies": {
+    "vault": {
+      "minor_per_unit": 100,
+      "flows": []
+    },
+    "tokens": {
+      "minor_per_unit": 1,
+      "flows": []
+    }
+  },
+  "prices": [],
+  "player_xp": {
+    "before": 0,
+    "after": 0
+  },
+  "item_conservation": {
+    "new_grants": 0,
+    "refunds_added": 0,
+    "per_accepted_native_batch_quantity_change": 0,
+    "native_tool_drops_preserved": true,
+    "receipts_and_authority_preserved": true
+  },
+  "existing_work_rates": {
+    "fallback_ms": 6000,
+    "native_batch_ms": 2000,
+    "exclusive_actions": true
+  },
+  "realized_throughput_delta": null,
+  "conclusion": "Use a narrow exact accepted lower-level shaft depth reference while retaining native ownership, hazard and item authority; verify continued physical descent separately."
+}

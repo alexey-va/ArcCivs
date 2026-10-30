@@ -283,6 +283,37 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             CivsMinePlan.localPoint(witness.building, worldPoint)) }
     }
 
+    /** Existing lower-level landings retain their depth reference, never ownership of new rock. */
+    private fun historicalLandingAuthority(city: Settlement, building: CivBuilding, plan: CivsMinePlan,
+        ordinal: Int, local: CivPosition): List<CivMineLevelWitness>? {
+        val step = plan.steps[ordinal]
+        if (step.stage != "shaft" || step.branch != "landing" || step.point != local) return null
+        val saved = city.minePlans?.get(building.id.toString()) ?: return emptyList()
+        return saved.levels.orEmpty().takeIf { CivsMineProgress.validLevels(building, saved) }.orEmpty()
+    }
+
+    private fun historicalLandingFloors(authority: List<CivMineLevelWitness>?, point: CivPosition): Set<Int> = buildSet {
+        for (witness in authority.orEmpty()) {
+            val saved = witness.state() ?: continue
+            val local = CivsMinePlan.localPoint(witness.building, point)
+            for (proof in listOfNotNull(saved, CivsMineProgress.v5State(saved), CivsMineProgress.v6State(saved)).distinctBy { it.version }) {
+                val old = CivsMinePlan.forBuilding(witness.building, proof.version) ?: continue
+                for (floor in old.floors) {
+                    if ("${floor.index}/shaft/landing" !in old.sections) continue
+                    val support = local.copy(y = floor.feetY - 1)
+                    // floor.cells also contains galleries: only its initial landing section is authority.
+                    if (floor.cells.asSequence().take(floor.sections.first().second).none { it == support }) continue
+                    if (old.expectedAt(support, proof.nextStep, proof.sectionSteps.orEmpty(), witness.building.rotation) ==
+                        "minecraft:cobblestone") add(CivsWorksiteLayouts.point(witness.building, support).y)
+                }
+            }
+        }
+    }
+
+    private fun stepMineCover(world: World, probe: CivMineCover) = probe.step(
+        historicalFloorCurrent = { y -> world.getBlockAt(probe.x, y, probe.z).blockData.asString == "minecraft:cobblestone" },
+        read = { y -> world.getBlockAt(probe.x, y, probe.z).type })
+
     /** Same pending-mutation authority at selection, admission, saved receipt and recovery. */
     private fun mineMutationAllowed(city: Settlement, building: CivBuilding, world: World, cell: CivPlanBlock,
         ordinal: Int, worker: CivWorker? = null, budgeted: Boolean = false, generator: Boolean = false,
@@ -321,11 +352,15 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
         val cap = civsProtectedBuildings(city).filter { it.id != building.id && CivsAutonomousGeometry.horizontalContains(it.bounds, point) }
             .minOfOrNull { it.bounds.min.y - 1 } ?: world.maxHeight - 1
         val highest = minOf(cap, world.getHighestBlockYAt(point.x, point.z, HeightMap.MOTION_BLOCKING_NO_LEAVES))
+        val historical = historicalLandingAuthority(city, building, plan, ordinal, local)
         val probe = if (budgeted && worker != null) mineCovers[worker.id]?.takeIf {
-            it.world == city.worldId && it.building == building.id && it.x == point.x && it.z == point.z && it.top == highest
-        } ?: CivMineCover(city.worldId, building.id, point.x, point.z, highest, world.minHeight)
+            it.world == city.worldId && it.building == building.id && it.x == point.x && it.z == point.z && it.top == highest &&
+                it.historicalAuthority == historical
+        } ?: CivMineCover(city.worldId, building.id, point.x, point.z, highest, world.minHeight,
+            historical, historicalLandingFloors(historical, point))
             .also { mineCovers[worker.id] = it }
-        else CivMineCover(city.worldId, building.id, point.x, point.z, highest, world.minHeight)
+        else CivMineCover(city.worldId, building.id, point.x, point.z, highest, world.minHeight,
+            historical, historicalLandingFloors(historical, point))
         while (!probe.finished) {
             if (budgeted && (context.mineChecksRemaining <= 0 || context.nanoTime() >= context.discoveryBudget.deadline)) {
                 context.spotSearchPending = true
@@ -333,7 +368,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
                 return null
             }
             if (budgeted) context.mineChecksRemaining--
-            probe.step { y -> world.getBlockAt(point.x, y, point.z).type }
+            stepMineCover(world, probe)
         }
         val ceiling = CivsWorksiteLayouts.point(building,
             local.copy(y = CivsMineSafety.ceiling(plan, ordinal, local))).y
@@ -532,12 +567,15 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
             ?: return context.blocked(worker, "worksite-layout", point = building.anchor, reason = "mine-layout-missing")
         // A seal's hazard observation can use the last native unit in a slice.
         // Resume its cover phase first, so even a one-unit budget makes progress.
+        mineCovers[worker.id]?.takeIf { cover -> cover.historicalAuthority != null &&
+            cover.historicalAuthority != city.minePlans?.get(building.id.toString())?.levels.orEmpty() }
+            ?.let { mineCovers.remove(worker.id) }
         mineCovers[worker.id]?.takeIf { it.world == city.worldId && it.building == building.id && !it.finished }?.let { cover ->
             if (!world.isChunkLoaded(cover.x shr 4, cover.z shr 4))
                 return context.blocked(worker, "worksite-unloaded", point = CivPosition(cover.x, cover.next, cover.z))
             while (!cover.finished && context.mineChecksRemaining > 0 && context.nanoTime() < context.discoveryBudget.deadline) {
                 context.mineChecksRemaining--
-                cover.step { y -> world.getBlockAt(cover.x, y, cover.z).type }
+                stepMineCover(world, cover)
             }
             if (!cover.finished || context.mineChecksRemaining == 0) {
                 context.spotSearchPending = true
