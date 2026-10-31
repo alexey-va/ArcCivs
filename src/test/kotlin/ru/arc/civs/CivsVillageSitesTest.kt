@@ -218,6 +218,49 @@ class CivsVillageSiteRejectionDetailsTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("invalid continuation batches are rejected before native loads surveys or founding") {
+        villageScenario { s ->
+            for (batch in listOf(-1, 4, Int.MIN_VALUE, Int.MAX_VALUE)) {
+                val failure = shouldThrow<java.util.concurrent.CompletionException> {
+                    s.subject.search(s.reference, 5, "Auto-", batch = batch).join()
+                }
+                CivsDiagnostics.rejection(failure)?.reason shouldBe "invalid-village-search-arguments"
+            }
+            s.tick(3)
+            s.subject.status()["active"] shouldBe false
+            s.loads shouldBe emptyList()
+            s.surveys shouldBe 0
+            s.admissions shouldBe emptyList()
+            s.registry.activeLeaseCount shouldBe 0
+        }
+    }
+
+    test("batch two begins at candidate ninety six and continues through the final existing batch within the same budget") {
+        villageScenario { s ->
+            val flat = s.coarseSurface
+            s.coarseSurface = { city, points -> flat(city, points).let { surface ->
+                if (s.coarseCities.size > 48) surface else surface.copy(columns = surface.columns.mapValues { (_, column) ->
+                    column.copy(natural = false)
+                })
+            } }
+            val candidates = CivsVillageSiteScoring.candidates(s.reference, "Auto-")
+            val result = s.subject.search(s.reference, 1, "Auto-", batch = 2)
+            s.subject.status()["batch"] shouldBe 2
+            s.subject.status()["candidates"] shouldBe 192
+            s.until { result.isDone }
+            result.join().complete shouldBe true
+            result.join().batch shouldBe 2
+            result.join().examined shouldBe 96
+            s.coarseCities.map { it.buildings.single().anchor } shouldBe candidates.drop(96)
+            s.fullCities.size shouldBe 1
+            s.admissions.single().city.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+            (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+            (s.peakPending <= 2) shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
     test("foundation rejectAt shape retains validated block and coordinates without world identifiers or accepting a town") {
         villageScenario { s ->
             val values = mutableMapOf("block" to "OAK_LOG", "x" to "262", "y" to "69", "z" to "-3593",
@@ -333,7 +376,7 @@ class CivsVillageSitesTest : FunSpec({
         }
     }
 
-    test("province timber rejection stays cheap and reserved proof budget returns one durable town for a safe replay") {
+    test("a partial canonical receipt resumes in another batch without repeating grants or changing its existing town") {
         villageScenario { s ->
             val forested = s.fullSurface
             var proofs = 0
@@ -346,6 +389,7 @@ class CivsVillageSitesTest : FunSpec({
             val result = s.subject.search(s.reference, 5, "Auto-")
             s.until { result.isDone }
             result.join().complete shouldBe false
+            result.join().batch shouldBe 0
             result.join().reason shouldBe "village-chunk-budget"
             result.join().created.size shouldBe 1
             (requireNotNull(result.join().rejected["village-no-trees"]) > 0) shouldBe true
@@ -357,15 +401,32 @@ class CivsVillageSitesTest : FunSpec({
             (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
             s.registry.activeLeaseCount shouldBe 0
             s.fullSurface = forested
-            val replay = s.subject.search(s.reference, 5, "Auto-")
+            val replay = s.subject.search(s.reference, 5, "Auto-", batch = 2)
             s.until { replay.isDone }
             replay.join().complete shouldBe true
+            replay.join().batch shouldBe 2
             replay.join().created.first { it.city == saved.id }.existing shouldBe true
             replay.join().created.first { it.city == saved.id }.name shouldBe savedReceipt.name
+            replay.join().created.first { it.city == saved.id }.style shouldBe savedReceipt.style
             s.cities.first { it.id == saved.id } shouldBe saved
             s.cities.size shouldBe 6
             s.admissions.size shouldBe 5
             s.cities.drop(1).map { it.id }.toSet().size shouldBe 5
+            s.cities.drop(1).map { it.id }.toSet() shouldBe (1..5).mapTo(hashSetOf()) {
+                CivsVillageSiteScoring.id(s.reference.id, "Auto-", it)
+            }
+            val canonical = s.cities.toList()
+            val loads = s.loads.size
+            val tickets = s.added.size
+            val completeReplay = s.subject.search(s.reference, 5, "Auto-", batch = 3)
+            s.until { completeReplay.isDone }
+            completeReplay.join().complete shouldBe true
+            completeReplay.join().batch shouldBe 3
+            completeReplay.join().created.all { it.existing } shouldBe true
+            s.cities shouldBe canonical
+            s.admissions.size shouldBe 5
+            s.loads.size shouldBe loads
+            s.added.size shouldBe tickets
             s.registry.activeLeaseCount shouldBe 0
             s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
         }
@@ -590,10 +651,15 @@ class CivsVillageSitesTest : FunSpec({
     test("explicit preparation has two outstanding loads and cancellation admits no stale lease") {
         villageScenario { s ->
             s.holdLoads = true
-            val result = s.subject.search(s.reference, 5, "Auto-")
-            s.subject.search(s.reference, 5, "Auto-") shouldBe result
+            val result = s.subject.search(s.reference, 5, "Auto-", batch = 2)
+            s.subject.search(s.reference, 5, "Auto-", batch = 2) shouldBe result
+            val otherBatch = shouldThrow<java.util.concurrent.CompletionException> {
+                s.subject.search(s.reference, 5, "Auto-", batch = 3).join()
+            }
+            CivsDiagnostics.rejection(otherBatch)?.reason shouldBe "world-busy"
             s.tick(30)
             s.loads.size shouldBe 2
+            s.subject.status()["batch"] shouldBe 2
             s.subject.status()["pending_loads"] shouldBe 2
             (s.subject.status()["styles"] as Map<*, *>).values.toSet().size shouldBe 5
             s.subject.cancel("test-cancel")

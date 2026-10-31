@@ -276,11 +276,12 @@ internal object CivsAutonomousTerraform {
     }
 
     internal fun connection(city: Settlement, building: CivBuilding, surface: CivTerrainSurface,
-        access: CivAutonomousAccess, additionalObstacles: List<CivBox>): List<CivPosition> {
+        access: CivAutonomousAccess, additionalObstacles: List<CivBox>,
+        inspectRoute: (CivRouteSearchStats) -> Unit = {}): List<CivPosition> {
         val obstacles = city.buildings.filter { it.id != building.id && !civsPublicTransit(it) }
             .map { CivsAutonomousGeometry.futureBounds(city, it) } + additionalObstacles
         return sources(city, building).asSequence().mapNotNull {
-            route(city, building, surface, obstacles, access.standing(city, building.id), it)
+            route(city, building, surface, obstacles, access.standing(city, building.id), it, inspect = inspectRoute)
         }.firstOrNull() ?: throw CivsRejection("autonomy-no-path")
     }
 
@@ -479,6 +480,7 @@ internal object CivsAutonomousTerraform {
             return points
         }
         if (start == target) return finish(listOf(from), "found")
+        if (!allowed(target.x, target.y, target.z)) return finish(null, "route-target-blocked")
         val ancestorColumns = hashSetOf<Long>()
         while (open.isNotEmpty() && expanded < MAXIMUM_ROUTE_NODES) {
             val current = open.remove()

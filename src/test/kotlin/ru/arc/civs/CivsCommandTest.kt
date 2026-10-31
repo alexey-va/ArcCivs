@@ -16,10 +16,11 @@ import java.util.UUID
 class CivsCommandTest : FunSpec({
     test("automatic village founding requires ready console administration and bounded exact arguments") {
         val host = mockk<CivsUiHost> { every { ready() } returns true }
-        val calls = mutableListOf<Triple<UUID, Int, String>>()
+        val calls = mutableListOf<Pair<Triple<UUID, Int, String>, Int>>()
         val messages = mutableListOf<String>()
-        val router = CivsCommand(host, mockk(), mockk(), mockk(relaxed = true), foundVillages = { city, count, prefix ->
-            calls += Triple(city, count, prefix); java.util.concurrent.CompletableFuture<Any>()
+        val router = CivsCommand(host, mockk(), mockk(), mockk(relaxed = true), foundVillages = { city, count, prefix, batch ->
+            calls += (Triple(city, count, prefix) to batch)
+            java.util.concurrent.CompletableFuture<Any>()
         })
         val console = mockk<ConsoleCommandSender>(relaxed = true) {
             every { hasPermission(any<String>()) } returns true
@@ -29,13 +30,17 @@ class CivsCommandTest : FunSpec({
         val reference = UUID.randomUUID()
         val valid = arrayOf("found-villages", reference.toString(), "5", "Auto-")
         router.onCommand(player, mockk(), "civs", valid)
-        for (args in listOf(valid.dropLast(1).toTypedArray(), valid + "extra",
+        for (args in listOf(valid.dropLast(1).toTypedArray(), valid + "extra", valid + "-1", valid + "4",
+                valid + "2147483648", valid + "1.5", valid + "", valid + arrayOf("2", "extra"),
                 arrayOf("found-villages", "invalid", "5", "Auto-"),
                 arrayOf("found-villages", reference.toString(), "0", "Auto-"),
                 arrayOf("found-villages", reference.toString(), "6", "Auto-"),
                 arrayOf("found-villages", reference.toString(), "5", " "))) {
             router.onCommand(console, mockk(), "civs", args)
-            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject["state"].asString shouldBe "failed"
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { receipt ->
+                receipt["state"].asString shouldBe "failed"
+                receipt["error"].asString shouldBe "invalid-village-search-arguments"
+            }
         }
         every { console.hasPermission("arccivs.admin") } returns false
         router.onCommand(console, mockk(), "civs", valid)
@@ -45,17 +50,30 @@ class CivsCommandTest : FunSpec({
         calls shouldBe emptyList()
         every { host.ready() } returns true
         router.onCommand(console, mockk(), "civs", valid)
-        calls shouldBe listOf(Triple(reference, 5, "Auto-"))
-        JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject["state"].asString shouldBe "accepted"
+        calls shouldBe listOf(Triple(reference, 5, "Auto-") to 0)
+        JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject.let { receipt ->
+            receipt["state"].asString shouldBe "accepted"
+            receipt["batch"].asInt shouldBe 0
+        }
+        for (batch in 0..3) {
+            router.onCommand(console, mockk(), "civs", valid + batch.toString())
+            calls.last() shouldBe (Triple(reference, 5, "Auto-") to batch)
+            JsonParser.parseString(messages.last().removePrefix("ARCCIVS_VILLAGE_SEARCH ")).asJsonObject["batch"].asInt shouldBe batch
+        }
+        calls.size shouldBe 5
         CivsCommand.completions(true, true, arrayOf("found-"), console = false) shouldBe emptyList()
         CivsCommand.completions(true, true, arrayOf("found-"), console = true) shouldBe listOf("found-villages")
+        CivsCommand.completions(true, true, valid + "", console = true) shouldBe listOf("0", "1", "2", "3")
+        CivsCommand.completions(true, true, valid + "2", console = true) shouldBe listOf("2")
+        CivsCommand.completions(true, true, valid + "", console = false) shouldBe emptyList()
+        CivsCommand.completions(true, false, valid + "", console = true) shouldBe emptyList()
     }
 
     test("village search status returns progress without starting or duplicating a founding operation") {
         val messages = mutableListOf<String>()
         val host = mockk<CivsUiHost> { every { ready() } returns true }
         val router = CivsCommand(host, mockk(), mockk(), mockk(),
-            foundVillages = { _, _, _ -> error("must not mutate") },
+            foundVillages = { _, _, _, _ -> error("must not mutate") },
             villageSearchStatus = { mapOf("state" to "searching", "created" to 2, "requested" to 5) })
         val console = mockk<ConsoleCommandSender>(relaxed = true) {
             every { hasPermission(any<String>()) } returns true

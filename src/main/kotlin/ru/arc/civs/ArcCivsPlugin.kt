@@ -27,8 +27,9 @@ import java.util.logging.Level
 open class ArcCivsPlugin : JavaPlugin() {
     private var runtime: PaperPluginRuntime? = null
     private var nativeWork: ru.arc.core.BudgetedTaskQueue? = null
-    // Core may finish retiring captured native handles on its next tick; IO closes inline.
+    // Detached planning/native retirement may finish after disable; file/SQL IO still closes inline.
     private var storageClose = CompletableFuture.completedFuture(Unit)
+    private var planningClose = CompletableFuture.completedFuture(Unit)
     private var nativeRetirementClose = CompletableFuture.completedFuture(Unit)
     private var nativeClose = CompletableFuture.completedFuture(Unit)
     private var historyClose = CompletableFuture.completedFuture(Unit)
@@ -60,6 +61,7 @@ open class ArcCivsPlugin : JavaPlugin() {
         }
         check(runtime == null) { "ArcCivs runtime is already active" }
         storageClose = CompletableFuture.completedFuture(Unit)
+        planningClose = CompletableFuture.completedFuture(Unit)
         nativeRetirementClose = CompletableFuture.completedFuture(Unit)
         nativeClose = CompletableFuture.completedFuture(Unit)
         historyClose = CompletableFuture.completedFuture(Unit)
@@ -89,18 +91,19 @@ open class ArcCivsPlugin : JavaPlugin() {
         }
     }
 
-    private fun prepare(lifecycle: PaperPluginRuntime, schematicService: ArcSchematicService?, root: Path) {
-        val terminal = CompletableFuture<Unit>()
-        lifecycle.own(PaperSqlServices.installConsumer(this, terminal))
+    internal fun ownExecutors(lifecycle: PaperPluginRuntime, nativeDrains: List<CompletableFuture<*>>,
+        terminal: CompletableFuture<Unit>, closeNetwork: () -> CompletableFuture<Unit>): Pair<BoundedAsyncExecutor, BoundedAsyncExecutor> {
         val executor = BoundedAsyncExecutor("ArcCivs-storage", 1, 256)
-        val nativeDrains = mutableListOf<CompletableFuture<*>>()
-        var network: CivsNetworkStore? = null
+        var planner: BoundedAsyncExecutor? = null
         lifecycle.own(AutoCloseable {
-            storageClose = executor.closeAsync().thenCompose {
-                network?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
-            }
+            // The runtime has already fenced tasks and closed the service/native owners in reverse order.
+            planningClose = planner?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
+            storageClose = executor.closeAsync().thenCompose { closeNetwork() }
             nativeRetirementClose = CompletableFuture.allOf(*nativeDrains.toTypedArray()).thenApply { Unit }
-            nativeClose = CompletableFuture.allOf(storageClose, nativeRetirementClose).thenApply { Unit }
+            nativeClose = CompletableFuture.allOf(storageClose, planningClose, nativeRetirementClose).thenApply { Unit }
+            planningClose.whenComplete { _, failure ->
+                if (failure != null) logger.log(Level.SEVERE, "ArcCivs planning drain failed", failure)
+            }
             storageClose.whenComplete { _, failure ->
                 if (failure != null) logger.log(Level.SEVERE, "ArcCivs storage drain failed", failure)
             }
@@ -110,8 +113,20 @@ open class ArcCivsPlugin : JavaPlugin() {
             nativeClose.whenComplete { _, failure ->
                 if (failure == null) terminal.complete(Unit) else terminal.completeExceptionally(failure)
             }
-            storageClose.get() // Explicit maintenance: detached file/SQL IO only, never native retirement.
+            storageClose.get() // Explicit maintenance: file/SQL IO only; planning/native drains stay asynchronous.
         })
+        val planningExecutor = BoundedAsyncExecutor("ArcCivs-planning", 1, 16).also { planner = it }
+        return executor to planningExecutor
+    }
+
+    private fun prepare(lifecycle: PaperPluginRuntime, schematicService: ArcSchematicService?, root: Path) {
+        val terminal = CompletableFuture<Unit>()
+        lifecycle.own(PaperSqlServices.installConsumer(this, terminal))
+        val nativeDrains = mutableListOf<CompletableFuture<*>>()
+        var network: CivsNetworkStore? = null
+        val (executor, planningExecutor) = ownExecutors(lifecycle, nativeDrains, terminal) {
+            network?.closeAsync() ?: CompletableFuture.completedFuture(Unit)
+        }
         try {
             val file = root.resolve("config.yml")
             Files.createDirectories(root)
@@ -160,6 +175,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 if (failure != null) nativeDrains += CompletableFuture.failedFuture<Unit>(failure)
             })
             val service = CivsService(this, lifecycle.tasks, settings, store, blueprints, executor,
+                planningExecutor = planningExecutor,
                 residentFoods = CivsResidentFoods.native(),
                 offlinePlayerData = ru.arc.paper.player.PaperOfflinePlayerData.capture(server),
                 previewRenderer = preview, boundaryRenderer = boundary, nativeWork = queue, backendTransfer = transfer, onCitizensCreated = { citizens ->
@@ -289,6 +305,7 @@ open class ArcCivsPlugin : JavaPlugin() {
                 else -> "ready"
             },
             "storage" to stage(storageClose),
+            "planning" to stage(planningClose),
             "native" to stage(nativeRetirementClose),
             "history" to stage(historyClose),
             "failure" to completion?.let(::completedFailure)?.javaClass?.simpleName,

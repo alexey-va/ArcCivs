@@ -35,7 +35,7 @@ internal data class CivVillageSiteRejection(val phase: String, val point: CivPos
 internal data class CivVillageSitesResult(val operation: UUID, val reference: UUID, val world: UUID,
     val requested: Int, val created: List<CivVillageSiteReceipt>, val rejected: Map<String, Int>,
     val examined: Int, val complete: Boolean, val reason: String?,
-    val rejectedSites: List<CivVillageSiteRejection> = emptyList())
+    val rejectedSites: List<CivVillageSiteRejection> = emptyList(), val batch: Int = 0)
 
 internal data class CivVillageTerrainScore(val score: Long, val columns: Int, val dryColumns: Int,
     val connectedColumns: Int, val treeColumns: Int, val relief: Int, val groundY: Int) {
@@ -199,7 +199,7 @@ internal class CivsVillageSites(
         val pending = hashSetOf<PaperChunkKey>()
         var failure: Throwable? = null
     }
-    private class Search(val reference: Settlement, val count: Int, val prefix: String, val forcedStyle: String?,
+    private class Search(val reference: Settlement, val count: Int, val prefix: String, val forcedStyle: String?, val batch: Int,
         val token: LifecycleTaskScope.Token) {
         val id = UUID.randomUUID()
         val result = CompletableFuture<CivVillageSitesResult>()
@@ -214,8 +214,8 @@ internal class CivsVillageSites(
         val leases = linkedMapOf<PaperChunkKey, PaperChunkTicketLease>()
         var phase = "templates"
         var examined = 0
-        var nextCandidate = 0
-        var batchEnd = CivsVillageSiteScoring.CANDIDATE_BATCH
+        var nextCandidate = batch * CivsVillageSiteScoring.CANDIDATE_BATCH
+        var batchEnd = nextCandidate + CivsVillageSiteScoring.CANDIDATE_BATCH
         var coarseBudgetStopped = false
         var nextShortlist = 0
         var requests = 0
@@ -248,12 +248,13 @@ internal class CivsVillageSites(
             .thenBy { it })
     }
 
-    fun search(reference: Settlement, count: Int, prefix: String, style: String? = null): CompletableFuture<CivVillageSitesResult> {
+    fun search(reference: Settlement, count: Int, prefix: String, style: String? = null, batch: Int = 0): CompletableFuture<CivVillageSitesResult> {
         check(Bukkit.isPrimaryThread())
+        if (batch !in 0..3) return CompletableFuture.failedFuture(CivsRejection("invalid-village-search-arguments"))
         val cleanPrefix = prefix.trim()
         active?.let {
             if (!it.finishing && it.reference.id == reference.id && it.count == count && it.prefix == cleanPrefix &&
-                it.forcedStyle == style) return it.result
+                it.forcedStyle == style && it.batch == batch) return it.result
             return CompletableFuture.failedFuture(CivsRejection("world-busy"))
         }
         if (closed || timer == null || !ready()) return CompletableFuture.failedFuture(CivsRejection("not-ready"))
@@ -264,7 +265,7 @@ internal class CivsVillageSites(
             return CompletableFuture.failedFuture(CivsRejection("city-not-found"))
         if (plugin.server.getWorld(reference.worldId)?.name !in settings.worlds)
             return CompletableFuture.failedFuture(CivsRejection("world-not-allowed"))
-        val search = Search(reference, count, cleanPrefix, style, tasks.token())
+        val search = Search(reference, count, cleanPrefix, style, batch, tasks.token())
         active = search
         runCatching {
             for (ordinal in 1..count) {
@@ -287,6 +288,7 @@ internal class CivsVillageSites(
 
     fun status(): Map<String, Any?> = active?.let { search -> mapOf(
         "active" to true, "operation" to search.id, "reference" to search.reference.id, "phase" to search.phase,
+        "batch" to search.batch,
         "requested" to search.count, "created" to search.created.values.toList(), "styles" to search.selectedStyles,
         "examined" to search.examined, "candidates" to search.candidates.size, "shortlist" to search.shortlist.size,
         "shortlist_attempted" to search.nextShortlist, "point" to search.point, "chunk_requests" to search.requests,
@@ -667,7 +669,7 @@ internal class CivsVillageSites(
         val result = CivVillageSitesResult(search.id, search.reference.id, search.reference.worldId, search.count,
             search.created.values.toList(), search.rejected.toMap(), search.examined,
             search.created.size == search.count && search.handoff == null,
-            if (search.releaseFailed) "chunk-release-failed" else reason, search.rejectedSites.toList())
+            if (search.releaseFailed) "chunk-release-failed" else reason, search.rejectedSites.toList(), search.batch)
         last = result
         if (active === search) active = null
         replies.clear()

@@ -36,7 +36,7 @@ class CivsCommand(
         CompletableFuture.failedFuture(CivsRejection("terrain-file-unavailable")) },
     private val saveSettlementCapture: (UUID, () -> Settlement) -> CompletableFuture<Path> = { _, _ ->
         CompletableFuture.failedFuture(CivsRejection("settlement-file-unavailable")) },
-    private val foundVillages: (UUID, Int, String) -> CompletableFuture<Any> = { _, _, _ ->
+    private val foundVillages: (UUID, Int, String, Int) -> CompletableFuture<Any> = { _, _, _, _ ->
         CompletableFuture.failedFuture(CivsRejection("village-search-unavailable")) },
     private val villageSearchStatus: () -> Map<String, Any?> = { mapOf("state" to "unavailable") },
 ) : CommandExecutor, TabCompleter {
@@ -46,20 +46,21 @@ class CivsCommand(
             val reference = args.getOrNull(1)?.let { runCatching { UUID.fromString(it) }.getOrNull() }
             val count = args.getOrNull(2)?.toIntOrNull()
             val prefix = args.getOrNull(3)
+            val batch = if (args.size > 4) args[4].toIntOrNull() else 0
             val error = when {
                 sender !is ConsoleCommandSender || !sender.hasPermission("arccivs.use") || !sender.hasPermission("arccivs.admin") -> "not-authorized"
                 status && args.size != 1 -> "invalid-village-search-arguments"
-                !status && (args.size != 4 || reference == null || count == null || count !in 1..5 ||
-                    prefix == null || prefix.isBlank() || prefix.length > 24) -> "invalid-village-search-arguments"
+                !status && (args.size !in 4..5 || reference == null || count == null || count !in 1..5 ||
+                    prefix == null || prefix.isBlank() || prefix.length > 24 || batch == null || batch !in 0..3) -> "invalid-village-search-arguments"
                 hotloadStatus()["state"] != "active" || !host.ready() -> "not-ready"
                 else -> null
             }
             fun reply(value: Any) = sender.sendMessage("ARCCIVS_VILLAGE_SEARCH " + Gson().toJson(value))
             if (error != null) reply(mapOf("state" to "failed", "error" to error))
             else if (status) reply(villageSearchStatus())
-            else runCatching { foundVillages(requireNotNull(reference), requireNotNull(count), requireNotNull(prefix)) }
+            else runCatching { foundVillages(requireNotNull(reference), requireNotNull(count), requireNotNull(prefix), requireNotNull(batch)) }
                 .onSuccess { future ->
-                    reply(mapOf("state" to "accepted", "reference" to reference, "requested" to count, "prefix" to prefix))
+                    reply(mapOf("state" to "accepted", "reference" to reference, "requested" to count, "prefix" to prefix, "batch" to batch))
                     future.whenCompleteSync(tasks) { result, failure ->
                         if (failure == null && result != null) reply(result)
                         else reply(mapOf("state" to "failed", "error" to
@@ -267,6 +268,8 @@ class CivsCommand(
             if (!use) return emptyList()
             if (console && admin && args.size == 2 && args[0] == "hotload")
                 return listOf("prepare", "status").filter { it.startsWith(args[1], true) }
+            if (console && admin && args.size == 5 && args[0] == "found-villages")
+                return listOf("0", "1", "2", "3").filter { it.startsWith(args[4]) }
             if (admin && args.size == 2 && args[0] == "debug")
                 return (listOf("all") + CivsDebug.systems + "layout").filter { it.startsWith(args[1], true) }
             if (admin && args.size == 4 && args[0] == "debug" && args[1] == "layout")

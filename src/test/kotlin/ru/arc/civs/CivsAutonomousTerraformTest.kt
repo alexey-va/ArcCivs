@@ -13,6 +13,45 @@ import org.bukkit.Bukkit
 import ru.arc.paper.testing.MockBukkitTestRuntime
 
 class CivsAutonomousTerraformTest : FunSpec({
+    test("a permanently blocked connection target is rejected without expanding the route search") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }.let { original -> original.copy(columns =
+            original.columns + (civsTerrainKey(building.entrance.x, building.entrance.z) to
+                CivTerrainSurfaceColumn(64, natural = false))) }
+        val searches = mutableListOf<CivRouteSearchStats>()
+        shouldThrow<CivsRejection> {
+            CivsAutonomousTerraform.connection(city, building, surface, CivAutonomousAccess(), emptyList(), searches::add)
+        }.reason shouldBe "autonomy-no-path"
+        searches.single().outcome shouldBe "route-target-blocked"
+        searches.single().expanded shouldBe 0
+    }
+
+    test("a matching retained standing height still admits a nonnatural connection target") {
+        val city = terraceCity()
+        val building = terraceBuilder(city)
+        val surface = terraceSurface { _, _ -> 64 }.let { original -> original.copy(columns =
+            original.columns + (civsTerrainKey(building.entrance.x, building.entrance.z) to
+                CivTerrainSurfaceColumn(64, natural = false))) }
+        val access = CivAutonomousAccess(mapOf(city.buildings.single().id to listOf(building.entrance)))
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, building, surface, access, emptyList(), searches::add)
+        route.first() shouldBe city.buildings.single().entrance
+        route.last() shouldBe building.entrance
+        searches.single().outcome shouldBe "found"
+    }
+
+    test("an existing zero length connection retains its exception to target admission") {
+        val city = terraceCity()
+        val building = city.buildings.single()
+        val searches = mutableListOf<CivRouteSearchStats>()
+        val route = CivsAutonomousTerraform.connection(city, building, CivTerrainSurface(-64, 320, emptyMap()),
+            CivAutonomousAccess(), emptyList(), searches::add)
+        route shouldBe listOf(building.entrance)
+        searches.single().outcome shouldBe "found"
+        searches.single().expanded shouldBe 0
+    }
+
     test("a graded junction retains its viable later arrival without reusing columns") {
         val original = terraceCity()
         val start = original.buildings.single().entrance

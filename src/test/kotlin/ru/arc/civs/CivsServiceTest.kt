@@ -48,6 +48,44 @@ import java.util.concurrent.Executor
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 
+class CivsVillagePlanningExecutorServiceTest : FunSpec({
+    fun villageExecutor(service: CivsService): Executor {
+        val sites = CivsService::class.java.getDeclaredField("villageSites").apply { isAccessible = true }.get(service)
+        return CivsVillageSites::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(sites) as Executor
+    }
+    fun storageExecutor(service: CivsService): Executor =
+        CivsService::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(service) as Executor
+
+    test("existing service callers retain the storage executor as their compatible planning default") {
+        serviceScenario { h ->
+            (villageExecutor(h.service) === storageExecutor(h.service)) shouldBe true
+        }
+    }
+
+    test("an explicit planning executor changes village proof wiring while preserving the service IO lane") {
+        serviceScenario { h ->
+            h.service.close()
+            val tasks = LifecycleTaskScope(BukkitTaskScheduler(h.plugin))
+            val storage = Executor(Runnable::run)
+            val planning = Executor { error("Construction must not submit a village proof") }
+            val service = CivsService(h.plugin, tasks,
+                CivsSettings(Path.of("/tmp/civs-unused"), setOf("vanilla"), 96, 500, 50_000, 4, 120, 48, 96),
+                h.store, h.blueprints, storage, h.worldAdapter, h.renderer, h.citizens,
+                backendTransfer = h.transfer, clock = { h.time }, boundaryRenderer = h.boundary,
+                storageAdapter = CivsStorage(h.plugin) { emptyArray() }, supplyExecutor = storage,
+                planningExecutor = planning)
+            try {
+                (villageExecutor(service) === planning) shouldBe true
+                (storageExecutor(service) === storage) shouldBe true
+                (villageExecutor(service) === storageExecutor(service)) shouldBe false
+            } finally {
+                service.close()
+                tasks.close()
+            }
+        }
+    }
+})
+
 class CivsRoutedTerraformPaymentServiceTest : FunSpec({
     test("routed terrain reserves no items and the next authored row still consumes one carried stone") {
         serviceScenario { h ->

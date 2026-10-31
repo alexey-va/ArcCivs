@@ -42,6 +42,7 @@ class CivsService(
     private val offlinePlayerData: ru.arc.paper.player.PaperOfflinePlayerData? = null,
     supplyExecutor: Executor? = null,
     private val residentFoods: CivsResidentFoods = CivsResidentFoods.BREAD_ONLY,
+    planningExecutor: Executor = executor,
 ) : CivsUiHost, Listener, AutoCloseable {
     private var cities = linkedMapOf<UUID, Settlement>()
     private val busy = mutableSetOf<UUID>()
@@ -328,7 +329,7 @@ class CivsService(
             store = store,
             executor = executor,
             roadMaintenance = roadMaintenance)
-        villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, executor,
+        villageSites = CivsVillageSites(plugin, tasks, settings, blueprints, world, planningExecutor,
             cities = { cities.values.toList() }, ready = ::ready,
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
             retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic,
@@ -381,13 +382,13 @@ class CivsService(
     fun start(): CompletableFuture<Unit> = loadCities()
     fun health(): RuntimeHealthContribution = health
 
-    internal fun foundVillages(referenceId: UUID, count: Int, prefix: String): CompletableFuture<Any> {
+    internal fun foundVillages(referenceId: UUID, count: Int, prefix: String, batch: Int = 0): CompletableFuture<Any> {
         checkMain()
         rejectIf(!ready(), "not-ready")
         val reference = cities[referenceId] ?: throw CivsRejection("city-not-found")
         rejectIf(reference.autonomy == null || reference.pendingDeletion != null, "invalid-reference-city")
         rejectIf(!testingAllowed(reference), "not-authorized")
-        return villageSites.search(reference, count, prefix).thenApply { it }
+        return villageSites.search(reference, count, prefix, batch = batch).thenApply { it }
     }
 
     internal fun villageSearchStatus(): Map<String, Any?> = villageSites.status()
