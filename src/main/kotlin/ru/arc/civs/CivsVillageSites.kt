@@ -26,9 +26,13 @@ internal data class CivVillageSiteReceipt(val city: UUID, val name: String, val 
     val center: CivPosition, val score: Long, val plots: Int, val dryColumns: Int,
     val treeColumns: Int, val existing: Boolean, val fallbackStyles: Map<String, Int> = emptyMap())
 
+internal data class CivVillageSiteRejection(val phase: String, val point: CivPosition?, val reason: String,
+    val terrain: CivVillageTerrainScore? = null, val provinceTreeColumns: Int? = null, val usableTreeColumns: Int? = null)
+
 internal data class CivVillageSitesResult(val operation: UUID, val reference: UUID, val world: UUID,
     val requested: Int, val created: List<CivVillageSiteReceipt>, val rejected: Map<String, Int>,
-    val examined: Int, val complete: Boolean, val reason: String?)
+    val examined: Int, val complete: Boolean, val reason: String?,
+    val rejectedSites: List<CivVillageSiteRejection> = emptyList())
 
 internal data class CivVillageTerrainScore(val score: Long, val columns: Int, val dryColumns: Int,
     val connectedColumns: Int, val treeColumns: Int, val relief: Int, val groundY: Int) {
@@ -43,9 +47,11 @@ internal data class CivVillageTerrainScore(val score: Long, val columns: Int, va
 
 /** Detached bounded policy. Natural block classification and final mutation authority stay with CivsWorld. */
 internal object CivsVillageSiteScoring {
-    const val MAXIMUM_CANDIDATES = 48
+    const val CANDIDATE_BATCH = 48
+    const val MAXIMUM_CANDIDATES = CANDIDATE_BATCH * 4
     const val MAXIMUM_SHORTLIST = 16
-    const val SAMPLE_STEP = 56
+    const val CORE_HALF_WIDTH = CivsSettlementLayout.MAXIMUM_HALF_WIDTH + 16
+    const val SAMPLE_STEP = CORE_HALF_WIDTH / 2
 
     fun id(reference: UUID, prefix: String, ordinal: Int): UUID =
         UUID.nameUUIDFromBytes("arccivs-village/$reference/$prefix/$ordinal".toByteArray(Charsets.UTF_8))
@@ -54,9 +60,10 @@ internal object CivsVillageSiteScoring {
         val seed = id(reference.id, prefix, 0)
         val phase = ((seed.leastSignificantBits ushr 11).toDouble() / (1L shl 53).toDouble()) * PI * 2
         return (0 until MAXIMUM_CANDIDATES).map { index ->
-            val ring = index / 8
-            val angle = phase + (index % 8) * PI / 4 + (ring % 2) * PI / 8
-            val distance = 768 + ring * 512
+            val tier = index / CANDIDATE_BATCH
+            val ring = index % CANDIDATE_BATCH / 8
+            val angle = phase + (index % 8) * PI / 4 + (ring % 2) * PI / 8 + (tier % 2) * PI / 8
+            val distance = 768 + ring * 512 + (tier / 2) * 256
             CivPosition(Math.addExact(reference.center.x, (cos(angle) * distance / 16).roundToInt() * 16),
                 reference.center.y, Math.addExact(reference.center.z, (sin(angle) * distance / 16).roundToInt() * 16))
         }
@@ -65,6 +72,34 @@ internal object CivsVillageSiteScoring {
     fun samples(center: CivPosition): List<CivPosition> = (-2..2).flatMap { x -> (-2..2).map { z ->
         center.copy(x = Math.addExact(center.x, x * SAMPLE_STEP), z = Math.addExact(center.z, z * SAMPLE_STEP))
     } }
+
+    fun coreScore(surface: CivTerrainSurface, center: CivPosition): CivVillageTerrainScore = score(surface.copy(
+        columns = surface.columns.filterKeys { key -> abs((key shr 32).toInt().toLong() - center.x) <= CORE_HALF_WIDTH &&
+            abs(key.toInt().toLong() - center.z) <= CORE_HALF_WIDTH }))
+
+    fun probeFits(requests: Int, probe: Int, missing: Int, fullArea: Long): Boolean =
+        requests.toLong() + probe + missing * fullArea <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS
+
+    fun usableTreeColumns(city: Settlement, plan: CivSettlementPlan, surface: CivTerrainSurface): Int {
+        val forester = plan.plots.firstOrNull { it.building.type == BuildingType.FORESTER }?.building ?: return 0
+        val search = CivsWorksiteLayouts.site(forester)?.getAsJsonObject("forester")
+            ?.getAsJsonObject("searchBounds") ?: return 0
+        val min = CivsWorksiteLayouts.vector(search["min"])
+        val max = CivsWorksiteLayouts.vector(search["max"])
+        val corners = listOf(min, max, min.copy(x = max.x), max.copy(x = min.x)).map { CivsWorksiteLayouts.point(forester, it) }
+        val xRange = corners.minOf { it.x }..corners.maxOf { it.x }
+        val zRange = corners.minOf { it.z }..corners.maxOf { it.z }
+        val structures = plan.plots.map { it.envelope } + plan.walls + plan.gates
+        val roads = plan.routes.values.flatMapTo(hashSetOf()) { CivsAutonomousTerraform.roadProfile(it).keys }
+        return surface.columns.count { (key, column) ->
+            val x = (key shr 32).toInt()
+            val z = key.toInt()
+            x in xRange && z in zRange && city.contains(x, z) && column.loaded && column.natural &&
+                column.topY.toLong() - column.groundY >= 2 && key !in roads && structures.none {
+                    x in it.min.x..it.max.x && z in it.min.z..it.max.z
+                }
+        }
+    }
 
     fun score(surface: CivTerrainSurface, step: Int = 1): CivVillageTerrainScore {
         require(step > 0)
@@ -166,6 +201,7 @@ internal class CivsVillageSites(
         val id = UUID.randomUUID()
         val result = CompletableFuture<CivVillageSitesResult>()
         val rejected = sortedMapOf<String, Int>()
+        val rejectedSites = ArrayDeque<CivVillageSiteRejection>()
         val created = sortedMapOf<Int, CivVillageSiteReceipt>()
         val selectedStyles = sortedMapOf<Int, String>()
         val templates = mutableMapOf<Int, Map<BuildingType, Pair<CivBuilding, CivBuilding>>>()
@@ -176,6 +212,8 @@ internal class CivsVillageSites(
         var phase = "templates"
         var examined = 0
         var nextCandidate = 0
+        var batchEnd = CivsVillageSiteScoring.CANDIDATE_BATCH
+        var coarseBudgetStopped = false
         var nextShortlist = 0
         var requests = 0
         var ticks = 0
@@ -251,7 +289,7 @@ internal class CivsVillageSites(
         "shortlist_attempted" to search.nextShortlist, "point" to search.point, "chunk_requests" to search.requests,
         "pending_loads" to (search.group?.pending?.size ?: 0), "leases" to search.leases.size,
         "maximum_pending_loads" to 2, "maximum_chunk_requests" to MAXIMUM_CHUNK_REQUESTS,
-        "rejected" to search.rejected.toMap(), "finishing" to search.finishing,
+        "rejected" to search.rejected.toMap(), "rejected_sites" to search.rejectedSites.toList(), "finishing" to search.finishing,
     ) } ?: mapOf("active" to false, "last" to last)
 
     fun cancel(reason: String = "cancelled") {
@@ -319,15 +357,23 @@ internal class CivsVillageSites(
     private fun coarse(search: Search) {
         if (!context(search)) return finish(search, "not-ready")
         val ordinal = search.missing() ?: return finish(search, null)
-        while (search.nextCandidate < search.candidates.size) {
-            val anchor = search.candidates[search.nextCandidate++]
+        while (search.nextCandidate < minOf(search.batchEnd, search.candidates.size)) {
+            val anchor = search.candidates[search.nextCandidate]
             val city = draft(search, ordinal, anchor)
             search.point = city.center
+            search.phase = "coarse-candidate"
             val failure = runCatching { checkSpace(city.worldId, city.center) }.exceptionOrNull()
-            if (failure != null) { reject(search, rejection(failure)); continue }
+            if (failure != null) { search.nextCandidate++; reject(search, rejection(failure)); continue }
             val points = CivsVillageSiteScoring.samples(city.center)
+            val keys = points.map { PaperChunkKey(city.worldId, it.x shr 4, it.z shr 4) }.distinct()
+            if (!CivsVillageSiteScoring.probeFits(search.requests, keys.size, search.count - search.created.size,
+                    CivsChunkArea.of(city).size)) {
+                search.coarseBudgetStopped = true
+                return full(search)
+            }
+            search.nextCandidate++
             search.phase = "coarse-loading"
-            load(search, points.map { PaperChunkKey(city.worldId, it.x shr 4, it.z shr 4) }.distinct(),
+            load(search, keys,
                 failed = { error -> reject(search, rejection(error)); release(search) { coarse(search) } }) {
                 search.phase = "coarse-survey"
                 await(search, world.prospectiveHeightField(city, city.buildings.single(), points), failed = { error ->
@@ -336,7 +382,7 @@ internal class CivsVillageSites(
                     search.examined++
                     val score = CivsVillageSiteScoring.score(surface, CivsVillageSiteScoring.SAMPLE_STEP)
                     val refused = score.rejection(full = false)
-                    if (refused != null) reject(search, refused) else {
+                    if (refused != null) reject(search, refused, score) else {
                         search.shortlist += Candidate(anchor.copy(y = score.groundY), score)
                         search.shortlist.sortByDescending { it.score.score }
                         while (search.shortlist.size > CivsVillageSiteScoring.MAXIMUM_SHORTLIST) search.shortlist.removeLast()
@@ -356,10 +402,14 @@ internal class CivsVillageSites(
             val candidate = search.shortlist[search.nextShortlist++]
             val city = draft(search, ordinal, candidate.point)
             search.point = city.center
+            search.phase = "growth-area-candidate"
             val failure = runCatching { checkSpace(city.worldId, city.center) }.exceptionOrNull()
             if (failure != null) { reject(search, rejection(failure)); continue }
+            val keys = CivsChunkArea.of(city).keys().toList()
+            if (search.requests.toLong() + keys.size > MAXIMUM_CHUNK_REQUESTS)
+                return finish(search, "village-chunk-budget")
             search.phase = "growth-area-loading"
-            load(search, CivsChunkArea.of(city).keys().toList(), failed = { error ->
+            load(search, keys, failed = { error ->
                 reject(search, rejection(error)); release(search) { full(search) }
             }) {
                 search.phase = "growth-area-survey"
@@ -369,15 +419,27 @@ internal class CivsVillageSites(
             }
             return
         }
-        finish(search, "autonomy-no-site")
+        if (search.coarseBudgetStopped) finish(search, "village-chunk-budget")
+        else if (search.nextCandidate < search.candidates.size) {
+            search.shortlist.clear()
+            search.nextShortlist = 0
+            search.batchEnd = minOf(search.candidates.size, search.batchEnd + CivsVillageSiteScoring.CANDIDATE_BATCH)
+            coarse(search)
+        } else finish(search, "autonomy-no-site")
     }
 
     private fun prove(search: Search, ordinal: Int, city: Settlement, surface: CivTerrainSurface) {
         search.phase = "growth-area-ranking"
-        await(search, CompletableFuture.supplyAsync({ CivsVillageSiteScoring.score(surface) }, executor), failed = {
+        await(search, CompletableFuture.supplyAsync({ CivsVillageSiteScoring.coreScore(surface, city.center) to
+            surface.columns.values.count { it.loaded && it.natural && it.topY.toLong() - it.groundY >= 2 } }, executor), failed = {
             finish(search, rejection(it))
-        }) { score ->
-            score.rejection(full = true)?.let { reject(search, it); release(search) { full(search) }; return@await }
+        }) { (score, provinceTrees) ->
+            val refused = score.rejection(full = false) ?: "village-no-trees".takeIf { provinceTrees < 8 }
+            if (refused != null) {
+                reject(search, refused, score, provinceTrees)
+                release(search) { full(search) }
+                return@await
+            }
             val hall = city.buildings.single()
             val prepared = if (hall.schematicId.startsWith("civs/v2/")) blueprints.prepareEntry(hall.schematicId,
                 hall.id, city.worldId, hall.anchor, hall.rotation / 90, hall.rotation)
@@ -389,7 +451,7 @@ internal class CivsVillageSites(
                     throw CivsRejection("blueprint-changed")
                 await(search, world.captureManualFoundation(city.id, city.owner, city.worldId, blueprint.building,
                     blueprint.cells, executor, autonomous = true, adminPlacement = false), failed = { error ->
-                    reject(search, rejection(error)); release(search) { full(search) }
+                    reject(search, rejection(error), score, provinceTrees); release(search) { full(search) }
                 }) { terrain ->
                     search.phase = "complete-layout-proof"
                     val templates = search.templates.getValue(ordinal)
@@ -398,15 +460,19 @@ internal class CivsVillageSites(
                             CivsVillageSiteScoring.preparedSurface(surface, blueprint.building), CivAutonomousAccess(),
                             fortification = fortification)
                         if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
-                        plan
+                        val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
+                        if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
+                        plan to trees
                     }, executor)
                     await(search, proof, failed = { error ->
-                        reject(search, rejection(error)); release(search) { full(search) }
-                    }) { plan ->
+                        reject(search, rejection(error), score, provinceTrees,
+                            CivsDiagnostics.rejection(error)?.values?.get("usable-tree-columns")?.toIntOrNull())
+                        release(search) { full(search) }
+                    }) { (plan, trees) ->
                         search.phase = "founding"
                         val planned = CivsRules.validate(city.copy(autonomy = city.autonomy!!.copy(plan = plan,
                             layoutHalfWidth = plan.halfWidth)))
-                        found(search, ordinal, planned, blueprint, terrain, score)
+                        found(search, ordinal, planned, blueprint, terrain, score.copy(treeColumns = trees))
                     }
                 }
             }
@@ -546,7 +612,12 @@ internal class CivsVillageSites(
         search.afterRelease = done
     }
 
-    private fun reject(search: Search, reason: String) { search.rejected.merge(reason, 1, Int::plus) }
+    private fun reject(search: Search, reason: String, terrain: CivVillageTerrainScore? = null,
+        provinceTrees: Int? = null, usableTrees: Int? = null) {
+        search.rejected.merge(reason, 1, Int::plus)
+        if (search.rejectedSites.size == 8) search.rejectedSites.removeFirst()
+        search.rejectedSites.addLast(CivVillageSiteRejection(search.phase, search.point, reason, terrain, provinceTrees, usableTrees))
+    }
     private fun rejection(failure: Throwable): String {
         CivsDiagnostics.rejection(failure)?.let { return it.reason }
         active?.let { search -> if (!search.unexpectedLogged) {
@@ -589,7 +660,7 @@ internal class CivsVillageSites(
         val result = CivVillageSitesResult(search.id, search.reference.id, search.reference.worldId, search.count,
             search.created.values.toList(), search.rejected.toMap(), search.examined,
             search.created.size == search.count && search.handoff == null,
-            if (search.releaseFailed) "chunk-release-failed" else reason)
+            if (search.releaseFailed) "chunk-release-failed" else reason, search.rejectedSites.toList())
         last = result
         if (active === search) active = null
         replies.clear()

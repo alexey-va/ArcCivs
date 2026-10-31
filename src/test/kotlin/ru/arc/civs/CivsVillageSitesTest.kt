@@ -23,12 +23,103 @@ import ru.arc.paper.chunk.PaperChunkTicketRegistry
 import ru.arc.paper.testing.MockBukkitTestRuntime
 import ru.arc.paper.testing.failOnUnsupportedMockBukkitOperation
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.Executor
 import java.util.logging.Logger
 
 class CivsVillageSiteScoringTest : FunSpec({
+    test("interlaced tiers preserve the original forty eight anchors and fill both radial and angular gaps") {
+        val reference = villageReference(UUID(0, 1)).copy(id = UUID(0, 123), center = CivPosition(-1883, 67, -2760))
+        val candidates = CivsVillageSiteScoring.candidates(reference, "Auto-")
+        val original = candidates.take(48).joinToString(";") { "${it.x},${it.y},${it.z}" }
+        MessageDigest.getInstance("SHA-256").digest(original.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) } shouldBe "dd497670ee266802251ee061424277b9f8d69df22c1773acdfcf70842ad55ffb"
+        candidates.chunked(CivsVillageSiteScoring.CANDIDATE_BATCH).size shouldBe 4
+        candidates.distinct().size shouldBe 192
+        fun distance(p: CivPosition): Double = kotlin.math.hypot((p.x - reference.center.x).toDouble(), (p.z - reference.center.z).toDouble())
+        (kotlin.math.abs(distance(candidates[48]) - distance(candidates[0])) < 24) shouldBe true
+        (distance(candidates[96]) - distance(candidates[0]) in 232.0..280.0) shouldBe true
+        CivsVillageSiteScoring.samples(reference.center).let { samples ->
+            samples.size shouldBe 25
+            samples.minOf { it.x } shouldBe reference.center.x - 88
+            samples.maxOf { it.z } shouldBe reference.center.z + 88
+        }
+    }
+
+    test("wet or hilly provincial fringe cannot veto a dry construction core but the same core limits stay strict") {
+        val center = CivPosition(0, 63, 0)
+        val flat = villageSurface(center, 127)
+        for (fringe in listOf("wet", "hill")) {
+            val surface = flat.copy(columns = flat.columns.mapValues { (key, column) ->
+                val outer = kotlin.math.abs((key shr 32).toInt()) > 88 || kotlin.math.abs(key.toInt()) > 88
+                if (!outer) column else column.copy(natural = fringe != "wet", groundY = 95, topY = 95)
+            })
+            (CivsVillageSiteScoring.score(surface).rejection(full = true) != null) shouldBe true
+            CivsVillageSiteScoring.coreScore(surface, center).let { score ->
+                score.columns shouldBe 177 * 177
+                score.rejection(full = true) shouldBe null
+            }
+        }
+        val split = flat.copy(columns = flat.columns.mapValues { (key, column) ->
+            column.copy(natural = (key shr 32).toInt() != 0)
+        })
+        CivsVillageSiteScoring.coreScore(split, center).rejection(full = false) shouldBe "village-disconnected"
+        val wet = flat.copy(columns = flat.columns.mapValues { (_, column) -> column.copy(natural = false) })
+        CivsVillageSiteScoring.coreScore(wet, center).rejection(full = false) shouldBe "village-wet-or-obstructed"
+        val threshold = CivVillageTerrainScore(0, 100, 80, 60, 8, 12, 63)
+        threshold.rejection(full = true) shouldBe null
+        threshold.copy(dryColumns = 79).rejection(full = true) shouldBe "village-wet-or-obstructed"
+        threshold.copy(connectedColumns = 59).rejection(full = true) shouldBe "village-disconnected"
+        threshold.copy(relief = 13).rejection(full = true) shouldBe "village-steep"
+    }
+
+    test("usable timber belongs to the first rotated forester work zone and excludes future buildings and roads") {
+        val city = villageReference(UUID.randomUUID())
+        val source = "civs/minecolonies/nordic/fundamentals/lumberjack1"
+        val forester = villageBlueprint(source, UUID.randomUUID(), city.worldId, CivPosition(20, 63, 0), BuildingType.FORESTER).building
+        val plan = villageLayout(city).copy(plots = listOf(CivSettlementPlot(forester, forester.bounds)))
+        val bare = villageSurface(city.center, 127).let { surface -> surface.copy(
+            columns = surface.columns.mapValues { (_, column) -> column.copy(topY = column.groundY) }) }
+        fun trees(points: List<CivPosition>): CivTerrainSurface = bare.copy(columns = LinkedHashMap(bare.columns).apply {
+            points.forEach { point -> val key = civsTerrainKey(point.x, point.z); this[key] = getValue(key).copy(topY = 68) }
+        })
+        val remote = (0..7).map { CivPosition(-60 + it, 63, 0) }
+        CivsVillageSiteScoring.score(trees(remote)).treeColumns shouldBe 8
+        CivsVillageSiteScoring.usableTreeColumns(city, plan, trees(remote)) shouldBe 0
+        val usable = (0..7).map { CivPosition(30 + it, 63, 5) }
+        CivsVillageSiteScoring.usableTreeColumns(city, plan, trees(usable)) shouldBe 8
+        val house = villageBlueprint("house1", UUID.randomUUID(), city.worldId, CivPosition(33, 63, 5), BuildingType.HOUSE).building
+        val reserved = plan.copy(plots = plan.plots + CivSettlementPlot(house,
+            CivBox(CivPosition(30, 63, 4), CivPosition(37, 68, 6))))
+        CivsVillageSiteScoring.usableTreeColumns(city, reserved, trees(usable)) shouldBe 0
+        val road = plan.copy(routes = mapOf(forester.id.toString() to usable.map { it.copy(y = 64) }))
+        CivsVillageSiteScoring.usableTreeColumns(city, road, trees(usable)) shouldBe 0
+        val perimeter = CivBox(CivPosition(30, 63, 5), CivPosition(37, 72, 5))
+        CivsVillageSiteScoring.usableTreeColumns(city, plan.copy(walls = listOf(perimeter)), trees(usable)) shouldBe 0
+        CivsVillageSiteScoring.usableTreeColumns(city, plan.copy(gates = listOf(perimeter)), trees(usable)) shouldBe 0
+        val edge = (0..7).map { CivPosition(30 + it, 63, -25) }
+        CivsVillageSiteScoring.usableTreeColumns(city, plan, trees(edge)) shouldBe 8
+        val rotated = forester.copy(rotation = 90)
+        val turned = plan.copy(plots = listOf(CivSettlementPlot(rotated, rotated.bounds)))
+        CivsVillageSiteScoring.usableTreeColumns(city, turned, trees(edge)) shouldBe 0
+        val rotatedTrees = (0..7).map { CivsWorksiteLayouts.point(rotated, CivPosition(10 + it, 0, -25)) }
+        CivsVillageSiteScoring.usableTreeColumns(city, turned, trees(rotatedTrees)) shouldBe 8
+        val unavailable = trees(usable).let { surface -> surface.copy(columns = surface.columns.mapValues { (_, column) ->
+            column.copy(loaded = false)
+        }) }
+        CivsVillageSiteScoring.usableTreeColumns(city, plan, unavailable) shouldBe 0
+    }
+
+    test("coarse requests reserve complete proof areas for every missing canonical town at the exact budget boundary") {
+        val cap = CivsVillageSites.MAXIMUM_CHUNK_REQUESTS
+        val boundary = cap - 25 - 5 * 361
+        CivsVillageSiteScoring.probeFits(boundary, 25, 5, 361) shouldBe true
+        CivsVillageSiteScoring.probeFits(boundary + 1, 25, 5, 361) shouldBe false
+        CivsVillageSiteScoring.probeFits(boundary + 361, 25, 4, 361) shouldBe true
+    }
+
     test("candidate IDs and bounded terrain centres repeat across negative world coordinates") {
         val reference = villageReference(UUID.randomUUID()).copy(center = CivPosition(-1883, 67, -2760))
         val candidates = CivsVillageSiteScoring.candidates(reference, "Auto-")
@@ -82,6 +173,164 @@ class CivsVillageSiteScoringTest : FunSpec({
 })
 
 class CivsVillageSitesTest : FunSpec({
+    test("a complete layout with only remote provincial trees is refused with its detached usable timber evidence") {
+        villageScenario { s ->
+            s.fullSurface = { city ->
+                val surface = villageSurface(city.center, 127)
+                surface.copy(columns = surface.columns.mapValues { (key, column) ->
+                    val timber = (key shr 32).toInt() in city.center.x + 112..city.center.x + 119 &&
+                        key.toInt() == city.center.z + 120
+                    column.copy(topY = if (timber) 68 else column.groundY)
+                })
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { (s.subject.status()["rejected_sites"] as? List<*>)?.filterIsInstance<CivVillageSiteRejection>()
+                ?.any { it.usableTreeColumns == 0 } == true }
+            val evidence = (s.subject.status()["rejected_sites"] as List<*>).filterIsInstance<CivVillageSiteRejection>().last()
+            evidence.phase shouldBe "complete-layout-proof"
+            evidence.reason shouldBe "village-no-trees"
+            evidence.provinceTreeColumns shouldBe 8
+            evidence.terrain?.columns shouldBe 177 * 177
+            evidence.point shouldBe s.fullCities.single().center
+            s.admissions shouldBe emptyList()
+            s.subject.cancel("timber-evidence-test")
+            s.until { result.isDone }
+            result.join().rejectedSites.last() shouldBe evidence
+            result.join().created shouldBe emptyList()
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("a later interlaced tier finds five distinct complete towns and replay creates no duplicate grants") {
+        villageScenario { s ->
+            val flat = s.coarseSurface
+            s.coarseSurface = { city, points -> flat(city, points).let { surface ->
+                if (s.coarseCities.size > 48) surface else surface.copy(columns = surface.columns.mapValues { (_, column) ->
+                    column.copy(natural = false)
+                })
+            } }
+            val result = s.subject.search(s.reference, 5, "Auto-")
+            s.until { result.isDone }
+            val first = result.join()
+            first.complete shouldBe true
+            first.created.size shouldBe 5
+            first.created.map { it.style }.toSet().size shouldBe 5
+            first.created.map { it.city }.toSet() shouldBe (1..5).mapTo(hashSetOf()) {
+                CivsVillageSiteScoring.id(s.reference.id, "Auto-", it)
+            }
+            s.coarseCities.size shouldBe 96
+            s.fullCities.size shouldBe 5
+            s.admissions.size shouldBe 5
+            s.registry.activeLeaseCount shouldBe 0
+            (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+            (s.peakPending <= 2) shouldBe true
+            val canonical = s.cities.toList()
+            val loads = s.loads.size
+            val tickets = s.added.size
+            val replay = s.subject.search(s.reference, 5, "Auto-")
+            s.until { replay.isDone }
+            replay.join().complete shouldBe true
+            replay.join().created.all { it.existing } shouldBe true
+            replay.join().created.map { it.city }.toSet() shouldBe first.created.map { it.city }.toSet()
+            s.cities shouldBe canonical
+            s.loads.size shouldBe loads
+            s.added.size shouldBe tickets
+            s.admissions.size shouldBe 5
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("exhausted full proofs continue once into the next tier while keeping the final proof inside the request budget") {
+        villageScenario { s ->
+            var proofs = 0
+            s.layout = { city ->
+                if (++proofs <= 16) throw CivsRejection("autonomy-no-site")
+                villageLayout(city)
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { result.isDone }
+            result.join().complete shouldBe true
+            result.join().created.size shouldBe 1
+            result.join().rejected["autonomy-no-site"] shouldBe 16
+            proofs shouldBe 17
+            s.coarseCities.size shouldBe 82
+            s.fullCities.size shouldBe 17
+            s.peakRequests shouldBe 8_187 // 82*25 coarse requests + 17*361 complete proof areas.
+            s.admissions.size shouldBe 1
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("province timber rejection stays cheap and reserved proof budget returns one durable town for a safe replay") {
+        villageScenario { s ->
+            val forested = s.fullSurface
+            var proofs = 0
+            s.layout = { city -> proofs++; villageLayout(city) }
+            s.fullSurface = { city -> forested(city).let { surface ->
+                if (s.admissions.isEmpty()) surface else surface.copy(columns = surface.columns.mapValues { (_, column) ->
+                    column.copy(topY = column.groundY)
+                })
+            } }
+            val result = s.subject.search(s.reference, 5, "Auto-")
+            s.until { result.isDone }
+            result.join().complete shouldBe false
+            result.join().reason shouldBe "village-chunk-budget"
+            result.join().created.size shouldBe 1
+            (requireNotNull(result.join().rejected["village-no-trees"]) > 0) shouldBe true
+            proofs shouldBe 1 // Treeless provinces never enter the expensive full layout solver.
+            val saved = s.cities.last()
+            val savedReceipt = result.join().created.single()
+            saved.id shouldBe CivsVillageSiteScoring.id(s.reference.id, "Auto-", 1)
+            CivsVillageSiteScoring.probeFits(s.peakRequests, 25, 4, 361) shouldBe false
+            (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+            s.registry.activeLeaseCount shouldBe 0
+            s.fullSurface = forested
+            val replay = s.subject.search(s.reference, 5, "Auto-")
+            s.until { replay.isDone }
+            replay.join().complete shouldBe true
+            replay.join().created.first { it.city == saved.id }.existing shouldBe true
+            replay.join().created.first { it.city == saved.id }.name shouldBe savedReceipt.name
+            s.cities.first { it.id == saved.id } shouldBe saved
+            s.cities.size shouldBe 6
+            s.admissions.size shouldBe 5
+            s.cities.drop(1).map { it.id }.toSet().size shouldBe 5
+            s.registry.activeLeaseCount shouldBe 0
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
+    test("cancelling adaptive continuation fences its late native callbacks and releases the previous tier once") {
+        villageScenario { s ->
+            val flat = s.coarseSurface
+            s.coarseSurface = { city, points ->
+                if (s.coarseCities.size == 48) s.holdLoads = true
+                flat(city, points).let { surface -> surface.copy(columns = surface.columns.mapValues { (_, column) ->
+                    column.copy(natural = false)
+                }) }
+            }
+            val result = s.subject.search(s.reference, 1, "Auto-")
+            s.until { s.coarseCities.size == 48 && s.subject.status()["pending_loads"] == 2 }
+            val observations = (s.subject.status()["rejected_sites"] as List<*>).filterIsInstance<CivVillageSiteRejection>()
+            observations.size shouldBe 8
+            observations.all { it.phase == "coarse-survey" && it.reason == "village-wet-or-obstructed" &&
+                it.terrain?.columns == 25 && it.point != null } shouldBe true
+            observations.last().point shouldBe s.coarseCities.last().center
+            s.subject.cancel("adaptive-cancel")
+            s.tick(10)
+            s.completeLoads(evictUnticketed = true)
+            s.tick(10)
+            result.join().reason shouldBe "adaptive-cancel"
+            result.join().created shouldBe emptyList()
+            result.join().rejectedSites shouldBe observations
+            s.admissions shouldBe emptyList()
+            s.registry.activeLeaseCount shouldBe 0
+            (s.peakPending <= 2) shouldBe true
+            s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
+        }
+    }
+
     for (change in listOf("removed", "owner", "world", "autonomy", "deletion", "chunk-loading-disabled"))
     test("a committed handoff releases temporary leases and preserves its receipt when the target is $change") {
         villageScenario { s ->
@@ -168,8 +417,8 @@ class CivsVillageSitesTest : FunSpec({
             result.join().complete shouldBe true
             result.join().created.size shouldBe 1
             result.join().rejected["chunks-unloaded"] shouldBe null
-            result.join().examined shouldBe CivsVillageSiteScoring.MAXIMUM_CANDIDATES
-            s.surveys shouldBe CivsVillageSiteScoring.MAXIMUM_CANDIDATES + 1
+            result.join().examined shouldBe CivsVillageSiteScoring.CANDIDATE_BATCH
+            s.surveys shouldBe CivsVillageSiteScoring.CANDIDATE_BATCH + 1
             s.admissions.size shouldBe 1
             s.registry.activeLeaseCount shouldBe 0
             s.removed.groupingBy { it }.eachCount() shouldBe s.added.groupingBy { it }.eachCount()
@@ -299,7 +548,13 @@ class CivsVillageSitesTest : FunSpec({
             val result = s.subject.search(s.reference, 1, "Auto-")
             s.until { result.isDone }
             result.join().complete shouldBe false
-            result.join().rejected["autonomy-no-site"] shouldBe CivsVillageSiteScoring.MAXIMUM_SHORTLIST
+            (requireNotNull(result.join().rejected["autonomy-no-site"]) >= CivsVillageSiteScoring.MAXIMUM_SHORTLIST) shouldBe true
+            result.join().reason shouldBe "village-chunk-budget"
+            (s.peakRequests <= CivsVillageSites.MAXIMUM_CHUNK_REQUESTS) shouldBe true
+            result.join().rejectedSites.size shouldBe 8
+            result.join().rejectedSites.all { it.phase == "complete-layout-proof" && it.reason == "autonomy-no-site" &&
+                it.terrain?.columns == 177 * 177 && (it.provinceTreeColumns ?: 0) >= 8 } shouldBe true
+            result.join().rejectedSites.last().point shouldBe s.fullCities.last().center
             result.join().created shouldBe emptyList()
             s.admissions shouldBe emptyList()
             s.cities shouldBe listOf(s.reference)
@@ -439,7 +694,10 @@ private fun villageLayout(city: Settlement): CivSettlementPlan {
                 y = 63, z = city.center.z - 48 + next / 10 * 12)
             next++
             villageBlueprint("civs/v2/${city.style}/${type.name.lowercase()}/fixture/level1", UUID.randomUUID(),
-                city.worldId, anchor, type).building.copy(phase = BuildingPhase.SITE)
+                city.worldId, anchor, type).building.copy(phase = BuildingPhase.SITE).let {
+                    // The detached fixture retains a real authored forester work zone for usable timber admission.
+                    if (type == BuildingType.FORESTER) it.copy(schematicId = "civs/minecolonies/nordic/fundamentals/lumberjack1") else it
+                }
         }
         CivSettlementPlot(building, building.bounds)
     }
@@ -481,6 +739,14 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     var handoffFailure: String? = null
     var surveys = 0
     var retainFailure: Throwable? = null
+    val coarseCities = mutableListOf<Settlement>()
+    val fullCities = mutableListOf<Settlement>()
+    var peakRequests = 0
+    var peakPending = 0
+    var coarseSurface: (Settlement, List<CivPosition>) -> CivTerrainSurface = { _, samples -> CivTerrainSurface(-64, 320,
+        samples.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(63, true) }) }
+    var fullSurface: (Settlement) -> CivTerrainSurface = { villageSurface(it.center, 127) }
+    var layout: (Settlement) -> CivSettlementPlan = ::villageLayout
     var founding: (CivVillageSiteAdmission) -> CompletableFuture<Settlement> = { admission ->
         cities += admission.city
         CompletableFuture.completedFuture(admission.city)
@@ -524,14 +790,14 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
                     ?: CivsChunkArea.of(city).keys()
                 keys.all { it in nativeTickets && world.isChunkLoaded(it.x, it.z) } shouldBe true
             }
-            val surface = if (samples == null) villageSurface(city.center, 80) else CivTerrainSurface(-64, 320,
-                samples.associate { civsTerrainKey(it.x, it.z) to CivTerrainSurfaceColumn(63, true) })
+            val surface = if (samples == null) { fullCities += city; fullSurface(city) }
+                else { coarseCities += city; coarseSurface(city, samples) }
             CompletableFuture.completedFuture(surface)
         }
         every { access.captureManualFoundation(any(), any(), any(), any(), any(), any(), any(), any(), any()) } returns
             CompletableFuture.completedFuture(null)
         every { CivsSettlementPlans.prepare(any(), any(), any(), any(), any(), any(), any()) } answers {
-            villageLayout(firstArg())
+            layout(firstArg())
         }
         subject = CivsVillageSites(plugin, tasks, settings, blueprints, access, Executor(Runnable::run), { cities },
             { true }, { worldId, center ->
@@ -569,9 +835,14 @@ private class VillageScenario(paper: MockBukkitTestRuntime) : AutoCloseable {
     fun completeLoads(evictUnticketed: Boolean) {
         loads.indices.filter { !loads[it].second.isDone }.forEach { completeLoad(it, evictUnticketed) }
     }
-    fun tick(count: Int) { scheduler.tick(count.toLong()) }
+    fun tick(count: Int) { repeat(count) {
+        scheduler.tick()
+        val status = subject.status()
+        peakRequests = maxOf(peakRequests, status["chunk_requests"] as? Int ?: 0)
+        peakPending = maxOf(peakPending, status["pending_loads"] as? Int ?: 0)
+    } }
     fun until(done: () -> Boolean) {
-        repeat(12_000) { if (done()) return; scheduler.tick() }
+        repeat(12_000) { if (done()) return; tick(1) }
         error("Village search did not finish: ${subject.status()}")
     }
     override fun close() { subject.close(); registry.close(); tasks.close() }

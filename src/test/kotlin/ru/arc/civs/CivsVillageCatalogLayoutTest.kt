@@ -71,6 +71,12 @@ class CivsVillageCatalogLayoutTest : FunSpec({
                         result["half_width"] = plan.halfWidth
                         counts shouldBe expected
                         CivsVillageSiteScoring.completeProfile(plan) shouldBe true
+                        val wooded = surface.copy(columns = surface.columns.mapValues { (_, column) ->
+                            column.copy(topY = column.groundY + 5)
+                        })
+                        val usableTrees = CivsVillageSiteScoring.usableTreeColumns(city, plan, wooded)
+                        result["usable_forester_tree_columns"] = usableTrees
+                        withClue("Authored forester work area for $style") { (usableTrees >= 8) shouldBe true }
                         gson.toJson(city) shouldBe before
                         result["success"] = true
                     } catch (failure: Exception) {
@@ -90,6 +96,7 @@ class CivsVillageCatalogLayoutTest : FunSpec({
             }
             val report = linkedMapOf("selector" to "CivBlueprintCatalog.autonomous + maximum family frame",
                 "terrain" to "synthetic-flat-natural-255x255", "radius" to 128, "initial_hall" to "SITE",
+                "resource_probe" to "synthetic woods in the authored forester area excluding planned roads and envelopes",
                 "expected_ordinary_plots" to 34, "results" to results)
             val json = gson.toJson(report)
             System.getenv("CIVS_VILLAGE_LAYOUT_OUT")?.let { destination ->
