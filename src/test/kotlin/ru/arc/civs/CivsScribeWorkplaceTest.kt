@@ -40,7 +40,8 @@ class CivsScribeWorkplaceTest : FunSpec({
         citizenStorageTarget(city.copy(buildings = listOf(hall, obstruction)), hall, world) { true } shouldBe CivPosition(-1, 64, -4)
         val visited = mutableListOf<CivPosition>()
         citizenStorageTarget(city, hall, world) { visited += it; false } shouldBe null
-        visited.size shouldBe 12
+        visited.size shouldBe 24
+        visited.all { citizenAtStorage(world, it.point(), hall.control!!) } shouldBe true
         visited.none { it.x == hall.control!!.x && it.z == hall.control!!.z } shouldBe true
         citizenStorageTarget(city, hall, world) { it == hall.control!!.copy(y = 65) } shouldBe null
         every { world.getBlockAt(0, 64, -4).type } returns Material.AIR

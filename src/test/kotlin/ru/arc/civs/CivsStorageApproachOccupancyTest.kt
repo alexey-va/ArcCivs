@@ -3,13 +3,100 @@ package ru.arc.civs
 import io.kotest.assertions.withClue
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import org.bukkit.Bukkit
 import org.bukkit.Location
 import org.bukkit.Material
 import org.bukkit.block.Barrel
 import org.bukkit.inventory.ItemStack
+import org.bukkit.util.BoundingBox
+import org.bukkit.util.VoxelShape
+import org.mockbukkit.mockbukkit.block.BlockMock
+import org.mockbukkit.mockbukkit.world.Coordinate
 import java.util.UUID
 
 class CivsStorageApproachOccupancyTest : FunSpec({
+    for (cached in listOf(true, false)) test("the native barrel with its north side occupied walks to a clear diagonal cached=$cached") {
+        residentRuntime(workerId = UUID(146, 150), worldFactory = ::CapturedBarrelApproachWorld) { h ->
+            val fixture = storageApproachFixture(h, true, 1)
+            val actor = fixture.actor
+            val neighbour = fixture.neighbours.single()
+            val control = fixture.control
+            // Local native geometry is translated from (-1844,71,-2689) to the fixture barrel.
+            // Capture 2026-10-31T03:18:01.687Z, worker 679ad6aa, SHA-256
+            // 9fab27d47c26eeb85331c23a0af0fb195f0a03e63a8221112adf994a98806037.
+            // The captured worker's pose is used as the stationary blocker; resident roles are symmetric.
+            installCapturedBarrelApproaches(h, control)
+            neighbour.npc.teleport(Location(h.world, control.x + .8795858695087, control.y.toDouble(),
+                control.z - .8795858695084))
+            actor.npc.teleport(Location(h.world, control.x + .5, control.y.toDouble(), control.z - 6.5))
+            if (!cached) actor.targets.clear()
+            val neighbourPosition = neighbour.npc.location
+            val occupied = listOf(citizenStandingBounds(neighbourPosition, neighbour.npc.scale))
+            fun safe(point: CivPosition): Boolean = citizenStandable(h.world, point) &&
+                citizenPacketBodyClear(h.world, point.point(), false) && citizenControlClear(h.city, point) &&
+                point.location(h.world).let { citizenResidentStepClear(actor.npc, it, it, occupied) }
+            val cardinal = listOf(0, 1, -1).flatMap { dy ->
+                listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1).map { (dx, dz) ->
+                    control.copy(x = control.x + dx, y = control.y + dy, z = control.z + dz)
+                }
+            }
+            cardinal.size shouldBe 12
+            cardinal.filter(::safe) shouldBe emptyList()
+            val northDiagonals = listOf(-1, 1).map { control.copy(x = control.x + it, z = control.z - 1) }
+            northDiagonals.forEach { point ->
+                safe(point) shouldBe true
+                citizenAtStorage(h.world, point.point(), control) shouldBe true
+                citizenCanReachBlock(h.world, point.location(h.world).add(0.0, actor.npc.eyeHeight, 0.0), control) shouldBe true
+            }
+            val before = h.city
+            val token = actor.plan.token
+            val cycle = actor.cycle
+            val barrel = h.world.getBlockAt(control.x, control.y, control.z).state as Barrel
+            barrel.inventory.setItem(0, ItemStack(Material.IRON_PICKAXE))
+            var offers = 0
+            h.workerDelivery = { worker, proof ->
+                worker shouldBe h.workerId
+                proof shouldBe token
+                h.owner.requireStorageArrival(h.city.id, worker, fixture.building.id)
+                citizenCanReachBlock(actor.npc, control) shouldBe true
+                actor.cycle.phase shouldBe CitizenPhase.DELIVERING
+                (actor.cycle.observedWorkMillis >= 1_000) shouldBe true
+                h.city shouldBe before
+                offers++
+                h.pendingDelivery
+            }
+            fixture.routes.startRoute(actor, h.world, requireNotNull(actor.plan.workplace), 2_000) shouldBe true
+            (northDiagonals.any { it.point() == requireNotNull(actor.route).target.point() }) shouldBe true
+            var walked = 0.0
+            for (tick in 1..600) {
+                val previous = actor.npc.location
+                h.navigate()
+                val actual = actor.npc.location
+                withClue("tick=$tick ${h.navigationState()}") {
+                    (previous.distance(actual) <= .172001) shouldBe true
+                    citizenPacketBodyClear(h.world, actual.point(), false) shouldBe true
+                    citizenResidentStepClear(actor.npc, previous, actual, occupied) shouldBe true
+                    neighbour.npc.location shouldBe neighbourPosition
+                }
+                walked += previous.distance(actual)
+                if (tick % 20 == 0) h.owner.pulse(requireNotNull(h.navigationNow))
+                if (offers == 1) break
+            }
+            withClue(h.owner.debug(h.city.id, h.workerId)) {
+                offers shouldBe 1
+                (walked > 4.0) shouldBe true
+            }
+            (actor.cycle === cycle) shouldBe true
+            actor.plan.token shouldBe token
+            h.city shouldBe before
+            neighbour.yieldProgress shouldBe 0.0
+            barrel.inventory.getItem(0) shouldBe ItemStack(Material.IRON_PICKAXE)
+            CivsEquipment.plainCount(h.city.workers.first { it.id == h.workerId }, "IRON_PICKAXE") shouldBe 0
+            h.city.workers.first { it.id == h.workerId }.completedCycles shouldBe 10_234L
+            h.deliveries shouldBe 1
+        }
+    }
+
     for (cached in listOf(true, false)) test("an occupied ${if (cached) "cached" else "first"} barrel side keeps the tool cycle and walks to a free side") {
         residentRuntime(workerId = UUID(144, 679)) { h ->
             val fixture = storageApproachFixture(h, cached, 1)
@@ -77,6 +164,11 @@ class CivsStorageApproachOccupancyTest : FunSpec({
             val before = h.city
             val token = actor.plan.token
             val cycle = actor.cycle
+            for (dy in listOf(0, 1, -1)) for (dx in listOf(-1, 1)) for (dz in listOf(-1, 1)) {
+                val diagonal = fixture.control.copy(x = fixture.control.x + dx, y = fixture.control.y + dy,
+                    z = fixture.control.z + dz)
+                citizenStandable(h.world, diagonal) shouldBe false
+            }
             fixture.routes.startRoute(actor, h.world, requireNotNull(actor.plan.workplace), 2_000) shouldBe false
             actor.route shouldBe null
             actor.cycle.phase shouldBe CitizenPhase.PAUSED
@@ -161,6 +253,10 @@ private fun storageApproachFixture(h: ResidentRuntime, cached: Boolean, neighbou
     else others.zip(listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)).forEach { (other, offset) ->
         other.npc.teleport(control.copy(x = control.x + offset.first, z = control.z + offset.second).location(h.world))
     }
+    if (neighbours == 4) for (dx in listOf(-1, 1)) for (dz in listOf(-1, 1)) {
+        // This negative fixture closes diagonal support too; four residents cover only the cardinal cells.
+        for (depth in 1..2) h.world.getBlockAt(control.x + dx, control.y - depth, control.z + dz).type = Material.AIR
+    }
     actor.cycle.phase shouldBe CitizenPhase.TO_WORK
     citizenAtStorage(h.world, actor.npc.location.point(), control) shouldBe false
     if (cached) actor.targets[preferred] = preferred
@@ -171,4 +267,61 @@ private fun storageActors(h: ResidentRuntime): Map<UUID, CitizenActor> = h.owner
     isAccessible = true
     @Suppress("UNCHECKED_CAST")
     get(h.owner) as Map<UUID, CitizenActor>
+}
+
+private fun installCapturedBarrelApproaches(h: ResidentRuntime, control: CivPosition) {
+    fun cell(dx: Int, dy: Int, dz: Int, data: String) {
+        h.world.getBlockAt(control.x + dx, control.y + dy, control.z + dz).blockData = Bukkit.createBlockData("minecraft:$data")
+    }
+    for (dx in -1..1) for (dz in -1..1) for (dy in -1..2) cell(dx, dy, dz, "air")
+    cell(0, -1, 0, "oak_slab[type=top,waterlogged=false]")
+    cell(0, 0, 0, "barrel[facing=north,open=false]")
+    for (dx in -1..1) {
+        cell(dx, -1, -1, "cobblestone")
+        cell(dx, 0, 1, "spruce_trapdoor[facing=south,half=bottom,open=true,powered=false,waterlogged=false]")
+    }
+    cell(-1, -1, 0, "oak_stairs[facing=west,half=top,shape=straight,waterlogged=false]")
+    cell(1, -1, 0, "oak_stairs[facing=east,half=top,shape=straight,waterlogged=false]")
+    cell(-1, 0, 0, "spruce_trapdoor[facing=east,half=bottom,open=true,powered=false,waterlogged=false]")
+    cell(1, 0, 0, "spruce_trapdoor[facing=west,half=bottom,open=true,powered=false,waterlogged=false]")
+    cell(-1, 1, -1, "wall_torch[facing=east]")
+    cell(1, 1, -1, "wall_torch[facing=west]")
+}
+
+/** Recorded local shapes, not full-cube substitutes for the native torches/trapdoors/stairs. */
+private class CapturedBarrelApproachWorld : ResidentRuntimeWorld() {
+    private val captured = mutableMapOf<Coordinate, BlockMock>()
+    override fun getBlockAt(point: Coordinate): BlockMock {
+        if (point.x !in 19..21 || point.z !in -1..1 || point.y !in 63..66) return super.getBlockAt(point)
+        return captured.getOrPut(point) {
+            object : BlockMock(if (point.y <= 63) Material.STONE else Material.AIR,
+                Location(this, point.x.toDouble(), point.y.toDouble(), point.z.toDouble())) {
+                fun boxes(): List<BoundingBox> = when (type) {
+                    Material.AIR, Material.CAVE_AIR, Material.VOID_AIR, Material.WALL_TORCH -> emptyList()
+                    Material.OAK_SLAB -> listOf(BoundingBox(0.0, .5, 0.0, 1.0, 1.0, 1.0))
+                    Material.OAK_STAIRS -> if ("facing=east" in blockData.asString)
+                        listOf(BoundingBox(.5, 0.0, 0.0, 1.0, 1.0, 1.0), BoundingBox(0.0, .5, 0.0, .5, 1.0, 1.0))
+                    else listOf(BoundingBox(0.0, 0.0, 0.0, .5, 1.0, 1.0), BoundingBox(.5, .5, 0.0, 1.0, 1.0, 1.0))
+                    Material.SPRUCE_TRAPDOOR -> listOf(when {
+                        "facing=east" in blockData.asString -> BoundingBox(0.0, 0.0, 0.0, .1875, 1.0, 1.0)
+                        "facing=west" in blockData.asString -> BoundingBox(.8125, 0.0, 0.0, 1.0, 1.0, 1.0)
+                        else -> BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, .1875)
+                    })
+                    Material.STONE, Material.COBBLESTONE, Material.BARREL -> listOf(BoundingBox(0.0, 0.0, 0.0, 1.0, 1.0, 1.0))
+                    else -> error("Uncaptured barrel fixture state: ${blockData.asString}")
+                }
+                override fun isPassable(): Boolean = boxes().isEmpty()
+                override fun getBoundingBox(): BoundingBox {
+                    val boxes = boxes()
+                    return if (boxes.isEmpty()) BoundingBox(x.toDouble(), y.toDouble(), z.toDouble(), x + 1.0, y.toDouble(), z + 1.0)
+                    else BoundingBox(x + boxes.minOf { it.minX }, y + boxes.minOf { it.minY }, z + boxes.minOf { it.minZ },
+                        x + boxes.maxOf { it.maxX }, y + boxes.maxOf { it.maxY }, z + boxes.maxOf { it.maxZ })
+                }
+                override fun getCollisionShape(): VoxelShape = boxes().let { boxes -> object : VoxelShape {
+                    override fun getBoundingBoxes(): Collection<BoundingBox> = boxes
+                    override fun overlaps(other: BoundingBox): Boolean = boxes.any { it.overlaps(other) }
+                } }
+            }
+        }
+    }
 }

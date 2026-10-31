@@ -36,12 +36,13 @@ internal fun citizenControlStepClear(city: Settlement, from: CitizenPoint, to: C
     }
 }
 
-/** One real barrel, twelve supported side cells; never its top or another building's interior. */
+/** One real barrel, at most twenty-four supported adjacent cells; never its top or another building's interior. */
 internal fun citizenStorageTarget(city: Settlement, own: CivBuilding, world: World,
     safe: (CivPosition) -> Boolean = { citizenStandable(world, it) }): CivPosition? {
     val control = own.control ?: return null
     if (world.uid != city.worldId || !citizenStorageReady(world, control)) return null
-    for (dy in listOf(0, 1, -1)) for ((dx, dz) in listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1)) {
+    val sides = listOf(listOf(1 to 0, -1 to 0, 0 to 1, 0 to -1), listOf(1 to 1, -1 to 1, 1 to -1, -1 to -1))
+    for (offsets in sides) for (dy in listOf(0, 1, -1)) for ((dx, dz) in offsets) {
         val coordinates = listOf(control.x.toLong() + dx, control.y.toLong() + dy, control.z.toLong() + dz)
         if (coordinates.any { it !in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }) continue
         val point = CivPosition(coordinates[0].toInt(), coordinates[1].toInt(), coordinates[2].toInt())
