@@ -48,6 +48,11 @@ internal class CivsCitizenWork(
     fun waitingForMineAccess(actor: CitizenActor, city: Settlement, worker: CivWorker): Boolean =
         mineVisits.waitingForAccess(actor, city, worker, actor.npc.world)
 
+    fun inboundMineAccess(actor: CitizenActor, city: Settlement, target: CivPosition, idleAnchor: CivPosition?): CivBuilding? =
+        mineVisits.inbound(actor, city, target, idleAnchor)
+
+    fun bindMineAccess(actor: CitizenActor, city: Settlement, route: CitizenRoute) = mineVisits.bind(actor, city, route)
+
     fun retainConstruction(cities: Collection<Settlement>) {
         constructionWorkplaces.keys.retainAll(cities.mapNotNull { it.construction?.id }.toSet())
         mineVisits.retain(cities)

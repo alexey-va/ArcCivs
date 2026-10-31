@@ -33,16 +33,81 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
     fun retain(cities: Collection<Settlement>) {
         val current = cities.flatMap { city -> city.workers.map { city.id to it.id } }.toSet()
         attempted.keys.retainAll(current)
+        val byId = cities.associateBy { it.id }
+        for (actor in runtime.actors.values) byId[actor.cityId]?.let { reconcileAccess(actor, it) }
         targetChecks = 8 // Shared across every optional visit admitted on this work pulse.
     }
     fun clear() = attempted.clear()
 
-    fun waitingForAccess(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World): Boolean =
-        pending(actor, city, worker, world)?.let { occupied(actor, it, world) } == true
+    fun waitingForAccess(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World): Boolean {
+        val mine = physicalMine(actor, city, worker) ?: pending(actor, city, worker, world)?.building ?: return false
+        if (actor.mineVisit != null || actor.mineAccess?.id == mine.id ||
+            underground(actor, mine) && !atSurface(actor, mine, mine)) return false
+        return occupied(actor, city, mine.id, world)
+    }
 
-    private fun occupied(actor: CitizenActor, key: CivMineVisitKey, world: World): Boolean = runtime.actors.values.any { other ->
-        other !== actor && other.cityId == key.cityId && other.worldId == world.uid && other.npc.isValid &&
-            other.mineVisit?.key?.let { it.cityId == key.cityId && it.building.id == key.building.id } == true
+    private fun occupied(actor: CitizenActor, city: Settlement, mineId: UUID, world: World): Boolean = runtime.actors.values.any { other ->
+        other !== actor && other.cityId == city.id && other.worldId == world.uid && other.npc.isValid &&
+            (other.mineVisit?.key?.let { it.cityId == city.id && it.building.id == mineId } == true || other.mineAccess?.id == mineId ||
+                other.route?.let { inbound(other, city, it.authored, it.idleAnchor) }?.id == mineId)
+    }
+
+    private fun physicalMine(actor: CitizenActor, city: Settlement, worker: CivWorker): CivBuilding? {
+        if (actor.cycle.phase in setOf(CitizenPhase.CLOSED, CitizenPhase.DELIVERING, CitizenPhase.PICKING_UP) ||
+            actor.plan.type != BuildingType.QUARRY || actor.plan.idleReason != null || actor.plan.courier != null ||
+            actor.sheltering || actor.returningToWarehouse || actor.attacker != null || actor.foodSource != null ||
+            actor.mealVisit != null || actor.social.visit != null || actor.collectionSeek != null ||
+            actor.collectionHome != null || actor.outputReturn != null || actor.supplyPickup != null) return null
+        val work = actor.plan.worldWork?.takeIf { it.miningStep != null && it.workerId == worker.id &&
+            it.cycle == worker.completedCycles && it.buildingId == worker.assignment &&
+            it.buildingId == actor.plan.token.assignmentId } ?: return null
+        return city.building(work.buildingId)?.takeIf { it.type == BuildingType.QUARRY &&
+            work.standing.y < it.entrance.y - .5 }
+    }
+
+    fun inbound(actor: CitizenActor, city: Settlement, target: CivPosition, idleAnchor: CivPosition?): CivBuilding? {
+        if (idleAnchor != null || target != actor.plan.worldWork?.standing) return null
+        val worker = city.workers.firstOrNull { it.id == actor.workerId } ?: return null
+        return physicalMine(actor, city, worker)
+    }
+
+    fun bind(actor: CitizenActor, city: Settlement, route: CitizenRoute) {
+        val mine = inbound(actor, city, route.authored, route.idleAnchor) ?: return
+        reconcileAccess(actor, city)
+        if (actor.mineAccess == null) actor.mineAccess = mine
+    }
+
+    /** A cancelled route or completed action does not move an underground resident out of its shaft. */
+    private fun reconcileAccess(actor: CitizenActor, city: Settlement) {
+        if (!actor.npc.isValid || actor.worldId != city.worldId || actor.npc.world.uid != city.worldId || actor.mineVisit != null) return
+        val saved = actor.mineAccess
+        val inbound = actor.route?.let { inbound(actor, city, it.authored, it.idleAnchor) }
+        if (saved != null) {
+            if (inbound?.id != saved.id && atSurface(actor, saved, city.building(saved.id))) actor.mineAccess = inbound
+            return
+        }
+        if (inbound != null) { actor.mineAccess = inbound; return }
+        // Recovery only: normal physical entry binds the admitted route before its first native move.
+        val mine = city.workers.firstOrNull { it.id == actor.workerId }?.assignment?.let(city::building)
+            ?.takeIf { it.type == BuildingType.QUARRY } ?: return
+        if (underground(actor, mine) && !atSurface(actor, mine, mine)) actor.mineAccess = mine
+    }
+
+    private fun underground(actor: CitizenActor, mine: CivBuilding): Boolean = actor.npc.location.let { at ->
+        at.y < mine.entrance.y - .5 && at.blockX in mine.bounds.min.x..mine.bounds.max.x && at.blockZ in mine.bounds.min.z..mine.bounds.max.z
+    }
+
+    private fun atSurface(actor: CitizenActor, saved: CivBuilding, current: CivBuilding?): Boolean {
+        val world = actor.npc.world
+        val at = actor.npc.location
+        val point = at.point()
+        val controls = listOfNotNull(current?.control, saved.control).distinct()
+        val barrels = controls.filter { citizenAtStorage(world, point, it) }
+        val outside = point.y >= (current ?: saved).entrance.y - .5 && listOfNotNull(saved, current).all {
+            at.blockX !in it.bounds.min.x..it.bounds.max.x || at.blockZ !in it.bounds.min.z..it.bounds.max.z
+        }
+        if (barrels.isEmpty() && !outside || !citizenPacketSupported(world, point) || !citizenPacketBodyClear(world, point, false)) return false
+        return outside || barrels.any { citizenCanReachBlock(actor.npc, it) }
     }
 
     private fun pending(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World): CivMineVisitKey? {
@@ -82,7 +147,7 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
     fun update(actor: CitizenActor, city: Settlement, worker: CivWorker, world: World, now: Long): Boolean {
         if (actor.mineVisit == null) {
             val key = pending(actor, city, worker, world) ?: return false
-            if (occupied(actor, key, world)) {
+            if (actor.mineAccess?.id != key.building.id && occupied(actor, city, key.building.id, world)) {
                 actor.cycle.deferWork(now)
                 runtime.statuses[worker.id] = "mine-waiting"
                 return true

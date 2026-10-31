@@ -35,6 +35,8 @@ internal class CitizenActor(val cityId: UUID, val workerId: UUID, val worldId: U
     var navigationSuppressed = 0
     val mineRouteEpisode = CivsMineRouteEpisode()
     var mineVisit: CitizenMineVisit? = null
+    // Real shaft access survives route/cycle replacement until the resident physically returns to the surface.
+    var mineAccess: CivBuilding? = null
     var turnOrigin: CitizenPoint? = null
     var turnSinceTick = 0L
     var turnAmount = 0f

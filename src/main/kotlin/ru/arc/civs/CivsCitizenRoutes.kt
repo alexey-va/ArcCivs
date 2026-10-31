@@ -56,6 +56,12 @@ internal class CivsCitizenRoutes(
         if (!shelter.wake(actor)) return false
         val from = actor.npc.location
         val city = runtime.cityProvider().firstOrNull { it.id == actor.cityId } ?: return false
+        if (workRuntime.inboundMineAccess(actor, city, target, idleAnchor) != null &&
+            city.workers.firstOrNull { it.id == actor.workerId }?.let { workRuntime.waitingForMineAccess(actor, city, it) } == true) {
+            actor.cycle.deferWork(now)
+            runtime.statuses[actor.workerId] = "mine-waiting"
+            return false
+        }
         val waitingMine = waitingMine(actor, city, idleAnchor)
         if (waitingMine != null && !outside(waitingMine, target.x, target.z)) return false
         val visit = actor.mineVisit?.takeIf { idleAnchor == null && it.owns(target) && !actor.sheltering &&
@@ -147,6 +153,7 @@ internal class CivsCitizenRoutes(
         val timeout = (10_000 + distance * 1_500).toLong().coerceAtMost(90_000)
         actor.route = CitizenRoute(from.point(), to, chunks, now, timeout,
             allowed, motion, trip, target, waypoint != null, idleAnchor)
+        workRuntime.bindMineAccess(actor, city, requireNotNull(actor.route))
         actor.route?.progressTick = runtime.navigationTick
         val storageReason = when {
             actor.plan.type != BuildingType.BUILDER_HUT || idleAnchor != null || actor.sheltering || actor.attacker != null -> null

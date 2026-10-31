@@ -420,6 +420,283 @@ class CivsMineVisitTest : FunSpec({
         }
     }
 
+    for (started in listOf(false, true)) test("an optional visitor holds a real physical miner before admission started=$started") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val real = h.addMiner()
+            val action = h.physical(real, started)
+            if (started) h.city = h.city.copy(autonomy = null) // Ordinary physical mines share the same narrow access.
+            val before = h.city
+            val cycle = real.actor.cycle
+            val phase = cycle.phase
+            val (work, routes) = h.nativeWorkOwner()
+            work.update(real.actor, h.city, h.world, ++h.now)
+            h.runtime.statuses[real.worker.id] shouldBe "mine-waiting"
+            real.actor.route?.let { (it.idleAnchor != null) shouldBe true }
+            (real.actor.cycle === cycle) shouldBe true
+            cycle.phase shouldBe phase
+            cycle.observedWorkMillis shouldBe 0L
+            real.actor.plan.worldWork shouldBe action
+            routes.startRoute(real.actor, h.world, action.standing, ++h.now) shouldBe false
+            (mineVisitField(work, "mineVisits") as CivsMineVisits).retainedAttempts shouldBe 0
+            h.city shouldBe before
+        }
+    }
+
+    test("a physical route holds access through deep cancellation closed search assignment and proof changes") {
+        mineVisitFixture { h ->
+            val real = h.addMiner()
+            val action = h.physical(real)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(real.actor, h.world, action.standing, h.now) shouldBe true
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe true
+            h.manager.update(h.actor, h.city, h.worker, h.world, h.now) shouldBe true
+            h.actor.mineVisit shouldBe null
+            h.manager.retainedAttempts shouldBe 0
+            real.at = action.standing.location(h.world)
+            routes.cancelRoute(real.actor)
+            real.actor.cycle.arrive(h.now)
+            real.actor.cycle.work(h.now + 1_000)
+            val credited = real.actor.cycle.observedWorkMillis
+            credited shouldBe 1_000L
+            real.actor.cycle.close()
+            val hall = h.city.buildings.first { it.type == BuildingType.TOWN_HALL }
+            real.actor.plan = real.actor.plan.copy(token = real.actor.plan.token.copy(assignmentId = hall.id),
+                type = hall.type, storage = requireNotNull(hall.control), workplace = null,
+                idleReason = "searching-work", worldWork = null)
+            h.city = h.city.copy(workers = h.city.workers.map { if (it.id == real.worker.id) it.copy(assignment = hall.id) else it },
+                minePlans = mapOf(h.mine.id.toString() to CivMinePlanState(CivsMinePlan.VERSION, 0)))
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe true
+            h.manager.update(h.actor, h.city, h.worker, h.world, ++h.now) shouldBe true
+            h.actor.mineVisit shouldBe null
+            real.actor.cycle.phase shouldBe CitizenPhase.CLOSED
+            real.actor.cycle.observedWorkMillis shouldBe credited
+            h.city.stock shouldBe before.stock
+            h.city.workers.map { it.items } shouldBe before.workers.map { it.items }
+
+            real.at = h.standing.location(h.world)
+            work.retainConstruction(listOf(h.city))
+            h.city = h.city.copy(minePlans = before.minePlans)
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe false
+            h.manager.update(h.actor, h.city, h.worker, h.world, ++h.now) shouldBe true
+            h.actor.mineVisit?.key?.workerId shouldBe h.worker.id
+            h.manager.retainedAttempts shouldBe 1
+        }
+    }
+
+    test("two physical waiters do not own access until the first real route is admitted") {
+        mineVisitFixture { h ->
+            val first = h.addMiner()
+            val second = h.addMiner()
+            val firstWork = h.physical(first)
+            val secondWork = h.physical(second)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            work.waitingForMineAccess(first.actor, h.city, first.worker) shouldBe false
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe false
+            routes.startRoute(first.actor, h.world, firstWork.standing, h.now) shouldBe true
+            work.waitingForMineAccess(first.actor, h.city, first.worker) shouldBe false
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe true
+            routes.startRoute(second.actor, h.world, secondWork.standing, ++h.now) shouldBe false
+            second.actor.route shouldBe null
+            routes.cancelRoute(first.actor)
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe false
+            routes.startRoute(second.actor, h.world, secondWork.standing, ++h.now) shouldBe true
+            work.waitingForMineAccess(first.actor, h.city, first.worker) shouldBe true
+            first.actor.cycle.phase shouldBe CitizenPhase.TO_WORK
+            second.actor.cycle.phase shouldBe CitizenPhase.TO_WORK
+            first.actor.cycle.observedWorkMillis shouldBe 0L
+            second.actor.cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+        }
+    }
+
+    for (ready in listOf(false, true)) test("a retained physical detour waits without losing observed credit ready=$ready") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val real = h.addMiner()
+            val action = h.physical(real)
+            real.actor.cycle.arrive(h.now)
+            for (elapsed in 1_000L..(if (ready) 6_000L else 1_000L) step 1_000) real.actor.cycle.work(h.now + elapsed)
+            real.actor.workDetour = real.actor.plan.token
+            val cycle = real.actor.cycle
+            val phase = cycle.phase
+            val credited = cycle.observedWorkMillis
+            phase shouldBe if (ready) CitizenPhase.READY else CitizenPhase.WORKING
+            credited shouldBe if (ready) 6_000L else 1_000L
+            val queued = h.addMiner()
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            h.runtime.wanderBudget = 8
+            work.update(real.actor, h.city, h.world, h.now + 10_000)
+            h.runtime.statuses[real.worker.id] shouldBe "mine-waiting"
+            real.actor.route?.let { (it.idleAnchor != null) shouldBe true }
+            (real.actor.cycle === cycle) shouldBe true
+            cycle.phase shouldBe phase
+            cycle.observedWorkMillis shouldBe credited
+            real.actor.workDetour shouldBe real.actor.plan.token
+            routes.startRoute(real.actor, h.world, action.standing, h.now + 10_001) shouldBe false
+            h.runtime.actors.remove(h.worker.id)
+            work.retainConstruction(listOf(h.city))
+            h.runtime.wanderBudget = 8
+            work.update(real.actor, h.city, h.world, h.now + 10_002)
+            requireNotNull(real.actor.route).authored shouldBe action.standing
+            cycle.phase shouldBe phase
+            cycle.observedWorkMillis shouldBe credited
+            work.waitingForMineAccess(queued.actor, h.city, queued.worker) shouldBe true
+            h.city shouldBe before
+        }
+    }
+
+    test("a current real barrel below the saved entrance releases physical access without height assumptions") {
+        mineVisitFixture { h ->
+            val real = h.addMiner()
+            val action = h.physical(real)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(real.actor, h.world, action.standing, h.now) shouldBe true
+            real.at = action.standing.location(h.world)
+            routes.cancelRoute(real.actor)
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe true
+            val control = requireNotNull(h.mine.control).copy(y = action.standing.y)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            for (dy in 1..2) h.world.getBlockAt(control.x, control.y + dy, control.z).type = Material.AIR
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == h.mine.id) it.copy(control = control) else it })
+            citizenAtStorage(h.world, real.at.point(), control) shouldBe true
+            citizenCanReachBlock(real.actor.npc, control) shouldBe true
+            citizenPacketSupported(h.world, real.at.point()) shouldBe true
+            repeat(2) {
+                work.retainConstruction(listOf(h.city))
+                work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe false
+            }
+            h.manager.update(h.actor, h.city, h.worker, h.world, ++h.now) shouldBe true
+            h.actor.mineVisit?.key?.workerId shouldBe h.worker.id
+            real.actor.cycle.observedWorkMillis shouldBe 0L
+        }
+    }
+
+    test("unbound physical presence is reserved after close while another quarry and retired actors stay independent") {
+        mineVisitFixture { h ->
+            val real = h.addMiner()
+            val action = h.physical(real)
+            real.at = action.standing.location(h.world)
+            real.actor.cycle.close()
+            real.actor.plan = real.actor.plan.copy(idleReason = "searching-work", worldWork = null)
+            val independent = h.addMiner(spatialBuilding("caledonia", "miner", 1, CivPosition(32, 69, 0)))
+            val (work, _) = h.nativeWorkOwner()
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe true
+            work.waitingForMineAccess(independent.actor, h.city, independent.worker) shouldBe false
+            h.manager.update(independent.actor, h.city, independent.worker, h.world, h.now) shouldBe true
+            independent.actor.mineVisit?.key?.building?.id shouldBe independent.worker.assignment
+            work.waitingForMineAccess(real.actor, h.city, real.worker) shouldBe false
+            every { real.actor.npc.isValid } returns false
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe false
+            h.manager.update(h.actor, h.city, h.worker, h.world, ++h.now) shouldBe true
+            h.actor.mineVisit?.key?.workerId shouldBe h.worker.id
+        }
+    }
+
+    test("a real miner at a lower current barrel waits rather than claiming to be underground") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val real = h.addMiner()
+            val action = h.physical(real)
+            val control = requireNotNull(h.mine.control).copy(y = h.standing.y - 3)
+            h.world.getBlockAt(control.x, control.y, control.z).type = Material.BARREL
+            for (dy in 1..2) h.world.getBlockAt(control.x, control.y + dy, control.z).type = Material.AIR
+            h.city = h.city.copy(buildings = h.city.buildings.map { if (it.id == h.mine.id) it.copy(control = control) else it })
+            real.at = h.standing.copy(y = control.y).location(h.world)
+            (action.standing.y < real.at.y) shouldBe true
+            citizenAtStorage(h.world, real.at.point(), control) shouldBe true
+            citizenCanReachBlock(real.actor.npc, control) shouldBe true
+            citizenPacketSupported(h.world, real.at.point()) shouldBe true
+            citizenPacketBodyClear(h.world, real.at.point(), false) shouldBe true
+            val before = h.city
+            val cycle = real.actor.cycle
+            val (work, routes) = h.nativeWorkOwner()
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(real.actor, h.city, real.worker) shouldBe true
+            work.update(real.actor, h.city, h.world, ++h.now)
+            h.runtime.statuses[real.worker.id] shouldBe "mine-waiting"
+            routes.startRoute(real.actor, h.world, action.standing, ++h.now) shouldBe false
+            (real.actor.cycle === cycle) shouldBe true
+            cycle.phase shouldBe CitizenPhase.TO_WORK
+            cycle.observedWorkMillis shouldBe 0L
+            h.city shouldBe before
+        }
+    }
+
+    test("an admitted route to a new quarry protects both shafts until surface handoff adopts the new owner") {
+        mineVisitFixture { h ->
+            val moving = h.addMiner()
+            val first = h.physical(moving)
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(moving.actor, h.world, first.standing, h.now) shouldBe true
+            moving.at = first.standing.location(h.world)
+            routes.cancelRoute(moving.actor)
+
+            val building = spatialBuilding("caledonia", "miner", 1, CivPosition(32, 69, 0))
+            val standing = CivsWorksiteLayouts.point(building, requireNotNull(CivsMinePlan.forBuilding(building)).bottom)
+            val second = h.addMiner(building.copy(entrance = standing.copy(x = building.bounds.min.x - 1)))
+            val secondWork = h.physical(second)
+            h.city = h.city.copy(workers = h.city.workers.map {
+                if (it.id == moving.worker.id) it.copy(assignment = building.id) else it
+            })
+            val movedWork = secondWork.copy(workerId = moving.worker.id)
+            moving.actor.plan = second.actor.plan.copy(worldWork = movedWork)
+            moving.actor.cycle = moving.actor.plan.cycle().also { it.start() }
+            routes.startRoute(moving.actor, h.world, movedWork.standing, ++h.now) shouldBe true
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe true
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe true
+
+            moving.at = h.standing.location(h.world)
+            work.retainConstruction(listOf(h.city))
+            routes.cancelRoute(moving.actor)
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe true
+            moving.at = movedWork.standing.location(h.world)
+            moving.actor.cycle.close()
+            moving.actor.plan = moving.actor.plan.copy(idleReason = "searching-work", worldWork = null)
+            work.retainConstruction(listOf(h.city))
+            work.waitingForMineAccess(second.actor, h.city, second.worker) shouldBe true
+            work.waitingForMineAccess(h.actor, h.city, h.worker) shouldBe false
+            moving.actor.cycle.phase shouldBe CitizenPhase.CLOSED
+            moving.actor.cycle.observedWorkMillis shouldBe 0L
+            h.city.workers.forEach { it.completedCycles shouldBe 0L }
+        }
+    }
+
+    test("an underground physical owner keeps its egress and accepted receipt while another visit exists") {
+        mineVisitFixture { h ->
+            val visit = h.selectTarget()
+            h.actor.mineVisit = null
+            val real = h.addMiner()
+            val action = h.physical(real)
+            val before = h.city
+            val (work, routes) = h.nativeWorkOwner()
+            routes.startRoute(real.actor, h.world, action.standing, h.now) shouldBe true
+            real.at = action.standing.location(h.world)
+            routes.cancelRoute(real.actor)
+            h.actor.mineVisit = visit
+            work.waitingForMineAccess(real.actor, h.city, real.worker) shouldBe false
+            routes.startRoute(real.actor, h.world, h.standing, ++h.now) shouldBe true
+            requireNotNull(real.actor.route).authored shouldBe h.standing
+            routes.cancelRoute(real.actor)
+            real.actor.cycle.arrive(h.now)
+            for (elapsed in 1_000L..6_000L step 1_000) real.actor.cycle.work(h.now + elapsed)
+            real.actor.cycle.phase shouldBe CitizenPhase.READY
+            val ticket = requireNotNull(real.actor.cycle.beginDelivery(h.now + 6_000))
+            work.update(real.actor, h.city, h.world, h.now + 6_001)
+            real.actor.cycle.phase shouldBe CitizenPhase.DELIVERING
+            real.actor.cycle.acceptsCompletion(ticket) shouldBe true
+            real.actor.cycle.observedWorkMillis shouldBe 6_000L
+            h.city shouldBe before
+        }
+    }
+
     test("visit attempt memory saturates closed and is pruned by current residents rather than active actors") {
         mineVisitFixture(maximumAttempts = 1) { h ->
             h.selectTarget()
@@ -586,6 +863,21 @@ private class MineVisitFixture(paper: MockBukkitTestRuntime, maximumAttempts: In
         return CivsCitizenWork(runtime, { routes }, { mockk(relaxed = true) }, { couriers }, { leisure },
             { logistics }, { mockk(relaxed = true) }, { mockk(relaxed = true) }, { life }, mockk(relaxed = true),
             CivsPaths(), { _, _ -> null }, { _, _ -> true }, { _, _ -> null }, { _, _ -> }, { _, _ -> })
+    }
+
+    fun physical(miner: MineVisitMiner, started: Boolean = true): CivWorldWork {
+        val mine = requireNotNull(city.building(requireNotNull(miner.worker.assignment)))
+        val standing = CivsWorksiteLayouts.point(mine, requireNotNull(CivsMinePlan.forBuilding(mine)).bottom).copy(y = 60)
+        val focus = standing.copy(x = standing.x + 1)
+        world.getBlockAt(focus.x, focus.y, focus.z).type = Material.STONE
+        val action = CivWorldWork(miner.worker.id, miner.worker.completedCycles, mine.id, standing,
+            listOf(CivPlanBlock(focus, "minecraft:stone", "minecraft:air")), durationMillis = 6_000,
+            status = "digging-mine", miningStep = 4, focus = focus, miningPlanVersion = CivsMinePlan.VERSION,
+            miningAccessStep = 0, miningAccessSections = city.minePlans?.get(mine.id.toString())?.sectionSteps)
+        miner.actor.plan = miner.actor.plan.copy(workplace = standing, workMillis = 6_000, worldWork = action)
+        miner.actor.cycle = miner.actor.plan.cycle()
+        if (started) miner.actor.cycle.start()
+        return action
     }
 
     fun staircaseMine(entranceOutside: Boolean): CivBuilding {
