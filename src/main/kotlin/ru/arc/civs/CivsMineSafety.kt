@@ -70,7 +70,7 @@ internal object CivsMineSafety {
     }
 
     private val GROUND = setOf(Material.STONE, Material.DEEPSLATE, Material.GRANITE, Material.DIORITE,
-        Material.ANDESITE, Material.TUFF, Material.CALCITE, Material.DIRT, Material.GRASS_BLOCK,
+        Material.ANDESITE, Material.TUFF, Material.CALCITE, Material.SMOOTH_BASALT, Material.DIRT, Material.GRASS_BLOCK,
         Material.COARSE_DIRT, Material.ROOTED_DIRT, Material.PODZOL, Material.MYCELIUM, Material.CLAY,
         Material.SAND, Material.RED_SAND, Material.GRAVEL, Material.TERRACOTTA, Material.MUD,
         Material.SANDSTONE, Material.RED_SANDSTONE)

@@ -333,7 +333,9 @@ class CivsService(
             cities = { cities.values.toList() }, ready = ::ready,
             checkSpace = { worldId, center -> buildingRequests.checkSettlementSpace(worldId, center) },
             retainLoaded = chunkLoading::retainLoaded, found = buildingRequests::foundAutomatic,
-            chunksReady = chunkLoading::handoffReady)
+            chunksReady = chunkLoading::handoffReady,
+            capture = if (planningExecutor !== executor)
+                CivsVillageSearchCapture(plugin.dataFolder.toPath(), plugin.pluginMeta.version, plugin.logger) else null)
         storage.residentFoods = residentFoods
         storage.forestryLeafCurrentCity = { cities[it] }
         storage.relocationCurrentCity = { cities[it] }

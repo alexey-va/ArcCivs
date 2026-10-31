@@ -55,6 +55,10 @@ class CivsVillagePlanningExecutorServiceTest : FunSpec({
     }
     fun storageExecutor(service: CivsService): Executor =
         CivsService::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(service) as Executor
+    fun villageCapture(service: CivsService): Any? {
+        val sites = CivsService::class.java.getDeclaredField("villageSites").apply { isAccessible = true }.get(service)
+        return CivsVillageSites::class.java.getDeclaredField("capture").apply { isAccessible = true }.get(sites)
+    }
     fun placementExecutor(service: CivsService): Executor {
         val placement = CivsService::class.java.getDeclaredField("autonomousPlacement").apply { isAccessible = true }.get(service)
         return CivsAutonomousPlacement::class.java.getDeclaredField("executor").apply { isAccessible = true }.get(placement) as Executor
@@ -64,6 +68,7 @@ class CivsVillagePlanningExecutorServiceTest : FunSpec({
         serviceScenario { h ->
             (villageExecutor(h.service) === storageExecutor(h.service)) shouldBe true
             (placementExecutor(h.service) === storageExecutor(h.service)) shouldBe true
+            villageCapture(h.service) shouldBe null
         }
     }
 
@@ -84,6 +89,7 @@ class CivsVillagePlanningExecutorServiceTest : FunSpec({
                 (placementExecutor(service) === planning) shouldBe true
                 (storageExecutor(service) === storage) shouldBe true
                 (villageExecutor(service) === storageExecutor(service)) shouldBe false
+                (villageCapture(service) is CivsVillageSearchCapture) shouldBe true
             } finally {
                 service.close()
                 tasks.close()

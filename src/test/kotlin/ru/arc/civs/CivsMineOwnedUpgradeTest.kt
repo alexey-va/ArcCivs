@@ -106,7 +106,7 @@ class CivsMineOwnedUpgradeTest : FunSpec({
                 f.state.copy(levels = listOf(unpaid)) to OWNED_MINE_FENCE,
                 f.state to OWNED_MINE_FENCE.replace("dark_oak", "spruce"),
                 f.state to OWNED_MINE_FENCE.replace("waterlogged=false", "waterlogged=true"),
-                f.state to "minecraft:smooth_basalt",
+                f.state to "minecraft:stone_bricks",
             )) {
                 f.block(point).blockData = Bukkit.createBlockData(data)
                 val city = f.city.copy(minePlans = mapOf(f.mine.id.toString() to state))
@@ -148,7 +148,7 @@ private class OwnedMineUpgradeFixture(val paper: MockBukkitTestRuntime, val worl
         val progress = plan.normalizedProgress(state.nextStep, plan.advanceSection(ordinal, state.sectionSteps.orEmpty()))
         val native = block(point)
         // Sample the same native drops as the unchanged mine planner; no replacement/refund item is invented.
-        val outputs = if (native.type == Material.SMOOTH_BASALT) emptyMap() else native.getDrops(ItemStack(Material.IRON_PICKAXE))
+        val outputs = if (native.type == Material.STONE_BRICKS) emptyMap() else native.getDrops(ItemStack(Material.IRON_PICKAXE))
             .groupBy { it.type.name }.mapValues { (_, stacks) -> stacks.sumOf { it.amount.toLong() } }
         val worker = city.workers.single()
         return CivWorldWork(worker.id, worker.completedCycles, mine.id,

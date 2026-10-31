@@ -189,7 +189,7 @@ internal open class CivsWorksiteServerFixture : ServerMock() {
             data == CAPTURED_MOSSY_COBBLESTONE_WALL_STATE -> Material.MOSSY_COBBLESTONE_WALL
             data in CAPTURED_GLASS_PANE_STATES -> Material.GLASS_PANE
             data in CAPTURED_IRON_BARS_STATES -> Material.IRON_BARS
-            data == CAPTURED_GLOW_LICHEN_STATE -> Material.GLOW_LICHEN
+            GLOW_LICHEN_STATE.matches(data) -> Material.GLOW_LICHEN
             timberState != null -> {
                 val timber = timberState.groupValues[1]
                 val part = when {
@@ -245,7 +245,8 @@ internal open class CivsWorksiteServerFixture : ServerMock() {
 
     private companion object {
         const val CAPTURED_MOSSY_COBBLESTONE_WALL_STATE = "minecraft:mossy_cobblestone_wall[east=none,north=none,south=none,up=true,waterlogged=false,west=none]"
-        const val CAPTURED_GLOW_LICHEN_STATE = "minecraft:glow_lichen[down=false,east=false,north=false,south=true,up=false,waterlogged=true,west=false]"
+        val GLOW_LICHEN_STATE = Regex("minecraft:glow_lichen\\[down=(true|false),east=(true|false),north=(true|false)," +
+            "south=(true|false),up=(true|false),waterlogged=(true|false),west=(true|false)]")
         val CAPTURED_GLASS_PANE_STATES = setOf(
             "minecraft:glass_pane[east=true,north=false,south=false,waterlogged=false,west=true]",
             "minecraft:glass_pane[east=false,north=true,south=true,waterlogged=false,west=false]",

@@ -26,7 +26,11 @@ internal class CitizenMineVisit(val key: CivMineVisitKey, val storageStanding: C
 internal class CivsMineVisits(private val runtime: CitizenRuntime, private val maximumAttempts: Int = 4_096,
     private val routesOwner: () -> CivsCitizenRoutes) {
     private val routes get() = routesOwner()
-    private val attempted = mutableMapOf<Pair<UUID, UUID>, CivMineVisitKey>()
+    private class Attempts(val building: CivBuilding, val proof: CivMinePlanState) {
+        val causes = hashSetOf<CivMineVisitCause>()
+        fun matches(key: CivMineVisitKey) = building == key.building && proof == key.proof
+    }
+    private val attempted = mutableMapOf<Pair<UUID, UUID>, Attempts>()
     private var targetChecks = 8
     internal val retainedAttempts: Int get() = attempted.size
 
@@ -121,7 +125,11 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
         val cause = CivsMineFallback.cause(work) ?: return null
         val key = CivMineVisitKey(city.id, worker.id, mine, proof(city, mine), cause)
         val identity = city.id to worker.id
-        return key.takeUnless { attempted[identity] == it || identity !in attempted && attempted.size >= maximumAttempts }
+        val previous = attempted[identity]
+        val current = previous?.takeIf { it.matches(key) }
+        // Diagnostic churn must not reopen old attempts; saturation keeps them closed until paid topology changes.
+        return key.takeUnless { current != null && (it.cause in current.causes || current.causes.size >= MAXIMUM_CAUSES) ||
+            previous == null && attempted.size >= maximumAttempts }
     }
 
     fun reconcile(actor: CitizenActor, city: Settlement) {
@@ -166,7 +174,10 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
                 runtime.statuses[worker.id] = if (actor.route?.motion?.failure != null) "route-unreachable" else "moving-to-storage"
                 return true
             }
-            attempted[city.id to worker.id] = key
+            val identity = city.id to worker.id
+            val history = attempted[identity]?.takeIf { it.matches(key) }
+                ?: Attempts(key.building, key.proof).also { attempted[identity] = it }
+            history.causes += key.cause
             val allowed = passage(mine, key.proof)
             val candidates = candidates(mine, key.proof).filter {
                 it.y <= work.standing.y - 2 && it.y <= actor.npc.location.y - 2 && allowed.completed(it.point())
@@ -270,6 +281,8 @@ internal class CivsMineVisits(private val runtime: CitizenRuntime, private val m
             "mining_step" to visit.key.proof.nextStep, "elapsed_ms" to (now - visit.startedAt).coerceAtLeast(0))
 
     companion object {
+        private const val MAXIMUM_CAUSES = 32
+
         private fun proof(city: Settlement, mine: CivBuilding): CivMinePlanState = city.minePlans?.get(mine.id.toString())
             ?.let(CivsMineProgress::detached) ?: CivMinePlanState(CivsMinePlan.VERSION, 0,
                 legacyStep = city.mineProgress?.get(mine.id.toString()))

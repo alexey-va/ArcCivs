@@ -1190,7 +1190,7 @@ internal class CivsMineWorksite(context: CivsWorksiteContext, approaches: CivsWo
     private fun position(block: Block) = CivPosition(block.x, block.y, block.z)
 
     companion object {
-        private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN)
+        private val WEEDS = setOf(Material.SHORT_GRASS, Material.TALL_GRASS, Material.FERN, Material.LARGE_FERN, Material.GLOW_LICHEN)
         private val UNBREAKABLE = setOf(Material.BEDROCK, Material.BARRIER, Material.END_PORTAL_FRAME, Material.END_PORTAL, Material.NETHER_PORTAL)
     }
 }

@@ -37,6 +37,59 @@ class CivsMineHistoricalLandingTest : FunSpec({
         }
     }
 
+    for ((material, outputs) in listOf(
+        Material.SMOOTH_BASALT to mapOf("SMOOTH_BASALT" to 1L),
+        Material.GLOW_LICHEN to emptyMap(),
+    )) test("native $material excavation preserves its exact cut and pickaxe item receipt") {
+        historicalLandingFixture { f ->
+            if (material == Material.GLOW_LICHEN) f.block(f.point).blockData = Bukkit.createBlockData(
+                "minecraft:glow_lichen[down=false,east=false,north=false,south=true,up=false,waterlogged=false,west=false]")
+            else f.block(f.point).type = material
+            val before = f.block(f.point).blockData.asString
+            val work = f.cut()
+            work.changes shouldBe listOf(CivPlanBlock(f.point, before, "minecraft:air"))
+            work.inputs shouldBe emptyMap()
+            work.outputs shouldBe outputs
+            work.durationMillis shouldBe 2_000L
+            f.runtime.validateMineReceiptNative(f.city, work)
+            f.block(f.point).blockData.asString shouldBe before
+            val worker = f.city.workers.single()
+            val after = CivsRules.finishWorldWork(f.city, work, 10_000)
+            after.workers.single().completedCycles shouldBe worker.completedCycles + 1
+            CivsEquipment.slots(after.workers.single()).take(CivsEquipment.BAG) shouldBe
+                CivsEquipment.slots(worker).take(CivsEquipment.BAG)
+            CivsEquipment.plainCount(after.workers.single(), "SMOOTH_BASALT") shouldBe
+                CivsEquipment.plainCount(worker, "SMOOTH_BASALT") + outputs.getOrDefault("SMOOTH_BASALT", 0L).toInt()
+            CivsEquipment.plainCount(after.workers.single(), "GLOW_LICHEN") shouldBe
+                CivsEquipment.plainCount(worker, "GLOW_LICHEN")
+            after.minePlans!!.getValue(f.mine.id.toString()).levels shouldBe f.state.levels
+            shouldThrow<CivsRejection> { CivsRules.finishWorldWork(after, work, 12_000) }
+            f.block(f.point).type = Material.AIR
+            f.runtime.validateMineReceiptNative(after, work)
+            CivsEquipment.plainCount(after.workers.single(), "SMOOTH_BASALT") shouldBe
+                CivsEquipment.plainCount(worker, "SMOOTH_BASALT") + outputs.getOrDefault("SMOOTH_BASALT", 0L).toInt()
+        }
+    }
+
+    test("smooth basalt provides real rock cover while glow lichen and unowned cobblestone do not") {
+        historicalLandingFixture { f ->
+            val roof = f.point.copy(y = 58)
+            f.block(roof).type = Material.SMOOTH_BASALT
+            f.runtime.validateMineReceiptNative(f.city, f.cut())
+            CivsMineSafety.natural(Material.SMOOTH_BASALT) shouldBe true
+            CivsMineSafety.natural(Material.GLOW_LICHEN) shouldBe false
+            CivsMineSafety.natural(Material.COBBLESTONE) shouldBe false
+            for (uncovered in listOf(Material.GLOW_LICHEN, Material.COBBLESTONE)) {
+                f.block(roof).type = uncovered
+                val city = f.city.copy(minePlans = mapOf(f.mine.id.toString() to f.state.copy(levels = null)))
+                shouldThrow<CivsRejection> { f.runtime.validateMineReceiptNative(city, f.cut()) }
+                    .reason shouldBe "mine-thin-cover"
+                f.block(f.point).type shouldBe Material.STONE
+                f.block(roof).type shouldBe uncovered
+            }
+        }
+    }
+
     test("unpaid and current-only floors cannot authorize a new landing below them") {
         historicalLandingFixture { f ->
             val witness = f.state.levels!!.single()
@@ -72,7 +125,7 @@ class CivsMineHistoricalLandingTest : FunSpec({
 
     test("a paid depth reference does not authorize a foreign target or revoke the current claim guard") {
         historicalLandingFixture { f ->
-            for (foreign in listOf(Material.STONE_BRICKS, Material.SMOOTH_BASALT)) {
+            for (foreign in listOf(Material.STONE_BRICKS, Material.COBBLESTONE)) {
                 f.block(f.point).type = foreign
                 shouldThrow<CivsRejection> { f.runtime.validateMineReceiptNative(f.city, f.cut()) }
                     .reason shouldBe "mine-foreign-block"
@@ -149,7 +202,11 @@ private class HistoricalLandingFixture(val paper: MockBukkitTestRuntime, val wor
         return CivWorldWork(worker.id, worker.completedCycles, mine.id,
             CivsWorksiteLayouts.point(mine, requireNotNull(plan.steps[ordinal].approach)),
             listOf(CivPlanBlock(point, native.blockData.asString, "minecraft:air")),
-            outputs = if (native.type == Material.STONE) mapOf("COBBLESTONE" to 1L) else emptyMap(),
+            outputs = when (native.type) {
+                Material.STONE -> mapOf("COBBLESTONE" to 1L)
+                Material.SMOOTH_BASALT -> mapOf("SMOOTH_BASALT" to 1L)
+                else -> emptyMap() // A pickaxe clears lichen without the shears-only item.
+            },
             status = "digging-mine", durationMillis = 2_000, focus = point, miningPlanVersion = 7,
             miningStep = progress.first, miningAccessStep = state.nextStep, miningSections = progress.second,
             miningAccessSections = state.sectionSteps, miningOrdinal = ordinal)

@@ -102,6 +102,86 @@ class CivsMineVisitTest : FunSpec({
         }
     }
 
+    test("alternating safety denials cannot repeat an already attempted visit or delay its fallback work") {
+        mineVisitFixture { h ->
+            val before = h.city
+            h.selectTarget()
+            val changed = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need.copy(reason = "mine-foreign-block", blockMaterial = "COBBLESTONE"))
+            h.manager.update(changed, h.city, h.worker, h.world, h.now) shouldBe true
+
+            val repeated = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need)
+            h.manager.update(repeated, h.city, h.worker, h.world, h.now) shouldBe false
+            repeated.mineVisit shouldBe null
+            repeated.cycle.start()
+            repeated.cycle.arrive(h.now)
+            for (elapsed in 1_000L..CivsMineFallback.DURATION_MILLIS step 1_000)
+                repeated.cycle.work(h.now + elapsed)
+            repeated.cycle.phase shouldBe CitizenPhase.READY
+            repeated.cycle.observedWorkMillis shouldBe CivsMineFallback.DURATION_MILLIS
+            h.city shouldBe before
+            h.worker.completedCycles shouldBe 0L
+            CivsMineFallback.matches(requireNotNull(repeated.plan.worldWork)) shouldBe true
+        }
+    }
+
+    test("changed paid proof resets all attempted safety causes for that worker") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val changed = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need.copy(reason = "mine-foreign-block", blockMaterial = "COBBLESTONE"))
+            h.manager.update(changed, h.city, h.worker, h.world, h.now) shouldBe true
+
+            val previous = h.city.minePlans!!.getValue(h.mine.id.toString())
+            h.city = h.city.copy(minePlans = mapOf(h.mine.id.toString() to previous.copy(nextStep = previous.nextStep + 1)))
+            val next = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need)
+            h.manager.update(next, h.city, h.worker, h.world, h.now) shouldBe true
+            val repeated = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            h.manager.update(repeated, h.city, h.worker, h.world, h.now) shouldBe false
+            h.manager.retainedAttempts shouldBe 1
+        }
+    }
+
+    test("changed building resets attempted safety causes without resetting its worker identity") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            val upgraded = h.mine.copy(level = 2, schematicId = h.mine.schematicId.dropLast(1) + "2")
+            h.city = h.city.copy(buildings = listOf(upgraded))
+            val next = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            h.manager.update(next, h.city, h.worker, h.world, h.now) shouldBe true
+            val repeated = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            h.manager.update(repeated, h.city, h.worker, h.world, h.now) shouldBe false
+            h.manager.retainedAttempts shouldBe 1
+        }
+    }
+
+    test("per-proof safety cause memory saturates without evicting old attempts and reopens on paid progress") {
+        mineVisitFixture { h ->
+            h.selectTarget()
+            // One initial cause plus31 distinct native denials fills the fixed32-cause bound.
+            for (index in 1..31) {
+                val next = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+                CivsMineFallback.withCause(h.work, h.need.copy(point = h.denied.copy(x = h.denied.x + index)))
+                h.manager.update(next, h.city, h.worker, h.world, h.now) shouldBe true
+            }
+            val saturated = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need.copy(point = h.denied.copy(x = h.denied.x + 32)))
+            h.manager.update(saturated, h.city, h.worker, h.world, h.now) shouldBe false
+            val repeated = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            CivsMineFallback.withCause(h.work, h.need)
+            h.manager.update(repeated, h.city, h.worker, h.world, h.now) shouldBe false
+            h.manager.retainedAttempts shouldBe 1
+
+            val previous = h.city.minePlans!!.getValue(h.mine.id.toString())
+            h.city = h.city.copy(minePlans = mapOf(h.mine.id.toString() to previous.copy(nextStep = previous.nextStep + 1)))
+            val afterProgress = CitizenActor(h.city.id, h.worker.id, h.world.uid, h.npc, h.actor.plan)
+            h.manager.update(afterProgress, h.city, h.worker, h.world, h.now) shouldBe true
+            h.manager.retainedAttempts shouldBe 1
+        }
+    }
+
     test("changed proof cancels stale native search and blocks an unpaid return without teleport or work") {
         mineVisitFixture { h ->
             val visit = h.selectTarget()

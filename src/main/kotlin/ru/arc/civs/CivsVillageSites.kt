@@ -189,6 +189,7 @@ internal class CivsVillageSites(
     private val nanoTime: () -> Long = System::nanoTime,
     private val clock: () -> Long = System::currentTimeMillis,
     private val chunksReady: (Settlement) -> Boolean = { true },
+    private val capture: CivsVillageSearchCapture? = null,
 ) : AutoCloseable {
     private data class Candidate(val point: CivPosition, val score: CivVillageTerrainScore)
     private data class LoadReply(val operation: UUID, val group: UUID, val key: PaperChunkKey,
@@ -463,13 +464,17 @@ internal class CivsVillageSites(
                     search.phase = "complete-layout-proof"
                     val templates = search.templates.getValue(ordinal)
                     val proof = blueprints.fortification(city.style).thenApplyAsync({ fortification ->
-                        val plan = CivsSettlementPlans.prepare(city, templates,
-                            CivsVillageSiteScoring.preparedSurface(surface, blueprint.building), CivAutonomousAccess(),
-                            fortification = fortification)
-                        if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
-                        val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
-                        if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
-                        plan to trees
+                        val preparedSurface = CivsVillageSiteScoring.preparedSurface(surface, blueprint.building)
+                        fun prepare(inspect: ((CivSettlementPlan, CivSettlementInfrastructure) -> Unit)? = null): Pair<CivSettlementPlan, Int> {
+                            val plan = CivsSettlementPlans.prepare(city, templates, preparedSurface, CivAutonomousAccess(),
+                                fortification = fortification, inspect = inspect)
+                            if (!CivsVillageSiteScoring.completeProfile(plan)) throw CivsRejection("autonomy-no-site")
+                            val trees = CivsVillageSiteScoring.usableTreeColumns(city, plan, surface)
+                            if (trees < 8) throw CivsRejection("village-no-trees", mapOf("usable-tree-columns" to trees.toString()))
+                            return plan to trees
+                        }
+                        capture?.prove(search.id, search.reference.id, city, preparedSurface, templates) { inspect -> prepare(inspect) }
+                            ?: prepare()
                     }, executor)
                     await(search, proof, failed = { error ->
                         val observed = CivsDiagnostics.rejection(error)
