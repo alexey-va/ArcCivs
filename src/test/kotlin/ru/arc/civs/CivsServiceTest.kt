@@ -7476,6 +7476,134 @@ private class RequestDialog(h: ServiceScenario, private val player: Player) : Au
     override fun close() { ui.close(); runtime.close() }
 }
 
+class CivsCraftCompletionFreshnessTest : FunSpec({
+    for (change in listOf("cycle", "items")) test("a funded accepted craft completes after only another worker changes $change") {
+        serviceScenario { h ->
+            val (workshop, carpenter) = prepareFundedCraft(h)
+            val receipts = mutableListOf<CivInventoryTransaction>()
+            val journal = CompletableFuture<CivInventoryTransaction>()
+            every { h.store.saveInventoryTransaction(any()) } answers { receipts += firstArg<CivInventoryTransaction>(); journal }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val job = h.craftJob(carpenter.id)
+            job.inputs shouldBe mapOf("OAK_LOG" to 1L)
+            job.material shouldBe "OAK_PLANKS"
+            job.amount shouldBe 4L
+            val captured = requireNotNull(h.service.city(h.player))
+            val supplies = CivsService::class.java.getDeclaredField("residentSupplies").also { it.isAccessible = true }
+                .get(h.service) as CivsResidentSupplies
+            supplies.craftObservationCurrent(captured) shouldBe true
+            val other = captured.workers.first { it.id != carpenter.id }
+            val changedOther = if (change == "cycle") other.copy(completedCycles = other.completedCycles + 1)
+                else CivsEquipment.collectSupplies(other, mapOf("BREAD" to 1L))
+            val current = captured.copy(workers = captured.workers.map { if (it.id == other.id) changedOther else it })
+            replaceCraftTestCity(h, current)
+            supplies.craftObservationCurrent(current) shouldBe false
+            h.service.craftPlan(current, carpenter) shouldBe job
+            CivsCarpentry.valid(current, carpenter, job) shouldBe true
+            CivsEquipment.inputsReady(carpenter, job.inputs, emptyMap()) shouldBe true
+            val barrel = craftTestBarrel(h, workshop)
+            barrel.isEmpty shouldBe true
+            val delivery = deliverCraftTest(h, current, carpenter, job.id)
+            h.tickUntil("accepted craft reaches its journal") { receipts.isNotEmpty() || delivery.isDone }
+            if (delivery.isDone) h.await(delivery)
+            receipts.size shouldBe 1
+            barrel.isEmpty shouldBe true
+            h.service.city(h.player) shouldBe current
+            journal.complete(receipts.single())
+            h.tickUntil("paid craft awaits city publication") { h.saves.size == 1 }
+            delivery.isDone shouldBe false
+            barrel.contents.filterNotNull() shouldBe listOf(ItemStack(Material.OAK_PLANKS, 4))
+            h.commit()
+            val completed = h.await(delivery)
+            val paid = completed.workers.first { it.id == carpenter.id }
+            paid.completedCycles shouldBe carpenter.completedCycles + 1
+            CivsEquipment.plainCount(paid, "OAK_LOG") shouldBe 0
+            CivsEquipment.plainCount(paid, "OAK_PLANKS") shouldBe 0
+            completed.workers.first { it.id == other.id } shouldBe changedOther
+            completed.stock shouldBe current.stock
+            verify(exactly = 1) {
+                h.citizens.requireSelectedWorkDelivery(current.id, carpenter.id,
+                    citizenPlan(current, carpenter)!!.token.copy(craftJobId = job.id), job)
+                h.citizens.requireStorageArrival(current.id, carpenter.id, workshop.id)
+                h.store.saveInventoryTransaction(any())
+            }
+            (shouldThrow<CompletionException> { h.await(deliverCraftTest(h, completed, carpenter, job.id)) }
+                .cause as CivsRejection).reason shouldBe "stale-delivery"
+            h.saves.size shouldBe 1
+            verify(exactly = 1) { h.store.saveInventoryTransaction(any()) }
+        }
+    }
+
+    for (guard in listOf("job", "cycle", "assignment", "missing-inputs", "output-full"))
+        test("craft completion preserves its $guard rejection without a receipt or free output") {
+            serviceScenario { h ->
+                val (workshop, carpenter) = prepareFundedCraft(h)
+                h.start()
+                val job = h.craftJob(carpenter.id)
+                var current = requireNotNull(h.service.city(h.player))
+                if (guard in setOf("assignment", "missing-inputs")) {
+                    current = current.copy(workers = current.workers.map { worker ->
+                        if (worker.id != carpenter.id) worker
+                        else if (guard == "assignment") worker.copy(assignment = current.buildings.first().id)
+                        else CivsEquipment.consumeInputs(worker, job.inputs)
+                    })
+                    replaceCraftTestCity(h, current)
+                }
+                val barrel = craftTestBarrel(h, workshop)
+                if (guard == "output-full") repeat(barrel.size) { barrel.setItem(it, ItemStack(Material.STONE, 64)) }
+                val slots = barrel.contents.map { it?.clone() }
+                val rejected = deliverCraftTest(h, current, carpenter, if (guard == "job") UUID.randomUUID() else job.id,
+                    cycle = carpenter.completedCycles + if (guard == "cycle") 1 else 0)
+                val reason = (shouldThrow<CompletionException> { h.await(rejected) }.cause as CivsRejection).reason
+                reason shouldBe when (guard) {
+                    "missing-inputs" -> "materials-missing"
+                    "output-full" -> "storage-full"
+                    else -> "stale-delivery"
+                }
+                h.service.city(h.player) shouldBe current
+                barrel.contents.toList() shouldBe slots
+                current.workers.first { it.id == carpenter.id }.completedCycles shouldBe carpenter.completedCycles
+                CivsEquipment.plainCount(current.workers.first { it.id == carpenter.id }, "OAK_PLANKS") shouldBe 0
+                h.saves shouldBe emptyList()
+                verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+            }
+        }
+})
+
+private fun prepareFundedCraft(h: ServiceScenario): Pair<CivBuilding, CivWorker> {
+    val (workshop, carpenter) = h.prepareCarpentry()
+    val base = h.store.load().join().single()
+    val funded = CivsEquipment.collectSupplies(carpenter, mapOf("OAK_LOG" to 1L))
+    val ready = CivsRules.validate(base.copy(inventory = CivInventory(CivStorageMode.PHYSICAL),
+        buildings = base.buildings.map { if (it.type == BuildingType.TOWN_HALL) it.copy(control = CivPosition(0, 63, 0)) else it },
+        workers = base.workers.map { if (it.id == carpenter.id) funded else it }))
+    h.world.loadChunk(1, 0)
+    ready.buildings.forEach { building -> requireNotNull(building.control).let { h.world.getBlockAt(it.x, it.y, it.z).type = Material.BARREL } }
+    every { h.store.load() } returns CompletableFuture.completedFuture(listOf(ready))
+    return workshop to funded
+}
+
+private fun replaceCraftTestCity(h: ServiceScenario, city: Settlement) {
+    @Suppress("UNCHECKED_CAST")
+    val cities = CivsService::class.java.getDeclaredField("cities").also { it.isAccessible = true }
+        .get(h.service) as MutableMap<UUID, Settlement>
+    cities[city.id] = city
+}
+
+private fun craftTestBarrel(h: ServiceScenario, building: CivBuilding): org.bukkit.inventory.Inventory =
+    requireNotNull(building.control).let { (h.world.getBlockAt(it.x, it.y, it.z).state as org.bukkit.block.Barrel).inventory }
+
+private fun deliverCraftTest(h: ServiceScenario, city: Settlement, worker: CivWorker, jobId: UUID,
+    cycle: Long = worker.completedCycles): CompletableFuture<Settlement> =
+    CivsResidentSupplies::class.java.getDeclaredMethod("deliverCraft", UUID::class.java, UUID::class.java,
+        UUID::class.java, java.lang.Long.TYPE, java.lang.Long.TYPE, UUID::class.java, java.lang.Long.TYPE).let {
+        it.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        it.invokeService(h.service, city.id, worker.id, requireNotNull(worker.assignment), cycle,
+            worker.nextDeliveryAt, jobId, h.time) as CompletableFuture<Settlement>
+    }
+
 private fun serviceScenario(empty: Boolean = false, maximumCities: Int = 500, worldName: String = "vanilla",
     allowedWorlds: Set<String> = setOf("vanilla"), storageFactory: ((org.bukkit.plugin.Plugin) -> CivsStorage)? = null,
     nativeGeometry: Boolean = false,

@@ -103,7 +103,7 @@ internal class CivsResidentSupplies(
             var completed: Settlement? = null
             authority.inventoryMutation(cityId, { current ->
                 val worker = current.workers.firstOrNull { it.id == workerId } ?: throw CivsRejection("worker-not-found")
-                val job = requireCraftJob(current, worker, jobId)
+                val job = craftPlan(current, worker)?.takeIf { it.id == jobId } ?: throw CivsRejection("stale-delivery")
                 rejectIf(job.buildingId != assignment || job.cycle != cycle, "stale-delivery")
                 val selected = citizenPlan(current, worker) ?: throw CivsRejection("stale-delivery")
                 citizens.requireSelectedWorkDelivery(cityId, workerId, selected.token.copy(craftJobId = job.id), job)
