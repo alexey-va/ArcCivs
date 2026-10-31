@@ -643,6 +643,112 @@ class CivsForestryLeafLootServiceTest : FunSpec({
 
 
 
+class CivsBuilderBufferReserveServiceTest : FunSpec({
+    for (condition in listOf("surplus", "reserved", "partial-reserve", "destination-room", "bag-room", "short-stack-grown"))
+    test("ordinary hut recovery rechecks its whole slot proof with $condition") {
+        val nativeFence = CompletableFuture<Unit>()
+        val persisted = mutableListOf<CivInventoryTransaction>()
+        serviceScenario(nativeGeometry = true, storageFactory = { plugin ->
+            CivsStorage(plugin) { emptyArray() }.also { storage ->
+                // The native adapter's version contract is tested separately; hold its real receipt ACK here.
+                storage.persistCollectedNative = { tx, before ->
+                    before shouldBe false
+                    requireNotNull(tx.cargoDropoff)
+                    persisted += tx
+                    nativeFence
+                }
+            }
+        }) { h ->
+            val hut = h.city.buildings.last().copy(type = BuildingType.BUILDER_HUT, control = CivPosition(10, 64, 0),
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.BUILDER_HUT, 1))
+            val warehouse = hut.copy(id = UUID.randomUUID(), type = BuildingType.WAREHOUSE,
+                anchor = CivPosition(20, 64, 0), entrance = CivPosition(20, 64, -2), control = CivPosition(20, 64, 0),
+                bounds = CivBox(CivPosition(18, 63, -2), CivPosition(22, 68, 2)),
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.WAREHOUSE, 1))
+            val target = hut.copy(id = UUID.randomUUID(), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                anchor = CivPosition(30, 64, 0), entrance = CivPosition(30, 64, -2), control = CivPosition(30, 64, 0),
+                bounds = CivBox(CivPosition(28, 63, -2), CivPosition(32, 68, 2)),
+                schematicId = CivsBlueprints.schematicId("nordic", BuildingType.HOUSE, 1))
+            val courier = h.city.workers.first().copy(assignment = warehouse.id, nextDeliveryAt = 1,
+                items = if (condition == "bag-room") List(CivsEquipment.SLOTS) {
+                    when { it < CivsEquipment.BAG -> null; it == CivsEquipment.BAG -> CivResidentItem("DIRT", 1)
+                        else -> CivResidentItem("STONE", 64) }
+                } else null)
+            val builder = h.city.workers[1].copy(assignment = hut.id, nextDeliveryAt = 1)
+            val reserve = if (condition in setOf("reserved", "partial-reserve")) "DIRT" else "COBBLESTONE"
+            val order = CivConstruction(UUID.randomUUID(), target.id, 1, 2, 0, ConstructionPhase.PAUSED, Stock(),
+                failure = "placement-cancelled", plannedBuilding = target, batches = CivConstructionBatches(2, 16),
+                materials = mapOf(reserve to if (condition == "partial-reserve") 1L else 64L, "DARK_OAK_FENCE_GATE" to 1L),
+                payment = CivConstructionPayment(awaiting = mapOf("DARK_OAK_FENCE_GATE" to 1L)))
+            val city = CivsRules.validate(h.city.copy(buildings = listOf(h.city.buildings.first(), hut, warehouse, target),
+                workers = listOf(courier, builder), stock = Stock(), inventory = CivInventory(CivStorageMode.PHYSICAL),
+                construction = order))
+            h.world.loadChunk(1, 0)
+            for (x in listOf(10, 20)) h.world.getBlockAt(x, 64, 0).type = Material.BARREL
+            val source = (h.world.getBlockAt(10, 64, 0).state as org.bukkit.block.Barrel).inventory
+            val destination = (h.world.getBlockAt(20, 64, 0).state as org.bukkit.block.Barrel).inventory
+            repeat(source.size) { source.setItem(it, ItemStack(Material.STONE, 64)) }
+            source.setItem(0, ItemStack(Material.DIRT, if (condition == "short-stack-grown") 32 else 64))
+            source.setItem(1, ItemStack(Material.COBBLESTONE, 64))
+            source.setItem(2, ItemStack(Material.DIRT, 64).apply {
+                editMeta { it.displayName(Component.text("Exact native builder keepsake")) }
+            })
+            if (condition == "destination-room") {
+                repeat(destination.size) { destination.setItem(it, ItemStack(Material.STONE, 64)) }
+                destination.setItem(0, ItemStack(Material.DIRT, 1))
+            }
+            val beforeSlots = source.contents.map { it?.clone() }
+            val destinationSlots = destination.contents.map { it?.clone() }
+            every { h.store.load() } returns CompletableFuture.completedFuture(listOf(city))
+            every { h.store.save(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.saveInventoryTransaction(any()) } answers { CompletableFuture.completedFuture(firstArg()) }
+            every { h.store.deleteInventoryTransaction(any()) } returns CompletableFuture.completedFuture(true)
+            h.start()
+            val dispatcher = CivsService::class.java.getDeclaredField("supply").also { it.isAccessible = true }
+                .get(h.service) as CivsSupplyDispatcher
+            // Accepted before the current order: a fresh native pickup must reserve its latest full bill.
+            val cargo = CivCargo(CivsLogistics.shipmentId(city.id, courier.id, courier.completedCycles, hut.id, warehouse.id, "DIRT"),
+                warehouse.id, hut.id, warehouse.id, hut.entrance, "DIRT", if (condition == "short-stack-grown") 16L else 64L)
+            val accepted = CivCourierPlan(cargo, warehouse.id, warehouse.entrance, false)
+            mockkObject(dispatcher)
+            try {
+                every { dispatcher.plan(city.id, courier.id) } returns accepted
+                if (condition != "surplus") {
+                    val rejected = shouldThrow<CompletionException> { h.await(h.service.pickupCargo(city.id, courier.id, cargo)) }
+                    CivsDiagnostics.rejection(rejected)?.reason shouldBe "stale-delivery"
+                    source.contents.toList() shouldBe beforeSlots
+                    destination.contents.toList() shouldBe destinationSlots
+                    h.service.settlements().single() shouldBe city
+                    persisted shouldBe emptyList()
+                    verify(exactly = 0) { h.store.saveInventoryTransaction(any()) }
+                } else {
+                    val picked = h.await(h.service.pickupCargo(city.id, courier.id, cargo))
+                    source.getItem(0) shouldBe null
+                    source.contents.drop(1) shouldBe beforeSlots.drop(1)
+                    val carried = requireNotNull(picked.workers.first { it.id == courier.id }.cargo)
+                    carried.amount shouldBe 64L
+                    carried.inventoryBacked shouldBe true
+                    persisted shouldBe emptyList()
+                    val unloading = h.service.dropoffCargo(city.id, courier.id, carried, warehouse.id)
+                    h.tickUntil("native cargo credit awaiting its persistence ACK") { persisted.isNotEmpty() }
+                    persisted.size shouldBe 1
+                    unloading.isDone shouldBe false
+                    h.service.settlements().single() shouldBe picked
+                    destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
+                    source.contents.drop(1) shouldBe beforeSlots.drop(1)
+                    nativeFence.complete(Unit)
+                    val saved = h.await(unloading)
+                    destination.contents.filterNotNull() shouldBe listOf(ItemStack(Material.DIRT, 64))
+                    saved.workers.first { it.id == courier.id }.cargo shouldBe null
+                    saved.construction shouldBe order
+                    source.contents.drop(1) shouldBe beforeSlots.drop(1)
+                    verify(exactly = 2) { h.store.saveInventoryTransaction(any()) }
+                }
+            } finally { unmockkObject(dispatcher) }
+        }
+    }
+})
+
 class CivsLostToolReceiptServiceTest : FunSpec({
     test("a lost local tool invalidates the rejected pickup without advancing its worker or mine") {
         serviceScenario(nativeGeometry = true) { h ->

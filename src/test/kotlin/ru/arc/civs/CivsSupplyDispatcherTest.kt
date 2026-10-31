@@ -2,6 +2,8 @@ package ru.arc.civs
 
 import io.kotest.core.spec.style.FunSpec
 import io.kotest.matchers.shouldBe
+import io.mockk.every
+import io.mockk.mockk
 import ru.arc.core.BoundedAsyncExecutor
 import ru.arc.core.BudgetedTaskQueue
 import ru.arc.core.BukkitTaskScheduler
@@ -697,6 +699,139 @@ class CivsReadyWorkToolPriorityTest : FunSpec({
     }
 })
 
+class CivsBuilderBufferRecoveryTest : FunSpec({
+    test("a full construction buffer exports one whole surplus stack before admitting its missing gate") {
+        val input = builderBufferRecoveryFixture()
+        val hut = input.stores.getValue(SUPPLY_TARGET)
+        val warehouse = input.stores.getValue(SUPPLY_WAREHOUSE)
+        val plan = allocateCivSupplies(input).plans.values.single()
+        plan.cargo.sourceBuildingId shouldBe hut.id
+        plan.cargo.material shouldBe "DIRT"
+        plan.cargo.amount shouldBe 64L
+        plan.destinationBuildingId shouldBe warehouse.id
+        plan.cargo.redistribution shouldBe false
+        plan.cargo.sourceWorkerId shouldBe null
+        hut.stock shouldBe mapOf("DIRT" to 64L, "COBBLESTONE" to 128L)
+        hut.desiredStock shouldBe mapOf("COBBLESTONE" to 128L)
+
+        // Capture after the ordinary pickup/unload: the same items now leave one hut slot free.
+        val reopened = input.copy(stores = input.stores + mapOf(hut.id to hut.copy(stock = hut.stock - "DIRT",
+            capacity = CivSupplyCapacity(1, emptyMap())), warehouse.id to warehouse.copy(stock = warehouse.stock + ("DIRT" to 64L))),
+            couriers = input.couriers.map { it.copy(cycle = it.cycle + 1) })
+        for (material in listOf("DIRT", "COBBLESTONE", "DARK_OAK_FENCE_GATE", "BREAD"))
+            reopened.stores.values.sumOf { it.stock[material] ?: 0L } shouldBe input.stores.values.sumOf { it.stock[material] ?: 0L }
+        allocateCivSupplies(reopened).plans.values.single().let {
+            it.cargo.sourceBuildingId shouldBe warehouse.id
+            it.cargo.material shouldBe "DARK_OAK_FENCE_GATE"
+            it.cargo.amount shouldBe 6L
+            it.destinationBuildingId shouldBe hut.id
+        }
+    }
+
+    for (condition in listOf("not-full", "inputs-fit", "no-construction", "already-in-transit", "not-hut", "virtual", "no-order"))
+    test("service storage is not drained when $condition") {
+        val original = builderBufferRecoveryFixture()
+        val hut = original.stores.getValue(SUPPLY_TARGET)
+        val input = when (condition) {
+            "not-full" -> original.copy(stores = original.stores + (hut.id to hut.copy(capacity = CivSupplyCapacity(1, emptyMap()))))
+            "inputs-fit" -> original.copy(stores = original.stores + (hut.id to hut.copy(capacity = CivSupplyCapacity(0,
+                mapOf("DARK_OAK_FENCE_GATE" to 6L, "STONE_BRICKS" to 6L)))))
+            "no-construction" -> original.copy(requests = original.requests.filterNot { it.construction })
+            "already-in-transit" -> original.copy(requests = original.requests.map { if (it.construction) it.copy(inTransit = it.needed) else it })
+            "not-hut" -> original.copy(stores = original.stores + (hut.id to hut.copy(type = BuildingType.TOWN_HALL)))
+            "virtual" -> original.copy(stores = original.stores + (hut.id to hut.copy(capacity = CivSupplyCapacity(0, emptyMap(), 0))))
+            else -> original.copy(constructionId = null)
+        }
+        allocateCivSupplies(input).plans.values.none { it.cargo.sourceBuildingId == hut.id } shouldBe true
+    }
+
+    for (condition in listOf("all-reserved", "partial-surplus", "short-bag", "full-depot", "partial-depot"))
+    test("buffer recovery waits intact when $condition cannot free a complete source slot") {
+        val original = builderBufferRecoveryFixture()
+        val hut = original.stores.getValue(SUPPLY_TARGET)
+        val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE)
+        val input = when (condition) {
+            "all-reserved" -> original.copy(stores = original.stores + (hut.id to hut.copy(desiredStock = hut.stock)))
+            "partial-surplus" -> original.copy(stores = original.stores + (hut.id to hut.copy(
+                desiredStock = hut.desiredStock + ("DIRT" to 1L))))
+            "short-bag" -> original.copy(couriers = original.couriers.map { it.copy(bagRoom = it.bagRoom + ("DIRT" to 63L)) })
+            "full-depot" -> original.copy(stores = original.stores + (warehouse.id to warehouse.copy(capacity = CivSupplyCapacity(0, emptyMap()))))
+            else -> original.copy(stores = original.stores + (warehouse.id to warehouse.copy(capacity = CivSupplyCapacity(0, mapOf("DIRT" to 63L)))))
+        }
+        allocateCivSupplies(input).plans.values.none { it.cargo.sourceBuildingId == hut.id } shouldBe true
+        input.stores.getValue(hut.id).stock shouldBe hut.stock
+    }
+
+    test("all of a short plain material may leave while other construction reserves remain") {
+        val original = builderBufferRecoveryFixture()
+        val hut = original.stores.getValue(SUPPLY_TARGET).copy(stock = mapOf("DIRT" to 31L, "COBBLESTONE" to 128L))
+        val input = original.copy(stores = original.stores + (hut.id to hut))
+        allocateCivSupplies(input).plans.values.single().let {
+            it.cargo.sourceBuildingId shouldBe hut.id
+            it.cargo.material shouldBe "DIRT"
+            it.cargo.amount shouldBe 31L
+        }
+    }
+
+    test("one full hut admits only one recovery while another courier can continue normal work") {
+        val original = builderBufferRecoveryFixture()
+        val hut = original.stores.getValue(SUPPLY_TARGET).copy(stock = mapOf("DIRT" to 128L, "COBBLESTONE" to 128L))
+        val input = original.copy(stores = original.stores + (hut.id to hut), couriers = original.couriers +
+            original.couriers.single().copy(workerId = SUPPLY_SECOND))
+        val plans = allocateCivSupplies(input).plans.values
+        plans.filter { it.cargo.sourceBuildingId == hut.id }.single().cargo.amount shouldBe 64L
+        plans.single { it.cargo.sourceBuildingId != hut.id }.cargo.material shouldBe "BREAD"
+    }
+})
+
+class CivsBuilderBufferReservePlanningTest : FunSpec({
+    for (bill in listOf("remaining", "awaiting", "unknown"))
+    test("captured hut reserve uses $bill bill without adding ordinary construction requests") {
+        MockBukkitTestRuntime.open().use {
+            val base = settlementPlanCity()
+            val hut = base.buildings.first().copy(id = SUPPLY_TARGET, type = BuildingType.BUILDER_HUT, level = 1,
+                anchor = CivPosition(10, 64, 0), control = CivPosition(10, 64, 0), entrance = CivPosition(10, 65, -2),
+                bounds = CivBox(CivPosition(8, 64, -2), CivPosition(12, 68, 2)))
+            val warehouse = hut.copy(id = SUPPLY_WAREHOUSE, type = BuildingType.WAREHOUSE,
+                anchor = CivPosition(20, 64, 0), control = CivPosition(20, 64, 0), entrance = CivPosition(20, 65, -2),
+                bounds = CivBox(CivPosition(18, 64, -2), CivPosition(22, 68, 2)))
+            val target = hut.copy(id = UUID(0, 710), type = BuildingType.HOUSE, phase = BuildingPhase.CONSTRUCTING,
+                anchor = CivPosition(30, 64, 0), control = CivPosition(30, 64, 0), entrance = CivPosition(30, 65, -2),
+                bounds = CivBox(CivPosition(28, 64, -2), CivPosition(32, 68, 2)))
+            val remaining = mapOf("DIRT" to 64L, "COBBLESTONE" to 64L, "DARK_OAK_FENCE_GATE" to 6L, "WATER_BUCKET" to 1L)
+            val awaiting = if (bill == "awaiting") mapOf("DIRT" to 32L) else null
+            val order = CivConstruction(UUID(0, 711), target.id, 1, 2, 0, ConstructionPhase.WAITING_MATERIALS, Stock(),
+                plannedBuilding = target, batches = CivConstructionBatches(2, 16),
+                materials = remaining.takeIf { bill == "remaining" }, payment = CivConstructionPayment(awaiting = awaiting))
+            val builder = CivWorker(UUID(0, 712), "Builder", hut.id, items = List(CivsEquipment.SLOTS) {
+                if (it == CivsEquipment.BAG) CivResidentItem("DIRT", 16) else null })
+            // Sparse/unknown historical bill cases intentionally exercise this pure capture guard before snapshot validation.
+            val city = base.copy(buildings = base.buildings + listOf(hut, warehouse, target), workers = listOf(builder),
+                inventory = CivInventory(CivStorageMode.PHYSICAL), construction = order)
+            val stock = mapOf("DIRT" to 64L, "COBBLESTONE" to 64L)
+            fun captured(building: CivBuilding, items: Map<String, Long>) = CivSupplyCapturedStore(items,
+                CivSupplyCapacity(if (building.id == hut.id) 0 else 191, emptyMap()),
+                CivSupplyStorageKey(city.id, city.worldId, city.owner, CivStorageMode.PHYSICAL, building.id,
+                    building.type, building.phase, building.level, building.bounds, building.control,
+                    mapOf(requireNotNull(building.control) to "BARREL"), emptyMap(), 0))
+            val capture = mockk<CivsSupplyCapture>()
+            every { capture.step() } returns true
+            every { capture.result } returns CivSupplyCaptureResult(city.id,
+                mapOf(hut.id to captured(hut, stock), warehouse.id to captured(warehouse, emptyMap())))
+            val planning = CivsSupplyPlanning(city, capture, emptyMap(), { null }, { false })
+            var result: CivSupplySnapshot? = null
+            repeat(4) { if (result == null) result = planning.step() }
+            val snapshot = requireNotNull(result)
+            snapshot.stores.getValue(hut.id).desiredStock shouldBe when (bill) {
+                "remaining" -> mapOf("DIRT" to 48L, "COBBLESTONE" to 64L, "DARK_OAK_FENCE_GATE" to 6L)
+                "awaiting" -> mapOf("DIRT" to 16L)
+                else -> stock
+            }
+            snapshot.requests.none { it.buildingId == hut.id && !it.construction } shouldBe true
+        }
+    }
+})
+
 private val SUPPLY_CITY = UUID(0, 1)
 private val SUPPLY_WAREHOUSE = UUID(0, 10)
 private val SUPPLY_TARGET = UUID(0, 20)
@@ -705,6 +840,23 @@ private val SUPPLY_TAVERN = UUID(0, 40)
 private val SUPPLY_BLACKSMITH = UUID(0, 50)
 private val SUPPLY_COURIER = UUID(0, 100)
 private val SUPPLY_SECOND = UUID(0, 101)
+
+private fun builderBufferRecoveryFixture(): CivSupplySnapshot {
+    val original = constructionCollectionFixture()
+    val warehouse = original.stores.getValue(SUPPLY_WAREHOUSE).copy(
+        stock = mapOf("DARK_OAK_FENCE_GATE" to 6L, "BREAD" to 4L), capacity = CivSupplyCapacity(191, emptyMap()))
+    val hut = original.stores.getValue(SUPPLY_TARGET).copy(stock = mapOf("DIRT" to 64L, "COBBLESTONE" to 128L),
+        // Captured shared current-order reserve; the other full slots may hold custom items, never plain surplus.
+        desiredStock = mapOf("COBBLESTONE" to 128L), capacity = CivSupplyCapacity(0, emptyMap()))
+    return original.copy(stores = mapOf(warehouse.id to warehouse, hut.id to hut,
+        SUPPLY_TAVERN to original.stores.getValue(SUPPLY_TAVERN)),
+        requests = listOf(CivSupplyRequest(hut.id, "DARK_OAK_FENCE_GATE", 6, 0, true),
+            CivSupplyRequest(hut.id, "STONE_BRICKS", 6, 0, true), CivSupplyRequest(SUPPLY_TAVERN, "BREAD", 4, 0)),
+        couriers = original.couriers.map { it.copy(bagRoom = mapOf("DIRT" to 64L, "COBBLESTONE" to 64L,
+            "DARK_OAK_FENCE_GATE" to 64L, "STONE_BRICKS" to 64L, "BREAD" to 64L)) },
+        stackSizes = mapOf("DIRT" to 64, "COBBLESTONE" to 64, "DARK_OAK_FENCE_GATE" to 64, "STONE_BRICKS" to 64, "BREAD" to 64),
+        constructionId = UUID(0, 700))
+}
 
 private fun readyToolPriorityFixture(): CivSupplySnapshot {
     val original = constructionCollectionFixture()

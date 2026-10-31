@@ -22,6 +22,7 @@ internal class CivsSupplyPlanning(
     private val position: (UUID) -> CivPosition?,
     private val unavailable: (UUID) -> Boolean,
     private val crafts: Map<UUID, CivCraftJob> = emptyMap(),
+    private val constructionNeed: Map<String, Long>? = null,
 ) {
     private var stores: Map<UUID, CivSupplyStore>? = null
     private var requests = emptyList<CivSupplyRequest>()
@@ -35,8 +36,13 @@ internal class CivsSupplyPlanning(
             if (!capture.step()) return null
             stores = requireNotNull(capture.result).stores.mapNotNull { (id, observed) ->
                 val building = city.building(id)?.takeIf { it.control != null } ?: return@mapNotNull null
+                val reserved = CivsLogistics.desiredStock(city, building).toMutableMap()
+                // Unknown paid bills protect every observed plain item rather than authorizing surplus.
+                (CivsLogistics.constructionBufferReserve(city, id, constructionNeed) ?: observed.stock).forEach { (material, count) ->
+                    reserved.merge(material, count, Math::max)
+                }
                 id to CivSupplyStore(id, building.entrance, requireNotNull(building.control), observed.stock,
-                    CivsLogistics.desiredStock(city, building),
+                    reserved.toMap(),
                     CivsProduction.material(building).takeIf { building.phase == BuildingPhase.ACTIVE && !CivsRules.isBuilder(city, building) },
                     observed.capacity, building.type,
                     redistributionDepot = city.autonomy?.paused == false && city.inventory?.mode == CivStorageMode.PHYSICAL &&

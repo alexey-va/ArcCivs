@@ -475,6 +475,20 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
     val served = hashSetOf<CivSupplyTask>()
     val assigned = linkedMapOf<UUID, CivCourierPlan>()
     val rejectedRetained = hashSetOf<UUID>()
+    fun constructionBufferAmount(source: CivSupplyStore, warehouse: CivSupplyStore, material: String): Long {
+        if (snapshot.autonomousStock || snapshot.constructionId == null || source.type != BuildingType.BUILDER_HUT ||
+            source.capacity.virtualRoom != null || source.capacity.emptySlots != 0 ||
+            assigned.values.any { it.cargo.sourceBuildingId == source.id } ||
+            demand.none { (key, count) -> key.construction && count > 0 &&
+                (snapshot.constructionTargets[warehouse.id] ?: key.target) == source.id &&
+                roomFor(source.id, key.material, required = true) == 0L }) return 0
+        val stack = snapshot.stackSizes[material]?.takeIf { it in 1..64 } ?: return 0
+        val available = stock[source.id]?.get(material) ?: 0L
+        val free = (available - (source.desiredStock[material] ?: 0L)).coerceAtLeast(0)
+        val count = minOf(free, stack.toLong())
+        // Removing a whole stack, or all of a short material, proves at least one native slot will open.
+        return count.takeIf { it >= stack || it == available } ?: 0L
+    }
     var checks = 0
     fun checkBudget() {
         if (cancelled.get()) throw CancellationException("Supply calculation retired")
@@ -543,6 +557,9 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         val cargo = plan.cargo
         val key = if (cargo.redistribution) CivSupplyTask(cargo.sourceBuildingId, null, plan.destinationBuildingId, cargo.material, false)
             else if (cargo.sourceBuildingId == cargo.warehouseId) deliveryTask(plan) else null
+        val source = stores[cargo.sourceBuildingId]
+        if (source?.type == BuildingType.BUILDER_HUT && cargo.sourceBuildingId != cargo.warehouseId &&
+            constructionBufferAmount(source, stores[cargo.warehouseId] ?: continue, cargo.material) != cargo.amount) continue
         if (courier.warehouseId != cargo.warehouseId || cargo.amount !in 1..CivsLogistics.MAX_CARGO ||
             cargo.id != CivsLogistics.shipmentId(snapshot.cityId, worker, courier.cycle, cargo.sourceBuildingId,
                 cargo.targetBuildingId, cargo.material, cargo.sourceWorkerId) ||
@@ -578,7 +595,7 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
         val warehouse = stores[key.target] ?: continue
         val producer = key.worker?.let(sources::get)
         val available = if (key.worker == null) {
-            if (source.outputMaterial == null) continue
+            if (source.outputMaterial == null && constructionBufferAmount(source, warehouse, key.material) <= 0) continue
             ((stock[source.id]?.get(key.material) ?: 0L) - (source.desiredStock[key.material] ?: 0L)).coerceAtLeast(0)
         } else if (producer?.buildingId == source.id) excess[key.worker]?.get(key.material) ?: 0L else 0L
         if (available > 0 && source.id != warehouse.id &&
@@ -615,7 +632,15 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
             offer(warehouse, target, key.material, minOf(needed, stock[warehouse.id]?.get(key.material) ?: 0), key)
         }
         for (source in stores.values) {
-            if (source.outputMaterial == null) continue
+            if (source.outputMaterial == null) {
+                if (source.type != BuildingType.BUILDER_HUT) continue
+                for (material in stock[source.id].orEmpty().keys) {
+                    val count = constructionBufferAmount(source, warehouse, material)
+                    if (count > 0 && (courier.bagRoom[material] ?: 0L) >= count && roomFor(warehouse.id, material) >= count)
+                        offer(source, warehouse, material, count, CivSupplyTask(source.id, null, warehouse.id, material, false))
+                }
+                continue
+            }
             // A workshop retains its inputs; every other plain excess can leave,
             // including incidental dirt/stone rather than only its advertised output.
             for ((material, available) in stock[source.id].orEmpty()) {
@@ -664,9 +689,12 @@ internal fun allocateCivSupplies(snapshot: CivSupplySnapshot, ages: Map<CivSuppl
                 (candidate.plan.destinationBuildingId to cargo.material) in missingWorkTools
             else candidate.plan.destinationBuildingId == cargo.warehouseId && missingWorkTools.any { it.second == cargo.material }
         }
+        fun constructionBufferRecovery(candidate: Candidate): Boolean = candidate.key.source?.let(stores::get)?.type ==
+            BuildingType.BUILDER_HUT && candidate.plan.cargo.sourceBuildingId != candidate.plan.cargo.warehouseId
         // Saturated producers share ordinary request age, so neither recovery nor meals can monopolise the courier.
         val selected = candidates.minWithOrNull(compareBy<Candidate> {
-            if (missingWorkTool(it)) -1 else if (it.plan.cargo.redistribution) 3 else if (it.key.construction) 0
+            if (missingWorkTool(it)) -1 else if (it.plan.cargo.redistribution) 3
+            else if (it.key.construction || constructionBufferRecovery(it)) 0
             else if (capacityRecovery(it) || it.key.source == null) 1 else 2
         }.thenBy { if (it.key.construction && it.key.source != null) 1 else 0 }
             .thenBy { ages[it.key] ?: now }.thenBy { if (capacityRecovery(it)) 0 else 1 }

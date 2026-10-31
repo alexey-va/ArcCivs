@@ -118,7 +118,8 @@ internal class CivsCargoRequests(
             }
         }
         val capture = CivsSupplyPlanning(city, storage.startSupplyCapture(city), retained,
-            { citizens.courierPosition(cityId, it) }, { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId))
+            { citizens.courierPosition(cityId, it) }, { citizens.courierUnavailable(cityId, it) }, supply.craftJobs(cityId),
+            construction.supplyNeed(city)?.toMap())
         return {
             if (!authority.ready() || cityId in records.unhealthy) throw CivsRejection("storage-unavailable")
             if (cityId in records.busy) throw CivsRejection("city-busy")
@@ -183,12 +184,17 @@ internal class CivsCargoRequests(
                     }
                 }
                 rejectIf(accepted.sourceWorkerId != null, "stale-delivery")
+                val sourceCount = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
                 val available = run {
-                    val count = storage.buildingAvailable(city, accepted.sourceBuildingId)[accepted.material] ?: 0L
-                    val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else
-                        (city.building(accepted.sourceBuildingId)?.let { CivsLogistics.desiredStock(city, it)[accepted.material] } ?: 0L) +
+                    val reserve = if (accepted.sourceBuildingId == accepted.warehouseId) 0L else {
+                        val constructionReserve = CivsLogistics.constructionBufferReserve(city, accepted.sourceBuildingId,
+                            construction.supplyNeed(city)) ?: throw CivsRejection("stale-delivery")
+                        maxOf(city.building(accepted.sourceBuildingId)?.let {
+                            CivsLogistics.desiredStock(city, it)[accepted.material]
+                        } ?: 0L, constructionReserve[accepted.material] ?: 0L) +
                             (residentSupplies.craftRequired(city, accepted.sourceBuildingId)[accepted.material] ?: 0L)
-                    (count - reserve).coerceAtLeast(0)
+                    }
+                    (sourceCount - reserve).coerceAtLeast(0)
                 }
                 val needed = if (accepted.sourceBuildingId != accepted.warehouseId) CivsLogistics.MAX_CARGO else {
                     val local = residentSupplies.localStocks(city)
@@ -199,10 +205,14 @@ internal class CivsCargoRequests(
                             } == true)
                     }?.let { (it.needed - it.inTransit).coerceAtLeast(0) } ?: 0L
                 }
+                val material = Material.valueOf(accepted.material)
                 val amount = minOf(accepted.amount, requested.amount, available, needed,
-                    CivsEquipment.supplyRoom(worker, Material.valueOf(accepted.material)).toLong(),
+                    CivsEquipment.supplyRoom(worker, material).toLong(),
                     storage.cargoRoom(city, accepted.targetBuildingId, accepted.material))
                 rejectIf(amount <= 0L, "stale-delivery")
+                rejectIf(city.inventory?.mode == CivStorageMode.PHYSICAL && accepted.sourceBuildingId != accepted.warehouseId &&
+                    city.building(accepted.sourceBuildingId)?.type == BuildingType.BUILDER_HUT &&
+                    (amount != accepted.amount || amount < material.maxStackSize && amount != sourceCount), "stale-delivery")
                 val cargo = accepted.copy(amount = amount)
                 rejectIf(!CivsLogistics.validCargo(city, cargo), "stale-delivery")
                 citizens.requireStorageArrival(cityId, workerId, cargo.sourceBuildingId)

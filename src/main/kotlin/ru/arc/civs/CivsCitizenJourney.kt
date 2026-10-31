@@ -196,7 +196,7 @@ internal class CitizenCycle(val token: CitizenToken, private val workMillis: Lon
         ticket = null
         deliveryRetryAt = null
         retries.fail(now)
-        if (reason == "route-unreachable" && retries.exhausted) deliveryRetryAt = now + 15_000L
+        if (reason in setOf("route-unreachable", "storage-unavailable") && retries.exhausted) deliveryRetryAt = now + 15_000L
         phase = CitizenPhase.PAUSED
     }
     fun retry(now: Long) {

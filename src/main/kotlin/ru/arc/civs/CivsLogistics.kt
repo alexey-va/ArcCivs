@@ -117,6 +117,18 @@ object CivsLogistics {
         }
     }
 
+    /** A physical construction buffer keeps the unpaid bill, not merely its next missing row.
+     * Null means its paid order has no reliable bill: callers must decline export. */
+    internal fun constructionBufferReserve(city: Settlement, buildingId: UUID,
+        constructionNeed: Map<String, Long>? = null): Map<String, Long>? {
+        if (city.inventory?.mode != CivStorageMode.PHYSICAL) return emptyMap()
+        val order = city.construction?.takeIf { it.payment != null } ?: return emptyMap()
+        if (CivsRules.constructionStores(city, order.buildingId).none { it.id == buildingId }) return emptyMap()
+        val payment = requireNotNull(order.payment)
+        val materials = order.materials ?: if (payment.reservedBatch == null) payment.awaiting ?: constructionNeed else null
+        return materials?.let { CivsRules.constructionStorageInputs(city, order.buildingId, CivsMaterials.unpaid(it)) }
+    }
+
     fun plan(city: Settlement, worker: CivWorker, stock: (UUID) -> Map<String, Long>): CivCourierPlan? =
         plan(city, worker, stock, emptyMap()) { _, _ -> MAX_CARGO }
 

@@ -167,8 +167,14 @@ internal class CivsCitizenRoutes(
     private fun storageStanding(actor: CitizenActor, city: Settlement, world: World, target: CivPosition,
                                 storage: CivBuilding, allowCached: Boolean): CivPosition? {
         val control = requireNotNull(storage.control)
-        val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && citizenStandable(world, it) }
-        return cached ?: citizenStorageTarget(city, storage, world)
+        val safe: (CivPosition) -> Boolean = { point ->
+            citizenStandable(world, point) && citizenControlClear(city, point) &&
+                citizenPacketBodyClear(world, point.point(), false) && point.location(world).let { destination ->
+                    collisions.residentMoveAllowed(actor, destination, destination)
+                }
+        }
+        val cached = actor.targets[target]?.takeIf { allowCached && citizenAtStorage(world, it.point(), control) && safe(it) }
+        return cached ?: citizenStorageTarget(city, storage, world, safe)
             ?: storage.takeIf { !citizenStorageReady(world, control) && it.phase != BuildingPhase.ACTIVE && city.construction?.buildingId == it.id }
                 ?.entrance?.takeIf { citizenStandable(world, it) }
     }
